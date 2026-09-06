@@ -751,6 +751,92 @@ def _decoder_for_task(task: str, *, end2end_output: bool = False) -> str:
     return f"ultralytics_{task_name}_{suffix}"
 
 
+def expected_yolo_output_attributes(
+    *,
+    output_format: str,
+    class_count: int,
+    keypoint_count: int,
+    keypoint_dimensions: int,
+    has_objectness: bool = False,
+) -> int:
+    """Number of attributes per anchor/detection, independent of tensor layout."""
+    keypoints = int(keypoint_count) * int(keypoint_dimensions)
+    if output_format == "raw_yolo":
+        return 4 + int(has_objectness) + int(class_count) + keypoints
+    if output_format == "end2end_detections":
+        return 6 + keypoints
+    raise MobileExportError(f"Nieobsługiwany format wyjścia YOLO: {output_format}")
+
+
+def _resolve_ncnn_output_spec(
+    *, task: str, class_count: int, keypoint_count: int, keypoint_dimensions: int,
+    confidence_threshold: float, iou_threshold: float,
+) -> dict:
+    # Ultralytics/PNNX disables the end-to-end branch for NCNN (no TopK).
+    # This describes the exported artifact, not the original checkpoint head.
+    return {
+        "decoder": _decoder_for_task(task),
+        "output_format": "raw_yolo",
+        "class_count": int(class_count),
+        "keypoint_count": int(keypoint_count),
+        "keypoint_dimensions": int(keypoint_dimensions),
+        "end2end_output": False,
+        "has_objectness": False,
+        "tensor_layout": "channels_first",
+        "box_format": "xywh",
+        "normalized_coordinates": False,
+        "nms_in_graph": False,
+        "nms_required": True,
+        "confidence_threshold": float(confidence_threshold),
+        "iou_threshold": float(iou_threshold),
+    }
+
+
+def _validate_variant_output_contract(runtime: str, output: dict, *, task: str, class_count: int) -> None:
+    """Validate the runtime's complete output contract."""
+    output_format = output.get("output_format")
+    if output_format not in {"raw_yolo", "end2end_detections"}:
+        raise MobileExportError(f"Wariant {runtime}: nieprawidłowy output_format={output_format!r}.")
+    end2end = output_format == "end2end_detections"
+    if output.get("decoder") != _decoder_for_task(task, end2end_output=end2end):
+        raise MobileExportError(f"Wariant {runtime}: decoder jest niezgodny z task={task} i output_format={output_format}.")
+    try:
+        counts = [output.get(name, 0) for name in ("class_count", "keypoint_count", "keypoint_dimensions")]
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in counts):
+            raise ValueError("dimensions must be integers")
+        classes, keypoints, dimensions = counts
+        if classes != class_count or classes <= 0:
+            raise ValueError("class_count differs from labels")
+        if task == "pose" and (keypoints < 4 or dimensions not in {2, 3}):
+            raise ValueError("pose needs at least 4 keypoints with 2 or 3 dimensions")
+        if task == "detect" and (keypoints != 0 or dimensions != 0):
+            raise ValueError("detect cannot have keypoints")
+    except (TypeError, ValueError) as exc:
+        raise MobileExportError(f"Wariant {runtime}: nieprawidłowe wymiary wyjścia YOLO ({exc}).") from exc
+    expected = {
+        "box_format": "xyxy" if end2end else "xywh",
+        "nms_in_graph": False,
+        "nms_required": not end2end,
+    }
+    if "end2end_output" in output:
+        expected["end2end_output"] = end2end
+    if end2end:
+        expected.update(has_objectness=False, tensor_layout="detections_first", score_index=4, class_index=5)
+    elif output.get("tensor_layout") not in {"channels_first", "anchors_first"}:
+        raise MobileExportError(f"Wariant {runtime}: nieprawidłowy tensor_layout dla RAW YOLO.")
+    if runtime == "ncnn":
+        expected.update(
+            decoder=_decoder_for_task(task), output_format="raw_yolo", box_format="xywh",
+            nms_required=True, has_objectness=False, tensor_layout="channels_first", normalized_coordinates=False,
+        )
+        if "end2end_output" in output:
+            expected["end2end_output"] = False
+    for name, value in expected.items():
+        actual = output.get(name)
+        if actual != value or (isinstance(value, bool) and not isinstance(actual, bool)):
+            raise MobileExportError(f"Wariant {runtime}: {name}={actual!r}, wymagane {value!r}.")
+
+
 def _normalize_image_size(value: int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(value, tuple):
         if len(value) != 2:
@@ -1027,6 +1113,7 @@ def _infer_output_spec(
         return {
             "decoder": _decoder_for_task(task, end2end_output=True),
             "output_format": "end2end_detections",
+            "end2end_output": True,
             "class_count": int(class_count),
             "keypoint_count": normalized_keypoint_count,
             "keypoint_dimensions": int(dimensions),
@@ -1044,7 +1131,10 @@ def _infer_output_spec(
 
     end2end_candidates: list[tuple[int, int]] = []
     for dimensions in preferred_keypoint_dimensions:
-        expected = 6 + (dimensions * normalized_keypoint_count)
+        expected = expected_yolo_output_attributes(
+            output_format="end2end_detections", class_count=class_count,
+            keypoint_count=normalized_keypoint_count, keypoint_dimensions=dimensions,
+        )
         if (expected, dimensions) not in end2end_candidates:
             end2end_candidates.append((expected, dimensions))
     if end2end_output:
@@ -1056,7 +1146,10 @@ def _infer_output_spec(
     expected_text_items: list[str] = []
     seen_candidates: set[tuple[int, bool]] = set()
     for dimensions in preferred_keypoint_dimensions:
-        base_channels = 4 + int(class_count) + (dimensions * normalized_keypoint_count)
+        base_channels = expected_yolo_output_attributes(
+            output_format="raw_yolo", class_count=class_count,
+            keypoint_count=normalized_keypoint_count, keypoint_dimensions=dimensions,
+        )
         for expected, objectness in ((base_channels, False), (base_channels + 1, True)):
             key = (expected, objectness)
             if key in seen_candidates:
@@ -1092,6 +1185,7 @@ def _infer_output_spec(
     return {
         "decoder": _decoder_for_task(task),
         "output_format": "raw_yolo",
+        "end2end_output": False,
         "class_count": int(class_count),
         "keypoint_count": normalized_keypoint_count,
         "keypoint_dimensions": int(resolved_keypoint_dimensions),
@@ -1348,18 +1442,29 @@ class MobileModelExporter:
             notify(100.0, f"Pakiet mobilny gotowy: {destination.name}")
             return destination
 
-    def inspect_variant(self, variant: ExportedVariant) -> ExportedVariant:
+    def inspect_variant(self, variant: ExportedVariant, *, role: MobileRole) -> ExportedVariant:
+        task = _role_task(role)
+        if variant.runtime == "ncnn":
+            output_spec = _resolve_ncnn_output_spec(
+                task=task,
+                class_count=variant.output_spec["class_count"],
+                keypoint_count=variant.output_spec["keypoint_count"],
+                keypoint_dimensions=variant.output_spec["keypoint_dimensions"],
+                confidence_threshold=variant.output_spec["confidence_threshold"],
+                iou_threshold=variant.output_spec["iou_threshold"],
+            )
+            return replace(variant, output_spec=output_spec)
         if variant.runtime == "onnx":
             input_spec, output_spec = self._inspect_onnx_variant(
                 variant.files[0],
-                task=str(variant.output_spec.get("decoder", "")).replace("ultralytics_", "").replace("_raw_v1", ""),
+                task=task,
                 class_count=int(variant.output_spec.get("class_count", 0) or 0),
                 keypoint_count=int(variant.output_spec.get("keypoint_count", 0) or 0),
                 keypoint_dimensions=int(variant.output_spec.get("keypoint_dimensions", 0) or 0),
                 end2end_output=bool(variant.output_spec.get("end2end_output", False))
                 or "end2end" in str(variant.output_spec.get("decoder", "")),
-                confidence_threshold=float(variant.output_spec.get("confidence_threshold", 0.25) or 0.25),
-                iou_threshold=float(variant.output_spec.get("iou_threshold", 0.45) or 0.45),
+                confidence_threshold=float(variant.output_spec.get("confidence_threshold", 0.25)),
+                iou_threshold=float(variant.output_spec.get("iou_threshold", 0.45)),
             )
             return ExportedVariant(
                 id=variant.id,
@@ -1373,14 +1478,14 @@ class MobileModelExporter:
         if variant.runtime == "tflite":
             input_spec, output_spec = self._inspect_tflite_variant(
                 variant.files[0],
-                task=str(variant.output_spec.get("decoder", "")).replace("ultralytics_", "").replace("_raw_v1", ""),
+                task=task,
                 class_count=int(variant.output_spec.get("class_count", 0) or 0),
                 keypoint_count=int(variant.output_spec.get("keypoint_count", 0) or 0),
                 keypoint_dimensions=int(variant.output_spec.get("keypoint_dimensions", 0) or 0),
                 end2end_output=bool(variant.output_spec.get("end2end_output", False))
                 or "end2end" in str(variant.output_spec.get("decoder", "")),
-                confidence_threshold=float(variant.output_spec.get("confidence_threshold", 0.25) or 0.25),
-                iou_threshold=float(variant.output_spec.get("iou_threshold", 0.45) or 0.45),
+                confidence_threshold=float(variant.output_spec.get("confidence_threshold", 0.25)),
+                iou_threshold=float(variant.output_spec.get("iou_threshold", 0.45)),
             )
             return ExportedVariant(
                 id=variant.id,
@@ -1698,9 +1803,9 @@ class MobileModelExporter:
             input_spec=default_input,
             output_spec=default_output,
         )
-        if runtime in {"onnx", "tflite"}:
-            notify(0.94, "Sprawdzam wejście i wyjście wyeksportowanego modelu.")
-            variant = self.inspect_variant(variant)
+        notify(0.94, "Ustalam kontrakt RAW YOLO dla NCNN." if runtime == "ncnn"
+               else "Sprawdzam wejście i wyjście wyeksportowanego modelu.")
+        variant = self.inspect_variant(variant, role=request.role)
         notify(1.0, f"Wariant {runtime.upper()} {precision.upper()} gotowy.")
         return variant
 
@@ -1896,7 +2001,7 @@ class MobileModelExporter:
             raise MobileExportError("Androidowy backend ONNX wymaga wejścia FLOAT32.")
         output_spec = _infer_output_spec(
             output_shape,
-            task=("pose" if "pose" in task else "detect"),
+            task=task,
             class_count=class_count,
             keypoint_count=keypoint_count,
             keypoint_dimensions=keypoint_dimensions,
@@ -1937,7 +2042,7 @@ class MobileModelExporter:
                 input_spec["quantization"] = {"scale": float(scale), "zero_point": int(zero_point)}
         output_spec = _infer_output_spec(
             output_shape,
-            task=("pose" if "pose" in task else "detect"),
+            task=task,
             class_count=class_count,
             keypoint_count=keypoint_count,
             keypoint_dimensions=keypoint_dimensions,
@@ -2110,6 +2215,11 @@ class MobileModelExporter:
             precision = str(variant.get("precision") or "").strip().lower()
             if runtime not in {"tflite", "onnx", "ncnn"}:
                 raise MobileExportError(f"Nieobsługiwany runtime wariantu: {runtime}")
+            variant_output = variant.get("output", output)
+            if not isinstance(variant_output, dict):
+                raise MobileExportError(f"Wariant {runtime}: output nie jest obiektem JSON.")
+            # Android treats output as a complete override, not a field merge.
+            _validate_variant_output_contract(runtime, variant_output, task=task, class_count=len(labels))
             if precision not in {"fp32", "fp16", "int8", "uint8"}:
                 raise MobileExportError(f"Nieobsługiwana precyzja wariantu: {precision}")
             files = list(variant.get("files") or ([variant.get("file")] if variant.get("file") else []))
