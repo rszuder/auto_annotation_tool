@@ -473,6 +473,9 @@ class TrainingHistory:
         return ""
 
     def _infer_run_target(self, run: TrainingRun) -> str:
+        explicit = str(getattr(run, "training_target", "") or "").strip().lower()
+        if explicit in {"plate", "char", "vehicle"}:
+            return explicit
         inferred = self._infer_target_from_args_file(getattr(run, "output_dir", ""))
         if inferred:
             return inferred

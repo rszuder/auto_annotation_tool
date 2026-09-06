@@ -6,6 +6,27 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-06: tożsamość modeli i spójne manifesty eksportu mobilnego
+
+Lista eksportu rozpoznaje kopie wag po SHA-256. Wpis treningu ma pierwszeństwo
+przed kopią pliku w katalogu modeli, zachowuje projekt i rodowód, a metadane
+modelu oraz alternatywne lokalizacje są uzupełniane z kopii. Różne wagi tej
+samej architektury i odrębne etapy treningowe nie są arbitralnie scalane.
+Powiązanie kopii z historią wymaga zgodności wag, a nie daty w nazwie pliku.
+
+Profil, metryki oraz sekcje manifestu korzystają z tego samego checkpointu
+i jego epoki. Licznik wykonanych epok nie zastępuje najlepszej epoki.
+Odczyt rzeczywistego checkpointu ma pierwszeństwo przed błędnym snapshotem;
+bufory są unieważniane po zmianie wag, pliku metadanych albo historii.
+Macierzysty projekt zachowuje nazwę również przy kopii w globalnym katalogu.
+Historia uwzględnia jawny `training_target`, także dla MZ z neutralną nazwą.
+Histogram wyjaśnia liczbę modeli bez metryk.
+
+Eksporter odrzuca niezgodne SHA-256 i sprzeczne najlepsze epoki przed eksportem
+oraz przy tworzeniu manifestu. Kontrolne paczki ONNX FP32 rzeczywistych modeli
+YOLO26n/26s ponownie odczytano z ZIP: epoki wynoszą 135/139 przy 150 wykonanych.
+Szczegóły: `docs/audyt_tozsamosci_modeli_mobilnych_2026_09_06.md`.
+
 ## 2026-09-06: poprawne zamykanie treningów pose i detect
 
 Wspólne zamknięcie treningu wywoływało nieistniejącą metodę
