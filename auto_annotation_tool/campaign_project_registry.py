@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .config import logger
+from . import project_attachment
 
 
 def _iter_project_workspace_dirs(root: Path) -> list[Path]:
@@ -206,10 +207,12 @@ def _load_state(self) -> Dict[str, Any]:
                         if isinstance(project_data, dict):
                             data["projects"][project_name] = self._ensure_project_defaults(project_data)
                     data["active_project"] = ""
+                    self._registered_project_names = set(data.get("projects", {}))
                     return data
         except Exception as e:
             logger.error(f"Błąd czytania rejestru kampanii: {e}")
 
+    self._registered_project_names = set()
     return {
         "active_project": "",
         "projects": {},
@@ -219,10 +222,35 @@ def _load_state(self) -> Dict[str, Any]:
 def save_state(self):
     try:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w", encoding="utf-8") as f:
-            json.dump(self.state, f, indent=4, ensure_ascii=False)
+        # Preserve projects attached by another instance since this one loaded.
+        disk = project_attachment._read_json(self.state_file, {})
+        known = getattr(self, "_registered_project_names", set(self.state.get("projects", {})))
+        for name, data in disk.get("projects", {}).items():
+            if name not in known and name not in self.state["projects"]:
+                self.state["projects"][name] = data
+        project_attachment._atomic_bytes(self.state_file, project_attachment._json_bytes(self.state))
+        self._registered_project_names = set(self.state["projects"])
     except Exception as e:
         logger.error(f"Błąd zapisu rejestru kampanii: {e}")
+        return False
+    for name in self.state.get("projects", {}):
+        try:
+            project_attachment.save_project_descriptor(self, name)
+        except Exception as exc:
+            logger.warning(f"Nie udało się zapisać przenośnego opisu projektu {name}: {exc}")
+    return True
+
+
+def list_attachable_projects(self):
+    return project_attachment.list_attachable_projects(self)
+
+
+def inspect_existing_project(self, folder):
+    return project_attachment.inspect_existing_project(self, Path(folder))
+
+
+def attach_existing_project(self, plan, *, name=None):
+    return project_attachment.attach_existing_project(self, plan, name=name)
 
 
 def _resolve_project_name(self, name: str = None) -> str:
@@ -291,6 +319,7 @@ def create_project(self, name: str) -> bool:
 
     root = self.get_project_root_dir(name)
     self._ensure_project_workspace_tree(root)
+    project_attachment.save_project_descriptor(self, name)
     try:
         self.append_project_history_event(
             "project",
@@ -340,6 +369,9 @@ _INSTANCE_METHODS = (
     "clear_active_project",
     "create_project",
     "delete_project",
+    "list_attachable_projects",
+    "inspect_existing_project",
+    "attach_existing_project",
 )
 
 

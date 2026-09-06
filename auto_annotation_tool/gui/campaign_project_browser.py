@@ -992,6 +992,13 @@ def _build_projects_browser(self, parent):
     self._bind_icon_button(self.project_add_button_canvas, role="project_add", command=self._add_new_project)
     self.frame.after_idle(lambda: self._draw_icon_button("project_add"))
 
+    from .project_attachment_dialog import show_project_attachment_dialog
+    self.project_attach_button = ttk.Button(
+        status_panel, text="Podłącz istniejący projekt…",
+        command=lambda: show_project_attachment_dialog(self),
+    )
+    self.project_attach_button.pack(fill=tk.X, pady=(2, 8))
+
     for font_spec in status_fonts[1:]:
         lbl = tk.Label(
             status_panel,
