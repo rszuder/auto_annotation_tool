@@ -17,6 +17,11 @@ class TrainingFinalizationTests(unittest.TestCase):
         if torch is None:
             self.skipTest("PyTorch unavailable")
         history = TrainingHistory(root / "history")
+        dataset = root / "dataset"
+        for split in ("train", "val"):
+            (dataset / "images" / split).mkdir(parents=True)
+            (dataset / "images" / split / "sample.jpg").write_bytes(b"test image")
+        (dataset / "data.yaml").write_text("train: images/train\nval: images/val\nnames: [sample]\n", encoding="utf-8")
         # Deliberately misleading names: an explicit char target must win.
         run = history.create_run("plate_project_training", epochs=150, training_target=target,
                                  dataset_path=str(root / "dataset"),
@@ -41,6 +46,7 @@ class TrainingFinalizationTests(unittest.TestCase):
                 self.callbacks[name] = callback
 
             def train(self, **kwargs):
+                self.callbacks["on_pretrain_routine_end"](self)
                 output = Path(kwargs["project"]) / "train"
                 weights = output / "weights"
                 weights.mkdir(parents=True)

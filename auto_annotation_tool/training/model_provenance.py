@@ -216,6 +216,8 @@ def build_model_training_provenance(
         "dataset": dataset,
         "dataset_id": str(dataset.get("dataset_id") or ""),
         "dataset_path": str(dataset.get("local_path_hint") or resolved_dataset_path),
+        "input_dataset_snapshot": _mapping_copy(_value(run, "training_dataset_input_snapshot")),
+        "dataset_preparation": _mapping_copy(_value(run, "dataset_preparation")),
         "input_checkpoint": input_checkpoint_snapshot,
         "input_checkpoint_sha256": input_sha,
         "output_checkpoint": output_checkpoint_snapshot,
@@ -431,7 +433,10 @@ def _dataset_provenance_for_run(
 ) -> tuple[dict[str, Any], str]:
     snapshot = _mapping_copy(_value(run, "training_dataset_snapshot"))
     if snapshot:
-        return _normalized_dataset_snapshot(snapshot, target=target), "frozen_at_training_start"
+        capture = str(snapshot.get("snapshot_source") or "frozen_at_training_start")
+        if capture not in {"frozen_at_training_start", "reconstructed_from_training_artifacts"}:
+            capture = "frozen_at_training_start"
+        return _normalized_dataset_snapshot(snapshot, target=target), capture
 
     embedded = _mapping_copy(_value(run, "dataset"))
     if embedded and (
@@ -1442,6 +1447,8 @@ def _run_like_dict(run_like: Any) -> dict[str, Any]:
         "parent_dataset_path",
         "training_target",
         "training_dataset_snapshot",
+        "training_dataset_input_snapshot",
+        "dataset_preparation",
         "input_checkpoint_snapshot",
         "output_checkpoint_snapshot",
     ):
