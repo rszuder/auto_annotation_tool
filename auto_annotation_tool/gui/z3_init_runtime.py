@@ -171,8 +171,10 @@ def __init__(self, parent, app):
     self._preview_controls_legend_current_width = 0.0
     self._preview_controls_legend_current_height = 0.0
     self._preview_controls_legend_current_bounds = None
+    self._preview_controls_legend_render_key = None
     self._preview_controls_legend_offset_x = 10.0
     self._preview_controls_legend_offset_y = 10.0
+    self._preview_controls_legend_position_manual = False
     self._preview_controls_legend_last_collapsed_offset = None
     self._preview_controls_legend_grab_bbox = None
     self._preview_controls_legend_drag_state = None

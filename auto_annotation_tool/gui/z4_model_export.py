@@ -77,6 +77,7 @@ from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
 from .z4_mobile_report_browser import open_mobile_report_browser
+from .z4_mobile_export_locations import MobileExportSourceLocations
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
@@ -7620,7 +7621,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     )
     details_shell.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
     details_shell.grid_columnconfigure(0, weight=1)
-    details_shell.grid_rowconfigure(1, weight=1)
+    details_shell.grid_rowconfigure(2, weight=1)
     tk.Label(
         details_shell,
         text="Krótki profil kandydata",
@@ -7629,6 +7630,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
         font=("Segoe UI", 10, "bold"),
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+    source_locations = MobileExportSourceLocations(
+        details_shell, bg=card_bg, fg=fg, muted=muted, accent=border,
+    )
+    source_locations.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     details_table = _build_wrapped_info_table(
         details_shell,
         [
@@ -7639,7 +7644,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         header_bg=blend_hex_colors(card_bg, accent, 0.08),
         height=172,
     )
-    details_table["shell"].grid(row=1, column=0, sticky="nsew")
+    details_table["shell"].grid(row=2, column=0, sticky="nsew")
     try:
         requirements_shell.grid_remove()
         details_shell.grid_configure(row=1, rowspan=2, sticky="nsew", padx=(0, 10))
@@ -9807,6 +9812,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             _mobile_export_perf_record("apply_candidate", 0.0, candidate=0)
             return
         selected_state["candidate"] = candidate
+        source_locations.set_candidate(candidate)
         run = candidate.get("run")
         target = str(candidate.get("target") or "").strip().lower()
         role = str(candidate.get("role") or _mobile_role_from_training_target(target)).strip()

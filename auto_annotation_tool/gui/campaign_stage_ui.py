@@ -111,7 +111,7 @@ def _rebuild_wizard_stage_ui(self):
     self.frame.after_idle(self._sync_right_panel_scrollregion)
     self.frame.after_idle(self._sync_right_panel_canvas_width)
 
-def _refresh_wizard_transition_graph(self):
+def _refresh_wizard_transition_graph(self, *, allow_pending_actions: bool = True):
     refresh_started = perf_counter()
     try:
         ensure_ready = getattr(self, "_ensure_wizard_stage_ui_ready", None)
@@ -129,7 +129,7 @@ def _refresh_wizard_transition_graph(self):
         logger.warning("Graf kampanii ma nieaktywny kontener body po probie odbudowy UI.")
         return
     try:
-        self._render_step1_route_actions(body)
+        self._render_step1_route_actions(body, allow_pending_actions=allow_pending_actions)
     except Exception as e:
         logger.exception("Nie udało się odświeżyć grafu przejść kampanii")
         try:
