@@ -1168,7 +1168,7 @@ class YOLOPoseTrainer:
                     epoch = int(float(str(row.get("epoch") or row.get("Epoch") or "").strip()))
                 except Exception:
                     continue
-                score_95 = self._safe_float(
+                score_95 = TrainingHistory._safe_float(
                     row.get("map50_95")
                     or row.get("box_map50_95")
                     or row.get("pose_map50_95")
@@ -1176,7 +1176,7 @@ class YOLOPoseTrainer:
                     or row.get("metrics/mAP50-95"),
                     -1.0,
                 )
-                score_50 = self._safe_float(
+                score_50 = TrainingHistory._safe_float(
                     row.get("map50")
                     or row.get("box_map50")
                     or row.get("pose_map50")
@@ -1867,19 +1867,15 @@ class YOLOPoseTrainer:
             train_dir = Path(run.output_dir) / "train"
             best_weights = train_dir / "weights" / "best.pt"
             last_weights = train_dir / "weights" / "last.pt"
+            if not best_weights.is_file() and not last_weights.is_file():
+                raise RuntimeError("Trening nie zapisał pliku best.pt ani last.pt.")
             history_run_for_snapshot = self.history.get_run(run.id) or run
             completed_epoch = self._resolve_finished_run_completed_epoch(
                 history_run_for_snapshot,
                 last_checkpoint=last_weights if last_weights.exists() else None,
             )
-            best_epoch, best_epoch_source = self._resolve_best_epoch_for_snapshot(history_run_for_snapshot)
-            output_checkpoint_snapshot = build_output_checkpoint_training_snapshot(
-                best_checkpoint=best_weights if best_weights.exists() else None,
-                last_checkpoint=last_weights if last_weights.exists() else None,
-                best_epoch=best_epoch,
-                best_epoch_source=best_epoch_source,
-            )
-
+            # model.train() has returned after final validation and weights exist.
+            # Persist completion before optional metadata/report/UI work.
             self.history.update_run(
                 run.id,
                 status=TrainingStatus.COMPLETED.value,
@@ -1887,8 +1883,21 @@ class YOLOPoseTrainer:
                 best_weights=str(best_weights) if best_weights.exists() else "",
                 last_weights=str(last_weights) if last_weights.exists() else "",
                 current_epoch=completed_epoch,
-                output_checkpoint_snapshot=output_checkpoint_snapshot,
+                output_checkpoint_snapshot={},
+                error_message="",
+                paused_at=None,
             )
+            try:
+                best_epoch, best_epoch_source = self._resolve_best_epoch_for_snapshot(history_run_for_snapshot)
+                output_checkpoint_snapshot = build_output_checkpoint_training_snapshot(
+                    best_checkpoint=best_weights if best_weights.exists() else None,
+                    last_checkpoint=last_weights if last_weights.exists() else None,
+                    best_epoch=best_epoch,
+                    best_epoch_source=best_epoch_source,
+                )
+                self.history.update_run(run.id, output_checkpoint_snapshot=output_checkpoint_snapshot)
+            except Exception as snapshot_err:
+                logger.warning(f"Trening ukończony, ale nie udało się zapisać metadanych checkpointu: {snapshot_err}")
             self._export_training_report_artifacts(self.history.get_run(run.id) or run)
             # Błędy eksportu modelu nie powinny przerywać zakończonego treningu.
             try:
@@ -1897,7 +1906,14 @@ class YOLOPoseTrainer:
                     from ..campaign_manager import CAMPAIGN
 
                     final_map = float(self.history.get_run(run.id).best_map50) * 100
-                    is_pose = "pose" in str(model_file).lower() or "plate" in run.name.lower()
+                    task_tag = str(getattr(run, "training_target", "") or "").strip().lower()
+                    if task_tag not in {"plate", "char", "vehicle"}:
+                        if str(getattr(self.model, "task", "") or "").lower() == "pose" or dataset_profile.get("is_pose"):
+                            task_tag = "plate"
+                        elif any(word in f"{run.dataset_path} {run.name}".lower() for word in ("char", "znak")):
+                            task_tag = "char"
+                        else:
+                            task_tag = "vehicle"
 
                     # Zapisz model w katalogu modeli aktywnego projektu.
                     project_models_dir = CAMPAIGN.get_dir("models")
@@ -1909,17 +1925,7 @@ class YOLOPoseTrainer:
 
                     # Uporządkuj modele według typu zadania w nowym drzewie trained/<target>.
                     trained_root = project_models_dir / "trained"
-                    if is_pose:
-                        target_dir = trained_root / "plates"
-                        task_tag = "plate"
-                    else:
-                        ds_path = str(run.dataset_path).lower()
-                        if "char" in ds_path or "znak" in ds_path or "char" in run.name.lower():
-                            target_dir = trained_root / "chars"
-                            task_tag = "char"
-                        else:
-                            target_dir = trained_root / "vehicles"
-                            task_tag = "vehicle"
+                    target_dir = trained_root / {"plate": "plates", "char": "chars", "vehicle": "vehicles"}[task_tag]
 
                     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1938,16 +1944,8 @@ class YOLOPoseTrainer:
                     # =========================================================
                     active_proj = CAMPAIGN.get_active_project_name()
                     if active_proj:
-                        if is_pose:
-                            CAMPAIGN.set_global_model("plate", str(target_path))
-                            logger.info("Menadżer Kampanii: Zaktualizowano model TABLIC.")
-                        else:
-                            if task_tag == "char":
-                                CAMPAIGN.set_global_model("char", str(target_path))
-                                logger.info("Menadżer Kampanii: Zaktualizowano model ZNAKÓW.")
-                            else:
-                                CAMPAIGN.set_global_model("vehicle", str(target_path))
-                                logger.info("Menadżer Kampanii: Zaktualizowano model POJAZDÓW.")
+                        CAMPAIGN.set_global_model(task_tag, str(target_path))
+                        logger.info(f"Menadżer Kampanii: Zaktualizowano model {task_tag}.")
 
                         # Sam udany trening nie domyka jeszcze iteracji kampanii.
                         # O zakończeniu etapu decyduje dopiero jawna akcja użytkownika w Z4.
@@ -1960,7 +1958,10 @@ class YOLOPoseTrainer:
             logger.info(f"Trening zakończony: {run.id}")
 
             if self.on_training_end:
-                self.on_training_end(True, "Trening zakończony")
+                try:
+                    self.on_training_end(True, "Trening zakończony")
+                except Exception as notification_err:
+                    logger.warning(f"Trening ukończony, ale nie udało się powiadomić interfejsu: {notification_err}")
 
         except InterruptedError as e:
             status = TrainingStatus.PAUSED.value if self.should_pause else TrainingStatus.CANCELLED.value

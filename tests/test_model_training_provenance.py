@@ -587,6 +587,46 @@ class ModelTrainingProvenanceTests(unittest.TestCase):
             self.assertIsNone(provenance["lineage_nominal_sample_presentations"])
             self.assertFalse(provenance["sample_presentations_known"])
 
+    def test_stripped_checkpoint_falls_back_instead_of_reporting_epoch_zero(self):
+        torch = get_torch_module()
+        if torch is None:
+            self.skipTest("PyTorch niedostępny")
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "best.pt"
+            torch.save({"epoch": -1, "optimizer": None}, checkpoint)
+            snapshot = build_output_checkpoint_training_snapshot(
+                best_checkpoint=checkpoint, best_epoch=135, best_epoch_source="metrics_history")
+            self.assertEqual(snapshot["best_epoch"], 135)
+            self.assertEqual(snapshot["best_epoch_source"], "metrics_history")
+
+    def test_stripped_checkpoint_matches_its_metrics_not_the_last_epoch(self):
+        torch = get_torch_module()
+        if torch is None:
+            self.skipTest("PyTorch niedostępny")
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "best.pt"
+            torch.save({"epoch": -1, "train_metrics": {"metrics/mAP50-95(B)": 0.78,
+                                                      "metrics/mAP50-95(P)": 0.86},
+                        "train_results": {"epoch": [135, 149, 150],
+                                          "metrics/mAP50-95(B)": [0.78, 0.79, 0.77],
+                                          "metrics/mAP50-95(P)": [0.86, 0.84, 0.84]}}, checkpoint)
+            snapshot = build_output_checkpoint_training_snapshot(best_checkpoint=checkpoint, best_epoch=149)
+            self.assertEqual(snapshot["best_epoch"], 135)
+            self.assertEqual(snapshot["best_epoch_source"], "checkpoint")
+
+    def test_ambiguous_stripped_metrics_do_not_override_fallback_epoch(self):
+        torch = get_torch_module()
+        if torch is None:
+            self.skipTest("PyTorch niedostępny")
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint = Path(tmp) / "best.pt"
+            torch.save({"epoch": -1, "train_metrics": {"metrics/mAP50-95(B)": 0.78},
+                        "train_results": {"epoch": [135, 150], "metrics/mAP50-95(B)": [0.78, 0.78]}}, checkpoint)
+            snapshot = build_output_checkpoint_training_snapshot(
+                best_checkpoint=checkpoint, best_epoch=135, best_epoch_source="metrics_history")
+            self.assertEqual(snapshot["best_epoch"], 135)
+            self.assertEqual(snapshot["best_epoch_source"], "metrics_history")
+
     def test_best_epoch_prefers_checkpoint_epoch_when_available(self):
         torch = get_torch_module()
         if torch is None:

@@ -777,7 +777,35 @@ def _checkpoint_completed_epoch(checkpoint_path: Path | str | None) -> int | Non
             checkpoint = torch.load(str(path), map_location="cpu")
         if not isinstance(checkpoint, Mapping):
             return None
-        return normalize_epoch_index_to_completed_epoch(checkpoint.get("epoch"))
+        raw_epoch = _int_or_none(checkpoint.get("epoch"))
+        if raw_epoch is None:
+            return None
+        if raw_epoch >= 0:
+            return normalize_epoch_index_to_completed_epoch(raw_epoch)
+        # Ultralytics replaces epoch with -1 when finalizing weights. best.pt
+        # then carries the entire run's train_results, including later epochs.
+        # Locate its own saved metrics instead of treating -1 as zero, or using
+        # the last results row as the best epoch.
+        metrics = checkpoint.get("train_metrics")
+        results = checkpoint.get("train_results")
+        if not isinstance(metrics, Mapping) or not isinstance(results, Mapping):
+            return None
+        metric_keys = [key for key in metrics if str(key).startswith("metrics/")]
+        epochs = results.get("epoch")
+        if not metric_keys or not isinstance(epochs, (list, tuple)):
+            return None
+        if any(not isinstance(results.get(key), (list, tuple)) or len(results[key]) != len(epochs)
+               for key in metric_keys):
+            return None
+        matches = []
+        for index, epoch in enumerate(epochs):
+            if all(_float_or_none(results[key][index]) is not None
+                   and _float_or_none(results[key][index]) == _float_or_none(metrics[key])
+                   for key in metric_keys):
+                completed_epoch = _int_or_none(epoch)
+                if completed_epoch is not None and completed_epoch > 0:
+                    matches.append(completed_epoch)
+        return matches[0] if len(matches) == 1 else None
     except Exception:
         return None
     finally:
