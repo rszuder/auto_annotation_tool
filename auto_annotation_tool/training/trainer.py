@@ -1368,6 +1368,7 @@ class YOLOPoseTrainer:
                     dataset_path,
                     target=training_target,
                 )
+                run_metadata["training_dataset_input_snapshot"] = dict(run_metadata["training_dataset_snapshot"])
                 finish_phase("dataset_snapshot", phase_started)
             except Exception as snapshot_error:
                 finish_phase("dataset_snapshot", phase_started)
@@ -1474,6 +1475,35 @@ class YOLOPoseTrainer:
         report_preflight("Trening uruchomiony", 100.0, str(self.current_run.id))
         return self.current_run.id
 
+    def _capture_prepared_dataset_snapshot(self, run: TrainingRun, dataset_path, *, is_resuming: bool = False) -> None:
+        """Freeze data after the loader has validated/repaired images, before gradients."""
+        dataset_root = Path(dataset_path)
+        if not (dataset_root / "data.yaml").is_file():
+            raise RuntimeError("Brak data.yaml podczas potwierdzania przygotowanego datasetu.")
+        prepared = build_training_dataset_snapshot(dataset_root, target=run.training_target)
+        if not prepared.get("split_sha256") or not prepared.get("total_images"):
+            raise RuntimeError("Nie udało się potwierdzić plików przygotowanego datasetu.")
+        stored = dict(run.training_dataset_snapshot or {})
+        initial = dict(run.training_dataset_input_snapshot or stored)
+        if is_resuming and stored:
+            matches, reason = training_dataset_snapshots_match(stored, prepared)
+            if not matches:
+                raise RuntimeError(f"Dataset zmienił się podczas przygotowania wznowienia treningu: {reason}")
+        changed = bool(initial and initial.get("dataset_id") != prepared.get("dataset_id"))
+        self.history.update_run(
+            run.id,
+            training_dataset_input_snapshot=initial,
+            training_dataset_snapshot=stored if is_resuming and stored else prepared,
+            dataset_preparation={
+                "schema": "alpr.dataset_preparation.v1", "status": "verified_before_first_epoch",
+                "verified_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                "input_dataset_id": initial.get("dataset_id", ""),
+                "dataset_id": prepared["dataset_id"], "content_changed_during_preparation": changed,
+                "is_resume": bool(is_resuming),
+            },
+        )
+        logger.info(f"Dataset po przygotowaniu: {prepared['dataset_id']} | zmiana plików: {changed}")
+
     def _training_loop(self, model_file, dataset_path, epochs, batch_size, img_size, device, lr0, resume_from):
         run = self.current_run
         try:
@@ -1546,6 +1576,15 @@ class YOLOPoseTrainer:
                 "completed_epoch": completed_epoch,
             }
             self._training_batch_state = batch_state
+            dataset_verified = False
+
+            def on_pretrain_routine_end(_trainer):
+                nonlocal dataset_verified
+                if self.on_progress:
+                    self.on_progress((completed_epoch / max(1, epochs)) * 100,
+                                     "Potwierdzam dataset po przygotowaniu obrazów...")
+                self._capture_prepared_dataset_snapshot(run, dataset_path, is_resuming=is_resuming)
+                dataset_verified = True
 
             def on_train_epoch_start(trainer):
                 if self.should_stop:
@@ -1553,6 +1592,8 @@ class YOLOPoseTrainer:
                 if self.should_pause:
                     self._save_checkpoint(trainer)
                     raise InterruptedError("Wstrzymano")
+                if not dataset_verified:
+                    on_pretrain_routine_end(trainer)
                 batch_state["epoch"] = int(getattr(trainer, "epoch", -1))
                 batch_state["batch"] = 0
                 total_batches = max(1, int(len(getattr(trainer, "train_loader", []) or [])))
@@ -1733,6 +1774,7 @@ class YOLOPoseTrainer:
 
             last_training_error = None
             for attempt_index, attempt in enumerate(training_attempts):
+                dataset_verified = False
                 if is_resuming:
                     logger.info(f"Wznawiam z: {resume_from}")
                     self.model = YoloClass(resume_from)
@@ -1753,6 +1795,7 @@ class YOLOPoseTrainer:
                 except Exception:
                     pass
 
+                self.model.add_callback("on_pretrain_routine_end", on_pretrain_routine_end)
                 self.model.add_callback("on_train_epoch_start", on_train_epoch_start)
                 self.model.add_callback("on_train_batch_end", on_train_batch_end)
                 self.model.add_callback("on_fit_epoch_end", on_fit_epoch_end)

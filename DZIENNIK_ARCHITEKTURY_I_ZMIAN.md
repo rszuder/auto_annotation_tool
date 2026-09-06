@@ -6,6 +6,28 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-06: identyfikator datasetu po przygotowaniu obrazów
+
+Ultralytics może naprawić i nadpisać JPEG podczas budowania loaderów. Snapshot
+liczony przed startem workera opisywał wtedy inne bajty niż wykorzystane od
+pierwszej epoki. Trening zamraża teraz canonical `training_dataset_snapshot`
+w `on_pretrain_routine_end`, po przygotowaniu loaderów i przed epokami.
+Pierwszy `on_train_epoch_start` stanowi zabezpieczenie na wypadek braku
+wcześniejszego callbacku. Pierwotny ślad pozostaje w
+`training_dataset_input_snapshot`, a przebieg przygotowania w
+`dataset_preparation`. Resume nadal odrzuca rzeczywiste zmiany datasetu.
+
+Eksport i profil korzystają z datasetu efektywnie użytego do treningu;
+rekonstrukcja historyczna zachowuje własne oznaczenie pochodzenia. Dla
+potwierdzonego przypadku YOLO26n/26s wspólny identyfikator to
+`DS-MT-FC1A2BF3BD`; różnicę starego zapisu n odtworzono dokładnie z dwóch
+JPEG-ów naprawionych przed pierwszą epoką. Nie jest to scalanie po nazwie.
+
+Weryfikacja: 401 testów i 44 podprzypadki oraz rzeczywisty jednoepokowy trening
+POSE i DETECT z automatyczną naprawą JPEG. Snapshot po przygotowaniu zgadza
+się z zawartością danych, a wejściowy pozostaje zachowany. Szczegóły:
+`docs/dataset_po_przygotowaniu_2026_09_06.md`.
+
 ## 2026-09-06: tożsamość modeli i spójne manifesty eksportu mobilnego
 
 Lista eksportu rozpoznaje kopie wag po SHA-256. Wpis treningu ma pierwszeństwo

@@ -84,6 +84,8 @@ class TrainingRun:
     # Zamrozone dane provenance. Pola sa opcjonalne, zeby starsze historie
     # treningow pozostaly czytelne bez migracji destrukcyjnej.
     training_dataset_snapshot: Dict = field(default_factory=dict)
+    training_dataset_input_snapshot: Dict = field(default_factory=dict)
+    dataset_preparation: Dict = field(default_factory=dict)
     input_checkpoint_snapshot: Dict = field(default_factory=dict)
     output_checkpoint_snapshot: Dict = field(default_factory=dict)
     
