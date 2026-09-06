@@ -6,6 +6,36 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-06: poprawne zamykanie treningów pose i detect
+
+Wspólne zamknięcie treningu wywoływało nieistniejącą metodę
+`YOLOPoseTrainer._safe_float`. Po poprawnym zapisie wag i końcowej walidacji
+mogło to ustawić status `failed` zarówno dla tablic POSE, jak i znaków DETECT.
+Konwersja korzysta teraz z istniejącego helpera historii. Status zakończenia,
+liczba faktycznie wykonanych epok i ścieżki wag są zapisywane przed dodatkowymi
+metadanymi; błąd tych metadanych lub końcowego callbacku UI nie unieważnia
+ukończonego treningu. Brak obu checkpointów oraz błąd samego treningu lub
+walidacji nadal dają niepowodzenie.
+
+Ujemna epoka w sfinalizowanym checkpointcie oznacza brak bezpośredniej
+informacji, a nie epokę zero. Jeśli zapisane metryki checkpointu jednoznacznie
+pasują do jego `train_results`, ustalana jest odpowiadająca im epoka. Nie jest
+to ostatni wiersz pełnej historii dołączonej przez Ultralytics do `best.pt`.
+Przy braku jednoznacznego dopasowania pozostaje fallback z historii.
+
+Katalog eksportu i model przypinany w projekcie wynikają z `training_target`.
+Dla starszych runów fallback korzysta z zadania modelu i rodzaju datasetu.
+Fragmenty `pose`/`plate` w ścieżce lub nazwie projektu nie przenoszą już
+modelu znaków do katalogu tablic.
+
+Weryfikacja: 74 testy i 7 podprzypadków przeszły, w tym zamknięcie 150 epok
+POSE i DETECT, early stopping, awarie metadanych/raportu/kopiowania/callbacku
+oraz odrzucenie nieudanej walidacji i braku wag. Wykonano także rzeczywisty
+trening YOLO26n DETECT na CPU: 2 epoki, 8 syntetycznych obrazów treningowych
+i 4 walidacyjne, 2 klasy znaków. Potwierdzono końcową walidację, status
+`completed`, raport, oba checkpointy i zgodną bajtowo kopię w `trained/chars`.
+Ta krótka próba sprawdza zamknięcie treningu, nie jakość rozpoznawania.
+
 ## 2026-09-06: komunikat T06, historia treningu na żywo i kompas Z2
 
 Komunikaty pominięcia treningu odwołują się do T06 zamiast starego T07.
