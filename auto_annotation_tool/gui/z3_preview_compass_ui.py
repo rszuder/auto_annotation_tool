@@ -453,8 +453,10 @@ def clamp_preview_controls_legend_offsets(
     except Exception:
         frame_w = 0.0
         frame_h = 0.0
-    top_clearance = 0.0
-    if bool(getattr(host, "_preview_fullscreen_active", False)) or bool(getattr(host, "_preview_render_state", None)):
+    top_clearance = 8.0
+    if host._is_preview_controls_legend_expanded() and (
+        bool(getattr(host, "_preview_fullscreen_active", False)) or bool(getattr(host, "_preview_render_state", None))
+    ):
         top_clearance = max(38.0, float(getattr(host, "_preview_overlay_top_bar_height", 38.0) or 38.0)) + 8.0
     safe_w = float(width or getattr(host, "_preview_controls_legend_current_width", 0.0) or 280.0)
     safe_h = float(height or getattr(host, "_preview_controls_legend_current_height", 0.0) or 120.0)
@@ -466,12 +468,15 @@ def clamp_preview_controls_legend_offsets(
 
 
 def toggle_preview_controls_legend(host: "CharacterAnnotationTab", event=None):
+    host._preview_controls_legend_drag_state = None
+    host._preview_controls_legend_click_state = None
     was_expanded = bool(host._is_preview_controls_legend_expanded())
     collapsed_anchor = None
     if not was_expanded:
         collapsed_anchor = {
-            "x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0) or 10.0),
-            "y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0) or 10.0),
+            "x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0)),
+            "y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0)),
+            "manual": bool(getattr(host, "_preview_controls_legend_position_manual", False)),
         }
         host._preview_controls_legend_last_collapsed_offset = dict(collapsed_anchor)
     else:
@@ -487,14 +492,12 @@ def toggle_preview_controls_legend(host: "CharacterAnnotationTab", event=None):
         host._preview_controls_legend_inline_expanded = not bool(
             getattr(host, "_preview_controls_legend_inline_expanded", False)
         )
-    place_preview_hint_overlay(host, refresh=True)
+    host._preview_controls_legend_position_manual = False
     if was_expanded and isinstance(collapsed_anchor, dict):
-        try:
-            host._preview_controls_legend_offset_x = float(collapsed_anchor.get("x", 10.0))
-            host._preview_controls_legend_offset_y = float(collapsed_anchor.get("y", 10.0))
-            place_preview_hint_overlay(host, refresh=False)
-        except Exception:
-            pass
+        host._preview_controls_legend_offset_x = float(collapsed_anchor.get("x", 10.0))
+        host._preview_controls_legend_offset_y = float(collapsed_anchor.get("y", 10.0))
+        host._preview_controls_legend_position_manual = bool(collapsed_anchor.get("manual", False))
+    place_preview_hint_overlay(host, refresh=True)
     try:
         _COMPASS_LOG.info(
             "[Z3 COMPASS] toggle expanded %s->%s fullscreen=%s visible=%s",
@@ -572,8 +575,8 @@ def on_preview_controls_legend_press(host: "CharacterAnnotationTab", event=None)
         host._preview_controls_legend_drag_state = {
             "press_root_x": root_x,
             "press_root_y": root_y,
-            "start_x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0) or 10.0),
-            "start_y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0) or 10.0),
+            "start_x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0)),
+            "start_y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0)),
         }
         host._preview_controls_legend_click_state = None
         update_preview_controls_legend_cursor(host, local_x, local_y)
@@ -582,8 +585,8 @@ def on_preview_controls_legend_press(host: "CharacterAnnotationTab", event=None)
     host._preview_controls_legend_click_state = {
         "press_root_x": root_x,
         "press_root_y": root_y,
-        "start_x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0) or 10.0),
-        "start_y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0) or 10.0),
+        "start_x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0)),
+        "start_y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0)),
         "compact_drag": bool(_preview_controls_legend_compact_hit(host, local_x, local_y)),
     }
     try:
@@ -629,6 +632,7 @@ def on_preview_controls_legend_drag(host: "CharacterAnnotationTab", event=None):
     clamped_x, clamped_y = clamp_preview_controls_legend_offsets(host, next_x, next_y)
     host._preview_controls_legend_offset_x = clamped_x
     host._preview_controls_legend_offset_y = clamped_y
+    host._preview_controls_legend_position_manual = True
     place_preview_hint_overlay(host, refresh=False)
     return "break"
 
@@ -755,31 +759,16 @@ def build_preview_legend_sections(host: "CharacterAnnotationTab"):
 
 
 def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
+    place_preview_hint_overlay(host, refresh=True)
+
+
+def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) -> None:
     canvas = getattr(host, "preview_controls_canvas", None)
     if canvas is None:
         return
 
-    try:
-        canvas.update_idletasks()
-    except Exception:
-        pass
-
     expanded = host._is_preview_controls_legend_expanded()
-    fullscreen = bool(getattr(host, "_preview_fullscreen_active", False))
     compact = not bool(expanded)
-    min_width = 32.0 if compact else 220.0
-    try:
-        configured_width = float(canvas.cget("width") or 0.0)
-    except Exception:
-        configured_width = 0.0
-    if compact:
-        width = min_width
-        try:
-            canvas.configure(width=int(width), height=int(width))
-        except Exception:
-            pass
-    else:
-        width = max(min_width, float(canvas.winfo_width() or configured_width or 0.0))
     canvas.delete("all")
     legend_theme = get_preview_legend_theme(host)
     bg_fill = legend_theme["panel_fill"]
@@ -814,7 +803,7 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
         expanded=expanded,
         theme=legend_theme,
     )
-    if not compact and not fullscreen:
+    if not compact:
         draw_preview_legend_grab_handle(
             host,
             canvas,
@@ -842,7 +831,7 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
 
         if width >= 920.0:
             column_count = 3
-        elif width >= 620.0:
+        elif width >= 600.0:
             column_count = 2
         else:
             column_count = 1
@@ -980,12 +969,7 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
         canvas.configure(scrollregion=(0, 0, int(max(1.0, width)), int(max(1.0, total_height))))
     except Exception:
         pass
-    host._preview_controls_legend_current_width = float(width)
     host._preview_controls_legend_content_height = float(total_height)
-    try:
-        host.frame.after_idle(host._place_preview_hint_overlay)
-    except Exception:
-        pass
 
 def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = False):
     host_widget = getattr(host, "preview_canvas_host", None)
@@ -995,160 +979,83 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
     if host_widget is None or overlay is None or canvas is None:
         return
     if not bool(getattr(host, "_preview_controls_legend_visible", True)):
-        try:
-            overlay.place_forget()
-        except Exception:
-            pass
-        try:
-            host._preview_controls_legend_current_bounds = None
-        except Exception:
-            pass
+        overlay.place_forget()
+        host._preview_controls_legend_current_bounds = None
+        host._preview_controls_legend_drag_state = None
+        host._preview_controls_legend_click_state = None
         return
-
-    try:
-        host_widget.update_idletasks()
-    except Exception:
-        pass
 
     host_width = max(0, int(host_widget.winfo_width() or 0))
     host_height = max(0, int(host_widget.winfo_height() or 0))
-    if host_width <= 0 or host_height <= 0:
+    if host_width <= 1 or host_height <= 1:
         return
 
     expanded = host._is_preview_controls_legend_expanded()
     fullscreen = bool(getattr(host, "_preview_fullscreen_active", False))
     compact = not bool(expanded)
-    if compact:
-        target_width = max(32, min(32, host_width - 20))
-    elif fullscreen:
-        target_width = max(220, min(520, host_width - 24))
-    else:
-        target_width = max(220, min((620 if expanded else 340), host_width - 20))
-    try:
-        canvas.configure(width=int(target_width))
-    except Exception:
-        pass
-
-    if refresh:
-        try:
-            host._refresh_preview_controls_legend()
-        except Exception:
-            pass
-    try:
-        canvas.update_idletasks()
-    except Exception:
-        pass
-
-    min_overlay_width = 32.0 if compact else 220.0
-    if compact:
-        overlay_width = 32.0
-    else:
-        overlay_width = max(
-            min_overlay_width,
-            float(
-                getattr(host, "_preview_controls_legend_current_width", 0.0)
-                or canvas.winfo_width()
-                or target_width
-            ),
-        )
-    min_content_height = 32.0 if compact else 56.0
-    if compact:
-        content_height = 32.0
-    else:
-        content_height = max(
-            min_content_height,
-            float(
-                getattr(host, "_preview_controls_legend_content_height", 0.0)
-                or getattr(host, "_preview_controls_legend_current_height", 0.0)
-                or canvas.winfo_height()
-                or min_content_height
-            ),
-        )
     top_clearance = 0.0
-    if bool(getattr(host, "_preview_fullscreen_active", False)) or bool(getattr(host, "_preview_render_state", None)):
+    if fullscreen or bool(getattr(host, "_preview_render_state", None)):
         top_clearance = max(38.0, float(getattr(host, "_preview_overlay_top_bar_height", 38.0) or 38.0)) + 8.0
-    max_visible_height = max(56.0, float(host_height) - top_clearance - 10.0)
-    overlay_height = 32.0 if compact else min(content_height, max_visible_height)
+
+    margin = 12.0
+    left, top = margin, max(margin, top_clearance + 4.0)
+    right, bottom = max(left + 1.0, host_width - margin), max(top + 1.0, host_height - margin)
     dock = getattr(host, "preview_overlay_dock", None)
-    dock_mapped = False
-    dock_x = dock_y = dock_w = dock_h = 0.0
-    if dock is not None and str(dock.winfo_manager()):
+    dock_rect = None
+    if dock is not None and str(dock.winfo_manager()) == "place":
         try:
-            dock.update_idletasks()
-            dock_x = float(dock.winfo_x() or 0.0)
-            dock_y = float(dock.winfo_y() or 0.0)
-            dock_w = float(dock.winfo_width() or dock.winfo_reqwidth() or 0.0)
-            dock_h = float(dock.winfo_height() or dock.winfo_reqheight() or 0.0)
-            dock_mapped = dock_w > 0.0 and dock_h > 0.0
-        except Exception:
-            dock_mapped = False
-    if fullscreen:
-        margin = 12.0
-        toggle_rect = getattr(host, "_preview_fullscreen_toggle_rect", None)
-        if compact and isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
-            try:
-                icon_x1, icon_y1, _icon_x2, icon_y2 = [float(value) for value in toggle_rect]
-                offset_x = icon_x1 - float(overlay_width) - 6.0
-                offset_y = ((icon_y1 + icon_y2) / 2.0) - (float(overlay_height) / 2.0)
-            except Exception:
-                offset_x = float(host_width) - float(overlay_width) - margin
-                offset_y = top_clearance + 6.0
-        elif dock_mapped:
-            offset_x = dock_x + dock_w - float(overlay_width)
-            offset_y = dock_y + dock_h + 6.0
-        else:
-            if isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
-                try:
-                    _icon_x1, _icon_y1, icon_x2, icon_y2 = [float(value) for value in toggle_rect]
-                    offset_x = icon_x2 - float(overlay_width)
-                    offset_y = icon_y2 + 6.0
-                except Exception:
-                    offset_x = float(host_width) - float(overlay_width) - margin
-                    offset_y = top_clearance + 6.0
-            else:
-                offset_x = float(host_width) - float(overlay_width) - margin
-                offset_y = top_clearance + 6.0
-        offset_x = min(max(margin, offset_x), max(margin, float(host_width) - float(overlay_width) - margin))
-        if compact:
-            offset_y = min(
-                max(margin, offset_y),
-                max(margin, float(host_height) - float(overlay_height) - margin),
-            )
-        else:
-            min_y = top_clearance + 4.0
-            offset_y = min(max(min_y, offset_y), max(min_y, float(host_height) - float(overlay_height) - margin))
-    else:
-        toggle_rect = getattr(host, "_preview_fullscreen_toggle_rect", None)
-        if compact and isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
-            try:
-                icon_x1, icon_y1, _icon_x2, icon_y2 = [float(value) for value in toggle_rect]
-                offset_x = icon_x1 - float(overlay_width) - 6.0
-                offset_y = ((icon_y1 + icon_y2) / 2.0) - (float(overlay_height) / 2.0)
-            except Exception:
-                offset_x = float(getattr(host, "_preview_controls_legend_offset_x", 10.0) or 10.0)
-                offset_y = float(getattr(host, "_preview_controls_legend_offset_y", 10.0) or 10.0)
-        elif dock_mapped:
-            margin = 12.0
-            offset_x = dock_x + dock_w - float(overlay_width)
-            offset_y = dock_y + dock_h + 6.0
-            offset_x = min(max(margin, offset_x), max(margin, float(host_width) - float(overlay_width) - margin))
-            offset_y = min(max(margin, offset_y), max(margin, float(host_height) - float(overlay_height) - margin))
-        else:
-            offset_x = float(getattr(host, "_preview_controls_legend_offset_x", 10.0) or 10.0)
-            offset_y = float(getattr(host, "_preview_controls_legend_offset_y", 10.0) or 10.0)
-            offset_x, offset_y = clamp_preview_controls_legend_offsets(
-                host,
-                offset_x,
-                offset_y,
-                width=overlay_width,
-                height=overlay_height,
-            )
-            host._preview_controls_legend_offset_x = float(offset_x)
-            host._preview_controls_legend_offset_y = float(offset_y)
-        if compact:
-            margin = 8.0
-            offset_x = min(max(margin, offset_x), max(margin, float(host_width) - float(overlay_width) - margin))
-            offset_y = min(max(margin, offset_y), max(margin, float(host_height) - float(overlay_height) - margin))
+            # Read the requested placement, which is already current even before
+            # Tk handles Configure. Never enter the event loop while laying out.
+            info = dock.place_info()
+            dock_x, dock_y = float(info["x"]), float(info["y"])
+            dock_w, dock_h = float(info["width"]), float(info["height"])
+            if dock_w > 0 and dock_h > 0:
+                dock_rect = (dock_x, dock_y, dock_x + dock_w, dock_y + dock_h)
+        except (tk.TclError, KeyError, ValueError):
+            pass
+    if expanded and dock_rect is not None:
+        dx1, dy1, dx2, dy2 = dock_rect
+        gap = 8.0
+        # Prefer the space beside the drawer; on a narrow preview use the
+        # space below it and scroll the legend instead of covering the drawer.
+        candidates = (
+            (left, top, min(right, dx1 - gap), bottom),
+            (max(left, dx2 + gap), top, right, bottom),
+            (left, max(top, dy2 + gap), right, bottom),
+            (left, top, right, min(bottom, dy1 - gap)),
+        )
+        for area in candidates:
+            if area[2] - area[0] >= 220.0 and area[3] - area[1] >= 56.0:
+                left, top, right, bottom = area
+                break
+
+    overlay_width = 32.0 if compact else min(520.0 if fullscreen else 620.0, right - left)
+    # Reserve the scrollbar gutter even while it is hidden, so its appearance
+    # cannot feed a smaller canvas width back into the next layout pass.
+    gutter = float(vbar.winfo_reqwidth() + 4) if expanded and vbar is not None else 0.0
+    canvas_width = max(1.0, overlay_width - gutter)
+    render_key = (bool(expanded), canvas_width)
+    if refresh or render_key != getattr(host, "_preview_controls_legend_render_key", None):
+        _draw_preview_controls_legend(host, canvas_width)
+        host._preview_controls_legend_render_key = render_key
+    content_height = float(getattr(host, "_preview_controls_legend_content_height", 32.0))
+    overlay_height = 32.0 if compact else min(content_height, bottom - top)
+    manual = bool(getattr(host, "_preview_controls_legend_position_manual", False))
+    offset_x, offset_y = right - overlay_width, top
+    toggle_rect = getattr(host, "_preview_fullscreen_toggle_rect", None)
+    if compact and isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
+        icon_x1, icon_y1, _icon_x2, icon_y2 = map(float, toggle_rect)
+        offset_x = icon_x1 - overlay_width - 6.0
+        offset_y = (icon_y1 + icon_y2 - overlay_height) / 2.0
+    if manual:
+        offset_x = float(getattr(host, "_preview_controls_legend_offset_x", offset_x))
+        offset_y = float(getattr(host, "_preview_controls_legend_offset_y", offset_y))
+    offset_x, offset_y = clamp_preview_controls_legend_offsets(
+        host, offset_x, offset_y, width=overlay_width, height=overlay_height,
+    )
+    host._preview_controls_legend_offset_x = offset_x
+    host._preview_controls_legend_offset_y = offset_y
+    host._preview_controls_legend_current_width = float(overlay_width)
     host._preview_controls_legend_current_height = float(overlay_height)
     host._preview_controls_legend_current_bounds = (
         float(offset_x),
@@ -1157,37 +1064,22 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
         float(offset_y) + float(overlay_height),
     )
 
-    try:
-        if compact:
-            canvas.configure(width=32, height=32)
-            if vbar is not None and str(vbar.winfo_manager()):
-                vbar.grid_remove()
-            canvas.yview_moveto(0.0)
-        else:
-            canvas.configure(height=int(math.ceil(overlay_height)))
-        if compact:
-            pass
-        elif content_height > overlay_height + 1.0:
-            if vbar is not None and not str(vbar.winfo_manager()):
-                vbar.grid(row=0, column=1, sticky="ns", padx=(4, 0))
-        else:
-            if vbar is not None and str(vbar.winfo_manager()):
-                vbar.grid_remove()
-            canvas.yview_moveto(0.0)
-    except Exception:
-        pass
+    canvas.configure(width=int(canvas_width), height=int(math.ceil(overlay_height)))
+    overlay.grid_columnconfigure(1, minsize=int(gutter))
+    if expanded and content_height > overlay_height + 1.0:
+        if vbar is not None and not str(vbar.winfo_manager()):
+            vbar.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+    else:
+        if vbar is not None and str(vbar.winfo_manager()):
+            vbar.grid_remove()
+        canvas.yview_moveto(0.0)
 
-    try:
-        overlay.place(
-            in_=host_widget,
-            x=int(round(offset_x)),
-            y=int(round(offset_y)),
-            width=int(math.ceil(overlay_width)),
-            height=int(math.ceil(overlay_height)),
-            anchor="nw",
-        )
-        overlay.lift()
-    except Exception:
-        pass
-
-
+    overlay.place(
+        in_=host_widget,
+        x=int(round(offset_x)),
+        y=int(round(offset_y)),
+        width=int(math.ceil(overlay_width)),
+        height=int(math.ceil(overlay_height)),
+        anchor="nw",
+    )
+    overlay.lift()

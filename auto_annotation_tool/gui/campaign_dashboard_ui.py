@@ -1296,7 +1296,7 @@ def _choose_step1_iteration_target(self, target: str):
         _finish_target_switch()
 
 
-def _render_step1_route_actions(self, frame):
+def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = True):
     """Render the new campaign transition graph.
 
     Stages are abstract nodes. Every edge owns a gate badge with three fields:
@@ -21492,6 +21492,14 @@ def _render_step1_route_actions(self, frame):
         pending_edge_key = str(getattr(self, "_pending_gate_action_modal_edge_key", "") or "").strip()
         if not pending_edge_key:
             return
+        # A delayed callback belongs to this visible graph. A palette repaint
+        # or a callback left behind after navigating to Z3 must not open work
+        # over another tab. Keep the request for the next explicit graph return.
+        try:
+            if not canvas.winfo_exists() or not self.frame.winfo_viewable():
+                return
+        except tk.TclError:
+            return
         try:
             attempts_left = int(getattr(self, "_pending_gate_action_modal_attempts", 0) or 0)
         except Exception:
@@ -21868,7 +21876,7 @@ def _render_step1_route_actions(self, frame):
     except Exception:
         _schedule_draw()
     try:
-        if str(getattr(self, "_pending_gate_action_modal_edge_key", "") or "").strip():
+        if allow_pending_actions and str(getattr(self, "_pending_gate_action_modal_edge_key", "") or "").strip():
             frame.after(220, _open_pending_gate_action_modal)
     except Exception:
         pass

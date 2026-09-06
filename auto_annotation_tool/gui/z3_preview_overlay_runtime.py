@@ -149,12 +149,7 @@ def _toggle_preview_overlay_dock_tool(self, tool_key: str):
                 self._preview_legend_toggle_after_id = None
             except Exception:
                 pass
-            overlay = getattr(self, "preview_hint_frame", None)
-            if overlay is not None:
-                try:
-                    overlay.place_forget()
-                except Exception:
-                    pass
+            self._place_preview_hint_overlay()
         else:
             try:
                 self._place_preview_hint_overlay(refresh=True)

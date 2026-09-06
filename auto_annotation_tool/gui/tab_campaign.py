@@ -1397,9 +1397,13 @@ class CampaignTab:
                     pass
 
         try:
-            self._refresh_dashboard()
+            # Repaint the existing graph without re-entering campaign navigation,
+            # changing tab access, or dispatching a pending return to gate work.
+            graph = getattr(self, "wizard_transition_graph_shell", None)
+            if graph is not None and graph.winfo_exists() and graph.winfo_manager():
+                self._refresh_wizard_transition_graph(allow_pending_actions=False)
         except Exception:
-            pass
+            logger.exception("Nie udało się odświeżyć motywu grafu kampanii")
 
     def _ask_project_from_list(self, title="Wybierz projekt", action_label="OK"):
         """WyĹ›wietla modalny wybĂłr projektu i zwraca nazwÄ™ albo None."""
