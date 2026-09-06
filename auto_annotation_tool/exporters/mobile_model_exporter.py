@@ -1106,6 +1106,38 @@ def _infer_output_spec(
     }
 
 
+def validate_checkpoint_metadata(checkpoint: Path, metadata: dict | None) -> None:
+    """Reject a manifest assembled from different weights or epoch profiles."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    training = metadata.get("training") or {}
+    metrics = metadata.get("metrics") or {}
+    candidate = metadata.get("candidate") or {}
+    candidate_training = candidate.get("training_provenance") or {}
+    output_snapshots = [(payload.get("output_checkpoint") or {}) for payload in (training, candidate_training)]
+    expected_hashes = [candidate.get("checkpoint_sha256"), (metadata.get("source") or {}).get("checkpoint_sha256")]
+    for payload in (training, candidate_training):
+        output = payload.get("output_checkpoint") or {}
+        expected_hashes.extend([payload.get("best_checkpoint_sha256"), output.get("best_checkpoint_sha256"),
+                                (output.get("best") or {}).get("sha256")])
+    expected_hashes = {str(value).lower() for value in expected_hashes if value}
+    if expected_hashes and expected_hashes != {sha256_file(checkpoint).lower()}:
+        raise MobileExportError("Metadane treningu nie odpowiadają wybranemu checkpointowi (SHA-256). Odśwież listę modeli.")
+    epochs = set()
+    for payload in (training, metrics, candidate, candidate_training, *output_snapshots):
+        value = payload.get("best_epoch")
+        if value is None or value == "":
+            continue
+        try:
+            epoch = int(value)
+            if epoch <= 0 or float(value) != epoch:
+                raise ValueError()
+        except (TypeError, ValueError, OverflowError):
+            raise MobileExportError("Nieprawidłowa najlepsza epoka w metadanych modelu.")
+        epochs.add(epoch)
+    if len(epochs) > 1:
+        raise MobileExportError("Profil kandydata i manifest wskazują różne najlepsze epoki. Odśwież listę modeli.")
+
+
 class MobileModelExporter:
     """Export trained YOLO weights into the Android ALPR model-package contract."""
 
@@ -1115,6 +1147,8 @@ class MobileModelExporter:
             checkpoint = Path(request.checkpoint)
             if not checkpoint.exists() or not checkpoint.is_file():
                 problems.append(f"Brak checkpointu: {checkpoint}")
+            else:
+                validate_checkpoint_metadata(checkpoint, request.metadata)
         except Exception as exc:
             problems.append(f"Nieprawidłowa ścieżka checkpointu: {exc}")
 
@@ -1977,6 +2011,7 @@ class MobileModelExporter:
         metadata = _json_safe_value(dict(request.metadata or {}))
         if not isinstance(metadata, dict):
             metadata = {}
+        validate_checkpoint_metadata(checkpoint, metadata)
         source_meta = dict(metadata.get("source") or {})
         source_meta.update(
             {

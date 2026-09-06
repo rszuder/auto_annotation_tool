@@ -14,6 +14,7 @@ import csv
 import json
 import re
 import zipfile
+from functools import lru_cache
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -167,8 +168,14 @@ def build_model_training_provenance(
     if not lineage_result.total_epochs_known:
         sample_presentations_known = False
         lineage_nominal_sample_presentations = None
-    best_epoch = _best_epoch_from_run(run)
-    best_epoch_source = _best_epoch_source_from_run(run)
+    checkpoint_metrics = build_checkpoint_metric_summary(run, checkpoint=checkpoint_path)
+    best_epoch = checkpoint_metrics["best_epoch"]
+    best_epoch_source = checkpoint_metrics["best_epoch_source"]
+    if best_epoch is not None and best_epoch_source == "checkpoint" and not output_mismatch_warning:
+        if output_checkpoint_snapshot.get("best_epoch") not in (None, best_epoch):
+            output_checkpoint_snapshot["historical_best_epoch"] = output_checkpoint_snapshot["best_epoch"]
+        output_checkpoint_snapshot["best_epoch"] = best_epoch
+        output_checkpoint_snapshot["best_epoch_source"] = best_epoch_source
 
     parent_run_id = _explicit_parent_run_id(run)
     payload = {
@@ -766,6 +773,12 @@ def _checkpoint_completed_epoch(checkpoint_path: Path | str | None) -> int | Non
     path = _path_or_none(checkpoint_path)
     if path is None or not path.exists() or not path.is_file():
         return None
+    stat = path.stat()
+    return _cached_checkpoint_completed_epoch(str(path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+@lru_cache(maxsize=64)
+def _cached_checkpoint_completed_epoch(path: str, size: int, mtime_ns: int, ctime_ns: int) -> int | None:
     torch = get_torch_module()
     if torch is None:
         return None
@@ -974,6 +987,53 @@ def _checkpoint_mismatch_warning(snapshot: Mapping[str, Any], checkpoint_path: P
     if current and current != frozen:
         return f"Ostrzezenie: {label} nie odpowiada checkpointowi zarejestrowanemu po treningu."
     return ""
+
+
+def build_checkpoint_metric_summary(run_like: Any, *, checkpoint: Path | str | None = None,
+                                    verify_checkpoint: bool = True) -> dict[str, Any]:
+    """Describe the selected weights, never the maximum of unrelated epoch metrics."""
+    run = _run_like_dict(run_like)
+    path = _path_or_none(checkpoint or _value(run, "best_weights"))
+    rows = [dict(row) for row in (run.get("metrics_history") or []) if isinstance(row, Mapping)]
+    snapshot = _checkpoint_snapshot_from_run(run, "output_checkpoint_snapshot")
+    frozen_sha = _checkpoint_snapshot_sha(snapshot, key="best") or _checkpoint_snapshot_sha(snapshot)
+    actual_sha = _file_sha256(path)
+    mismatch = bool(frozen_sha and actual_sha and frozen_sha != actual_sha)
+    epoch = None
+    source = "unknown"
+    frozen_epoch = _int_or_none(snapshot.get("best_epoch"))
+    frozen_source = str(snapshot.get("best_epoch_source") or "")
+    if (frozen_sha and actual_sha == frozen_sha and frozen_epoch is not None and frozen_epoch > 0
+            and frozen_source.startswith("checkpoint")):
+        epoch, source = frozen_epoch, frozen_source
+    if run and actual_sha and (verify_checkpoint or epoch is None):
+        checkpoint_epoch = _checkpoint_completed_epoch(path)
+        if checkpoint_epoch is not None:
+            epoch, source = checkpoint_epoch, "checkpoint"
+    if epoch is None and run and not mismatch:
+        epoch = _best_epoch_from_run(run)
+        source = _best_epoch_source_from_run(run) if epoch is not None else "unknown"
+        if epoch is not None and epoch <= 0:
+            epoch, source = None, "unknown"
+    # The final validation callback can repeat the last epoch number while
+    # evaluating earlier best.pt weights. Keep the original epoch row.
+    best_row = next((row for row in rows if _int_or_none(row.get("epoch")) == epoch), {}) if epoch else {}
+    if mismatch:
+        best_row = {}
+    def metric(*keys):
+        for key in keys:
+            value = _float_or_none(best_row.get(key))
+            if value is not None:
+                return value
+        return None
+    return {
+        "best_epoch": epoch, "best_epoch_source": source,
+        "checkpoint_sha256": actual_sha, "checkpoint_mismatch": mismatch,
+        "best_map50": metric("map50", "box_map50", "metrics/mAP50(B)", "metrics/mAP50"),
+        "best_map50_95": metric("map50_95", "box_map50_95", "metrics/mAP50-95(B)", "metrics/mAP50-95"),
+        "best_row": best_row, "latest": rows[-1] if rows else {}, "history_rows": rows,
+        "metrics_source": "checkpoint_epoch_history" if best_row else "unknown",
+    }
 
 
 def _best_epoch_from_run(run: Mapping[str, Any]) -> int | None:
@@ -1434,15 +1494,19 @@ def _file_sha256(path: Path | None) -> str:
         safe_path = Path(path)
         if not safe_path.exists() or not safe_path.is_file():
             return ""
-        digest = hashlib.sha256()
-        with safe_path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest()
+        stat = safe_path.stat()
+        return _cached_file_sha256(str(safe_path.resolve()), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
     except Exception:
         return ""
+
+
+@lru_cache(maxsize=128)
+def _cached_file_sha256(path: str, size: int, mtime_ns: int, ctime_ns: int) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _file_size(path: Path) -> int:

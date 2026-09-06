@@ -67,6 +67,7 @@ from ..training import (
     build_model_training_provenance,
 )
 from ..ranking import ModelRanking
+from ..training.model_provenance import build_checkpoint_metric_summary, _file_sha256
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .free_mode_assistant import get_mobile_export_assistant_context
@@ -208,63 +209,10 @@ def _resolve_history_run_best_weights(self, run) -> Path | None:
         return None
 
 def _build_history_run_metric_summary(self, run) -> dict:
-    rows = list(getattr(run, "metrics_history", []) or [])
-    latest = dict(rows[-1]) if rows and isinstance(rows[-1], dict) else {}
-    best_row: dict = {}
-    best_score = -1.0
+    checkpoint = self._resolve_history_run_best_weights(run) if run is not None else None
+    return build_checkpoint_metric_summary(run, checkpoint=checkpoint, verify_checkpoint=False)
 
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        score = self._training_metric_value(
-            row,
-            (
-                "map50_95",
-                "box_map50_95",
-                "metrics/mAP50-95(B)",
-                "metrics/mAP50-95",
-                "pose_map50_95",
-                "metrics/mAP50-95(P)",
-            ),
-        )
-        if score is None:
-            score = self._training_metric_value(
-                row,
-                (
-                    "map50",
-                    "box_map50",
-                    "metrics/mAP50(B)",
-                    "metrics/mAP50",
-                    "pose_map50",
-                    "metrics/mAP50(P)",
-                ),
-            )
-        if score is not None and score > best_score:
-            best_score = score
-            best_row = dict(row)
 
-    best_map50 = self._training_metric_float(getattr(run, "best_map50", None))
-    best_map50_95 = self._training_metric_float(getattr(run, "best_map50_95", None))
-    if best_map50 is None:
-        best_map50 = self._training_metric_value(best_row, ("map50", "box_map50", "metrics/mAP50(B)", "metrics/mAP50", "pose_map50", "metrics/mAP50(P)"))
-    if best_map50_95 is None:
-        best_map50_95 = self._training_metric_value(
-            best_row,
-            ("map50_95", "box_map50_95", "metrics/mAP50-95(B)", "metrics/mAP50-95", "pose_map50_95", "metrics/mAP50-95(P)"),
-        )
-
-    epoch = self._training_metric_value(best_row, ("epoch", "Epoch"))
-    if epoch is None:
-        epoch = self._training_metric_float(getattr(run, "current_epoch", None))
-
-    return {
-        "best_map50": best_map50,
-        "best_map50_95": best_map50_95,
-        "best_epoch": epoch,
-        "latest": latest,
-        "best_row": best_row,
-        "history_rows": rows,
-    }
 
 def _build_free_mode_model_export_path(self, run, target: str, target_dir: Path, source_path: Path) -> Path:
     prefix = {
@@ -874,14 +822,19 @@ def _mobile_export_yolo_size_label(size: str) -> str:
     }.get(str(size or "").strip().lower(), "")
 
 _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX: dict[str, dict] | None = None
+_MOBILE_EXPORT_RUN_SNAPSHOT_SIGNATURE: tuple | None = None
 
 def _mobile_export_run_id_from_text(text) -> str:
     match = re.search(r"(20\d{6}_\d{6})", str(text or ""))
     return str(match.group(1) or "").strip() if match else ""
 
 def _mobile_export_run_snapshot_index() -> dict[str, dict]:
-    global _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX
-    if _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX is not None:
+    global _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX, _MOBILE_EXPORT_RUN_SNAPSHOT_SIGNATURE
+    files = [Path(CONFIG.DIR_5_RUNS) / "training_history.json"]
+    files.extend(Path(CONFIG.get_training_runs_dir(target)) / "training_history.json" for target in ("plate", "char", "vehicle"))
+    files.extend(Path(CONFIG.DIR_9_PROJECTS).glob("*/5_training_runs/training_history.json"))
+    signature = tuple(_mobile_export_file_signature(path) for path in sorted(set(files)))
+    if _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX is not None and _MOBILE_EXPORT_RUN_SNAPSHOT_SIGNATURE == signature:
         return _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX
 
     index: dict[str, dict] = {}
@@ -902,7 +855,11 @@ def _mobile_export_run_snapshot_index() -> dict[str, dict]:
                 continue
             snapshot = dict(run_payload)
             snapshot.setdefault("id", key)
-            index.setdefault(key, snapshot)
+            snapshot["_history_dir"] = str(path.parent)
+            if key in index and index[key] != snapshot:
+                index[f"{path.parent}|{key}"] = snapshot
+            else:
+                index[key] = snapshot
 
     try:
         runs_root = Path(CONFIG.DIR_5_RUNS)
@@ -928,14 +885,24 @@ def _mobile_export_run_snapshot_index() -> dict[str, dict]:
         pass
 
     _MOBILE_EXPORT_RUN_SNAPSHOT_INDEX = index
+    _MOBILE_EXPORT_RUN_SNAPSHOT_SIGNATURE = signature
     return index
 
 def _mobile_export_run_snapshot_for_reference(reference) -> dict:
-    run_id = _mobile_export_run_id_from_text(reference)
-    if not run_id:
+    path = Path(str(reference or ""))
+    digest = _file_sha256(path)
+    if not digest:
         return {}
-    snapshot = _mobile_export_run_snapshot_index().get(run_id)
-    return dict(snapshot) if isinstance(snapshot, dict) else {}
+    matches = []
+    for snapshot in _mobile_export_run_snapshot_index().values():
+        output = snapshot.get("output_checkpoint_snapshot") or {}
+        expected = str(output.get("best_checkpoint_sha256") or (output.get("best") or {}).get("sha256") or "")
+        if not expected:
+            expected = _file_sha256(Path(str(snapshot.get("best_weights") or "")))
+        if expected and expected == digest:
+            matches.append(snapshot)
+    identities = {(item.get("_history_dir"), item.get("id")) for item in matches}
+    return dict(matches[0]) if len(identities) == 1 else {}
 
 def _mobile_export_architecture_from_run_reference(reference, target: str = "", task_hint: str = "", visited: set[str] | None = None) -> str:
     run_id = _mobile_export_run_id_from_text(reference)
@@ -1507,13 +1474,17 @@ def _mobile_export_candidate_from_artifact(
         project_name = str(project_payload.get("name") or source_payload.get("project_name") or "").strip()
         project_root = str(project_payload.get("root") or source_payload.get("project_root") or project_root or "").strip()
     info = metadata.get("info") if isinstance(metadata.get("info"), dict) else {}
-    history_snapshot = _mobile_export_run_snapshot_for_reference(safe_path.name)
+    history_snapshot = _mobile_export_run_snapshot_for_reference(safe_path)
+    if history_snapshot.get("_history_dir"):
+        history_project, history_root = _mobile_export_project_identity_from_path(history_snapshot["_history_dir"])
+        project_name = history_project or project_name
+        project_root = history_root or project_root
 
     metric_root = raw_payload.get("metrics") if isinstance(raw_payload.get("metrics"), dict) else {}
     extra_root = raw_payload.get("extra") if isinstance(raw_payload.get("extra"), dict) else {}
     extra_metrics = extra_root.get("metrics") if isinstance(extra_root.get("metrics"), dict) else {}
     training_root = raw_payload.get("training") if isinstance(raw_payload.get("training"), dict) else {}
-    run_snapshot = raw_payload.get("run_snapshot") if isinstance(raw_payload.get("run_snapshot"), dict) else {}
+    run_snapshot = history_snapshot or (raw_payload.get("run_snapshot") if isinstance(raw_payload.get("run_snapshot"), dict) else {})
     best_row = metric_root.get("best_row") if isinstance(metric_root.get("best_row"), dict) else {}
     latest = metric_root.get("latest") if isinstance(metric_root.get("latest"), dict) else {}
 
@@ -1686,13 +1657,7 @@ def _mobile_export_candidate_from_artifact(
         "dataset_path": dataset_path,
         "best_map50": best_map50,
         "best_map50_95": best_map50_95,
-        "best_epoch": _mobile_export_nested_value(
-            {"metrics": metric_root, "extra_metrics": extra_metrics, "run": run_snapshot, "history": history_snapshot},
-            "metrics.best_epoch",
-            "extra_metrics.best_epoch",
-            "run.current_epoch",
-            "history.current_epoch",
-        ),
+        "best_epoch": build_checkpoint_metric_summary(run_snapshot, checkpoint=safe_path, verify_checkpoint=False)["best_epoch"],
         "created_at": created_at,
         "started_at": str(training_root.get("started_at") or run_snapshot.get("started_at") or history_snapshot.get("started_at") or ""),
         "finished_at": str(training_root.get("finished_at") or run_snapshot.get("finished_at") or history_snapshot.get("finished_at") or created_at),
@@ -1762,7 +1727,7 @@ def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) ->
     raw_run_snapshot = raw_model_metadata.get("run_snapshot") if isinstance(raw_model_metadata.get("run_snapshot"), dict) else {}
     history_snapshot = _mobile_export_run_snapshot_for_reference(best_weights)
     if not isinstance(run_snapshot, dict) or not run_snapshot:
-        run_snapshot = dict(raw_run_snapshot or history_snapshot or {})
+        run_snapshot = dict(history_snapshot or raw_run_snapshot or {})
     provenance_source = run if run is not None else (run_snapshot or raw_training)
     dataset_hint = (
         str(getattr(run, "dataset_path", "") or "").strip()
@@ -1770,7 +1735,7 @@ def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) ->
         or str(run_snapshot.get("dataset_path") or "").strip()
         or str(history_snapshot.get("dataset_path") or "").strip()
     )
-    if run is None and isinstance(raw_training, dict) and raw_training.get("provenance_version"):
+    if run is None and not run_snapshot and isinstance(raw_training, dict) and raw_training.get("provenance_version"):
         training_payload = dict(raw_training)
     else:
         training_payload = _mobile_export_build_training_provenance(
@@ -1783,6 +1748,11 @@ def _build_mobile_export_metadata(self, run, target: str, best_weights: Path) ->
         )
         if not training_payload and isinstance(raw_training, dict):
             training_payload = dict(raw_training)
+    metric_summary = build_checkpoint_metric_summary(provenance_source, checkpoint=best_weights)
+    training_payload["best_epoch"] = metric_summary["best_epoch"]
+    training_payload["best_epoch_source"] = metric_summary["best_epoch_source"]
+    if not project_name and history_snapshot.get("_history_dir"):
+        project_name, project_root = _mobile_export_project_identity_from_path(history_snapshot["_history_dir"])
     compatibility_defaults = {
         "run_id": str(getattr(run, "id", "") or raw_training.get("run_id") or run_snapshot.get("id") or ""),
         "run_name": str(getattr(run, "name", "") or raw_training.get("run_name") or raw_training.get("name") or run_snapshot.get("name") or ""),
@@ -2380,55 +2350,53 @@ def _mobile_export_candidate_training_provenance(
     *,
     include_dataset_fingerprint: bool = False,
 ) -> dict:
-    """Return cached canonical provenance for one export candidate."""
-
+    """One checkpoint-bound profile shared by the table, details and manifest."""
     if not isinstance(candidate, dict):
         return {}
+    metadata = candidate.get("model_metadata") or {}
+    raw = metadata.get("raw") or {}
+    run_like = (candidate.get("run") or candidate.get("history_snapshot")
+                or raw.get("run_snapshot") or raw.get("training"))
     cached = candidate.get("training_provenance")
-    cached_version = _mobile_export_int_or_none(cached.get("provenance_version")) if isinstance(cached, dict) else None
-    if isinstance(cached, dict) and cached_version is not None and cached_version >= 2:
-        return cached
-    if candidate.get("_training_provenance_loaded"):
-        return cached if isinstance(cached, dict) else {}
-
-    metadata = candidate.get("model_metadata") if isinstance(candidate.get("model_metadata"), dict) else {}
-    raw = metadata.get("raw") if isinstance(metadata.get("raw"), dict) else {}
-    raw_training = raw.get("training") if isinstance(raw.get("training"), dict) else {}
-    raw_run_snapshot = raw.get("run_snapshot") if isinstance(raw.get("run_snapshot"), dict) else {}
-    history_snapshot = candidate.get("history_snapshot") if isinstance(candidate.get("history_snapshot"), dict) else {}
-    run_like = candidate.get("run") or raw_run_snapshot or history_snapshot or raw_training
-    provenance = _mobile_export_build_training_provenance(
-        run_like,
-        target=str(candidate.get("target") or ""),
-        checkpoint=candidate.get("best_weights"),
-        dataset_path=str(candidate.get("dataset_path") or ""),
-        model_metadata=metadata,
-        include_dataset_fingerprint=include_dataset_fingerprint,
-    )
-    if not provenance and isinstance(raw_training, dict) and raw_training.get("provenance_version"):
-        provenance = dict(raw_training)
-
+    # Small caller-supplied snapshots can have no source run (legacy packages).
+    if not run_like and isinstance(cached, dict) and cached.get("provenance_version"):
+        provenance = cached
+    else:
+        run_snapshot = _mobile_export_run_like_dict(run_like)
+        signature = (
+            _mobile_export_file_signature(candidate.get("best_weights")),
+            json.dumps(run_snapshot, sort_keys=True, default=str),
+            bool(include_dataset_fingerprint),
+        )
+        if candidate.get("_training_provenance_signature") == signature and isinstance(cached, dict):
+            provenance = cached
+        else:
+            provenance = _mobile_export_build_training_provenance(
+                run_like, target=str(candidate.get("target") or ""),
+                checkpoint=candidate.get("best_weights"), dataset_path=candidate.get("dataset_path"),
+                model_metadata=metadata, include_dataset_fingerprint=include_dataset_fingerprint)
+            candidate["_training_provenance_signature"] = signature
+        summary = build_checkpoint_metric_summary(run_like, checkpoint=candidate.get("best_weights"))
+        provenance["best_epoch"] = summary["best_epoch"]
+        provenance["best_epoch_source"] = summary["best_epoch_source"]
+        for key in ("best_map50", "best_map50_95"):
+            if summary["best_row"] or summary["checkpoint_mismatch"]:
+                candidate[key] = summary[key]
+        candidate["checkpoint_sha256"] = summary["checkpoint_sha256"]
     candidate["_training_provenance_loaded"] = True
-    if isinstance(provenance, dict):
-        candidate["training_provenance"] = provenance
-        display_total = _mobile_export_provenance_display_total(provenance)
-        if display_total > 0:
-            candidate["total_epochs"] = display_total
-        known_total = _mobile_export_provenance_known_total(provenance)
-        candidate["total_epochs_known"] = known_total is not None
-        if provenance.get("known_epochs_minimum") is not None:
-            candidate["known_epochs_minimum"] = _mobile_export_int_or_none(provenance.get("known_epochs_minimum"))
-        if provenance.get("lineage_stage_count_known") is not None:
-            candidate["lineage_stage_count_known"] = _mobile_export_bool_or_none(provenance.get("lineage_stage_count_known"))
-        if provenance.get("known_stage_count_minimum") is not None:
-            candidate["known_stage_count_minimum"] = _mobile_export_int_or_none(provenance.get("known_stage_count_minimum"))
-        if provenance.get("provenance_status"):
-            candidate["provenance_status"] = str(provenance.get("provenance_status") or "")
-        dataset = provenance.get("dataset") if isinstance(provenance.get("dataset"), dict) else {}
-        dataset_id = str(dataset.get("dataset_id") or "").strip()
-        if dataset_id:
-            candidate["dataset_label"] = dataset_id
-    return provenance if isinstance(provenance, dict) else {}
+    candidate["training_provenance"] = provenance
+    candidate["best_epoch"] = provenance.get("best_epoch")
+    candidate["best_epoch_source"] = provenance.get("best_epoch_source", "unknown")
+    candidate["total_epochs"] = _mobile_export_provenance_display_total(provenance)
+    candidate["total_epochs_known"] = _mobile_export_provenance_known_total(provenance) is not None
+    for key in ("known_epochs_minimum", "lineage_stage_count_known", "known_stage_count_minimum", "provenance_status"):
+        if key in provenance:
+            candidate[key] = provenance[key]
+    dataset = provenance.get("dataset") or {}
+    if dataset.get("dataset_id"):
+        candidate["dataset_label"] = dataset["dataset_id"]
+    return provenance
+
 
 
 def _mobile_export_candidate_training_int(candidate: dict | None, key: str) -> int | None:
@@ -3248,14 +3216,24 @@ def _draw_mobile_export_overview_chart(
                     anchor=tk.CENTER,
                     font=("Segoe UI", 7, "bold"),
                 )
-    canvas.create_text(left, height - 12, text="wyniki + zaznaczone", fill=muted, anchor=tk.W, font=("Segoe UI", 8))
-    canvas.create_text(right, height - 12, text=f"{len(scored)}/{len(candidates)}", fill=muted, anchor=tk.E, font=("Segoe UI", 8))
+    missing_count = sum(_mobile_export_percent_value(item.get("best_map50_95")) is None for item in candidates)
+    canvas.create_text(left, height - 12, text=f"Bez metryk: {missing_count}", fill=muted, anchor=tk.W, font=("Segoe UI", 8))
+    canvas.create_text(right, height - 12, text=f"{len(scored)}/{len(candidates)} modeli", fill=muted, anchor=tk.E, font=("Segoe UI", 8))
 
 def _mobile_export_safe_path_key(path_value) -> str:
     try:
         return str(Path(str(path_value or "")).resolve()).lower()
     except Exception:
         return str(path_value or "").strip().lower()
+
+
+def _mobile_export_file_signature(path_value) -> tuple:
+    path = Path(str(path_value or ""))
+    try:
+        stat = path.stat()
+        return (_mobile_export_safe_path_key(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    except OSError:
+        return (_mobile_export_safe_path_key(path), None, None, None)
 
 def _mobile_export_project_identity_from_path(path_value) -> tuple[str, str]:
     try:
@@ -3279,7 +3257,17 @@ def _mobile_export_project_identity_from_path(path_value) -> tuple[str, str]:
     project_name = str(relative.parts[0] or "").strip()
     if not project_name:
         return "", ""
-    return project_name, str(projects_root / project_name)
+    project_root = projects_root / project_name
+    try:
+        if _mobile_export_safe_path_key(CAMPAIGN.get_active_project_root_dir()) == _mobile_export_safe_path_key(project_root):
+            return str(CAMPAIGN.get_active_project_name() or project_name), str(project_root)
+        state = getattr(CAMPAIGN, "state", {})
+        for label, item in (state.get("projects", {}) if isinstance(state, dict) else {}).items():
+            if item.get("folder_name") == project_name:
+                return str(label), str(project_root)
+    except Exception:
+        pass
+    return project_name, str(project_root)
 
 def _mobile_export_project_label(candidate: dict | None, *, empty: str = "") -> str:
     if not isinstance(candidate, dict):
@@ -3291,25 +3279,13 @@ def _mobile_export_candidate_dedupe_key(candidate: dict | None) -> str:
     if not isinstance(candidate, dict):
         return ""
     path_key = _mobile_export_safe_path_key(candidate.get("best_weights"))
-    marker = _mobile_export_target_marker(candidate)
-    scope = str(candidate.get("scope") or "").strip().lower()
-    is_base_vehicle_model = (
-        "bazowe modele pojazdów" in scope
-        or "lokalne modele pojazdów" in scope
-    )
-    if marker == "MP" and candidate.get("run") is None and is_base_vehicle_model:
-        try:
-            model_path = Path(candidate.get("best_weights"))
-            fallback = model_path.stem
-        except Exception:
-            fallback = str(candidate.get("model_label") or "")
-        identity = _mobile_export_compact_yolo_label(candidate.get("model_version"))
-        if not identity or identity == "-" or identity.lower().startswith("nieznana"):
-            identity = fallback
-        identity = re.sub(r"[^a-z0-9]+", "", str(identity or "").strip().lower())
-        if identity:
-            return f"semantic|{marker}|{identity}"
+    digest = _file_sha256(Path(str(candidate.get("best_weights") or "")))
+    if digest:
+        candidate["checkpoint_sha256"] = digest
+        return f"sha256|{digest}"
     return f"path|{path_key}" if path_key else ""
+
+
 
 def _mobile_export_candidate_preference(candidate: dict | None) -> tuple:
     if not isinstance(candidate, dict):
@@ -3337,7 +3313,8 @@ def _mobile_export_candidate_preference(candidate: dict | None) -> tuple:
     except Exception:
         depth_score = 0
         mtime = 0.0
-    return (priority, depth_score, mtime, len(str(candidate.get("model_label") or "")))
+    return (int(candidate.get("run") is not None), int(bool(candidate.get("history_snapshot"))),
+            priority, depth_score, mtime, len(str(candidate.get("model_label") or "")))
 
 def _dedupe_mobile_export_candidates(candidates: list[dict]) -> list[dict]:
     result: list[dict] = []
@@ -3353,8 +3330,28 @@ def _dedupe_mobile_export_candidates(candidates: list[dict]) -> list[dict]:
             result.append(candidate)
             continue
         existing = result[existing_index]
+        existing_run = existing.get("run")
+        candidate_run = candidate.get("run")
+        if (existing_run is not None and candidate_run is not None
+                and _mobile_export_run_like_value(existing_run, "id") != _mobile_export_run_like_value(candidate_run, "id")):
+            # Equal weights can belong to separate recorded training stages.
+            # Do not silently replace one lineage with another.
+            result.append(candidate)
+            continue
         if _mobile_export_candidate_preference(candidate) > _mobile_export_candidate_preference(existing):
-            result[existing_index] = candidate
+            preferred, other = dict(candidate), existing
+        else:
+            preferred, other = dict(existing), candidate
+        preferred["alternate_paths"] = sorted({str(value) for item in (preferred, other)
+                                              for value in [item.get("best_weights"), *item.get("alternate_paths", [])] if value})
+        preferred["model_info"] = {**(other.get("model_info") or {}), **(preferred.get("model_info") or {})}
+        for field in ("project_name", "project_root"):
+            if not preferred.get(field):
+                preferred[field] = other.get(field, "")
+        if preferred.get("run") is not None:
+            preferred.pop("_training_provenance_loaded", None)
+            preferred["training_provenance"] = {}
+        result[existing_index] = preferred
     return result
 
 def _mobile_export_dataset_label(dataset_path: str, target: str) -> str:
@@ -3449,12 +3446,26 @@ def _mobile_export_candidates_source_signature(self) -> tuple:
         for history_dir, _label, project_name, _project_root in _mobile_export_history_sources(self):
             history_file = Path(history_dir) / getattr(TrainingHistory, "HISTORY_FILE", "training_history.json")
             add_stat("history", history_file, project_name)
+            try:
+                runs = json.loads(history_file.read_text(encoding="utf-8-sig")).get("runs", {})
+                for run_id, run in runs.items():
+                    for path in (run.get("best_weights"), Path(history_dir) / run_id / "train/weights/best.pt"):
+                        if path:
+                            add_stat("checkpoint", path)
+                            for sidecar in _mobile_export_raw_metadata_candidates(Path(path)):
+                                add_stat("sidecar", sidecar)
+            except (OSError, ValueError):
+                pass
     except Exception:
         pass
 
     try:
         for models_dir, target, _label, project_name, _project_root in _mobile_export_artifact_sources(self):
             add_stat("models", models_dir, target, project_name)
+            for path in sorted(Path(models_dir).rglob("*.pt")):
+                add_stat("checkpoint", path, target)
+                for sidecar in _mobile_export_raw_metadata_candidates(path):
+                    add_stat("sidecar", sidecar)
     except Exception:
         pass
 
@@ -3496,7 +3507,12 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                     continue
                 snapshot = _mobile_export_run_like_dict(local_run)
                 snapshot.setdefault("id", run_id)
-                snapshot_index[run_id] = snapshot
+                snapshot["_history_dir"] = str(history_dir)
+                existing = snapshot_index.get(run_id)
+                if existing and existing.get("_history_dir") != str(history_dir):
+                    snapshot_index[f"{history_dir}|{run_id}"] = snapshot
+                else:
+                    snapshot_index[run_id] = snapshot
         except Exception:
             pass
 
@@ -3517,7 +3533,8 @@ def _collect_mobile_export_candidates(self) -> list[dict]:
                 if target not in {"plate", "char", "vehicle"}:
                     continue
 
-                best_weights = self._resolve_history_run_best_weights(run)
+                local_weights = Path(history_dir) / str(run.id) / "train/weights/best.pt"
+                best_weights = local_weights if local_weights.is_file() else self._resolve_history_run_best_weights(run)
                 if best_weights is None:
                     continue
                 best_key = _mobile_export_safe_path_key(best_weights)
@@ -3806,7 +3823,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
             ("Źródło", "Gotowy plik .pt z listy modeli"),
             ("Wersja YOLO", str(candidate.get("model_version") or "-")),
             ("Parametry modelu", params_label),
-            ("Rodzina modelu", str(info.get("architecture_label") or info.get("yolo_variant") or "-")),
+            ("Rodzina modelu", str(info.get("architecture_label") or info.get("yolo_variant") or candidate.get("model_version") or "-")),
             ("Dataset treningowy", str(candidate.get("dataset_label") or "-")),
             *training_rows,
             ("Obraz wejściowy", f"{_format_mobile_export_int(candidate.get('img_size'))} px"),
@@ -3824,6 +3841,7 @@ def _mobile_export_candidate_detail_rows(candidate: dict) -> list[tuple[str, str
         ("Projekt", _mobile_export_project_label(candidate, empty="-")),
         ("Wersja YOLO", str(candidate.get("model_version") or "-")),
         ("Parametry modelu", params_label),
+        ("Rodzina modelu", str(info.get("architecture_label") or info.get("yolo_variant") or candidate.get("model_version") or "-")),
         ("Dataset treningowy", str(candidate.get("dataset_label") or "-")),
         *training_rows,
         ("Obraz wejściowy", f"{_format_mobile_export_int(getattr(run, 'img_size', None))} px"),
@@ -3888,6 +3906,8 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "model_version": str(candidate.get("model_version") or ""),
         "checkpoint": checkpoint,
         "checkpoint_name": checkpoint_name,
+        "checkpoint_sha256": _file_sha256(Path(checkpoint)) if checkpoint else "",
+        "alternate_paths": list(candidate.get("alternate_paths") or []),
         "run_label": str(candidate.get("run_label") or ""),
         "history_dir": str(candidate.get("history_dir") or ""),
         "dataset_label": str(candidate.get("dataset_label") or ""),
@@ -3912,7 +3932,7 @@ def _mobile_export_candidate_manifest_snapshot(candidate: dict | None) -> dict:
         "best_epoch_source": str(training_provenance.get("best_epoch_source") or "") if isinstance(training_provenance, dict) else "",
         "provenance_capture": str(training_provenance.get("provenance_capture") or "") if isinstance(training_provenance, dict) else "",
         "training_provenance": training_provenance if isinstance(training_provenance, dict) else {},
-        "best_epoch": candidate.get("best_epoch"),
+        "best_epoch": training_provenance.get("best_epoch"),
         "best_map50": candidate.get("best_map50"),
         "best_map50_95": candidate.get("best_map50_95"),
         "created_at": str(candidate.get("created_at") or ""),
