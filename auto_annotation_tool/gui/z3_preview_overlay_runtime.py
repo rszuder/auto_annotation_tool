@@ -121,9 +121,9 @@ def _schedule_preview_overlay_toggle_job(self, attr_name: str, delay_ms: int, ca
         _run_toggle_job()
 
 def _toggle_preview_overlay_dock(self, event=None):
-    self._preview_overlay_dock_expanded = True
-    self._preview_overlay_dock_render_key = None
-    self._place_preview_overlay_dock(force_render=True)
+    slide = getattr(self, "_preview_drawer_slide", None)
+    if slide is not None:
+        slide.toggle()
     self._place_preview_hint_overlay(refresh=True)
     self._focus_preview_canvas()
     return "break"

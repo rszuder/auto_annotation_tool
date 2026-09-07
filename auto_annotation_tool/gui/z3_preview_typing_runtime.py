@@ -149,25 +149,21 @@ def _resolve_preview_typing_overlay_anchor(self, overlay_w: float, overlay_h: fl
     base_x, base_y = self._get_preview_typing_overlay_anchor(overlay_h)
     base_x = max(margin, min(max(margin, float(canvas_w) - float(overlay_w) - margin), float(base_x)))
     base_y = max(margin, min(max_y, float(base_y)))
+    bounds = getattr(self, "_preview_controls_legend_current_bounds", None)
+    if bool(getattr(self, "_preview_controls_legend_visible", True)) and bounds:
+        left, top, right, bottom = bounds
+        if base_x < right and base_x + overlay_w > left and base_y < bottom and base_y + overlay_h > top:
+            if bottom + margin + overlay_h <= canvas_h - margin:
+                base_y = bottom + margin
+            elif right + margin + overlay_w <= canvas_w - margin:
+                base_x = right + margin
     # AS jest czystą nakładką canvasa: nie rezerwuje miejsca i nie omija tablicy.
     # Jeśli nachodzi na obraz, ma go jedynie przysłonić, nigdy przestawiać.
     return float(base_x), float(base_y)
 
 def _get_preview_typing_overlay_bottom_offset(self) -> float:
-    legend_canvas = getattr(self, "preview_controls_canvas", None)
-    if not bool(getattr(self, "_preview_fullscreen_active", False)) or legend_canvas is None:
-        return 8.0
-
-    try:
-        legend_canvas.update_idletasks()
-    except Exception:
-        pass
-
-    try:
-        legend_height = float(max(0, int(legend_canvas.winfo_height() or 0)))
-    except Exception:
-        legend_height = 0.0
-    return 12.0 + legend_height if legend_height > 0.0 else 8.0
+    # The compass floats above the image; it is not a reserved bottom rail.
+    return 8.0
 
 def _get_preview_controls_legend_clearance_y(self) -> float:
     if not bool(getattr(self, "_preview_fullscreen_active", False)):

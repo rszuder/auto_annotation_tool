@@ -153,12 +153,6 @@ def apply_preview_info_stats_style(host: "CharacterAnnotationTab", progress_bar_
         except Exception:
             pass
 
-    try:
-        host._update_preview_repair_progress_ui()
-    except Exception:
-        pass
-
-
 def apply_preview_typing_overlay_style(host: "CharacterAnnotationTab") -> None:
     palette = getattr(host.app, "palette", {})
     overlay = getattr(host, "preview_typing_overlay", None)
@@ -1153,5 +1147,4 @@ def refresh_preview_layout_override_ui_light(host, *, message: str, tone: str = 
     host._refresh_preview_editor_toolbar()
     host._update_preview_edit_status(message, tone=tone)
     host._focus_preview_canvas()
-
 

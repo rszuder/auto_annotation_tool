@@ -503,8 +503,8 @@ def on_preview_canvas_motion(host, event=None):
 
     label_mode_active = bool(getattr(self, "_preview_char_label_mode", False))
     edit_mode_active = bool(getattr(self, "_preview_char_edit_mode", False)) and not label_mode_active
-    if edit_mode_active or bool(getattr(self, "_preview_char_add_mode", False)):
-        _mark_preview_char_edit_interaction(self)
+    # Hover is not an edit. Updating the edit timestamp here postponed save
+    # and counters indefinitely while the pointer moved over a selected box.
     grip_hit = self._find_preview_character_grip_hit(event.x, event.y) if edit_mode_active else None
     next_hover_grip = str((grip_hit or {}).get("key", "") or "") if isinstance(grip_hit, dict) else None
     if isinstance(grip_hit, dict):
@@ -2214,6 +2214,8 @@ def finalize_preview_char_add_state(host) -> str:
         selected_record=new_record,
         success_message="Dodano nowy box znaku do metadata.json.",
         render_preview=False,
+        save_immediately=False,
+        save_delay_ms=650,
         refresh_row=True,
         light_redraw_indices=None,
     )

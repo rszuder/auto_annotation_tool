@@ -361,7 +361,7 @@ def draw_preview_legend_compass_toggle(
 ) -> tuple[float, float]:
     tags = ("preview_legend", "preview_legend_toggle")
     compact = not bool(expanded)
-    size = 24.0 if compact else 38.0
+    size = 38.0
     text_fill = str(theme.get("token_text", "#f3f3f3"))
     compass_photo = get_preview_legend_compass_photo(host, theme, size=int(size))
     if compass_photo is not None:
@@ -375,17 +375,15 @@ def draw_preview_legend_compass_toggle(
     else:
         canvas.create_oval(x, y, x + size, y + size, fill=theme.get("token_fill", "#3c3c3c"), outline=theme.get("badge_plate_outline", "#2fbf71"), width=1, tags=tags)
         canvas.create_text(x + (size / 2.0), y + (size / 2.0), text="◎", fill=text_fill, font=host._get_preview_legend_font(12, "bold"), tags=tags)
-    if compact:
-        return size, size
     state_text = "Zwiń skróty" if expanded else "Rozwiń skróty"
     title_x = x + size + 10.0
     canvas.create_text(
         title_x,
         y + 5.0,
-        text="Skróty podglądu",
+        text="Kompas podglądu",
         anchor="nw",
         fill=theme.get("section_title", text_fill),
-        font=host._get_preview_legend_font(8, "bold"),
+        font=host._get_preview_legend_font(8 if expanded else 10, "bold"),
         tags=tags,
     )
     canvas.create_text(
@@ -394,10 +392,10 @@ def draw_preview_legend_compass_toggle(
         text=state_text,
         anchor="nw",
         fill=theme.get("section_muted", "#d8e2ee"),
-        font=host._get_preview_legend_font(7, "normal"),
+        font=host._get_preview_legend_font(7 if expanded else 9, "normal"),
         tags=tags,
     )
-    return 152.0, size
+    return 206.0, size
 
 
 def draw_preview_legend_grab_handle(host: "CharacterAnnotationTab", canvas, x: float, y: float, *, theme: dict) -> tuple[float, float]:
@@ -454,9 +452,7 @@ def clamp_preview_controls_legend_offsets(
         frame_w = 0.0
         frame_h = 0.0
     top_clearance = 8.0
-    if host._is_preview_controls_legend_expanded() and (
-        bool(getattr(host, "_preview_fullscreen_active", False)) or bool(getattr(host, "_preview_render_state", None))
-    ):
+    if bool(getattr(host, "_preview_fullscreen_active", False)) or bool(getattr(host, "_preview_render_state", None)):
         top_clearance = max(38.0, float(getattr(host, "_preview_overlay_top_bar_height", 38.0) or 38.0)) + 8.0
     safe_w = float(width or getattr(host, "_preview_controls_legend_current_width", 0.0) or 280.0)
     safe_h = float(height or getattr(host, "_preview_controls_legend_current_height", 0.0) or 120.0)
@@ -484,14 +480,7 @@ def toggle_preview_controls_legend(host: "CharacterAnnotationTab", event=None):
         if isinstance(stored_anchor, dict):
             collapsed_anchor = dict(stored_anchor)
 
-    if bool(getattr(host, "_preview_fullscreen_active", False)):
-        host._preview_controls_legend_fullscreen_expanded = not bool(
-            getattr(host, "_preview_controls_legend_fullscreen_expanded", False)
-        )
-    else:
-        host._preview_controls_legend_inline_expanded = not bool(
-            getattr(host, "_preview_controls_legend_inline_expanded", False)
-        )
+    host._preview_controls_legend_expanded = not was_expanded
     host._preview_controls_legend_position_manual = False
     if was_expanded and isinstance(collapsed_anchor, dict):
         host._preview_controls_legend_offset_x = float(collapsed_anchor.get("x", 10.0))
@@ -588,6 +577,7 @@ def on_preview_controls_legend_press(host: "CharacterAnnotationTab", event=None)
         "start_x": float(getattr(host, "_preview_controls_legend_offset_x", 10.0)),
         "start_y": float(getattr(host, "_preview_controls_legend_offset_y", 10.0)),
         "compact_drag": bool(_preview_controls_legend_compact_hit(host, local_x, local_y)),
+        "toggle_hit": bool(canvas_toggle_hit(host, local_x, local_y)),
     }
     try:
         _COMPASS_LOG.info(
@@ -681,6 +671,10 @@ def on_preview_controls_legend_release(host: "CharacterAnnotationTab", event=Non
         return "break"
     if abs(root_x - float(click_state.get("press_root_x", root_x))) > 4.0 or abs(root_y - float(click_state.get("press_root_y", root_y))) > 4.0:
         return "break"
+    local_x, local_y = _preview_controls_legend_event_xy(host, event)
+    if not (click_state.get("compact_drag") or click_state.get("toggle_hit")
+            or canvas_toggle_hit(host, local_x, local_y)):
+        return "break"
     try:
         _COMPASS_LOG.info("[Z3 COMPASS] release click -> toggle")
     except Exception:
@@ -762,6 +756,41 @@ def refresh_preview_controls_legend(host: "CharacterAnnotationTab"):
     place_preview_hint_overlay(host, refresh=True)
 
 
+def canvas_toggle_hit(host, x: float, y: float) -> bool:
+    canvas = getattr(host, "preview_controls_canvas", None)
+    bounds = canvas.bbox("preview_legend_toggle") if canvas is not None else None
+    return bool(bounds and bounds[0] <= x <= bounds[2] and bounds[1] <= y <= bounds[3])
+
+
+def _sync_preview_compass_header(host):
+    canvas = host.preview_controls_canvas
+    offset = float(canvas.canvasy(0))
+    previous = float(getattr(host, "_preview_compass_header_offset", 0.0))
+    if offset != previous:
+        canvas.move("preview_legend_header", 0, offset - previous)
+    host._preview_compass_header_offset = offset
+    canvas.tag_raise("preview_legend_header")
+    host._preview_controls_legend_grab_bbox = canvas.bbox("preview_legend_grab")
+
+
+def _draw_preview_compass_context(host, canvas, width: float, y: float, theme: dict) -> float:
+    """Collapsed compass keeps the current file and navigation context, as in Z2."""
+    context = host._get_preview_legend_context()
+    expanded = host._is_preview_controls_legend_expanded()
+    lines = ["Plik: " + str(context.get("filename") or "Brak obrazu"),
+             str(context.get("image_text") or ""), str(context.get("plate_text") or ""),
+             str(context.get("vehicle_text") or "")]
+    for index, text in enumerate(lines):
+        item = canvas.create_text(14, y, text=text, anchor="nw", width=max(1, width - 28),
+                                  fill=theme["entry_text"],
+                                  font=host._get_preview_legend_font(8 if expanded else (11 if index == 0 else 10),
+                                                                   "bold" if index == 0 else "normal"),
+                                  tags=("preview_legend", "preview_legend_context"))
+        bounds = canvas.bbox(item)
+        y = float(bounds[3] + 4) if bounds else y + 20
+    return y + 8
+
+
 def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) -> None:
     canvas = getattr(host, "preview_controls_canvas", None)
     if canvas is None:
@@ -780,7 +809,7 @@ def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) 
         pass
 
     host._preview_controls_legend_grab_bbox = None
-    background_height = float(width) if compact else 72.0
+    background_height = 72.0
     if compact:
         bg_outline = str(legend_theme.get("badge_plate_outline", "#2fbf71"))
     background_id = canvas.create_rectangle(
@@ -793,8 +822,8 @@ def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) 
         width=1,
         tags=("preview_legend",)
     )
-    toggle_x = 4.0 if compact else 12.0
-    toggle_y = ((float(background_height) - 24.0) / 2.0) if compact else 8.0
+    toggle_x = 12.0
+    toggle_y = 8.0
     toggle_w, toggle_h = draw_preview_legend_compass_toggle(
         host,
         canvas,
@@ -811,7 +840,8 @@ def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) 
             10.0,
             theme=legend_theme,
         )
-    current_y = toggle_y + toggle_h + (6.0 if compact else 8.0)
+    current_y = _draw_preview_compass_context(host, canvas, width, toggle_y + toggle_h + 10.0, legend_theme)
+    header_height = current_y
 
     if expanded:
         sections = build_preview_legend_sections(host)
@@ -954,10 +984,15 @@ def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) 
             max_bottom = max(max_bottom, section_y + section_height)
 
         total_height = max(92.0, max_bottom + 12.0)
-    elif compact:
-        total_height = float(width)
     else:
         total_height = max(56.0, current_y + 4.0)
+    # Keep the close toggle and grab available while the shortcuts scroll.
+    header_background = canvas.create_rectangle(2, 2, width - 2, header_height, fill=bg_fill,
+                                                outline="", tags=("preview_legend", "preview_legend_header"))
+    canvas.tag_lower(header_background, "preview_legend_toggle")
+    for tag in ("preview_legend_toggle", "preview_legend_grab", "preview_legend_context"):
+        canvas.addtag_withtag("preview_legend_header", tag)
+    host._preview_compass_header_offset = 0.0
     canvas.coords(
         background_id,
         2 if compact else 1,
@@ -970,6 +1005,7 @@ def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) 
     except Exception:
         pass
     host._preview_controls_legend_content_height = float(total_height)
+    _sync_preview_compass_header(host)
 
 def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = False):
     host_widget = getattr(host, "preview_canvas_host", None)
@@ -978,6 +1014,13 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
     vbar = getattr(host, "preview_controls_vbar", None)
     if host_widget is None or overlay is None or canvas is None:
         return
+    if getattr(host, "_preview_compass_scroll_canvas", None) is not canvas:
+        def on_scroll(first, last):
+            if vbar is not None:
+                vbar.set(first, last)
+            _sync_preview_compass_header(host)
+        canvas.configure(yscrollcommand=on_scroll)
+        host._preview_compass_scroll_canvas = canvas
     if not bool(getattr(host, "_preview_controls_legend_visible", True)):
         overlay.place_forget()
         host._preview_controls_legend_current_bounds = None
@@ -1013,7 +1056,7 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
                 dock_rect = (dock_x, dock_y, dock_x + dock_w, dock_y + dock_h)
         except (tk.TclError, KeyError, ValueError):
             pass
-    if expanded and dock_rect is not None:
+    if dock_rect is not None:
         dx1, dy1, dx2, dy2 = dock_rect
         gap = 8.0
         # Prefer the space beside the drawer; on a narrow preview use the
@@ -1029,24 +1072,20 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
                 left, top, right, bottom = area
                 break
 
-    overlay_width = 32.0 if compact else min(520.0 if fullscreen else 620.0, right - left)
+    overlay_width = min(360.0 if compact else (520.0 if fullscreen else 620.0), right - left)
     # Reserve the scrollbar gutter even while it is hidden, so its appearance
     # cannot feed a smaller canvas width back into the next layout pass.
-    gutter = float(vbar.winfo_reqwidth() + 4) if expanded and vbar is not None else 0.0
+    gutter = float(vbar.winfo_reqwidth() + 4) if vbar is not None else 0.0
     canvas_width = max(1.0, overlay_width - gutter)
-    render_key = (bool(expanded), canvas_width)
+    context = host._get_preview_legend_context()
+    render_key = (bool(expanded), canvas_width, tuple(sorted(context.items())))
     if refresh or render_key != getattr(host, "_preview_controls_legend_render_key", None):
         _draw_preview_controls_legend(host, canvas_width)
         host._preview_controls_legend_render_key = render_key
     content_height = float(getattr(host, "_preview_controls_legend_content_height", 32.0))
-    overlay_height = 32.0 if compact else min(content_height, bottom - top)
+    overlay_height = min(content_height, bottom - top)
     manual = bool(getattr(host, "_preview_controls_legend_position_manual", False))
-    offset_x, offset_y = right - overlay_width, top
-    toggle_rect = getattr(host, "_preview_fullscreen_toggle_rect", None)
-    if compact and isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
-        icon_x1, icon_y1, _icon_x2, icon_y2 = map(float, toggle_rect)
-        offset_x = icon_x1 - overlay_width - 6.0
-        offset_y = (icon_y1 + icon_y2 - overlay_height) / 2.0
+    offset_x, offset_y = left, top
     if manual:
         offset_x = float(getattr(host, "_preview_controls_legend_offset_x", offset_x))
         offset_y = float(getattr(host, "_preview_controls_legend_offset_y", offset_y))
@@ -1066,7 +1105,7 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
 
     canvas.configure(width=int(canvas_width), height=int(math.ceil(overlay_height)))
     overlay.grid_columnconfigure(1, minsize=int(gutter))
-    if expanded and content_height > overlay_height + 1.0:
+    if content_height > overlay_height + 1.0:
         if vbar is not None and not str(vbar.winfo_manager()):
             vbar.grid(row=0, column=1, sticky="ns", padx=(4, 0))
     else:

@@ -118,6 +118,7 @@ from .z3_preview_badges import (
     measure_preview_text_badge,
 )
 from .z3_detection_runtime import clear_detection_review_snapshot_after_manual_edit
+from .z3_metadata_cache import read_preview_metadata, mark_preview_metadata_changed
 from .z2_shared_ui import campaign_gate_id_for_edge
 
 try:
@@ -816,11 +817,12 @@ def get_plate_listbox_source_flags(host, data: dict | None) -> list[str]:
         ):
             flags.add("YS")
 
-    if "MB" in flags or "MS" in flags:
+    if flags.intersection({"M", "MB", "MS"}):
+        flags.add("MANUAL")
         flags.discard("M")
     if "OS" in flags:
         flags.discard("O")
-    preferred_order = ("MB", "MS", "GB", "OS", "YB", "YS", "M", "O")
+    preferred_order = ("MANUAL", "MB", "MS", "GB", "OS", "YB", "YS", "O")
     return [flag for flag in preferred_order if flag in flags]
 
 
@@ -842,7 +844,8 @@ def rebuild_preview_listbox(
             selected_pid = None
 
     current_order = [pid for pid in host._preview_base_plate_ids if pid in host.preview_metadata]
-    appended = [pid for pid in host.preview_metadata.keys() if pid not in current_order]
+    current_ids = set(current_order)
+    appended = [pid for pid in host.preview_metadata.keys() if pid not in current_ids]
     host._preview_base_plate_ids = current_order + appended
     visible_plate_ids = list(host._preview_base_plate_ids)
     if bool(getattr(host, "_preview_import_focus_active", False)):
@@ -865,16 +868,20 @@ def rebuild_preview_listbox(
     try:
         host.plates_listbox.delete(0, tk.END)
         row_statuses: list[str] = []
+        labels = []
         defer_row_styles = len(host._listbox_pid_by_index) > 80
         for idx, pid in enumerate(host._listbox_pid_by_index):
             data = host.preview_metadata.get(pid, {})
-            label = host._format_plate_listbox_label(pid, data)
+            label = host._format_plate_listbox_label(pid, data, ordinal=idx + 1)
             status = str(data.get("status", "unknown")).strip().lower()
 
-            host.plates_listbox.insert(tk.END, label)
-            if defer_row_styles:
-                row_statuses.append(status)
-            else:
+            labels.append(label)
+            row_statuses.append(status)
+
+        if labels:
+            host.plates_listbox.insert(tk.END, *labels)
+        if not defer_row_styles:
+            for idx, status in enumerate(row_statuses):
                 host._apply_plate_listbox_row_style(idx, status)
 
         if defer_row_styles:
@@ -1880,8 +1887,22 @@ def _get_preview_character_edit_grip_style(host: "CharacterAnnotationTab") -> di
 
 
 def _get_preview_selected_character_box_color(host: "CharacterAnnotationTab") -> str:
-    palette = getattr(host.app, "palette", {})
-    return str(palette.get("warning") or palette.get("accent") or "#ff9f1a")
+    return "#d000a8"
+
+
+def _draw_preview_new_character_box(canvas, x1, y1, x2, y2):
+    # Cyan with a dark keyline stays visible over white plates, black glyphs
+    # and the photo, independently of the application theme.
+    tags = ("preview_char_add_preview",)
+    canvas.create_rectangle(x1, y1, x2, y2, outline="#071923", width=6, tags=tags)
+    canvas.create_rectangle(x1, y1, x2, y2, outline="#00e5ff", width=3, tags=tags)
+    label = canvas.create_text(x1 + 4, max(8, y1 - 8), text="Nowy box", fill="#00e5ff",
+                               font=("Segoe UI", 9, "bold"), anchor=tk.SW, tags=tags)
+    bounds = canvas.bbox(label)
+    if bounds:
+        background = canvas.create_rectangle(bounds[0] - 3, bounds[1] - 2, bounds[2] + 3, bounds[3] + 2,
+                                             fill="#071923", outline="", tags=tags)
+        canvas.tag_lower(background, label)
 
 
 def _draw_preview_character_edit_grips(
@@ -2992,6 +3013,11 @@ def set_preview_fullscreen(host, active: bool):
         self._update_preview_edit_status("Pełny ekran jest dostępny po załadowaniu obrazu podglądu.", tone="warning")
         return
 
+    self._preview_fullscreen_transition_active = True
+    self._preview_fullscreen_transition_started = time.perf_counter()
+    self._preview_fullscreen_old_canvas_size = (
+        self.preview_canvas.winfo_width(), self.preview_canvas.winfo_height(),
+    )
     root = getattr(self.app, "root", None)
     try:
         windowing_system = str(self.frame.tk.call("tk", "windowingsystem")).lower()
@@ -3007,6 +3033,10 @@ def set_preview_fullscreen(host, active: bool):
     log_frame = getattr(self, "detection_log_frame", None)
 
     if next_state:
+        self._preview_fullscreen_restore_panel_widths = {
+            "right": right_panel.winfo_width() if right_panel is not None else 300,
+            "list": list_panel.winfo_width() if list_panel is not None else 240,
+        }
         self._preview_fullscreen_restore_log_visible = bool(getattr(self, "_detection_log_visible", False))
         try:
             self._preview_fullscreen_restore_root_state = bool(root.attributes("-fullscreen")) if root is not None else False
@@ -3082,7 +3112,8 @@ def set_preview_fullscreen(host, active: bool):
 
         try:
             if not self._pane_has_child(split, right_panel) and right_panel is not None:
-                split.add(right_panel, minsize=300, stretch="never")
+                panel_widths = getattr(self, "_preview_fullscreen_restore_panel_widths", {})
+                split.add(right_panel, minsize=300, stretch="never", width=panel_widths.get("right", 300))
                 try:
                     split.paneconfigure(right_panel, minsize=300, stretch="never")
                 except Exception:
@@ -3091,7 +3122,9 @@ def set_preview_fullscreen(host, active: bool):
             pass
         try:
             if not self._pane_has_child(preview_split, list_panel) and list_panel is not None:
-                preview_split.add(list_panel, minsize=240, before=getattr(self, "preview_lf", None))
+                panel_widths = getattr(self, "_preview_fullscreen_restore_panel_widths", {})
+                preview_split.add(list_panel, minsize=240, width=panel_widths.get("list", 240),
+                                  before=getattr(self, "preview_lf", None))
         except Exception:
             pass
         try:
@@ -3107,24 +3140,32 @@ def set_preview_fullscreen(host, active: bool):
             pass
         self._preview_fullscreen_active = False
 
-    self._apply_preview_fullscreen_chrome()
+    # Resize once after Tk applies the final pane and window geometry. The
+    # old synchronous render was repeated by the pending Configure callback.
+    preview_tools = getattr(self, "preview_tools", None)
+    if preview_tools is not None:
+        if next_state or getattr(self, "_preview_tools_hidden_by_design", False):
+            preview_tools.grid_remove()
+        else:
+            preview_tools.grid()
+    self._sync_preview_edit_status_visibility()
     self._update_preview_toolbar_state()
-    self._refresh_preview_controls_legend()
-    self._on_preview_select(None)
-    try:
-        self.frame.after_idle(self._ensure_preview_mode_overlay_position)
-    except Exception:
-        self._ensure_preview_mode_overlay_position()
+    self._schedule_preview_stabilized_rerender(delay_ms=90)
     self._focus_preview_canvas()
 
 
 def reset_preview_cache(host):
+    mark_preview_metadata_changed(host)
     if bool(getattr(host, "_preview_fullscreen_active", False)):
         try:
             host._set_preview_fullscreen(False)
         except Exception:
             pass
     host._flush_scheduled_preview_metadata_save()
+    writer = getattr(host, "_preview_autosave_writer", None)
+    if writer is not None:
+        writer.close()
+        host._preview_autosave_writer = None
     host.preview_metadata = {}
     host._preview_base_plate_ids = []
     host._loaded_meta_path = None
@@ -3459,6 +3500,7 @@ def persist_active_preview_characters(
     refresh_row: bool = True,
     light_redraw_indices=None,
 ):
+    mark_preview_metadata_changed(host)
     perf_start = time.perf_counter()
     phase_start = perf_start
     prepare_ms = live_ui_ms = redraw_ms = save_ms = 0.0
@@ -3532,7 +3574,9 @@ def persist_active_preview_characters(
     status_suffix = "Status tablicy: OK." if status_now == "perfect" else "Status tablicy: wymaga korekty."
     live_message = f"{success_message} {status_suffix}".strip()
     live_tone = "success" if status_now == "perfect" else "info"
-    row_refresh_needed = bool(refresh_row) or (status_now != previous_status)
+    # Provenance and the text can change while quality stays needs_fix/perfect.
+    # Refresh only this row, also for the lightweight drag/typing save path.
+    row_refresh_needed = True
 
     status_frame_needed = status_now in {"perfect", "bad", "needs_fix"} or previous_status in {
         "perfect",
@@ -3704,8 +3748,7 @@ def load_preview_data(host, quiet=False):
 
         if (not self.preview_metadata) or (not quiet) or need_reload:
             phase_started = time.perf_counter()
-            with open(meta_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
+            loaded = read_preview_metadata(self, meta_path, prefer_live=False)
             read_ms = (time.perf_counter() - phase_started) * 1000.0
 
             if not isinstance(loaded, dict):
@@ -3956,6 +3999,13 @@ def on_preview_select(host, event=None):
     """Podgląd tablicy + bboxy znaków."""
     if not PIL_AVAILABLE:
         return
+    canvas = getattr(self, "preview_canvas", None)
+    if canvas is not None and (not canvas.winfo_ismapped() or canvas.winfo_width() <= 1 or canvas.winfo_height() <= 1):
+        # T05 builds this tab before it is mapped. Drawing at 1x1 computes the
+        # wrong image/box transform and queues competing overlay layouts.
+        self._preview_render_when_visible = True
+        return
+    self._preview_render_when_visible = False
     fast_select_render = bool(getattr(self, "_preview_fast_select_render", False))
     render_profile_start = time.perf_counter()
     render_profile_marks: dict[str, float] = {}
@@ -4659,25 +4709,7 @@ def on_preview_select(host, event=None):
                     ay1, ay2 = ay2, ay1
                 add_cx1, add_cy1 = self._preview_image_to_canvas_point(ax1, ay1)
                 add_cx2, add_cy2 = self._preview_image_to_canvas_point(ax2, ay2)
-                self.preview_canvas.create_rectangle(
-                    add_cx1,
-                    add_cy1,
-                    add_cx2,
-                    add_cy2,
-                    outline=selection_color,
-                    width=2,
-                    dash=(5, 3),
-                    tags=("preview_char_add_preview",),
-                )
-                self.preview_canvas.create_text(
-                    add_cx1 + 4,
-                    max(8, add_cy1 - 8),
-                    text="Nowy box",
-                    fill=selection_color,
-                    font=("Segoe UI", 8, "bold"),
-                    anchor=tk.SW,
-                    tags=("preview_char_add_preview",),
-                )
+                _draw_preview_new_character_box(self.preview_canvas, add_cx1, add_cy1, add_cx2, add_cy2)
 
         _mark_render_profile("draw")
         try:
@@ -5078,27 +5110,8 @@ def redraw_preview_add_box_overlay_only(host) -> bool:
 
     add_cx1, add_cy1 = self._preview_image_to_canvas_point(ax1, ay1)
     add_cx2, add_cy2 = self._preview_image_to_canvas_point(ax2, ay2)
-    selection_color = getattr(self.app, "palette", {}).get("accent", "#ffd166")
     try:
-        canvas.create_rectangle(
-            add_cx1,
-            add_cy1,
-            add_cx2,
-            add_cy2,
-            outline=selection_color,
-            width=2,
-            dash=(5, 3),
-            tags=("preview_char_add_preview",),
-        )
-        canvas.create_text(
-            add_cx1 + 4,
-            max(8, add_cy1 - 8),
-            text="Nowy box",
-            fill=selection_color,
-            font=("Segoe UI", 8, "bold"),
-            anchor=tk.SW,
-            tags=("preview_char_add_preview",),
-        )
+        _draw_preview_new_character_box(canvas, add_cx1, add_cy1, add_cx2, add_cy2)
         return True
     except Exception:
         return False

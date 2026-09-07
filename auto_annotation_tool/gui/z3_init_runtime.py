@@ -78,6 +78,7 @@ def __init__(self, parent, app):
 
     # preview/cache state
     self.preview_metadata = {}
+    self._preview_metadata_revision = 0
     self.preview_plate_ids = []
     self._preview_base_plate_ids = []
     self._listbox_pid_by_index = []
@@ -166,8 +167,7 @@ def __init__(self, parent, app):
     self._preview_fullscreen_restore_geometry = ""
     self._preview_legend_font_cache = {}
     self._preview_legend_image_cache = {}
-    self._preview_controls_legend_inline_expanded = False
-    self._preview_controls_legend_fullscreen_expanded = False
+    self._preview_controls_legend_expanded = False
     self._preview_controls_legend_current_width = 0.0
     self._preview_controls_legend_current_height = 0.0
     self._preview_controls_legend_current_bounds = None

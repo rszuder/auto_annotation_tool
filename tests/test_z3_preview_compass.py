@@ -24,6 +24,8 @@ def compass(root):
     host = CharacterAnnotationTab.__new__(CharacterAnnotationTab)
     host.frame = root
     host.app = SimpleNamespace(palette={})
+    host._get_preview_legend_context = lambda: {"filename": "ABC1234.jpg", "image_text": "Tablica: 1/1245",
+                                               "plate_text": "Boxy: 7", "vehicle_text": "Tryb: podgląd"}
     host._preview_render_state = {"image": True}
     host.preview_canvas_host = tk.Frame(root)
     host.preview_canvas_host.place(x=0, y=0, width=960, height=600)
@@ -101,13 +103,14 @@ def test_drag_uses_visible_position_and_survives_refresh(compass, expanded, full
     press = event(compass, x, y)
     # A one-column fullscreen legend fills the available height.
     dy = 0 if fullscreen and expanded else 20
-    drag = event(compass, x, y, dx=-60, dy=dy)
+    drag = event(compass, x, y, dx=60, dy=dy)
     compass._on_preview_controls_legend_press(press)
     compass._on_preview_controls_legend_drag(drag)
     compass._on_preview_controls_legend_release(drag)
     compass.frame.update_idletasks()
     after = bounds(compass.preview_hint_frame)
-    assert after[:2] == (before[0] - 60, before[1] + dy)
+    expected_y = min(before[1] + dy, 600 - (before[3] - before[1]))
+    assert after[:2] == (before[0] + 60, expected_y)
     compass._place_preview_hint_overlay(refresh=True)
     compass.frame.update_idletasks()
     assert bounds(compass.preview_hint_frame) == after
@@ -149,18 +152,20 @@ def test_expand_scroll_collapse_and_resize_leave_event_loop_idle(compass):
             assert refresh.call_count == count
             assert compass._preview_controls_legend_configure_after_id is None
             compass._on_preview_controls_legend_mousewheel(SimpleNamespace(delta=-120))
+            compass.preview_controls_canvas.yview_moveto(0)
             compass._on_preview_controls_legend_press(event(compass, 20, 20))
             compass._on_preview_controls_legend_release(event(compass, 20, 20))
             settle(compass)
             assert not compass._is_preview_controls_legend_expanded()
-            assert bounds(compass.preview_hint_frame)[2] - bounds(compass.preview_hint_frame)[0] == 32
+            assert bounds(compass.preview_hint_frame)[2] - bounds(compass.preview_hint_frame)[0] == 360
+            assert compass.preview_controls_canvas.bbox("preview_legend_context") is not None
             assert compass.preview_controls_canvas.yview() == (0.0, 1.0)
             assert compass.frame.grab_current() is None
 
 
-def test_collapse_restores_manually_moved_icon(compass):
+def test_collapse_restores_manually_moved_compact_card(compass):
     compass._on_preview_controls_legend_press(event(compass, 16, 16))
-    drag = event(compass, 16, 16, dx=-120, dy=70)
+    drag = event(compass, 16, 16, dx=120, dy=70)
     compass._on_preview_controls_legend_drag(drag)
     compass._on_preview_controls_legend_release(drag)
     compass.frame.update_idletasks()
@@ -184,3 +189,41 @@ def test_hiding_compass_clears_interaction_and_allows_reopening(compass):
     compass.frame.update_idletasks()
     assert compass._is_preview_controls_legend_expanded()
     assert not overlaps(bounds(compass.preview_hint_frame), bounds(compass.preview_overlay_dock))
+
+
+def test_fullscreen_keeps_compass_expansion_and_shortcut_clicks_do_not_collapse(compass):
+    compass._toggle_preview_controls_legend()
+    for fullscreen in (True, False, True):
+        compass._preview_fullscreen_active = fullscreen
+        compass._place_preview_hint_overlay(refresh=True)
+        assert compass._is_preview_controls_legend_expanded()
+    compass._on_preview_controls_legend_press(event(compass, 80, 240))
+    compass._on_preview_controls_legend_release(event(compass, 80, 240))
+    assert compass._is_preview_controls_legend_expanded()
+    compass._toggle_preview_controls_legend()
+    for fullscreen in (False, True):
+        compass._preview_fullscreen_active = fullscreen
+        assert not compass._is_preview_controls_legend_expanded()
+
+
+def test_compact_context_updates_without_reopening(compass):
+    compass._get_preview_legend_context = lambda: {"filename": "SECOND_1234.jpg", "image_text": "Tablica: 2/1245"}
+    compass._place_preview_hint_overlay()
+    canvas = compass.preview_controls_canvas
+    text = " ".join(canvas.itemcget(item, "text") for item in canvas.find_withtag("preview_legend_context"))
+    assert "SECOND_1234.jpg" in text and "2/1245" in text
+    assert not compass._is_preview_controls_legend_expanded()
+
+
+def test_expanded_header_stays_reachable_after_scrolling(compass):
+    compass._toggle_preview_controls_legend()
+    compass.frame.update_idletasks()
+    canvas = compass.preview_controls_canvas
+    canvas.yview_moveto(1)
+    compass.frame.update_idletasks()
+    bounds = canvas.bbox("preview_legend_toggle")
+    assert bounds is not None
+    assert bounds[1] - canvas.canvasy(0) < 15
+    compass._on_preview_controls_legend_press(event(compass, 20, 20))
+    compass._on_preview_controls_legend_release(event(compass, 20, 20))
+    assert not compass._is_preview_controls_legend_expanded()

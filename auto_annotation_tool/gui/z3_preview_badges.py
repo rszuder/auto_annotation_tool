@@ -327,18 +327,51 @@ def measure_preview_overlay_text_width(host, text: str, font) -> float:
     if not content:
         return 0.0
     try:
-        font_obj = font if isinstance(font, tkfont.Font) else tkfont.Font(font=font)
-        return float(font_obj.measure(content))
+        font_obj, key = _preview_overlay_measurement_font(host, font)
+        cache = getattr(host, "_preview_overlay_text_width_cache", None)
+        if not isinstance(cache, dict):
+            cache = host._preview_overlay_text_width_cache = {}
+        cache_key = (key, content)
+        if cache_key not in cache:
+            if len(cache) >= 512:
+                cache.clear()
+            cache[cache_key] = float(font_obj.measure(content))
+        return cache[cache_key]
     except Exception:
         return float(max(0, len(content)) * 7)
 
 
 def measure_preview_overlay_font_height(host, font) -> float:
     try:
-        font_obj = font if isinstance(font, tkfont.Font) else tkfont.Font(font=font)
-        return float(max(10, int(font_obj.metrics("linespace") or 0)))
+        font_obj, key = _preview_overlay_measurement_font(host, font)
+        cache = getattr(host, "_preview_overlay_font_height_cache", None)
+        if not isinstance(cache, dict):
+            cache = host._preview_overlay_font_height_cache = {}
+        if key not in cache:
+            if len(cache) >= 32:
+                cache.clear()
+            cache[key] = float(max(10, int(font_obj.metrics("linespace") or 0)))
+        return cache[key]
     except Exception:
         return 12.0
+
+
+def _preview_overlay_measurement_font(host, font):
+    master = getattr(host, "preview_canvas", None) or host.frame
+    fonts = getattr(host, "_preview_overlay_measurement_fonts", None)
+    if not isinstance(fonts, dict):
+        fonts = host._preview_overlay_measurement_fonts = {}
+    if isinstance(font, tkfont.Font):
+        font_obj = font
+        description = tuple(sorted(font.actual().items()))
+    else:
+        description = str(font)
+        if description not in fonts:
+            if len(fonts) >= 32:
+                fonts.clear()
+            fonts[description] = tkfont.Font(root=master, font=font)
+        font_obj = fonts[description]
+    return font_obj, (description, float(master.tk.call("tk", "scaling")))
 
 
 def estimate_preview_source_legend_height(host) -> float:
@@ -401,8 +434,8 @@ def get_preview_source_visual_style(host, source_tag: str):
 
     styles = {
         "manual": {
-            "outline": palette.get("error", "#e74c3c"),
-            "guide": blend_hex_colors(palette.get("error", "#e74c3c"), "#ffffff", 0.35),
+            "outline": "#d000a8",
+            "guide": "#ff6ce4",
             "char": "#fff5d6",
             "badge_fill": "#4f3a0f",
             "badge_outline": "#6b4a10",

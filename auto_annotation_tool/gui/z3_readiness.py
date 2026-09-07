@@ -7,9 +7,29 @@ from pathlib import Path
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from ..validators import validate_yolo_dataset
+from .z3_metadata_cache import readiness_key
 
 
 def get_step3_yolo_export_readiness_snapshot(host, *, selected_strategies=None, selected_sources=None) -> dict:
+    strategies = set(selected_strategies if selected_strategies is not None else host._get_selected_gold_export_strategy_buckets())
+    sources = set(selected_sources if selected_sources is not None else host._get_selected_gold_export_source_buckets())
+    try:
+        key = readiness_key(host, strategies, sources, (
+            bool(getattr(host, "_step3_linear_mode", False)), CAMPAIGN.get_active_project_name(),
+            int(getattr(CONFIG, "CAMPAIGN_MIN_CHAR_PLATES", 10)),
+        ))
+    except (OSError, ValueError, TypeError):
+        key = None
+    cached = getattr(host, "_preview_export_readiness_cache", None)
+    if key is not None and isinstance(cached, tuple) and cached[0] == key:
+        return dict(cached[1])
+    result = _compute_step3_yolo_export_readiness(host, selected_strategies=strategies, selected_sources=sources)
+    if key is not None:
+        host._preview_export_readiness_cache = (key, dict(result))
+    return result
+
+
+def _compute_step3_yolo_export_readiness(host, *, selected_strategies=None, selected_sources=None) -> dict:
     self = host
     try:
         in_campaign = bool(getattr(self, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
@@ -43,8 +63,9 @@ def get_step3_yolo_export_readiness_snapshot(host, *, selected_strategies=None, 
         return result
 
     try:
+        options = {"prepare_records": False} if isinstance(getattr(self, "_preview_metadata_revision", None), int) else {}
         plate_entries, _strategy_counts, _selected_strategy_counts, _source_counts, _selected_source_counts = (
-            self._collect_gold_export_plate_candidates(selected_buckets, selected_source_buckets)
+            self._collect_gold_export_plate_candidates(selected_buckets, selected_source_buckets, **options)
         )
     except Exception as exc:
         result.update(

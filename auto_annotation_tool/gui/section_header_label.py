@@ -137,109 +137,47 @@ class SectionHeaderLabel(tk.Canvas):
         try:
             if not self.winfo_exists():
                 return
-        except tk.TclError:
-            return
-
-        try:
             width = max(1, int(self.winfo_width() or self.winfo_reqwidth() or 1))
-        except tk.TclError:
-            return
-        base_height = self._get_target_height()
-        height = base_height
-        panel, gradient_start, text_color = self._get_colors()
-
-        try:
+            panel, gradient_start, text_color = self._get_colors()
             super().configure(bg=panel)
-        except Exception:
-            pass
-
-        if self._background_image is None or self._background_size != (width, height):
-            self._background_image = tk.PhotoImage(master=self, width=width, height=height)
-            self._background_size = (width, height)
-
-        image = self._background_image
-        try:
-            image.blank()
-            fade_width = max(1, min(width, int(round(float(width) * self._fade_ratio))))
-            denominator = max(1, fade_width - 1)
-
-            for x in range(width):
-                if x >= fade_width:
-                    column_color = panel
-                else:
-                    ratio = float(x) / float(denominator)
-                    eased = ratio * ratio * (3.0 - (2.0 * ratio))
-                    column_color = blend_hex_colors(gradient_start, panel, eased)
-                image.put(str(column_color), to=(x, 0, x + 1, height))
-
-                if height >= 3 and x < fade_width:
-                    shine = max(0.0, 1.0 - (float(x) / float(denominator)))
-                    shine = 0.24 * (shine ** 1.45)
-                    if shine > 0.0:
-                        row_color = blend_hex_colors(column_color, "#ffffff", shine)
-                        image.put(str(row_color), to=(x, 1, x + 1, 2))
-        except Exception:
-            pass
-
-        text_width = max(1, width - (self._padx * 2))
-        try:
-            self.itemconfigure(self._bg_item, image=image)
-            self.coords(self._bg_item, 0, 0)
-        except Exception:
-            pass
-
-        try:
-            self.itemconfigure(
-                self._text_item,
-                text=self._text,
-                fill=text_color,
-                font=self._font,
-                width=text_width,
-            )
+            self.itemconfigure(self._text_item, text=self._text, fill=text_color,
+                               font=self._font, width=max(1, width - self._padx * 2))
             self.coords(self._text_item, self._padx, self._pady)
-        except Exception:
-            pass
-
-        try:
+            height = self._get_target_height()
             bbox = self.bbox(self._text_item)
             if bbox:
-                text_height = max(0, int(bbox[3]) - int(bbox[1]))
-                height = max(base_height, text_height + (self._pady * 2) + 2)
-        except Exception:
-            height = base_height
-
-        try:
+                height = max(height, int(bbox[3] - bbox[1]) + self._pady * 2 + 2)
             if int(self.cget("height") or 0) != height:
                 super().configure(height=height)
-        except Exception:
-            pass
+            background_key = (width, height, panel, gradient_start, self._fade_ratio)
+            if background_key != getattr(self, "_background_key", None):
+                if self._background_size != (width, height):
+                    self._background_image = tk.PhotoImage(master=self, width=width, height=height)
+                    self._background_size = (width, height)
+                self._paint_background(width, height, panel, gradient_start)
+                self._background_key = background_key
+            self.itemconfigure(self._bg_item, image=self._background_image)
+            self.coords(self._bg_item, 0, 0)
+        except tk.TclError:
+            return
 
-        try:
-            if self._background_size != (width, height):
-                self._background_image = tk.PhotoImage(master=self, width=width, height=height)
-                self._background_size = (width, height)
-                image = self._background_image
-                image.blank()
-                fade_width = max(1, min(width, int(round(float(width) * self._fade_ratio))))
-                denominator = max(1, fade_width - 1)
-                for x in range(width):
-                    if x >= fade_width:
-                        column_color = panel
-                    else:
-                        ratio = float(x) / float(denominator)
-                        eased = ratio * ratio * (3.0 - (2.0 * ratio))
-                        column_color = blend_hex_colors(gradient_start, panel, eased)
-                    image.put(str(column_color), to=(x, 0, x + 1, height))
-                    if height >= 3 and x < fade_width:
-                        shine = max(0.0, 1.0 - (float(x) / float(denominator)))
-                        shine = 0.24 * (shine ** 1.45)
-                        if shine > 0.0:
-                            row_color = blend_hex_colors(column_color, "#ffffff", shine)
-                            image.put(str(row_color), to=(x, 1, x + 1, 2))
-                self.itemconfigure(self._bg_item, image=image)
-                self.coords(self._bg_item, 0, 0)
-        except Exception:
-            pass
+    def _paint_background(self, width, height, panel, gradient_start):
+        # Transfer the gradient in one Tcl call instead of two calls per column.
+        fade_width = max(1, min(width, int(round(width * self._fade_ratio))))
+        denominator = max(1, fade_width - 1)
+        colors, highlights = [], []
+        for x in range(width):
+            color = panel
+            if x < fade_width:
+                ratio = x / denominator
+                color = blend_hex_colors(gradient_start, panel, ratio * ratio * (3.0 - 2.0 * ratio))
+            colors.append(str(color))
+            shine = 0.24 * max(0.0, 1.0 - x / denominator) ** 1.45
+            highlight = blend_hex_colors(color, "#ffffff", shine) if height >= 3 and shine > 0 else color
+            highlights.append(str(highlight))
+        normal_row = "{" + " ".join(colors) + "}"
+        highlight_row = "{" + " ".join(highlights) + "}"
+        self._background_image.put(" ".join(highlight_row if y == 1 else normal_row for y in range(height)))
 
     def apply_theme(self):
         self._schedule_render(force=True)

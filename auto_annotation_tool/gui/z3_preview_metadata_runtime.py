@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from .z3_metadata_cache import mark_preview_metadata_changed, PreviewMetadataAutosave, path_key
 import tkinter as tk
 
 from ..config import logger
@@ -302,6 +303,11 @@ def _persist_preview_metadata(
     mark_current_work: bool = False,
     mark_reason: str = "pz2_manual_ready",
 ):
+    mark_preview_metadata_changed(self)
+    writer = getattr(self, "_preview_autosave_writer", None)
+    if writer is not None:
+        writer.close()
+        self._preview_autosave_writer = None
     perf_start = time.perf_counter()
     write_ms = refresh_ms = sync_ms = info_ms = 0.0
     meta_path = self._get_preview_metadata_path()
@@ -366,14 +372,17 @@ def _flush_scheduled_preview_metadata_save(self):
         self._preview_metadata_save_after_id = None
 
     try:
-        if self.preview_metadata:
-            self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
-            try:
-                self._schedule_preview_info_refresh(delay_ms=900)
-            except Exception:
-                pass
+        if (after_id or getattr(self, "_preview_pending_save_pids", None)) and self.preview_metadata:
+            _start_preview_metadata_autosave(self)
+        writer = getattr(self, "_preview_autosave_writer", None)
+        if writer is not None:
+            mtime = writer.flush()
+            _cancel_preview_metadata_write_poll(self)
+            if path_key(writer.path) == path_key(self._get_preview_metadata_path()) and mtime is not None:
+                self._loaded_meta_path = writer.path
+                self._loaded_meta_mtime = mtime
     except Exception as exc:
-        logger.debug(f"Nie udało się zapisać odłożonych zmian metadata preview: {exc}")
+        logger.error(f"Nie udało się zapisać odłożonych zmian metadata preview: {exc}")
 
 def _cancel_scheduled_preview_metadata_save(self):
     after_id = getattr(self, "_preview_metadata_save_after_id", None)
@@ -385,6 +394,13 @@ def _cancel_scheduled_preview_metadata_save(self):
     self._preview_metadata_save_after_id = None
 
 def _schedule_preview_metadata_save(self, delay_ms: int = 450):
+    mark_preview_metadata_changed(self)
+    dirty_ids = getattr(self, "_preview_pending_save_pids", None)
+    if not isinstance(dirty_ids, set):
+        dirty_ids = self._preview_pending_save_pids = set()
+    pid = str(getattr(self, "_preview_active_pid", "") or "")
+    if pid:
+        dirty_ids.add(pid)
     previous_after_id = getattr(self, "_preview_metadata_save_after_id", None)
     if previous_after_id:
         try:
@@ -421,7 +437,6 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
             or getattr(self, "_preview_badge_drag_state", None) is not None
             or recent_char_edit
             or recent_preview_navigation
-            or (bool(getattr(self, "_preview_char_edit_mode", False)) and hot_char_target)
         ):
             if not bool(getattr(self, "_preview_metadata_save_defer_logged", False)):
                 self._preview_metadata_save_defer_logged = True
@@ -443,7 +458,7 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
         self._preview_metadata_save_after_id = None
         self._preview_metadata_save_defer_logged = False
         try:
-            self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+            _start_preview_metadata_autosave(self)
             try:
                 self._schedule_preview_info_refresh(delay_ms=900)
             except Exception:
@@ -455,6 +470,60 @@ def _schedule_preview_metadata_save(self, delay_ms: int = 450):
         self._preview_metadata_save_after_id = self.frame.after(max(1, int(delay_ms)), _save_later)
     except Exception:
         _save_later()
+
+def _cancel_preview_metadata_write_poll(self):
+    job = getattr(self, "_preview_metadata_write_poll_after_id", None)
+    if job:
+        self.frame.after_cancel(job)
+    self._preview_metadata_write_poll_after_id = None
+
+
+def _start_preview_metadata_autosave(self):
+    # The directory variable may already point at the next run. Pending edits
+    # belong to the dataset actually loaded in memory.
+    meta_path = getattr(self, "_loaded_meta_path", None) or self._get_preview_metadata_path()
+    if meta_path is None:
+        raise RuntimeError("Brak aktywnego preview runu do zapisania.")
+    writer = getattr(self, "_preview_autosave_writer", None)
+    if writer is None or writer.path != meta_path or writer.metadata is not self.preview_metadata:
+        if writer is not None:
+            writer.close()
+        cache = getattr(self, "_preview_metadata_file_cache", None)
+        if (isinstance(cache, tuple) and len(cache) >= 3 and cache[1] is self.preview_metadata
+                and cache[0][0] == path_key(meta_path)):
+            fragments = cache[2]
+        else:
+            # Results created by inference/import have no source fragments yet.
+            fragments = {pid: json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+                         for pid, data in self.preview_metadata.items()}
+        writer = self._preview_autosave_writer = PreviewMetadataAutosave(meta_path, self.preview_metadata, fragments)
+    dirty_ids = set(getattr(self, "_preview_pending_save_pids", set()) or ())
+    pid = str(getattr(self, "_preview_active_pid", "") or "")
+    if pid:
+        dirty_ids.add(pid)
+    future = writer.submit(dirty_ids)
+    self._preview_pending_save_pids = set()
+    _cancel_preview_metadata_write_poll(self)
+
+    def completed():
+        self._preview_metadata_write_poll_after_id = None
+        if writer is not getattr(self, "_preview_autosave_writer", None) or future is not writer.future:
+            return
+        if not future.done():
+            self._preview_metadata_write_poll_after_id = self.frame.after(80, completed)
+            return
+        try:
+            mtime = future.result()
+            if path_key(meta_path) == path_key(self._get_preview_metadata_path()):
+                self._loaded_meta_path = meta_path
+                self._loaded_meta_mtime = mtime
+            self._log_preview_edit_flow("metadata_saved", background=1, edited_plates=len(dirty_ids))
+        except Exception as exc:
+            self._preview_pending_save_pids.update(dirty_ids)
+            logger.error("Nie udało się zapisać metadata PZ2: %s", exc)
+            self._update_preview_edit_status(f"Nie zapisano zmian: {exc}", tone="error")
+    self._preview_metadata_write_poll_after_id = self.frame.after(80, completed)
+
 
 def _schedule_preview_info_refresh(self, delay_ms: int = 180):
     previous_after_id = getattr(self, "_preview_info_refresh_after_id", None)
@@ -499,7 +568,6 @@ def _schedule_preview_info_refresh(self, delay_ms: int = 180):
             or recent_char_edit
             or recent_preview_navigation
             or edit_session_active
-            or (bool(getattr(self, "_preview_char_edit_mode", False)) and hot_char_target)
         ):
             try:
                 self._log_preview_edit_flow(

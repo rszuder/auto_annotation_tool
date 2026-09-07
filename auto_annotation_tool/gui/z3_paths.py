@@ -8,6 +8,7 @@ from pathlib import Path
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from ..project_cache import PROJECT_CACHE
+from .z3_metadata_cache import read_preview_metadata
 
 
 def _has_campaign_preview_context(host) -> bool:
@@ -149,8 +150,7 @@ def get_preview_dir_plate_count(host, preview_dir=None) -> int:
             except Exception:
                 pass
 
-        with open(meta_path, "r", encoding="utf-8") as f:
-            loaded = json.load(f)
+        loaded = read_preview_metadata(host, meta_path)
         if not isinstance(loaded, dict):
             return 0
 

@@ -1975,11 +1975,6 @@ class AutoAnnotationApp:
             return 320
 
         try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
-
-        try:
             width = int(widget.winfo_width())
         except Exception:
             width = 0

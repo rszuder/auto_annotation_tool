@@ -1477,7 +1477,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 "INFO"
             )
             try:
-                flag_counts = {"M": 0, "O": 0, "YB": 0, "YS": 0}
+                flag_counts = {"MANUAL": 0, "O": 0, "YB": 0, "YS": 0}
                 combo_counts = {}
                 for plate_data in (local_meta or {}).values():
                     flags = list(self._get_plate_listbox_source_flags(plate_data))
@@ -1496,7 +1496,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     self.test_log_text,
                     (
                         "[DIAG] Znaczniki listy po detekcji: "
-                        f"M={flag_counts['M']}, O={flag_counts['O']}, "
+                        f"MANUAL={flag_counts['MANUAL']}, O={flag_counts['O']}, "
                         f"YB={flag_counts['YB']}, YS={flag_counts['YS']} | "
                         f"kombinacje: {combo_line}"
                     ),
@@ -1656,5 +1656,4 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
             self.frame.after(0, finalize)
 
     threading.Thread(target=worker, daemon=True).start()
-
 

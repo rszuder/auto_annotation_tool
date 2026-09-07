@@ -4,10 +4,13 @@
 
 import datetime
 import json
+import copy
+import os
 import shutil
 import tkinter as tk
 import uuid
 from pathlib import Path
+from .z3_metadata_cache import read_preview_metadata
 
 import cv2
 
@@ -164,7 +167,8 @@ def _resolve_gold_export_meta_path(raw_path) -> Path | None:
     return None
 
 
-def collect_gold_export_plate_candidates(host, selected_buckets, selected_sources=None) -> tuple[list[dict], dict, dict, dict, dict]:
+def collect_gold_export_plate_candidates(host, selected_buckets, selected_sources=None, *,
+                                         prepare_records: bool = True) -> tuple[list[dict], dict, dict, dict, dict]:
     selected = set(selected_buckets or [])
     selected_source_buckets = set(selected_sources or [])
     total_strategy_counts = host._empty_perfect_strategy_counts()
@@ -178,18 +182,24 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
 
     for meta in meta_candidates:
         run_dir = meta.parent
-        with open(meta, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
+        metadata = read_preview_metadata(host, meta)
+        with os.scandir(run_dir / "images") as image_entries:
+            image_names = {entry.name for entry in image_entries if entry.is_file()}
 
-        for pid, data in {k: v for k, v in metadata.items() if v.get("status") == "perfect"}.items():
-            host._ensure_plate_source_metadata(data, plate_id=str(pid or ""), meta_path=meta)
-            chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
-            host._update_preview_plate_layout_metadata(data, chars)
-            if chars:
-                data["characters"] = host._annotate_preview_character_reading_positions(
-                    host._sort_character_records_by_x(chars, data=data),
-                    data=data,
-                )
+        for pid, source_data in metadata.items():
+            if not isinstance(source_data, dict) or source_data.get("status") != "perfect":
+                continue
+            data = source_data
+            if prepare_records:
+                data = _copy_gold_candidate_for_normalization(source_data)
+                ensure_plate_source_metadata(host, data, plate_id=str(pid or ""), meta_path=meta, include_diagnostics=False)
+                chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
+                host._update_preview_plate_layout_metadata(data, chars)
+                if chars:
+                    data["characters"] = host._annotate_preview_character_reading_positions(
+                        host._sort_character_records_by_x(chars, data=data),
+                        data=data,
+                    )
             char_count = host._count_exportable_characters_in_data(data)
             if char_count <= 0:
                 continue
@@ -208,7 +218,7 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
                 continue
 
             img_src = run_dir / "images" / f"{pid}.jpg"
-            if not img_src.exists():
+            if img_src.name not in image_names:
                 continue
 
             seen.add(unique_key)
@@ -273,22 +283,30 @@ def _get_contextual_gold_metadata(host) -> dict:
         return {}
 
     try:
-        loaded = json.loads(safe_meta_path.read_text(encoding="utf-8"))
+        loaded = read_preview_metadata(host, safe_meta_path)
     except Exception:
         return {}
     if not isinstance(loaded, dict):
         return {}
 
-    try:
-        host.preview_metadata = loaded
-        host._loaded_meta_path = safe_meta_path
-        host._loaded_meta_mtime = safe_meta_path.stat().st_mtime
-    except Exception:
-        pass
     return loaded
 
 
 def build_contextual_gold_export_counts(host, *, selected_strategies=None, selected_sources=None):
+    metadata = _get_contextual_gold_metadata(host)
+    revision = getattr(host, "_preview_metadata_revision", None)
+    key = (id(metadata), revision, tuple(sorted(selected_strategies or ())), tuple(sorted(selected_sources or ())))
+    cached = getattr(host, "_preview_contextual_counts_cache", None)
+    if isinstance(revision, int) and isinstance(cached, tuple) and cached[0] == key and cached[2] is metadata:
+        return copy.deepcopy(cached[1])
+    result = _compute_contextual_gold_export_counts(host, selected_strategies=selected_strategies,
+                                                   selected_sources=selected_sources)
+    if isinstance(revision, int):
+        host._preview_contextual_counts_cache = (key, copy.deepcopy(result), metadata)
+    return result
+
+
+def _compute_contextual_gold_export_counts(host, *, selected_strategies=None, selected_sources=None):
     strategy_filter = set(selected_strategies or [])
     source_filter = set(selected_sources or [])
     use_strategy_filter = bool(strategy_filter)
@@ -347,6 +365,18 @@ def build_contextual_gold_export_counts(host, *, selected_strategies=None, selec
 
 
 def count_statuses_in_metadata_mapping(host, metadata_map):
+    revision = getattr(host, "_preview_metadata_revision", None)
+    key = (id(metadata_map), revision)
+    cached = getattr(host, "_preview_counts_cache", None)
+    if isinstance(revision, int) and isinstance(cached, tuple) and cached[0] == key and cached[2] is metadata_map:
+        return copy.deepcopy(cached[1])
+    result = _compute_statuses_in_metadata_mapping(host, metadata_map)
+    if isinstance(revision, int):
+        host._preview_counts_cache = (key, copy.deepcopy(result), metadata_map)
+    return result
+
+
+def _compute_statuses_in_metadata_mapping(host, metadata_map):
     perfect = 0
     needs_fix = 0
     unknown = 0
@@ -422,8 +452,7 @@ def build_merged_gold_export_counts(host, *, selected_strategies=None, selected_
     seen = set()
     for meta in meta_candidates:
         try:
-            with open(meta, "r", encoding="utf-8") as f:
-                metadata = json.load(f)
+            metadata = read_preview_metadata(host, meta)
         except Exception:
             continue
         if not isinstance(metadata, dict):
@@ -434,9 +463,10 @@ def build_merged_gold_export_counts(host, *, selected_strategies=None, selected_
                 continue
             if str(data.get("status", "unknown") or "unknown").strip().lower() != "perfect":
                 continue
+            data = _copy_gold_candidate_for_normalization(data)
 
             try:
-                host._ensure_plate_source_metadata(data, plate_id=str(pid or ""), meta_path=meta)
+                ensure_plate_source_metadata(host, data, plate_id=str(pid or ""), meta_path=meta, include_diagnostics=False)
             except Exception:
                 pass
 
@@ -1683,6 +1713,14 @@ def refresh_gold_export_source_labels(host) -> None:
         )
 
 
+def _copy_gold_candidate_for_normalization(data):
+    # Raw detector proposals are immutable diagnostics, often 300 per plate.
+    # Preserve them in the export payload without copying/reclassifying them
+    # for every status query; normalization only edits the final characters.
+    editable = {"characters", "source_info", "gold_state", "plate_attributes", "layout_separator"}
+    return {key: copy.deepcopy(value) if key in editable else value for key, value in data.items()}
+
+
 def ensure_plate_source_metadata(
     host,
     data: dict,
@@ -1694,6 +1732,7 @@ def ensure_plate_source_metadata(
     import_batch_id: str = "",
     review_manifest_id: str = "",
     modified_by: str = "",
+    include_diagnostics: bool = True,
 ) -> bool:
     self = host
     if not isinstance(data, dict):
@@ -1806,7 +1845,8 @@ def ensure_plate_source_metadata(
         gold_state["excluded_reason"] = str(gold_state.get("excluded_reason", "") or "")
         changed = True
 
-    for list_key in ("characters", "yolo_detections", "yolo_nms_detections", "yolo_raw_detections"):
+    list_keys = ("characters", "yolo_detections", "yolo_nms_detections", "yolo_raw_detections") if include_diagnostics else ("characters",)
+    for list_key in list_keys:
         records = data.get(list_key)
         if not isinstance(records, list):
             continue
