@@ -390,7 +390,13 @@ def build_detection_tab(
     self.preview_canvas.bind("<ButtonPress-3>", self._on_preview_canvas_secondary_press, add="+")
     self.preview_canvas.bind("<B1-Motion>", self._on_preview_canvas_drag, add="+")
     self.preview_canvas.bind("<ButtonRelease-1>", self._on_preview_canvas_release, add="+")
-    self.preview_canvas.bind("<Double-Button-1>", self._edit_selected_preview_char_symbol, add="+")
+    self.preview_canvas.bind(
+        "<Double-Button-1>",
+        lambda event: self._on_preview_canvas_press(event)
+        if self._extract_preview_action_from_current_item() == "toggle_plate_rows"
+        else self._edit_selected_preview_char_symbol(event),
+        add="+",
+    )
     self.preview_canvas.bind("<Motion>", self._on_preview_canvas_motion, add="+")
     self.preview_canvas.bind("<Leave>", self._on_preview_canvas_leave, add="+")
     self.preview_canvas.bind("<MouseWheel>", self._on_preview_canvas_mousewheel, add="+")
@@ -3099,4 +3105,3 @@ def build_detection_tab(
             )
         except Exception:
             pass
-

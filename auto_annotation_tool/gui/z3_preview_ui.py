@@ -119,6 +119,7 @@ from .z3_preview_badges import (
 )
 from .z3_detection_runtime import clear_detection_review_snapshot_after_manual_edit
 from .z3_metadata_cache import read_preview_metadata, mark_preview_metadata_changed
+from .z3_preview_layout_control import draw_plate_layout_control, hide_layout_tip
 from .z2_shared_ui import campaign_gate_id_for_edge
 
 try:
@@ -2263,12 +2264,7 @@ def redraw_preview_character_overlay_only(
             )
         except Exception:
             pass
-    try:
-        row_no = int(char_record.get("reading_row", 0) or 0)
-    except Exception:
-        row_no = 0
-    if row_no not in (1, 2):
-        row_no = host._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
+    row_no = host._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
     badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
 
     selection_id = None
@@ -4176,7 +4172,7 @@ def on_preview_select(host, event=None):
                 two_row_layout_active = bool(self._is_preview_two_row_layout_active(data))
             except Exception:
                 two_row_layout_active = False
-        if two_row_layout_active and not fast_select_render:
+        if two_row_layout_active:
             try:
                 self._ensure_preview_layout_separator(
                     data,
@@ -4497,12 +4493,7 @@ def on_preview_select(host, event=None):
             cx2, cy2 = (float(x2) * render_scale) + x_off, (float(y2) * render_scale) + y_off
 
             center_x = cx1 + (cx2 - cx1) / 2
-            try:
-                row_no = int(c.get("reading_row", 0) or 0)
-            except Exception:
-                row_no = 0
-            if row_no not in (1, 2):
-                row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
+            row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
             badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
             source_tag = self._get_character_source_tag(c, data=data, fallback_index=runtime_idx)
             char_box_source, char_sign_source = _preview_character_source_parts(self, c, data=data, fallback_index=runtime_idx)
@@ -4954,12 +4945,7 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
             continue
 
         center_x = cx1 + (cx2 - cx1) / 2.0
-        try:
-            row_no = int(c.get("reading_row", 0) or 0)
-        except Exception:
-            row_no = 0
-        if row_no not in (1, 2):
-            row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
+        row_no = self._get_preview_row_for_bbox([float(x1), float(y1), float(x2), float(y2)], data) or 1
         badge_side = "bottom" if two_row_layout_active and int(row_no) == 2 else "top"
         source_tag = self._get_character_source_tag(c, data=data, fallback_index=box_idx)
         char_box_source, char_sign_source = _preview_character_source_parts(self, c, data=data, fallback_index=box_idx)
@@ -5288,6 +5274,8 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
 
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
     if not isinstance(source_data, dict):
+        canvas.delete("preview_plate_layout_control")
+        hide_layout_tip(self)
         return False
     status = str(source_data.get("status", "") or "").strip().lower()
     severity = str(source_data.get("severity", "") or "").strip().lower()
@@ -5305,7 +5293,7 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
     elif status in {"bad", "needs_fix"} or severity == "error":
         frame_tone = "error"
     else:
-        return False
+        frame_tone = "muted"
 
     try:
         left = float(state.get("image_left", 0.0) or 0.0)
@@ -5323,6 +5311,8 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
         if frame_tone == "success"
         else palette.get("error", palette.get("danger", "#ef4444"))
     )
+    if frame_tone == "muted":
+        frame_color = palette.get("border", "#808890")
     tags = ("preview_plate_status_frame",)
     try:
         handle_radius = float(self._get_preview_char_handle_radius())
@@ -5356,6 +5346,7 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
             canvas.tag_raise("preview_char_add_preview")
         except Exception:
             pass
+        draw_plate_layout_control(self, source_data, right=right + frame_pad, top=top - frame_pad)
         return True
     except Exception:
         return False

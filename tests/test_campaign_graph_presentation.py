@@ -144,6 +144,30 @@ class GraphPresentationTkTests(unittest.TestCase):
         self.assertEqual(self.canvas.itemcget(items[0], "text"), "new")
         ns["_raise_graph_interactive_layers"].assert_called_once()
 
+    def test_signal_is_occluded_by_all_cards_after_each_frame_and_drag(self):
+        edge = self.canvas.create_line(0, 50, 500, 50, fill="#55dcf5", tags=("edge-line:e2_to_e4", "edge_line"))
+        node = self.canvas.create_rectangle(100, 20, 200, 80, fill="#141e12", tags=("node-group:E2",))
+        gate = self.canvas.create_rectangle(300, 20, 400, 80, fill="#141e12", tags=("gate-group:e3_to_e4",))
+        tooltip = self.canvas.create_rectangle(310, 5, 410, 30, fill="#ffffff", tags=("gate_selector_tooltip",))
+        ns = self.callback_namespace()
+        for dragged in (None, node, gate):
+            self.canvas.delete("graph_attention_flow")
+            signal = self.canvas.create_line(0, 50, 500, 50, fill="#55dcf5", width=3,
+                                             tags=("graph_attention_flow",))
+            if dragged is not None:
+                self.canvas.tag_raise(dragged)
+            order_before = list(self.canvas.find_all())
+            ns["_raise_graph_overlay_layers"]()
+            order = list(self.canvas.find_all())
+            self.assertLess(order.index(edge), order.index(signal))
+            for card in (node, gate, tooltip):
+                self.assertLess(order.index(signal), order.index(card))
+            self.assertEqual(order_before.index(node) < order_before.index(gate), order.index(node) < order.index(gate))
+            # At an exposed section of the edge the signal is visible; at a
+            # crossing the opaque card is the top item on the real Tk canvas.
+            for x, expected in ((50, signal), (150, node), (350, gate)):
+                self.assertEqual(self.canvas.find_overlapping(x, 50, x, 50)[-1], expected)
+
     def test_pan_only_moves_world_items(self):
         node = self.canvas.create_rectangle(100, 100, 180, 170, tags=("node-group:E2",))
         legend = self.canvas.create_text(10, 680, text="legend", tags=("graph_overlay_fixed",))
@@ -196,6 +220,66 @@ class GraphPresentationTkTests(unittest.TestCase):
         self.assertEqual(self.canvas.itemcget(arrow, "fill"), expected)
         self.style.apply(scope("e3_to_e4"))
         self.assertEqual(self.canvas.itemcget(line, "fill"), color)
+
+    def test_clickable_alternative_electrode_stays_visible_when_branch_is_dimmed(self):
+        from auto_annotation_tool.gui.campaign_graph_presentation import gate_electrode_style
+        for theme in THEME_DEFINITIONS:
+            with self.subTest(theme=theme):
+                self.canvas.delete("all")
+                palette = get_theme_palette(theme)
+                color = gate_electrode_style(palette)["fill"]
+                alternative = self.canvas.create_rectangle(10, 10, 42, 38, fill=color,
+                    tags=("gate-group:e1_to_e2", "gate:e1_to_e2:select", "gate_button"))
+                unavailable = self.canvas.create_rectangle(50, 10, 82, 38, fill=color,
+                    tags=("gate-group:e2_to_e4",))
+                style = CanvasWorkflowFocus(self.canvas, palette)
+                style.apply(scope("e1_to_e3"))
+                self.assertEqual(self.canvas.itemcget(alternative, "fill"), color)
+                self.assertNotEqual(self.canvas.itemcget(unavailable, "fill"), color)
+
+    def test_electrode_hover_tooltip_and_restore_in_all_themes(self):
+        from auto_annotation_tool.gui.campaign_graph_presentation import gate_electrode_style
+        from auto_annotation_tool.gui.web_slim_scrollbar import blend_hex_colors
+        wanted = {"_clear_gate_selector_tooltip", "_show_gate_selector_tooltip"}
+        body = [node for node in self.renderer.body if isinstance(node, ast.FunctionDef) and node.name in wanted]
+        self.assertEqual(len(body), len(wanted))
+        def luminance(color):
+            channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+            linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+                      for value in channels]
+            return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+        for theme in THEME_DEFINITIONS:
+            with self.subTest(theme=theme):
+                self.canvas.delete("all")
+                palette = get_theme_palette(theme)
+                style = gate_electrode_style(palette)
+                face = self.canvas.create_rectangle(10, 100, 42, 128, fill=style["fill"],
+                    tags=("gate_selector_face:e1_to_e2", "gate:e1_to_e2:select", "gate_button"))
+                tag = "gate:e1_to_e2:select"
+                geom = dict(x0=10, y0=100, x1=42, y1=128, hover_fill=style["hover"],
+                            color=style["border"], gate_id="T01", gate_label="Trenuj model", selected=False)
+                ns = {"canvas": self.canvas, "tk": tk, "gate_selector_hover": {}, "gate_geometry": {},
+                      "gate_selector_geometry": {tag: geom}, "_screen_x": lambda x, w: x,
+                      "_screen_y": lambda y, h: y, "accent": palette["accent"], "palette": palette,
+                      "card_bg": palette["panel"], "fg": palette["fg"], "blend_hex_colors": blend_hex_colors,
+                      "CAMPAIGN_TRANSITION_GRAPH": GRAPH, "_can_clear_step1_gate_selection": lambda edge: True}
+                exec(compile(ast.Module(body=body, type_ignores=[]), "selector_callbacks", "exec"), ns)
+                ns["_show_gate_selector_tooltip"](tag)
+                self.assertEqual(self.canvas.itemcget(face, "fill"), style["hover"])
+                tooltip = self.canvas.find_withtag("gate_selector_tooltip")
+                self.assertEqual(len(tooltip), 4)
+                background = next(item for item in tooltip if self.canvas.type(item) == "rectangle")
+                title = next(item for item in tooltip if self.canvas.type(item) == "text")
+                levels = sorted(luminance(self.canvas.itemcget(item, "fill")) for item in (background, title))
+                self.assertGreaterEqual((levels[1] + 0.05) / (levels[0] + 0.05), 4.5)
+                geom["selected"] = True
+                ns["_show_gate_selector_tooltip"](tag)
+                texts = [self.canvas.itemcget(item, "text") for item in self.canvas.find_withtag("gate_selector_tooltip")
+                         if self.canvas.type(item) == "text"]
+                self.assertIn("wyczyścić wybór", " ".join(texts))
+                ns["_clear_gate_selector_tooltip"]()
+                self.assertEqual(self.canvas.itemcget(face, "fill"), style["fill"])
+                self.assertFalse(self.canvas.find_withtag("gate_selector_tooltip"))
 
     def test_return_edge_is_bright_only_for_training_transition(self):
         color = self.palette["campaign_edge"]

@@ -1199,6 +1199,7 @@ def return_to_campaign_from_step4(host: "TrainingTab"):
 def finish_campaign_step4(host: "TrainingTab"):
     if not CAMPAIGN.get_active_project_name():
         return False
+    target = str(CAMPAIGN.get_iteration_target() or host.get_campaign_training_target() or "").strip().lower()
 
     if not host._step4_campaign_finish_ready:
         finish_state = {}
@@ -1275,6 +1276,14 @@ def finish_campaign_step4(host: "TrainingTab"):
         )
     except Exception:
         pass
+
+    if campaign_tab is not None and str(next_mode or "").strip().lower() in {"reuse_input", "new_input"}:
+        # No intermediate dataset/graph rebuild: the iteration worker will
+        # publish the new E1 once its input is prepared.
+        if host.app._get_selected_tab_key() != "campaign":
+            host.app.open_controlled_tab("campaign")
+        campaign_tab._start_iteration_advance(str(next_mode).strip().lower())
+        return True
 
     try:
         host.main_nb.select(host.tab_dataset)

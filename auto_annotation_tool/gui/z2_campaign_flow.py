@@ -346,7 +346,7 @@ def open_campaign_step2_entry(
                 "graph_gate_id": "T02",
                 "graph_visible_gate_id": "T02",
                 "graph_display_gate_id": "T02",
-                "graph_gate_label": "Kontrola importu AT",
+                "graph_gate_label": "Kontrola AT",
                 "graph_transition_title": "Kontroluj import anotacji tablic",
                 "graph_transition_source": "E1",
                 "graph_transition_target": "E3",
@@ -465,7 +465,7 @@ def open_campaign_step2_entry(
                 ).strip()
             except Exception:
                 plate_model_path = str(plate_model_path or "").strip()
-        if target == "char":
+        if target == "char" and not t02_at_review:
             if not restore_preview:
                 try:
                     char_source_state = dict(CAMPAIGN.get_step3_char_source_state() or {})
@@ -495,6 +495,16 @@ def open_campaign_step2_entry(
             input_dir = Path(iteration_source_dir)
         else:
             input_dir = fallback_folder if fallback_folder.exists() else Path(raw_dir)
+        if t02_at_review:
+            from .campaign_t02_source import resolve_t02_review_source
+
+            source_result = resolve_t02_review_source(CAMPAIGN, graph_context)
+            if not source_result.get("ok") or source_result.get("needs_approved_source"):
+                return {"ok": False, "reason": source_result.get("reason", "missing_t02_source"),
+                        "message": source_result.get("message", "Przygotuj źródło AT przez pole Praca bramki T02.")}
+            graph_context.update(source_result["context"])
+            input_dir = Path(graph_context.get("input_dir") or input_dir)
+            host._campaign_graph_entry_context = graph_context
         base_input_dir = input_dir
 
         try:
@@ -504,14 +514,18 @@ def open_campaign_step2_entry(
         _mark_phase("source_state")
 
         strategy = str(entry_strategy or "").strip().lower()
-        snapshot_state = host._load_campaign_project_snapshot()
+        snapshot_state = {} if t02_at_review else host._load_campaign_project_snapshot()
         _mark_phase("snapshot")
         char_repair_return = bool(
             target == "char"
             and host._is_campaign_char_repair_return_mode()
         )
         bootstrap = {}
-        if char_repair_return and open_existing_run and strategy != "raw":
+        if t02_at_review:
+            bootstrap = {"input_dir": base_input_dir, "restore_run_dir": graph_context.get("restore_run_dir"),
+                         "input_source": graph_context.get("input_source", "t02_at_review"), "manual_template": False}
+            char_manual_bootstrap = False
+        elif char_repair_return and open_existing_run and strategy != "raw":
             snapshot_restore_run = None
             snapshot_input_dir = None
             registry_active_entry = host._get_campaign_step2_active_run_entry(
@@ -698,8 +712,10 @@ def open_campaign_step2_entry(
                     manifest = host._load_annotation_run_manifest(context_run_dir)
                 except Exception:
                     manifest = {}
-                context_input = None
+                context_input = host._resolve_existing_dir(graph_context.get("input_dir")) if t02_at_review else None
                 for manifest_key in ("source_input_dir", "input_dir", "imported_source_input_dir"):
+                    if context_input is not None:
+                        break
                     raw_input = str(manifest.get(manifest_key) or "").strip()
                     if not raw_input:
                         continue
@@ -2079,9 +2095,9 @@ def build_z2_left_panel_copy_payload_campaign(
             )
 
     if t02_at_review:
-        payload["run_title"] = "Kontrola importu AT w Z2"
+        payload["run_title"] = "Kontrola AT w Z2"
         payload["run_intro_text"] = (
-            "To jest robocza kontrola anotacji tablic zaimportowanych do zasobów bramki T02."
+            "Kontrolujesz anotacje tablic z importu lub zatwierdzonej puli projektu w bramce T02."
         )
         payload["badge_text"] = "Bramka T02: kontrola AT względem aktualnego zbioru O"
         payload["badge_tone"] = "warning"
@@ -2093,7 +2109,7 @@ def build_z2_left_panel_copy_payload_campaign(
             "Po zakończeniu wróć do T02. Bramka nie zostanie zatwierdzona automatycznie; "
             "dopiero decyzja na grafie zamyka ten skrót i prowadzi do pracy nad znakami."
         )
-        payload["workflow_start_title"] = "Kontroluj import AT"
+        payload["workflow_start_title"] = "Kontroluj AT"
         payload["workflow_start_intro"] = (
             "Popraw lub zaakceptuj ramki tablic, a poprawnym obrazom nadaj status [OK]. "
             "Te [OK] są realnym wynikiem kontroli T02."

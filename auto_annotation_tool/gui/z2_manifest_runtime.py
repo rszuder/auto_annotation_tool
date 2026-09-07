@@ -439,6 +439,11 @@ def _load_annotation_run_approved_filenames(self, run_dir: Path | None) -> set[s
 def _get_campaign_hidden_project_approved_filenames_runtime(self) -> set[str]:
     if self._is_free_mode_session_context():
         return set()
+    from .z2_shared_ui import is_campaign_t02_at_review_context
+
+    if is_campaign_t02_at_review_context(self):
+        # T02 explicitly reviews existing AT, including the approved project pool.
+        return set()
     hidden_source = {
         str(entry or "").strip().lower()
         for entry in set(getattr(self, "_campaign_hidden_project_approved_filenames", set()) or set())

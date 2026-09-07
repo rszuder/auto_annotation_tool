@@ -54,13 +54,22 @@ def stage_number(stage_key: str | None) -> int:
 
 
 def is_transition_path_active(spec: CampaignTransitionSpec | None, selected_path: str | None) -> bool:
-    if spec is None or not spec.path_key:
+    if spec is None:
         return True
-    return str(selected_path or "").strip() == spec.path_key
+    path = str(selected_path or "").strip()
+    if spec.path_key:
+        return path == spec.path_key
+    if spec.edge_key == "e1_to_e2":
+        return path in {"plate_training", "char_from_images"}
+    if spec.source == "E3":
+        return path in {"char_from_images", "char_from_ready_plates"}
+    return True
 
 
 def is_transition_completed(spec: CampaignTransitionSpec | None, ctx: CampaignTransitionEvalContext) -> bool:
     if spec is None:
+        return False
+    if not is_transition_path_active(spec, ctx.selected_path):
         return False
     source_num = stage_number(spec.source)
     stage_status = ctx.stage_status or {}
@@ -79,6 +88,8 @@ def is_transition_ready(spec: CampaignTransitionSpec | None, ctx: CampaignTransi
         return False
     if is_transition_completed(spec, ctx):
         return True
+    if int(ctx.current_step or 1) != stage_number(spec.source):
+        return False
 
     if spec.key == "e1_to_e2_prepare_plate_annotations":
         explicit_path = str(ctx.explicit_selected_path or "").strip()

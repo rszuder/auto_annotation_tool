@@ -19,7 +19,7 @@ from ..campaign_iteration_paths import (
     iteration_path_target,
     normalize_iteration_path,
 )
-from .z2_shared_ui import campaign_visible_gate_id
+from .z2_shared_ui import campaign_visible_gate_id, campaign_gate_id_for_edge
 
 
 @dataclass(frozen=True)
@@ -27,6 +27,19 @@ class CampaignGraphActionResult:
     ok: bool
     action: str
     message: str = ""
+    pending: bool = False
+
+
+def _method_result(value, action, success_message, error_message):
+    if isinstance(value, CampaignGraphActionResult):
+        return value
+    if isinstance(value, Mapping) and "ok" in value:
+        return CampaignGraphActionResult(
+            bool(value["ok"]), action,
+            str(value.get("message") or (success_message if value["ok"] else error_message)),
+            pending=bool(value.get("pending", False)),
+        )
+    return CampaignGraphActionResult(value is not False, action, error_message if value is False else success_message)
 
 
 _E1_RESOURCE_CONTRACT_PATH_GROUPS = {
@@ -265,18 +278,17 @@ def _execute_approve_step1_ready_plates(host: Any, _payload: Mapping[str, Any]) 
         return CampaignGraphActionResult(
             False,
             "approve_step1_ready_plates",
-            "Brak akcji zatwierdzania T03.",
+            "Brak akcji zatwierdzania T02.",
         )
     try:
         CAMPAIGN.set_iteration_path("char_from_ready_plates")
     except Exception as exc:
-        logger.error(f"Nie udało się ustawić ścieżki T03 przed zatwierdzeniem: {exc}")
+        logger.error(f"Nie udało się ustawić ścieżki T02 przed zatwierdzeniem: {exc}")
         return CampaignGraphActionResult(
             False,
             "approve_step1_ready_plates",
-            "Nie udało się wybrać ścieżki T03. Odśwież projekt i spróbuj ponownie.",
+            "Nie udało się wybrać ścieżki T02. Odśwież projekt i spróbuj ponownie.",
         )
-    before_step = int(CAMPAIGN.get_current_step() or 1)
     try:
         result = method()
     except Exception as exc:
@@ -284,9 +296,9 @@ def _execute_approve_step1_ready_plates(host: Any, _payload: Mapping[str, Any]) 
         return CampaignGraphActionResult(
             False,
             "approve_step1_ready_plates",
-            "Nie udało się zatwierdzić T03.",
+            "Nie udało się zatwierdzić T02.",
         )
-    after_step = int(CAMPAIGN.get_current_step() or before_step)
+    after_step = int(CAMPAIGN.get_current_step() or 1)
     if bool(result) and after_step >= 3:
         try:
             CAMPAIGN.set_iteration_path("char_from_ready_plates")
@@ -297,22 +309,22 @@ def _execute_approve_step1_ready_plates(host: Any, _payload: Mapping[str, Any]) 
             CAMPAIGN.set_current_step(3)
             after_step = 3
         except Exception as exc:
-            logger.error(f"Nie udało się znormalizować stanu po zatwierdzeniu T03: {exc}")
+            logger.error(f"Nie udało się znormalizować stanu po zatwierdzeniu T02: {exc}")
             return CampaignGraphActionResult(
                 False,
                 "approve_step1_ready_plates",
-                "T03 została potwierdzona, ale nie udało się przejść do E3. Odśwież projekt i spróbuj ponownie.",
+                "T02 została potwierdzona, ale nie udało się przejść do E3. Odśwież projekt i spróbuj ponownie.",
             )
     if not bool(result) or after_step < 3:
         return CampaignGraphActionResult(
             False,
             "approve_step1_ready_plates",
-            "T03 nie została zatwierdzona. Najpierw potrzebne jest źródło tablic: AT z importu albo poprzedniej iteracji spełniające minimum.",
+            "T02 nie została zatwierdzona. Pozostajesz w E1; sprawdź źródło tablic i potwierdzenie decyzji.",
         )
     return CampaignGraphActionResult(
         True,
         "approve_step1_ready_plates",
-        "T03 zatwierdzona. Potwierdzono źródło tablic i przejście dalej do znaków.",
+        "T02 zatwierdzona. Potwierdzono źródło tablic i przejście dalej do znaków.",
     )
 
 
@@ -328,11 +340,11 @@ def _execute_host_method(
     if not callable(method):
         return CampaignGraphActionResult(False, action, f"Brak akcji: {method_name}.")
     try:
-        method()
+        value = method()
     except Exception as exc:
         logger.error(f"Nie udało się wykonać akcji grafu {action}: {exc}")
         return CampaignGraphActionResult(False, action, error_message)
-    return CampaignGraphActionResult(True, action, success_message)
+    return _method_result(value, action, success_message, error_message)
 
 
 def _graph_context_from_payload(payload: Mapping[str, Any]) -> dict:
@@ -366,11 +378,12 @@ def _execute_host_method_with_context(
         return CampaignGraphActionResult(False, action, f"Brak akcji: {method_name}.")
     context = _graph_context_from_payload(payload)
     try:
-        method(context)
+        kwargs = {"on_complete": payload.get("_on_complete")} if action.startswith("open_z2") else {}
+        value = method(context, **kwargs)
     except Exception as exc:
         logger.error(f"Nie udało się wykonać akcji grafu {action}: {exc}")
         return CampaignGraphActionResult(False, action, error_message)
-    return CampaignGraphActionResult(True, action, success_message)
+    return _method_result(value, action, success_message, error_message)
 
 
 def _execute_open_z2_campaign_context(host: Any, payload: Mapping[str, Any]) -> CampaignGraphActionResult:
@@ -379,15 +392,11 @@ def _execute_open_z2_campaign_context(host: Any, payload: Mapping[str, Any]) -> 
         return CampaignGraphActionResult(False, "open_z2_campaign_context", "Brak akcji: _step_goto_auto_annotation.")
     context = _graph_context_from_payload(payload)
     try:
-        method(preferred_source_context=context)
+        value = method(preferred_source_context=context, on_complete=payload.get("_on_complete"))
     except Exception as exc:
         logger.error(f"Nie udało się wykonać akcji grafu open_z2_campaign_context: {exc}")
         return CampaignGraphActionResult(False, "open_z2_campaign_context", "Nie udało się otworzyć Z2.")
-    return CampaignGraphActionResult(
-        True,
-        "open_z2_campaign_context",
-        "Z2 przekazano do otwarcia w kontekście kampanii.",
-    )
+    return _method_result(value, "open_z2_campaign_context", "Otwieram Z2…", "Nie udało się otworzyć Z2.")
 
 
 def _execute_open_z2_step2_review(host: Any, _payload: Mapping[str, Any]) -> CampaignGraphActionResult:
@@ -419,22 +428,22 @@ def _execute_return_to_z2_review(host: Any, payload: Mapping[str, Any]) -> Campa
     mark_rework = bool(payload.get("mark_step3_rework", True))
     context = _graph_context_from_payload(payload)
     try:
-        method(mark_step3_rework=mark_rework, preferred_source_context=context)
+        value = method(mark_step3_rework=mark_rework, preferred_source_context=context, on_complete=payload.get("_on_complete"))
     except Exception as exc:
         logger.error(f"Nie udało się wykonać akcji grafu return_to_z2_review: {exc}")
         return CampaignGraphActionResult(False, "return_to_z2_review", "Nie udało się wrócić do Z2.")
-    return CampaignGraphActionResult(True, "return_to_z2_review", "Z2 przekazano do otwarcia.")
+    return _method_result(value, "return_to_z2_review", "Otwieram Z2…", "Nie udało się wrócić do Z2.")
 
 
 def _execute_approve_step2(host: Any, payload: Mapping[str, Any]) -> CampaignGraphActionResult:
     context = _graph_context_from_payload(payload)
-    gate_id = str(context.get("graph_gate_id") or "").strip().upper()
+    gate_id = campaign_gate_id_for_edge(context.get("graph_edge_key"), context.get("graph_gate_id"))
     visible_gate_id = campaign_visible_gate_id(gate_id) or gate_id
     target = str(context.get("graph_transition_target") or "").strip().upper()
     success_message = "Bramka została przekazana do zatwierdzenia."
-    if target == "E4T" or gate_id == "T05":
+    if target == "E4T" or gate_id == "T04":
         success_message = f"Bramka {visible_gate_id} zatwierdzona. Odblokowano E4T, czyli trening modelu tablic."
-    elif target == "E3" or gate_id == "T04":
+    elif target == "E3" or gate_id == "T03":
         success_message = f"Bramka {visible_gate_id} zatwierdzona. Odblokowano E3, czyli pracę nad znakami."
 
     return _execute_host_method_with_context(
@@ -855,13 +864,20 @@ def execute_campaign_graph_action(
 ) -> CampaignGraphActionResult:
     normalized = str(action or "").strip()
     action_payload = dict(payload or {})
+    before_iteration = CAMPAIGN.get_current_iteration_num()
+    before_project = CAMPAIGN.get_active_project_name()
     # Approval can advance the state. Its resource record belongs to the source iteration.
     history_context = {}
-    if normalized.startswith("approve_step"):
+    if normalized.startswith("approve_step") or normalized in {"start_next_iteration", "open_z2_campaign_context", "open_z2_step2_review", "open_z2_step3_repair", "return_to_z2_review"}:
         history_context = {
-            "project_name": CAMPAIGN.get_active_project_name(),
-            "iteration_num": CAMPAIGN.get_current_iteration_num(),
+            "project_name": before_project,
+            "iteration_num": before_iteration,
         }
+    if normalized in {"open_z2_campaign_context", "open_z2_step2_review", "open_z2_step3_repair", "return_to_z2_review"}:
+        def _on_complete(value):
+            completed = _method_result(value, normalized, "Otworzono Z2.", "Nie udało się otworzyć Z2.")
+            _record_graph_action_history(normalized, action_payload, completed, **history_context)
+        action_payload["_on_complete"] = _on_complete
     handlers = {
         "set_iteration_path": _execute_set_iteration_path,
         "approve_step1": _execute_approve_step1,
@@ -890,8 +906,43 @@ def execute_campaign_graph_action(
         result = CampaignGraphActionResult(False, normalized, message)
         _record_graph_action_history(normalized, action_payload, result, **history_context)
         return result
+    if normalized.startswith("approve_step"):
+        from ..campaign_transition_specs import get_transition_specs_for_edge
+        from ..campaign_transition_evaluator import is_transition_path_active
+
+        context = _graph_context_from_payload(action_payload)
+        edge = str(context.get("graph_edge_key") or action_payload.get("transition_id") or "")
+        specs = get_transition_specs_for_edge(edge) if edge else ()
+        source_step = int(normalized[len("approve_step")])
+        path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
+        if (not before_project or int(CAMPAIGN.get_current_step() or 1) != source_step
+                or (specs and not is_transition_path_active(specs[0], path))
+                or (normalized == "approve_step1" and path not in {"plate_training", "char_from_images"})):
+            result = CampaignGraphActionResult(False, normalized,
+                "Ta bramka nie jest aktywnym przejściem bieżącej iteracji. Odśwież graf i wybierz bramkę aktualnego etapu.")
+            _record_graph_action_history(normalized, action_payload, result, **history_context)
+            return result
     result = handler(host, action_payload)
-    _record_graph_action_history(normalized, action_payload, result, **history_context)
+    if result.ok and (normalized.startswith("approve_step") or normalized == "start_next_iteration"):
+        expected_steps = {"approve_step1": 2, "approve_step1_ready_plates": 3,
+                          "approve_step2": 4 if CAMPAIGN.get_iteration_target() == "plate" else 3,
+                          "approve_step3": 4, "approve_step4": 5, "approve_step4_without_training": 5}
+        expected = expected_steps.get(normalized, 1)
+        after_step = int(CAMPAIGN.get_current_step() or 1)
+        next_iteration = int(CAMPAIGN.get_current_iteration_num() or 1) > int(before_iteration or 1)
+        same_project = CAMPAIGN.get_active_project_name() == before_project
+        if normalized == "start_next_iteration":
+            completed = same_project and next_iteration and after_step == 1
+        else:
+            status_getter = getattr(CAMPAIGN, f"get_step{normalized[len('approve_step')]}_status", None)
+            status = str(status_getter() or "") if callable(status_getter) else ""
+            completed = same_project and ((next_iteration and after_step == 1 and normalized.startswith("approve_step4")) or
+                        (not next_iteration and after_step == expected and status == "approved"))
+        if not completed:
+            result = CampaignGraphActionResult(False, normalized,
+                "Bramka nie została zatwierdzona. Stan etapu pozostał bez zatwierdzenia; sprawdź wymagane zasoby i potwierdzenie decyzji.")
+    if not result.pending:
+        _record_graph_action_history(normalized, action_payload, result, **history_context)
     return result
 
 

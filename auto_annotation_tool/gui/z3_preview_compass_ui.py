@@ -358,10 +358,11 @@ def draw_preview_legend_compass_toggle(
     *,
     expanded: bool,
     theme: dict,
+    width: float = 360.0,
 ) -> tuple[float, float]:
     tags = ("preview_legend", "preview_legend_toggle")
     compact = not bool(expanded)
-    size = 38.0
+    size = 34.0 if width >= 300 else 28.0
     text_fill = str(theme.get("token_text", "#f3f3f3"))
     compass_photo = get_preview_legend_compass_photo(host, theme, size=int(size))
     if compass_photo is not None:
@@ -375,25 +376,30 @@ def draw_preview_legend_compass_toggle(
     else:
         canvas.create_oval(x, y, x + size, y + size, fill=theme.get("token_fill", "#3c3c3c"), outline=theme.get("badge_plate_outline", "#2fbf71"), width=1, tags=tags)
         canvas.create_text(x + (size / 2.0), y + (size / 2.0), text="◎", fill=text_fill, font=host._get_preview_legend_font(12, "bold"), tags=tags)
-    state_text = "Zwiń skróty" if expanded else "Rozwiń skróty"
+    state_text = "Zwiń ▴" if expanded else "Rozwiń ▾"
     title_x = x + size + 10.0
     canvas.create_text(
         title_x,
-        y + 5.0,
-        text="Kompas podglądu",
+        y + 7.0,
+        text="Kompas podglądu" if width >= 340 else "Kompas",
         anchor="nw",
         fill=theme.get("section_title", text_fill),
-        font=host._get_preview_legend_font(8 if expanded else 10, "bold"),
+        font=host._get_preview_legend_font(10 if width >= 340 else 9, "bold"),
         tags=tags,
     )
+    button_w = 70.0
+    button_x = width - button_w - (42 if expanded else 12)
+    button_tags = tags + ("preview_legend_action",)
+    canvas.create_rectangle(button_x, y + 3, button_x + button_w, y + 30,
+                            fill=theme["entry_fill"], outline=theme["panel_outline"], tags=button_tags)
     canvas.create_text(
-        title_x,
-        y + 19.0,
+        button_x + button_w / 2,
+        y + 16,
         text=state_text,
-        anchor="nw",
+        anchor="center",
         fill=theme.get("section_muted", "#d8e2ee"),
-        font=host._get_preview_legend_font(7 if expanded else 9, "normal"),
-        tags=tags,
+        font=host._get_preview_legend_font(9, "bold"),
+        tags=button_tags,
     )
     return 206.0, size
 
@@ -776,19 +782,28 @@ def _sync_preview_compass_header(host):
 def _draw_preview_compass_context(host, canvas, width: float, y: float, theme: dict) -> float:
     """Collapsed compass keeps the current file and navigation context, as in Z2."""
     context = host._get_preview_legend_context()
-    expanded = host._is_preview_controls_legend_expanded()
-    lines = ["Plik: " + str(context.get("filename") or "Brak obrazu"),
-             str(context.get("image_text") or ""), str(context.get("plate_text") or ""),
-             str(context.get("vehicle_text") or "")]
-    for index, text in enumerate(lines):
-        item = canvas.create_text(14, y, text=text, anchor="nw", width=max(1, width - 28),
-                                  fill=theme["entry_text"],
-                                  font=host._get_preview_legend_font(8 if expanded else (11 if index == 0 else 10),
-                                                                   "bold" if index == 0 else "normal"),
-                                  tags=("preview_legend", "preview_legend_context"))
-        bounds = canvas.bbox(item)
-        y = float(bounds[3] + 4) if bounds else y + 20
-    return y + 8
+    tags = ("preview_legend", "preview_legend_context")
+    item = canvas.create_text(14, y, text=str(context.get("filename") or "Brak obrazu"),
+                             anchor="nw", width=max(1, width - 28), fill=theme["entry_text"],
+                             font=host._get_preview_legend_font(11, "bold"), tags=tags)
+    bounds = canvas.bbox(item)
+    y = float(bounds[3] + 10) if bounds else y + 26
+    cell_w = (width - 36) / 2
+    for index, (title, value) in enumerate((("TABLICE", context.get("image_text", "0/0")),
+                                           ("BOXY", context.get("plate_text", "0")))):
+        x = 14 + index * (cell_w + 8)
+        value = str(value).split(":", 1)[-1].strip()
+        canvas.create_rectangle(x, y, x + cell_w, y + 56, fill=theme["entry_fill"],
+                                outline=theme["panel_outline"], tags=tags)
+        canvas.create_text(x + 9, y + 7, text=title, anchor="nw", fill=theme["section_muted"],
+                           font=host._get_preview_legend_font(8, "bold"), tags=tags)
+        canvas.create_text(x + 9, y + 23, text=value, anchor="nw", fill=theme["entry_text"],
+                           font=host._get_preview_legend_font(15 if width >= 300 else 12, "bold"),
+                           tags=tags + ("preview_legend_counter",))
+    y += 66
+    canvas.create_text(14, y, text=str(context.get("vehicle_text") or ""), anchor="nw",
+                       fill=theme["section_muted"], font=host._get_preview_legend_font(9, "normal"), tags=tags)
+    return y + 24
 
 
 def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) -> None:
@@ -831,6 +846,7 @@ def _draw_preview_controls_legend(host: "CharacterAnnotationTab", width: float) 
         toggle_y,
         expanded=expanded,
         theme=legend_theme,
+        width=width,
     )
     if not compact:
         draw_preview_legend_grab_handle(
@@ -1073,10 +1089,9 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
                 break
 
     overlay_width = min(360.0 if compact else (520.0 if fullscreen else 620.0), right - left)
-    # Reserve the scrollbar gutter even while it is hidden, so its appearance
-    # cannot feed a smaller canvas width back into the next layout pass.
-    gutter = float(vbar.winfo_reqwidth() + 4) if vbar is not None else 0.0
-    canvas_width = max(1.0, overlay_width - gutter)
+    # The slim scrollbar overlays the inside edge of the card. It never leaves
+    # a differently coloured gutter, or changes the canvas width on refresh.
+    canvas_width = max(1.0, overlay_width)
     context = host._get_preview_legend_context()
     render_key = (bool(expanded), canvas_width, tuple(sorted(context.items())))
     if refresh or render_key != getattr(host, "_preview_controls_legend_render_key", None):
@@ -1104,13 +1119,16 @@ def place_preview_hint_overlay(host: "CharacterAnnotationTab", refresh: bool = F
     )
 
     canvas.configure(width=int(canvas_width), height=int(math.ceil(overlay_height)))
-    overlay.grid_columnconfigure(1, minsize=int(gutter))
+    overlay.grid_columnconfigure(1, minsize=0)
     if content_height > overlay_height + 1.0:
-        if vbar is not None and not str(vbar.winfo_manager()):
-            vbar.grid(row=0, column=1, sticky="ns", padx=(4, 0))
+        if vbar is not None:
+            if str(vbar.winfo_manager()) == "grid":
+                vbar.grid_forget()
+            vbar.place(x=int(overlay_width - 8), y=2, width=6, height=max(1, int(overlay_height - 4)))
+            tk.Misc.tkraise(vbar)
     else:
         if vbar is not None and str(vbar.winfo_manager()):
-            vbar.grid_remove()
+            vbar.place_forget()
         canvas.yview_moveto(0.0)
 
     overlay.place(

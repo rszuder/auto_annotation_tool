@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import tkinter as tk
+import tkinter.font as tkfont
 from unittest.mock import patch
 
 import pytest
@@ -123,7 +124,7 @@ def test_scrollbar_does_not_shrink_compass_on_each_refresh(compass):
     compass.frame.update_idletasks()
     compass._toggle_preview_controls_legend()
     compass.frame.update_idletasks()
-    assert compass.preview_controls_vbar.winfo_manager() == "grid"
+    assert compass.preview_controls_vbar.winfo_manager() == "place"
     initial = bounds(compass.preview_hint_frame)
     for _ in range(8):
         compass._refresh_preview_controls_legend()
@@ -210,7 +211,8 @@ def test_compact_context_updates_without_reopening(compass):
     compass._get_preview_legend_context = lambda: {"filename": "SECOND_1234.jpg", "image_text": "Tablica: 2/1245"}
     compass._place_preview_hint_overlay()
     canvas = compass.preview_controls_canvas
-    text = " ".join(canvas.itemcget(item, "text") for item in canvas.find_withtag("preview_legend_context"))
+    text = " ".join(canvas.itemcget(item, "text") for item in canvas.find_withtag("preview_legend_context")
+                    if canvas.type(item) == "text")
     assert "SECOND_1234.jpg" in text and "2/1245" in text
     assert not compass._is_preview_controls_legend_expanded()
 
@@ -227,3 +229,24 @@ def test_expanded_header_stays_reachable_after_scrolling(compass):
     compass._on_preview_controls_legend_press(event(compass, 20, 20))
     compass._on_preview_controls_legend_release(event(compass, 20, 20))
     assert not compass._is_preview_controls_legend_expanded()
+
+
+@pytest.mark.parametrize("expanded", [False, True])
+def test_compass_has_no_right_gutter_and_uses_readable_counters(compass, expanded):
+    if expanded:
+        compass._toggle_preview_controls_legend()
+    compass.frame.update_idletasks()
+    canvas = compass.preview_controls_canvas
+    assert canvas.winfo_width() == compass.preview_hint_frame.winfo_width()
+    for item in canvas.find_withtag("preview_legend_counter"):
+        assert tkfont.Font(root=compass.frame, font=canvas.itemcget(item, "font")).cget("size") >= 12
+    canvas.yview_moveto(1)
+    compass.frame.update_idletasks()
+    x1, y1, x2, y2 = canvas.bbox("preview_legend_action")
+    viewport_y = (y1 + y2) / 2 - canvas.canvasy(0)
+    assert 0 <= x1 < x2 <= canvas.winfo_width()
+    assert 0 < viewport_y < 50
+    click = event(compass, (x1 + x2) / 2, viewport_y)
+    compass._on_preview_controls_legend_press(click)
+    compass._on_preview_controls_legend_release(click)
+    assert compass._is_preview_controls_legend_expanded() is not expanded

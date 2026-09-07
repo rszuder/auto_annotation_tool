@@ -36,7 +36,7 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
 from .campaign_models import WizardStageStatus
-from .z2_shared_ui import campaign_visible_gate_id
+from .z2_shared_ui import campaign_visible_gate_id, campaign_gate_id_for_edge
 
 
 def _get_step2_disk_approval_fallback(
@@ -474,8 +474,10 @@ def _resolve_step2_wizard_action_command(self, action_id: str, *, context: dict 
 
 def _approve_step2_from_wizard(self, context: dict | None = None):
     annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
-    if annotation_tab is None:
-        return
+    if annotation_tab is None or not callable(getattr(annotation_tab, "_approve_annotation_stage", None)):
+        annotation_tab = self.app._ensure_tab_loaded("annotation", select=False)
+    if annotation_tab is None or not callable(getattr(annotation_tab, "_approve_annotation_stage", None)):
+        return False
     graph_context = dict(context or {})
     if graph_context:
         try:
@@ -508,10 +510,10 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
     if approval_iteration_target not in {"plate", "char"}:
         approval_iteration_target = self._get_iteration_target()
 
-    graph_gate_id = str(graph_context.get("graph_gate_id") or "").strip().upper()
+    graph_gate_id = campaign_gate_id_for_edge(graph_context.get("graph_edge_key"), graph_context.get("graph_gate_id"))
     graph_display_gate_id = campaign_visible_gate_id(graph_gate_id) if graph_gate_id else ""
     extra_run_dirs = []
-    if graph_gate_id == "T05":
+    if graph_gate_id == "T04":
         try:
             iteration_state = dict(CAMPAIGN.get_iteration_state() or {})
             session = dict(iteration_state.get("t05_work_session") or {})
@@ -579,7 +581,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
 
     if (
         approval_iteration_target == "plate"
-        and graph_gate_id == "T05"
+        and graph_gate_id == "T04"
         and bool(disk_fallback.get("interrupted_work"))
         and disk_fallback.get("run_dir") is not None
     ):
@@ -724,7 +726,7 @@ def _approve_step2_from_wizard(self, context: dict | None = None):
             self._refresh_dashboard()
             self.app.open_controlled_tab("campaign")
             self.app.update_campaign_tab_access()
-            if str(graph_context.get("graph_gate_id") or "").strip().upper() == "T05":
+            if graph_gate_id == "T04":
                 self.app.update_status(
                     "Bramka T04 została zatwierdzona. Projekt przeszedł do E4T, czyli treningu modelu tablic; bramka T06 zamknięcia iteracji pozostaje osobną decyzją.",
                     "info",

@@ -592,6 +592,7 @@ class FreeModeAssistantOverlay:
         self._estimated_content_height = 130
         self._content_window_id = None
         self._scrollregion_after_id = None
+        self._notice_after_id = None
 
         self.frame = tk.Frame(
             root,
@@ -666,6 +667,10 @@ class FreeModeAssistantOverlay:
         self.content_frame = tk.Frame(self.body_canvas, bd=0, highlightthickness=0)
         self._content_window_id = self.body_canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
 
+        self.notice_lbl = tk.Label(
+            self.content_frame, text="", anchor="w", justify=tk.LEFT,
+            bd=0, highlightthickness=0, font=("Segoe UI", 9), wraplength=330,
+        )
         self.body_lbl = tk.Label(
             self.content_frame,
             text="",
@@ -714,6 +719,7 @@ class FreeModeAssistantOverlay:
             self.body_canvas,
             self.content_frame,
             self.body_lbl,
+            self.notice_lbl,
             self.glossary_toggle_btn,
             self.glossary_lbl,
             self.body_scrollbar,
@@ -767,6 +773,7 @@ class FreeModeAssistantOverlay:
             self.body_canvas,
             self.content_frame,
             self.body_lbl,
+            self.notice_lbl,
             self.glossary_toggle_btn,
             self.glossary_lbl,
         )
@@ -786,6 +793,7 @@ class FreeModeAssistantOverlay:
                 activebackground=blend_hex_colors(close_fg, bg, 0.18),
             )
             self.body_lbl.configure(fg=body_fg)
+            self.notice_lbl.configure(fg=title_fg)
             self.glossary_toggle_btn.configure(
                 fg=title_fg,
                 activeforeground=title_fg,
@@ -821,6 +829,26 @@ class FreeModeAssistantOverlay:
         except Exception:
             pass
         self._refresh_glossary_display()
+        self._queue_scrollregion_refresh()
+
+    def show_notice(self, message: str, duration_ms: int = 2200) -> None:
+        self._clear_notice()
+        self.notice_lbl.configure(text=message)
+        self.notice_lbl.pack(before=self.body_lbl, fill=tk.X, pady=(4, 0))
+        self.body_canvas.yview_moveto(0.0)
+        self._notice_after_id = self.frame.after(duration_ms, self._clear_notice)
+        self._queue_scrollregion_refresh()
+
+    def _clear_notice(self) -> None:
+        if self._notice_after_id is None:
+            return
+        try:
+            self.frame.after_cancel(self._notice_after_id)
+            self.notice_lbl.pack_forget()
+            self.notice_lbl.configure(text="")
+        except tk.TclError:
+            pass
+        self._notice_after_id = None
         self._queue_scrollregion_refresh()
 
     def _toggle_glossary(self) -> None:
@@ -874,6 +902,7 @@ class FreeModeAssistantOverlay:
                 self.body_lbl.configure(wraplength=wrap)
             if int(float(self.glossary_lbl.cget("wraplength") or 0)) != wrap:
                 self.glossary_lbl.configure(wraplength=wrap)
+            self.notice_lbl.configure(wraplength=wrap)
         except Exception:
             pass
         self._queue_scrollregion_refresh()
@@ -917,6 +946,7 @@ class FreeModeAssistantOverlay:
 
     def hide(self) -> None:
         self._visible = False
+        self._clear_notice()
         try:
             self.frame.place_forget()
         except Exception:

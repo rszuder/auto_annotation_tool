@@ -16,6 +16,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -272,6 +273,80 @@ class CampaignIngestPlanner:
     # Planowanie ingestii
     # =========================================================
 
+    def _select_candidates(self, candidates, current_counter, limit):
+        """Update greedy scores in arrays; resolve ties with the original scorer."""
+        import numpy as np
+
+        if not candidates or limit <= 0:
+            return [], Counter(current_counter)
+        histogram = np.zeros((len(candidates), len(CHAR_ALPHABET)), dtype=np.float64, order="F")
+        char_index = {ch: index for index, ch in enumerate(CHAR_ALPHABET)}
+        signatures = []
+        for row, candidate in enumerate(candidates):
+            signatures.append(tuple(candidate.char_histogram.items()))
+            for ch, count in candidate.char_histogram.items():
+                histogram[row, char_index[ch]] = count
+        balance = np.array([current_counter.get(ch, 0) for ch in CHAR_ALPHABET], dtype=np.float64)
+        weights = 1.0 + balance.max() - balance + 1.0 / (balance + 1.0)
+        totals = histogram.sum(axis=1)
+        scores = np.zeros(len(candidates), dtype=np.float64)
+        for column in range(len(CHAR_ALPHABET)):
+            scores += histogram[:, column] * weights[column]
+        scores += np.count_nonzero(histogram, axis=1) * 0.05
+        selected = []
+        working_counter = Counter(current_counter)
+        for _ in range(min(limit, len(candidates))):
+            best = float(scores.max())
+            # Incremental floating-point sums can differ in their last digits.
+            # Scalar rescoring preserves the original stable tie/order contract.
+            near = np.flatnonzero(np.isclose(scores, best, rtol=1e-10, atol=1e-8))
+            exact = {}
+            chosen_index, best_score, best_details = -1, -1.0, {}
+            for index in near:
+                signature = signatures[index]
+                if signature not in exact:
+                    exact[signature] = self.score_candidate(candidates[index].char_histogram, working_counter)
+                score, details = exact[signature]
+                if score > best_score:
+                    chosen_index, best_score, best_details = index, score, details
+            chosen = candidates[chosen_index]
+            chosen.score = round(best_score, 6)
+            chosen.score_details = best_details
+            selected.append(chosen)
+            working_counter.update(chosen.char_histogram)
+            scores[chosen_index] = -np.inf
+            old_max = float(balance.max())
+            new_balance = balance + histogram[chosen_index]
+            new_max = float(new_balance.max())
+            if new_max != old_max:
+                scores += totals * (new_max - old_max)
+            for ch in chosen.char_histogram:
+                column = char_index[ch]
+                delta = (balance[column] - new_balance[column]
+                         + 1.0 / (new_balance[column] + 1.0) - 1.0 / (balance[column] + 1.0))
+                scores += histogram[:, column] * delta
+            balance = new_balance
+        return selected, working_counter
+
+    def _pool_images(self, root):
+        """Use directory entry metadata, avoiding a Windows stat per image."""
+        pending = [(Path(root), "")]
+        while pending:
+            directory, prefix = pending.pop()
+            children = []
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if entry.is_dir(follow_symlinks=False):
+                            children.append((Path(entry.path), prefix + entry.name + "/"))
+                        elif os.path.splitext(entry.name)[1].lower() in self.image_extensions and entry.is_file():
+                            path = Path(entry.path)
+                            key = self.make_source_key(path, root) if entry.is_symlink() else (prefix + entry.name).lower()
+                            yield path, key
+            except OSError:
+                continue
+            pending.extend(reversed(children))
+
     def score_candidate(
         self,
         candidate_hist: dict[str, int],
@@ -324,13 +399,7 @@ class CampaignIngestPlanner:
         skipped_used = 0
         skipped_invalid_gt = 0
 
-        for image_path in master_pool_dir.rglob("*"):
-            if not image_path.is_file():
-                continue
-            if image_path.suffix.lower() not in self.image_extensions:
-                continue
-
-            source_key = self.make_source_key(image_path, master_pool_dir=master_pool_dir)
+        for image_path, source_key in self._pool_images(master_pool_dir):
             if source_key in used_keys or image_path.name.lower() in used_names:
                 skipped_used += 1
                 continue
@@ -355,27 +424,9 @@ class CampaignIngestPlanner:
                 )
             )
 
-        remaining = list(candidates)
-        selected: list[IngestCandidate] = []
-        working_counter = Counter(current_counter)
-
-        while remaining and (select_all_remaining or len(selected) < requested_batch):
-            best_index = -1
-            best_score = -1.0
-            best_details: dict[str, float] = {}
-
-            for idx, candidate in enumerate(remaining):
-                score, details = self.score_candidate(candidate.char_histogram, working_counter)
-                if score > best_score:
-                    best_index = idx
-                    best_score = score
-                    best_details = details
-
-            chosen = remaining.pop(best_index)
-            chosen.score = round(best_score, 6)
-            chosen.score_details = best_details
-            selected.append(chosen)
-            working_counter.update(chosen.char_histogram)
+        selected, working_counter = self._select_candidates(
+            candidates, current_counter, len(candidates) if select_all_remaining else requested_batch,
+        )
 
         selected_hist = Counter()
         for candidate in selected:

@@ -86,7 +86,7 @@ def _is_preview_two_row_layout_active(self, data=None) -> bool:
 
 def _is_preview_layout_separator_interactive(self, data=None, *, ignore_active_char: bool = False) -> bool:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
-    if not self._is_preview_two_row_layout_active(source_data):
+    if not self._should_preview_use_two_row_layers(source_data):
         return False
     if ignore_active_char:
         return True
@@ -171,6 +171,14 @@ def _build_auto_preview_layout_separator(self, data, chars=None, *, image_w: flo
             if bottom_top > top_bottom:
                 separator_y = (top_bottom + bottom_top) / 2.0
                 source = "row_gap"
+            else:
+                # Slanted or overlapping boxes may have no empty horizontal gap.
+                # Split between the row centres instead of the image midpoint.
+                from statistics import median
+                top_center = median((float(bbox[1]) + float(bbox[3])) / 2 for bbox in top_boxes)
+                bottom_center = median((float(bbox[1]) + float(bbox[3])) / 2 for bbox in bottom_boxes)
+                separator_y = (top_center + bottom_center) / 2.0
+                source = "row_centers"
     separator_y = max(0.0, min(max_h, float(separator_y)))
     return {
         "x1": 0.0,
@@ -183,23 +191,37 @@ def _build_auto_preview_layout_separator(self, data, chars=None, *, image_w: flo
 def _ensure_preview_layout_separator(self, data, chars=None, *, image_w: float | None = None, image_h: float | None = None):
     if not isinstance(data, dict):
         return None
-    max_w = max(1.0, float(image_w if image_w is not None else data.get("plate_image_width", 1.0) or 1.0))
-    max_h = max(1.0, float(image_h if image_h is not None else data.get("plate_image_height", 1.0) or 1.0))
+    source_chars = chars if isinstance(chars, list) else data.get("characters", [])
+    boxes = [bbox for rec in source_chars if (bbox := record_bbox(rec)) is not None]
+    inferred_w = max((float(bbox[2]) for bbox in boxes), default=1.0)
+    inferred_h = max((float(bbox[3]) for bbox in boxes), default=1.0)
+    max_w = float(image_w or data.get("plate_image_width") or 1)
+    max_h = float(image_h or data.get("plate_image_height") or 1)
+    max_w = max_w if max_w > 1 else max(1.0, inferred_w)
+    max_h = max_h if max_h > 1 else max(1.0, inferred_h)
+    raw = data.get("layout_separator") if isinstance(data.get("layout_separator"), dict) else {}
+    try:
+        legacy_unit_separator = abs(float(raw.get("x2", 0)) - float(raw.get("x1", 0))) <= 1 and inferred_w > 1
+    except (ValueError, TypeError):
+        legacy_unit_separator = True
     existing = self._normalize_preview_layout_separator(data.get("layout_separator"), image_w=max_w, image_h=max_h)
-    if existing and str(existing.get("source", "")).lower().startswith("manual"):
+    if existing and not legacy_unit_separator and str(existing.get("source", "")).lower().startswith("manual"):
         data["layout_separator"] = existing
         return existing
     separator = self._build_auto_preview_layout_separator(data, chars, image_w=max_w, image_h=max_h)
     data["layout_separator"] = separator
-    separator = self._clamp_preview_layout_separator_to_existing_rows(data, separator)
-    data["layout_separator"] = separator
+    # Geometry is the source of an automatic split. Cached reading_row values
+    # may come from the old 1x1 separator and must not pull it above both rows.
     return separator
 
 def _get_preview_layout_separator_for_reading(self, data=None):
     if not isinstance(data, dict) or not self._should_preview_use_two_row_layers(data):
         return None
+    drag = getattr(self, "_preview_layout_separator_drag_state", None)
+    if isinstance(drag, dict) and isinstance(drag.get("preview_separator"), dict):
+        return self._normalize_preview_layout_separator(drag["preview_separator"])
     separator = self._normalize_preview_layout_separator(data.get("layout_separator"))
-    if separator is None:
+    if separator is None or abs(separator["x2"] - separator["x1"]) <= 1:
         separator = self._ensure_preview_layout_separator(data, data.get("characters", []))
     return separator
 
@@ -896,6 +918,11 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
         pass
 
     chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
+    selected_records = {}
+    for attr in ("_preview_char_selected_index", "_preview_char_label_active_index", "_preview_char_hover_label_index"):
+        index = getattr(self, attr, None)
+        if isinstance(index, int) and 0 <= index < len(chars):
+            selected_records[attr] = chars[index]
     if next_override:
         data["plate_layout_override"] = next_override
         data["layout_override_source"] = str(source or "manual")
@@ -911,15 +938,22 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
         data.pop("plate_layout_override", None)
         data.pop("layout_override_source", None)
         data.pop("layout_override_updated_at", None)
+        # Legacy metadata can otherwise recreate the just-cleared override.
+        data.pop("layout_source", None)
+        data.pop("manual_layout", None)
+        data.pop("layout_manual", None)
+        data.pop("layout_separator", None)
 
     self._update_preview_plate_layout_metadata(data, chars)
     ordered_chars = self._sort_character_records_by_x(chars, data=data)
+    for attr, record in selected_records.items():
+        setattr(self, attr, next((index for index, item in enumerate(ordered_chars) if item is record), None))
     ordered_chars = self._annotate_preview_character_reading_positions(ordered_chars, data=data)
     data["characters"] = ordered_chars
     data["status"] = self._derive_preview_status_from_data(data, ordered_chars)
 
     try:
-        self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+        self._schedule_preview_metadata_save(delay_ms=450)
         try:
             clear_detection_review_snapshot_after_manual_edit(self)
         except Exception:
@@ -929,10 +963,7 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
         except Exception:
             pass
     except Exception:
-        try:
-            self._schedule_preview_metadata_save(delay_ms=450)
-        except Exception:
-            pass
+        self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
 
     layout_text, tone = self._get_preview_plate_layout_dock_text(data)
     if next_override == "single_row":

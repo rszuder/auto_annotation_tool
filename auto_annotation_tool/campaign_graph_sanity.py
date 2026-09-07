@@ -386,6 +386,7 @@ def main() -> None:
     t03_spec = get_transition_specs_for_edge("e2_to_e3")[0]
     t04_spec = get_transition_specs_for_edge("e2_to_e4")[0]
     approved_ctx = CampaignTransitionEvalContext(
+        current_step=2,
         selected_path="char_from_images",
         resource_snapshots={"approved_plates": _snapshot("approved_plates", counter=12)},
     )
@@ -393,6 +394,7 @@ def main() -> None:
     _require(not is_transition_ready(t04_spec, approved_ctx), "T04 must not be ready on the char-from-images path")
 
     plate_training_ctx = CampaignTransitionEvalContext(
+        current_step=2,
         selected_path="plate_training",
         resource_snapshots={"approved_plates": _snapshot("approved_plates", counter=12)},
     )
@@ -401,6 +403,7 @@ def main() -> None:
 
     t05_spec = get_transition_specs_for_edge("e3_to_e4")[0]
     dataset_ctx = CampaignTransitionEvalContext(
+        current_step=3,
         selected_path="char_from_images",
         resource_snapshots={"char_dataset": _snapshot("char_dataset", counter=1, tone="success")},
     )
@@ -408,12 +411,14 @@ def main() -> None:
 
     t06_spec = get_transition_specs_for_edge("e4t_to_e1")[0]
     training_ctx = CampaignTransitionEvalContext(
+        current_step=4,
         selected_path="plate_training",
         resource_snapshots={"training_result": _snapshot("training_result", counter=1, tone="success")},
     )
     _require(is_transition_ready(t06_spec, training_ctx), "T06 should be ready with a training result")
 
     pending_training_ctx = CampaignTransitionEvalContext(
+        current_step=4,
         selected_path="plate_training",
         resource_snapshots={"training_result": _snapshot("training_result", source="completed run", tone="warning")},
     )

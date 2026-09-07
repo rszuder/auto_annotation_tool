@@ -470,7 +470,7 @@ def on_preview_canvas_motion(host, event=None):
         return
 
     action_key = self._extract_preview_action_from_current_item()
-    if action_key in {"reset_view", "edit_source_filename", "toggle_plate_layout", "toggle_fullscreen"}:
+    if action_key in {"reset_view", "edit_source_filename", "toggle_plate_layout", "toggle_plate_rows", "toggle_fullscreen"}:
         previous_hover_box = getattr(self, "_preview_char_hover_index", None)
         previous_hover_label = getattr(self, "_preview_char_hover_label_index", None)
         previous_hover_grip = getattr(self, "_preview_char_hover_grip", None)
@@ -788,6 +788,9 @@ def on_preview_canvas_press(host, event):
         return self._edit_preview_source_filename(event)
     if action_key == "toggle_plate_layout":
         return self._cycle_preview_plate_layout_override(event)
+    if action_key == "toggle_plate_rows":
+        from .z3_preview_layout_control import toggle_plate_rows
+        return toggle_plate_rows(self)
 
     badge_key = self._extract_preview_badge_key_from_current_item()
     if badge_key:
@@ -1073,6 +1076,12 @@ def on_preview_canvas_drag(host, event):
             separator_drag_state["dirty"] = True
             separator_drag_state["preview_separator"] = separator
             active_data = self._get_preview_active_data(create=False)
+            if isinstance(active_data, dict):
+                rows = tuple(self._get_preview_row_for_bbox(rec.get("bbox"), active_data)
+                             for rec in active_data.get("characters", []) if isinstance(rec, dict))
+                if rows != separator_drag_state.get("badge_rows"):
+                    separator_drag_state["badge_rows"] = rows
+                    self._redraw_preview_character_overlays_light()
             if not self._update_preview_layout_separator_visual(separator, active_data):
                 if isinstance(active_data, dict):
                     preview_data = dict(active_data)
@@ -1371,7 +1380,7 @@ def on_preview_canvas_release(host, event):
                 except Exception:
                     pass
                 try:
-                    self._draw_preview_plate_status_frame(data)
+                    self._redraw_preview_character_overlays_light()
                     if not (isinstance(separator, dict) and self._update_preview_layout_separator_visual(separator, data)):
                         self._draw_preview_layout_separator(data)
                 except Exception:
@@ -2122,6 +2131,10 @@ def on_preview_canvas_secondary_press(host, event=None):
     self._focus_preview_canvas()
     if event is None or not getattr(self, "_preview_render_state", None):
         return None
+    if self._extract_preview_action_from_current_item() == "toggle_plate_rows":
+        from .z3_preview_layout_control import hide_layout_tip
+        hide_layout_tip(self)
+        return self._cycle_preview_plate_layout_override(event)
 
     box_hit = self._find_preview_character_box_hit(event.x, event.y)
     if box_hit is None:

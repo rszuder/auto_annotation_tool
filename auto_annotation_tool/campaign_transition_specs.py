@@ -128,7 +128,7 @@ TRANSITION_SPECS: Tuple[CampaignTransitionSpec, ...] = (
             ),
             TransitionActionSpec(
                 key="review_imported_plate_annotations",
-                label="Kontroluj import AT w Z2",
+                label="Kontroluj AT w Z2",
                 graph_action="open_z2_campaign_context",
                 payload={
                     "context": {

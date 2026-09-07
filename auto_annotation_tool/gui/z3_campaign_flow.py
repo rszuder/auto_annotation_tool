@@ -10,6 +10,7 @@ from ..campaign_manager import CAMPAIGN
 from ..config import logger
 from ..project_cache import PROJECT_CACHE
 from .z3_metadata_cache import file_signature, path_key
+from .campaign_graph_presentation import close_graph_dialogs
 from .z3_view_models import (
     Step3CampaignNavigationViewModel,
     Step3EntryFlowViewModel,
@@ -106,8 +107,11 @@ def _mark_t06_z3_work_session(
         session.setdefault("started_at", now)
         session["last_active_at"] = now
     else:
-        if normalized_state in {"resolved", "closed", "complete", "completed"}:
-            previous_interrupted_at = str(session.pop("interrupted_at", "") or "").strip()
+        if normalized_state in {"resolved", "closed", "complete", "completed", "paused",
+                                "ready_for_pz2", "waiting_for_pz2", "ready_for_pz3", "waiting_for_pz3"}:
+            previous_interrupted_at = str(session.get("interrupted_at", "") or "").strip()
+            # Registry upserts merge dictionaries; omission cannot clear an old marker.
+            session["interrupted_at"] = ""
             if previous_interrupted_at:
                 session.setdefault("resolved_interrupted_at", previous_interrupted_at)
         session["closed_at"] = now
@@ -750,6 +754,9 @@ def return_to_t05_work_after_step3_pz1(host: "CharacterAnnotationTab") -> None:
 
 
 def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
+    campaign_tab = getattr(host.app, "tabs", {}).get("campaign")
+    if campaign_tab is not None:
+        close_graph_dialogs(campaign_tab.frame)
     try:
         host._hide_campaign_detect_splash()
     except Exception:
@@ -830,7 +837,7 @@ def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
         host.app.update_campaign_tab_access()
         if pz2_ready:
             host.app.update_status(
-                f"Wracasz do grafu. PZ2 jest domknięte w tej iteracji; kolejny krok wybierzesz w pracy bramki {CHAR_WORK_GATE_DISPLAY_ID}.",
+                f"PZ2 jest zapisane. W pracy bramki {CHAR_WORK_GATE_DISPLAY_ID} wybierz krok 2: utwórz dataset znaków w PZ3.",
                 "success",
             )
         else:

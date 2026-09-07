@@ -6846,7 +6846,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
         weight_text = _export_selection_package_weight_text(selected)
         state_text = str(selection_message or "-")
         try:
-            selected_params_var.set(str(selection_label or package_title or "-"))
+            selected_params_var.set(str(selection_label or package_title or "-") if selected
+                                    else "Wybierz kandydata z listy")
         except Exception:
             pass
         try:
@@ -7041,7 +7042,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     selected_model_var = tk.StringVar(value="-")
     selected_target_var = tk.StringVar(value="-")
     selected_metric_var = tk.StringVar(value="-")
-    selected_params_var = tk.StringVar(value="brak wyboru")
+    selected_params_var = tk.StringVar(value="Wybierz kandydata z listy")
     selected_size_var = tk.StringVar(value="-")
 
     selected_canvas = tk.Canvas(
@@ -7069,7 +7070,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 selected_canvas_state["after"] = selected_canvas.after(220, lambda w=width_hint: _draw_selected_cards(w))
                 return
             width = max(320, int(width_hint or selected_canvas.winfo_width() or 860))
-            height_value = max(52, int(selected_canvas.winfo_height() or 60))
+            empty_export = selected_params_var.get() == "Wybierz kandydata z listy"
+            height_value = 76 if empty_export else 60
+            if int(selected_canvas.cget("height")) != height_value:
+                selected_canvas.configure(height=height_value)
             selected_canvas.delete("all")
             selected_canvas.create_rectangle(
                 0,
@@ -7115,8 +7119,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 value = str(variable.get() or "-")
                 display = _mobile_export_text_for_width(value, max(82, card_width - 18), min_chars=9)
                 lines = display.splitlines()
-                if len(lines) > 2:
-                    display = "\n".join(lines[:2])
+                max_lines = 3 if title == "Eksport" and empty_export else 2
+                if len(lines) > max_lines:
+                    display = "\n".join(lines[:max_lines])
                 selected_canvas.create_text(
                     x + 8,
                     28,
@@ -7546,7 +7551,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
             finally:
                 done(rows=len(rows), widgets=0)
 
-        return {"shell": shell, "set_rows": set_rows, "canvas": canvas}
+        return {"shell": shell, "set_rows": set_rows, "canvas": canvas,
+                "scrollbar": scrollbar, "column_widths": _column_widths}
 
     requirements_shell = tk.Frame(
         main,
@@ -7590,7 +7596,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     )
     details_shell.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
     details_shell.grid_columnconfigure(0, weight=1)
-    details_shell.grid_rowconfigure(2, weight=1)
+    details_shell.grid_rowconfigure(1, weight=1)
     tk.Label(
         details_shell,
         text="Krótki profil kandydata",
@@ -7599,10 +7605,6 @@ def _open_mobile_model_export_center(self, initial_run=None):
         font=("Segoe UI", 10, "bold"),
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
-    source_locations = MobileExportSourceLocations(
-        details_shell, bg=card_bg, fg=fg, muted=muted, accent=border,
-    )
-    source_locations.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     details_table = _build_wrapped_info_table(
         details_shell,
         [
@@ -7613,7 +7615,17 @@ def _open_mobile_model_export_center(self, initial_run=None):
         header_bg=blend_hex_colors(card_bg, accent, 0.08),
         height=172,
     )
-    details_table["shell"].grid(row=2, column=0, sticky="nsew")
+    details_table["shell"].grid(row=1, column=0, sticky="nsew")
+    details_table["shell"].grid_rowconfigure(1, weight=0)
+    details_table["shell"].grid_rowconfigure(2, weight=1)
+    details_table["canvas"].grid_configure(row=2)
+    details_table["scrollbar"].grid_configure(row=2)
+    source_locations = MobileExportSourceLocations(
+        details_table["shell"], bg=card_bg, fg=fg, muted=muted, accent=border,
+        notify=getattr(self.app, "show_assistant_message", getattr(self.app, "update_status", None)),
+        column_widths=details_table["column_widths"],
+    )
+    source_locations.grid(row=1, column=0, sticky="ew")
     try:
         requirements_shell.grid_remove()
         details_shell.grid_configure(row=1, rowspan=2, sticky="nsew", padx=(0, 10))

@@ -210,6 +210,14 @@ def _start_iteration_advance(self, mode: str | None) -> None:
     self._iteration_advance_mode = mode
     self._iteration_advance_result = None
     self._set_iteration_advance_busy(True)
+    try:
+        self._show_project_loading_overlay(
+            title="Przygotowuję kolejną iterację",
+            body="Zapisuję stan przejścia i przygotowuję obrazy dla E1.",
+            eyebrow="BRAMKA T06", tone="info", progress=None,
+        )
+    except Exception:
+        pass
 
     worker = threading.Thread(
         target=self._run_iteration_advance_worker,
@@ -376,17 +384,6 @@ def _finish_step4_iteration(self):
         self.app.update_status("Iteracja została domknięta. Przygotowuję przejście do E1.", "info")
     except Exception:
         pass
-    try:
-        self._refresh_active_project_wizard_only()
-    except Exception:
-        try:
-            self._refresh_dashboard()
-        except Exception:
-            pass
-    try:
-        self.request_wizard_stage_focus(step_num=4)
-    except Exception:
-        pass
     self._start_iteration_advance(mode)
 
 
@@ -459,17 +456,6 @@ def _finish_step4_without_training(self):
             self.app.update_status("Iteracja została domknięta bez treningu. Przygotowuję przejście do E1.", "info")
         except Exception:
             pass
-        try:
-            self._refresh_active_project_wizard_only()
-        except Exception:
-            try:
-                self._refresh_dashboard()
-            except Exception:
-                pass
-        try:
-            self.request_wizard_stage_focus(step_num=4)
-        except Exception:
-            pass
         self._start_iteration_advance(mode)
         return
 
@@ -515,17 +501,6 @@ def _finish_step4_without_training(self):
 
     try:
         self.app.update_status("Iteracja została domknięta bez treningu. Przygotowuję przejście do E1.", "info")
-    except Exception:
-        pass
-    try:
-        self._refresh_active_project_wizard_only()
-    except Exception:
-        try:
-            self._refresh_dashboard()
-        except Exception:
-            pass
-    try:
-        self.request_wizard_stage_focus(step_num=4)
     except Exception:
         pass
     self._start_iteration_advance(mode)
@@ -588,6 +563,7 @@ def _set_iteration_advance_busy(self, busy: bool) -> None:
 
 
 def _run_iteration_advance_worker(self, mode: str) -> None:
+    started = perf_counter()
     try:
         result = CAMPAIGN.advance_to_next_iteration(start_mode=mode)
     except Exception as exc:
@@ -598,6 +574,7 @@ def _run_iteration_advance_worker(self, mode: str) -> None:
             "error": str(exc),
         }
     self._iteration_advance_result = dict(result or {})
+    self._iteration_advance_result["prepare_ms"] = (perf_counter() - started) * 1000.0
 
 
 def _schedule_iteration_advance_poll(self) -> None:
@@ -627,7 +604,12 @@ def _poll_iteration_advance_worker(self) -> None:
 
 
 def _finish_iteration_advance(self, mode: str, result: dict) -> None:
+    started = perf_counter()
     if not result.get("ok"):
+        try:
+            self._hide_project_loading_overlay()
+        except Exception:
+            pass
         reason = str(result.get("reason") or "").strip().lower()
         if reason == "step4_not_finished":
             stage_label = _campaign_training_stage_label()
@@ -688,14 +670,21 @@ def _finish_iteration_advance(self, mode: str, result: dict) -> None:
             next_input_dir = CAMPAIGN.get_iteration_raw_dir()
         if annotation_tab is not None and hasattr(annotation_tab, "prepare_campaign_iteration_transition"):
             annotation_tab.prepare_campaign_iteration_transition(
-                input_dir=(Path(next_input_dir) if next_input_dir else None)
+                input_dir=(Path(next_input_dir) if next_input_dir else None),
+                refresh_ui=False,
             )
     except Exception as e:
         logger.debug(f"Nie udało się przygotować Z2 do nowej iteracji: {e}")
 
-    self._rebuild_wizard_stage_ui()
-    self._refresh_dashboard()
-    self.app.update_campaign_tab_access()
+    # The existing graph host can render the new iteration once. Rebuilding it
+    # also scheduled several full scans of the same pool after idle and resize.
+    previous_lightweight = bool(getattr(self, "_project_open_lightweight_refresh", False))
+    try:
+        self._project_open_lightweight_refresh = True
+        self._clear_dashboard_perf_cache()
+        self._refresh_dashboard()
+    finally:
+        self._project_open_lightweight_refresh = previous_lightweight
 
     iter_num = int(result.get("next_iteration", CAMPAIGN.get_current_iteration_num()) or CAMPAIGN.get_current_iteration_num())
     effective_mode = str(result.get("effective_mode", "new_input") or "new_input").strip().lower()
@@ -780,6 +769,10 @@ def _finish_iteration_advance(self, mode: str, result: dict) -> None:
                 messagebox.showwarning("Wybierz nowy katalog zdjęć", message, parent=self.frame)
             except Exception:
                 pass
+    logger.info(
+        "[T06 PERF] iteration=%s mode=%s prepare=%.0fms finish_ui=%.0fms",
+        iter_num, mode, float(result.get("prepare_ms", 0.0)), (perf_counter() - started) * 1000.0,
+    )
 
 
 def _toggle_project_completion(self):

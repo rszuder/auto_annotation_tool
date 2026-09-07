@@ -1689,7 +1689,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         graph_view = {"zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0}
         self._campaign_graph_view = graph_view
     canvas.pack(fill=tk.X)
-    from .campaign_graph_presentation import GraphToolbar, CanvasWorkflowFocus, resolve_workflow_focus
+    from .campaign_graph_presentation import (
+        GraphToolbar, CanvasWorkflowFocus, resolve_workflow_focus, close_graph_dialogs,
+        GraphSignalMotion, gate_electrode_style, graph_signal_color,
+    )
     toolbar_commands = {}
     graph_toolbar = GraphToolbar(canvas, palette, toolbar_commands)
     workflow_focus_style = CanvasWorkflowFocus(canvas, palette)
@@ -1750,6 +1753,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
     gate_geometry: dict[str, dict[str, float]] = {}
     gate_field_geometry: dict[str, dict[str, float | str]] = {}
     gate_selector_geometry: dict[str, dict[str, float | str | bool]] = {}
+    gate_selector_hover: dict[str, object] = {}
     node_geometry: dict[str, dict[str, float]] = {}
     edge_line_items: dict[str, int] = {}
     edge_arrow_items: dict[str, int] = {}
@@ -2005,13 +2009,18 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
     def _raise_graph_overlay_layers() -> None:
         workflow_focus_style.apply(_workflow_focus_scope(), refresh_links=True)
+        # Signals belong under every card, including inactive and dragged cards.
+        # Keep the cards' existing stacking order when placing a new frame.
+        for item in canvas.find_all():
+            if any(tag.startswith(("gate-group:", "node-group:")) for tag in canvas.gettags(item)):
+                canvas.tag_lower("graph_attention_flow", item)
+                break
         for tag in (
             "gate_selector_arc_anim",
             "gate_approve_blink_rect",
             "gate_approve_blink_text",
             "gate_field_hover",
             "gate_selector_tooltip",
-            "graph_attention_flow",
             "graph_overlay_fixed",
         ):
             try:
@@ -4046,11 +4055,16 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         return dict(_step2_unpromoted_t05_cache)
 
     _t06_interrupted_work_cache: dict | None = None
+    _t06_interrupted_work_cache_key = None
 
     def _t06_interrupted_work_state() -> dict:
-        nonlocal _t06_interrupted_work_cache
-        if _t06_interrupted_work_cache is not None:
+        nonlocal _t06_interrupted_work_cache, _t06_interrupted_work_cache_key
+        latest_state = dict(CAMPAIGN.get_iteration_state() or {})
+        cache_key = json.dumps([latest_state.get("t06_work_session"), latest_state.get("t06_contracts")],
+                               sort_keys=True, default=str)
+        if _t06_interrupted_work_cache is not None and cache_key == _t06_interrupted_work_cache_key:
             return dict(_t06_interrupted_work_cache)
+        _t06_interrupted_work_cache_key = cache_key
         _t06_interrupted_work_cache = {}
         non_interrupted_z3_states = {
             "resolved",
@@ -4096,6 +4110,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             and session_work_area == "z3"
             and session_state not in non_interrupted_z3_states
         )
+        if (session_gate_id in CHAR_WORK_GATE_SESSION_IDS and session_work_area == "z3"
+                and session_state in {"ready_for_pz2", "waiting_for_pz2", "ready_for_pz3", "waiting_for_pz3"}
+                and not session_active):
+            return {}
         session_substep_hint = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
         session_targets_pz2_hint = session_substep_hint in {"2", "detect", "pz2", "z3_pz2"}
         session_reason_hint = str(session.get("reason") or "").strip().lower()
@@ -4132,6 +4150,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             except Exception:
                 legacy_pz2_done = False
             pz2_contract_ready = bool(pz2_contract.get("fulfilled") or legacy_pz2_done)
+            pz3_contract = dict(contracts.get("pz3_char_dataset") or {})
             exported_gate = _t06_exported_char_dataset_state()
             ready_dataset = str(exported_gate.get("ready_dataset") or exported_gate.get("dataset_hint") or "").strip()
             pz3_export_ready = bool(exported_gate.get("ok") and ready_dataset)
@@ -6197,6 +6216,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         notice: dict | None = None,
     ) -> None:
         dialog = tk.Toplevel(self.frame)
+        dialog._campaign_graph_dialog = True
         is_choice_guide = str(title or "").strip() == "Poradnik wyboru bramki"
         normalized_title = str(title or "").strip().lower()
         is_resource_modal = normalized_title.startswith("zasoby")
@@ -6324,6 +6344,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         row_count = max(1, len(buttons or ()))
         dialog_height = max(306, min(420, 218 + row_count * 88))
         dialog = tk.Toplevel(self.frame)
+        dialog._campaign_graph_dialog = True
         try:
             self.app.style_dialog_window(
                 dialog,
@@ -6369,8 +6390,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         ).pack(side=tk.RIGHT)
 
         intro_text = (
-            "T02 nie tworzy nowej pracy od zera. Tutaj wracasz do kontroli AT, "
-            "czyli sprawdzenia importu anotacji tablic na aktualnym zbiorze obrazów."
+            "Tutaj kontrolujesz anotacje tablic z importu lub zatwierdzonej puli projektu. "
+            "Po sprawdzeniu AT wróć do grafu i zatwierdź T02, aby przejść do pracy nad znakami."
         )
         tk.Label(
             body,
@@ -6384,6 +6405,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
         list_host = tk.Frame(body, bg=body_bg)
         list_host.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        def _run_t02_action(command):
+            close_graph_dialogs(self.frame)
+            return command() if callable(command) else False
 
         def _draw_control_icon(canvas: tk.Canvas, tone_color: str) -> None:
             try:
@@ -6497,7 +6522,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             choose_button = tk.Button(
                 row,
                 text="Wybierz",
-                command=lambda cmd=command: (dialog.destroy(), cmd() if callable(cmd) else None),
+                command=lambda cmd=command: _run_t02_action(cmd),
                 cursor="hand2",
                 bg=button_bg,
                 activebackground=button_hover_bg,
@@ -6541,6 +6566,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         visible_gate_id = _visible_badge_id(getattr(spec, "badge_id", "T05") if spec is not None else "T05") or "T04"
         modal_title = f"Praca {visible_gate_id}"
         dialog = tk.Toplevel(self.frame)
+        dialog._campaign_graph_dialog = True
         try:
             self.app.style_dialog_window(dialog, title=modal_title, geometry="740x500", parent=self.frame)
         except Exception:
@@ -7581,6 +7607,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
     def _open_t07_actions_modal(_body_text: str, buttons: list[tuple[str, object, str]]) -> None:
         display_gate_id = "T06"
         dialog = tk.Toplevel(self.frame)
+        dialog._campaign_graph_dialog = True
         try:
             self.app.style_dialog_window(dialog, title=f"Praca {display_gate_id}", geometry="700x680", parent=self.frame)
         except Exception:
@@ -8211,6 +8238,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         modal_height = 520
         modal_content_wrap = modal_width - 104
         dialog = tk.Toplevel(self.frame)
+        dialog._campaign_graph_dialog = True
         try:
             self.app.style_dialog_window(
                 dialog,
@@ -8547,11 +8575,14 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
         def _t06_label_is_char_dataset_pz3(label: str) -> bool:
             normalized = str(label or "").strip().lower()
+            if "pz2" in normalized:
+                return False
             return bool(
                 "pz3" in normalized
                 or "z3" in normalized
                 or "dataset znak" in normalized
                 or "datasetu znak" in normalized
+                or "wariant datasetu" in normalized
                 or "źródłowy dataset" in normalized
                 or "zrodlowy dataset" in normalized
                 or (
@@ -8689,6 +8720,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         def _t06_recommendation() -> tuple[str, str]:
             z3_label = _t06_first_action_label(_t06_label_is_pz3_work)
             pz2_label = _t06_first_action_label(_t06_label_is_char_pz2)
+            if not pz2_label and buttons:
+                pz2_label = str(buttons[0][0])
+            if not z3_label and len(buttons) >= 2:
+                z3_label = str(buttons[1][0])
             resume_label = _t06_first_action_label(_t06_label_is_resume)
             if _t06_pz2_draft_after_ready_export():
                 return (
@@ -9326,10 +9361,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     _abandon_interrupted_t06_ok()
             elif pending_ok_work and not is_resume:
                 _abandon_interrupted_t06_ok()
-            try:
-                dialog.destroy()
-            except Exception:
-                pass
+            close_graph_dialogs(self.frame)
             return command() if callable(command) else None
 
         for index, (label, command, tone) in enumerate(buttons, start=1):
@@ -10039,6 +10071,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 ]
 
                 dialog = tk.Toplevel(self.frame)
+                dialog._campaign_graph_dialog = True
                 try:
                     self.app.style_dialog_window(dialog, title=f"Zasoby bramki {CHAR_WORK_GATE_DISPLAY_ID}", geometry="1080x500", parent=self.frame)
                 except Exception:
@@ -10185,6 +10218,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
             if resource_rows:
                 dialog = tk.Toplevel(self.frame)
+                dialog._campaign_graph_dialog = True
                 try:
                     self.app.style_dialog_window(dialog, title="Zasoby bramki", geometry="760x380", parent=self.frame)
                 except Exception:
@@ -10518,6 +10552,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         _show_resource_opening_loader()
 
         dialog = tk.Toplevel(self.frame)
+        dialog._campaign_graph_dialog = True
         configure_minimizable_modal(dialog)
         try:
             dialog.withdraw()
@@ -19532,11 +19567,12 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 tags=(title_tag, "graph_title_raise", group_tag),
             )
             selector_tags = (group_tag, select_tag, "gate_button") if selector_enabled else (group_tag,)
-            electrode_color = _graph_card_contrast_color(accent if selected else muted_dim)
-            electrode_dim = blend_hex_colors(electrode_color, card_bg, 0.36 if selected else 0.62)
+            selector_style = gate_electrode_style(palette, selected=selected, enabled=selector_enabled)
+            electrode_color = selector_style["ink"]
+            electrode_dim = selector_style["rod"]
             selector_mid_y = y + title_h / 2
-            selector_h = min(title_h - 2 * local_zoom, 24 * local_zoom)
-            selector_x0 = x - 34 * local_zoom
+            selector_h = min(title_h - 2 * local_zoom, 28 * local_zoom)
+            selector_x0 = x - 38 * local_zoom
             selector_y0 = selector_mid_y - selector_h / 2
             selector_x1 = x - 6 * local_zoom
             selector_y1 = selector_mid_y + selector_h / 2
@@ -19546,7 +19582,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "y0": float(selector_y0),
                     "x1": float(selector_x1),
                     "y1": float(selector_y1),
-                    "color": str(accent if selected else warning),
+                    "color": selector_style["border"],
+                    "hover_fill": selector_style["hover"],
                     "gate_id": str(gate_id or "").strip(),
                     "gate_label": str(gate_title or "").strip(),
                     "selected": bool(selected),
@@ -19556,10 +19593,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 selector_y0,
                 selector_x1,
                 selector_y1,
-                fill=blend_hex_colors(title_fill, electrode_color, 0.06 if selected else 0.025),
-                outline=blend_hex_colors(electrode_color, card_bg, 0.28 if selected else 0.42),
-                width=1,
-                tags=selector_tags,
+                fill=selector_style["fill"],
+                outline=selector_style["border"],
+                width=2 if selector_enabled else 1,
+                tags=(*selector_tags, f"gate_selector_face:{edge.key}"),
             )
             canvas.create_line(
                 x - 6 * local_zoom,
@@ -19570,12 +19607,12 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 width=1,
                 tags=(group_tag,),
             )
-            e1_x = x - 27 * local_zoom
-            e2_x = x - 13 * local_zoom
+            e1_x = x - 30 * local_zoom
+            e2_x = x - 14 * local_zoom
             e_top = selector_y0 + 3.4 * local_zoom
             e_bottom = selector_y1 - 3.4 * local_zoom
-            rod_width = max(1, int(round(0.82 * local_zoom)))
-            contact_width = max(1, int(round(1.05 * local_zoom)))
+            rod_width = max(2 if selector_enabled else 1, int(round(1.25 * local_zoom)))
+            contact_width = max(2 if selector_enabled else 1, int(round(1.25 * local_zoom)))
             tip_len = 3.4 * local_zoom
             tip_hook = 1.35 * local_zoom
             tip_r = max(0.62, 0.78 * local_zoom)
@@ -19832,8 +19869,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 if value and not resource_detail_layout:
                     if idx == 0:
                         status_value = str(value).strip().upper()
-                        status_pill_font = _gate_font(8, local_zoom, "bold")
-                        status_pill_layout_font = _gate_layout_font(8, local_zoom, "bold")
+                        if status_value == "WYBIERZ":
+                            status_value = "DO WYBORU"
+                        status_pill_font = _gate_font(8, local_zoom)
+                        status_pill_layout_font = _gate_layout_font(8, local_zoom)
                         status_label_w = _measure_text_world_width("BRAMKA", row_label_layout_font)
                         status_text_w = _measure_text_world_width(status_value, status_pill_layout_font)
                         max_pill_w = max(
@@ -19852,9 +19891,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         pill_x0 = pill_x1 - pill_w
                         pill_y0 = y0 + (current_row_h - pill_h) / 2
                         pill_y1 = pill_y0 + pill_h
-                        pill_fill = palette["campaign_pill_fill"]
-                        pill_outline = blend_hex_colors(value_color, palette["campaign_pill_outline_base"], 0.38)
-                        pill_text = palette["campaign_pill_text"]
+                        pill_fill = row_fill
+                        pill_outline = ""
+                        pill_text = graph_card_muted if status_value == "DO WYBORU" else value_color
                         canvas.create_rectangle(
                             pill_x0,
                             pill_y0,
@@ -20210,7 +20249,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
         def _draw_attention_particles(
             points: list[tuple[float, float]],
-            progress: float,
+            head_distance: float,
             *,
             color: str,
         ) -> None:
@@ -20220,7 +20259,6 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             zoom = max(0.1, _graph_zoom())
             particle_len_screen = max(3.2, min(7.0, 4.5 * zoom))
             particle_len = particle_len_screen
-            head_distance = (float(progress) * (total_len + 34.0)) - 4.0
             offsets = (0.0, -8.0, -15.5, -22.5, -29.0)
             for index, offset in enumerate(offsets):
                 distance = head_distance + offset
@@ -20234,7 +20272,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 glow_width = 3 if index == 0 else 2
                 core_width = 2 if index == 0 else 1
                 glow_color = blend_hex_colors(color, card_bg, 0.18 + min(index, 3) * 0.08)
-                core_color = blend_hex_colors(color, palette["blend_light"], 0.16 if index == 0 else 0.04)
+                core_color = blend_hex_colors(color, palette["blend_light"], 0.48 if index == 0 else 0.08)
                 x0 = x - ux * half_len
                 y0 = y - uy * half_len
                 x1 = x + ux * half_len
@@ -20247,6 +20285,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     fill=glow_color,
                     width=glow_width,
                     capstyle=tk.ROUND,
+                    state=tk.DISABLED,
                     tags=("graph_attention_flow",),
                 )
                 core_half_len = max(1.5, half_len * 0.68)
@@ -20262,6 +20301,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     fill=core_color,
                     width=core_width,
                     capstyle=tk.ROUND,
+                    state=tk.DISABLED,
                     tags=("graph_attention_flow",),
                 )
 
@@ -20367,9 +20407,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             attention_state["token"] = token
             attention_state["running_key"] = attention_key
             attention_state["canvas"] = canvas
-            started_at = perf_counter() - 0.18
-            duration = max(3.8, min(6.0, 4.2 + 0.32 * len(initial_paths)))
-            colors = (accent, success, warning)
+            motion = GraphSignalMotion(perf_counter())
+            signal_color = graph_signal_color(palette)
 
             def _frame() -> None:
                 try:
@@ -20380,15 +20419,15 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         attention_state["running_key"] = ""
                         attention_state["canvas"] = None
                         return
-                    if _graph_modal_activity_active():
+                    modal_open = _graph_modal_activity_active()
+                    head_distance = motion.advance(perf_counter(), paused=modal_open)
+                    if modal_open:
                         try:
                             canvas.delete("graph_attention_flow")
                         except Exception:
                             pass
                         attention_state["after_id"] = canvas.after(320, _frame)
                         return
-                    elapsed = max(0.0, perf_counter() - started_at)
-                    progress = min(1.0, elapsed / duration)
                     canvas.delete("graph_attention_flow")
                     paths = [
                         (edge, _attention_path_for_edge(edge))
@@ -20400,14 +20439,14 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         attention_state["running_key"] = ""
                         attention_state["canvas"] = None
                         return
-                    for index, (_edge, path) in enumerate(paths):
+                    for _edge, path in paths:
                         _draw_attention_particles(
                             path,
-                            progress,
-                            color=colors[index % len(colors)],
+                            head_distance,
+                            color=signal_color,
                         )
                     _raise_graph_interactive_layers()
-                    if progress < 1.0:
+                    if not motion.finished(max(_polyline_length(path) for _edge, path in paths)):
                         attention_state["after_id"] = canvas.after(28, _frame)
                     else:
                         canvas.delete("graph_attention_flow")
@@ -20574,6 +20613,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
     def _clear_gate_selector_tooltip(_event=None) -> None:
         try:
+            hovered_item = gate_selector_hover.pop("item", None)
+            previous_fill = gate_selector_hover.pop("fill", None)
+            if hovered_item is not None and previous_fill is not None:
+                canvas.itemconfigure(hovered_item, fill=previous_fill)
             canvas.delete("gate_selector_tooltip")
         except Exception:
             pass
@@ -20621,6 +20664,12 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             return
         try:
             _clear_gate_selector_tooltip()
+            gate_key = str(tag or "").split(":")[1]
+            face_items = canvas.find_withtag(f"gate_selector_face:{gate_key}")
+            if face_items:
+                face = face_items[0]
+                gate_selector_hover.update(item=face, fill=canvas.itemcget(face, "fill"))
+                canvas.itemconfigure(face, fill=geom["hover_fill"])
             width = max(int(canvas.winfo_width() or 840), 720)
             height = max(int(canvas.winfo_height() or 520), 420)
             x0 = _screen_x(float(geom.get("x0", 0.0)), width)
@@ -20632,11 +20681,13 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             gate_label = str(geom.get("gate_label") or "").strip()
             color = str(geom.get("color") or accent)
             title = f"{gate_id}: wybór bramki" if gate_id else "Wybór bramki"
-            body = (
-                "Ta bramka jest aktywną ścieżką. Kliknięcie zostawi ten wybór."
-                if selected
-                else "Kliknij elektrodę, aby wybrać tę ścieżkę i pracować na jej zasobach, karcie pracy oraz zatwierdzeniu."
-            )
+            if selected:
+                edge = CAMPAIGN_TRANSITION_GRAPH.get_edge(gate_key)
+                body = ("Bramka wybrana. Kliknij ponownie elektrodę, aby wyczyścić wybór."
+                        if edge is not None and _can_clear_step1_gate_selection(edge)
+                        else "Bramka wybrana. Korzystaj z pól Zasoby, Praca i Zatwierdź.")
+            else:
+                body = "Kliknij elektrodę, aby wybrać bramkę i odblokować jej pola Zasoby, Praca i Zatwierdź."
             if gate_label:
                 title = f"{gate_id}: {gate_label}" if gate_id else gate_label
             tooltip_w = min(340, max(270, int(width * 0.32)))
@@ -20673,7 +20724,6 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             body_h = _measure_wrapped_text_height(body, body_font)
             tooltip_h = max(64, title_h + body_h + 28)
             tip_x = (x0 + x1) / 2
-            gate_key = str(tag or "").split(":")[1] if len(str(tag or "").split(":")) >= 3 else ""
             gate_geom = gate_geometry.get(gate_key, {}) if gate_key else {}
             gate_x0 = _screen_x(float(gate_geom.get("x", 0.0)), width) if gate_geom else x1 + 8
             gate_y0 = _screen_y(float(gate_geom.get("y", 0.0)), height) if gate_geom else y0
@@ -20721,7 +20771,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 tooltip_x0 + 10,
                 tooltip_y0 + 10,
                 text=title,
-                fill=color,
+                fill=blend_hex_colors(color, fg, 0.65),
                 anchor="nw",
                 width=tooltip_text_w,
                 font=title_font,
