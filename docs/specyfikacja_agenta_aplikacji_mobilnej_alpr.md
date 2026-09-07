@@ -30,7 +30,7 @@ W repozytorium desktopowym istnieje osobny tor eksportu mobilnego.
 
 | Obszar | Status | Pliki |
 | --- | --- | --- |
-| Centrum eksportu mobilnego | Zaimplementowane. Dostępne z menu `Eksport -> Pakiet mobilny ALPR (.alprmodel)` oraz z kontekstu treningów. | `auto_annotation_tool/gui/app.py`, `auto_annotation_tool/gui/z4_model_export.py` |
+| Centrum eksportu mobilnego | Zaimplementowane. Dostępne z menu `Integracje -> Eksport mobilny` oraz z kontekstu treningów. | `auto_annotation_tool/gui/app.py`, `auto_annotation_tool/gui/z4_model_export.py` |
 | Eksporter pakietu | Zaimplementowany jako niezależny moduł budujący `.alprmodel`. | `auto_annotation_tool/exporters/mobile_model_exporter.py` |
 | Preflight zależności | Zaimplementowany. Sprawdza checkpoint, formaty, rolę, katalog docelowy, zależności i kalibrację INT8. | `auto_annotation_tool/exporters/mobile_model_exporter.py`, `auto_annotation_tool/gui/z4_model_export.py` |
 | Import katalogowy MP | Zaimplementowany w centrum eksportu. Pokazuje listę modeli Ultralytics `detect`, używa lokalnego pliku, jeśli już istnieje w katalogach programu, albo pobiera checkpoint na desktopie do `Workspace/6_models/base/detect/ultralytics`, waliduje rolę `vehicle/detect` i dodaje model jako kandydata `MP`. Klasy pojazdów są ustawiane dopiero w konfiguracji eksportu pakietu. | `auto_annotation_tool/gui/z4_model_export.py` |
@@ -66,7 +66,7 @@ Eksporter Python obsluguje dwa poziomy tego kontenera:
 
 | Schemat | Znaczenie | Kiedy uzywac |
 | --- | --- | --- |
-| `alpr.model.v1` | Jeden model logiczny, np. `MP`, `MT` albo `MZ`. | Test izolowany, ranking pojedynczych modeli, fallback. |
+| `alpr.model.v1` | Jeden model logiczny, np. `MP`, `MT` albo `MZ`. | Test izolowany, ranking pojedynczych modeli, podmiana jednej roli w konfiguracji telefonu. |
 | `alpr.package.v1` | Kompletny pakiet ALPR z para `MT+MZ` albo kompletem `MP+MT+MZ` i pipeline. | Docelowy import do aplikacji demonstracyjnej oraz eksperyment end-to-end. |
 
 Przykładowa struktura:

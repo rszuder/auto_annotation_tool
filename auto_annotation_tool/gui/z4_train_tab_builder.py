@@ -1720,7 +1720,7 @@ def _build_train_tab(self):
         command=self._export_selected_run_model_to_free_mode,
     )
     self.history_context_menu.add_command(
-        label="Eksportuj pakiet mobilny (.alprmodel)",
+        label="Eksportuj model mobilny (.alprmodel)",
         command=self._export_selected_run_model_to_mobile_package,
     )
     self.history_context_menu.add_command(

@@ -6,9 +6,9 @@ Dokument opisuje sens opcji widocznych w modalu eksportu modeli do klienta mobil
 
 Model trenowany w aplikacji powstaje jako checkpoint YOLO, najczęściej `best.pt`. Taki plik jest wygodny w środowisku Python/PyTorch, ale nie jest właściwym formatem wdrożeniowym dla aplikacji Android.
 
-Eksport mobilny tworzy pakiet `.alprmodel`, czyli zwykły pakiet ZIP z manifestem i jednym lub wieloma wariantami wykonawczymi modelu.
+Eksport pojedynczego modelu tworzy model mobilny `.alprmodel` ze schematem `alpr.model.v1`: archiwum ZIP z manifestem i jednym lub wieloma wariantami wykonawczymi jednego MP, MT albo MZ.
 
-Pakiet mobilny zawiera:
+Model mobilny zawiera:
 
 - `manifest.json` z kontraktem inferencji;
 - warianty modelu, np. `LiteRT/TFLite`, `ONNX`, opcjonalnie `NCNN`;
@@ -17,7 +17,7 @@ Pakiet mobilny zawiera:
 - specyfikację wejścia i wyjścia modelu;
 - sumy kontrolne SHA-256.
 
-Ważne: zaznaczenie kilku formatów w prawym panelu eksportu oznacza kilka wariantów tego samego checkpointu `best.pt` w jednym pakiecie `.alprmodel`, a nie kilka różnych modeli logicznych.
+Ważne: zaznaczenie kilku formatów w prawym panelu eksportu oznacza kilka wariantów tego samego checkpointu `best.pt` w jednym modelu mobilnym `.alprmodel`, a nie kilka różnych modeli logicznych.
 
 Przykład:
 
@@ -36,6 +36,8 @@ Eksport ma teraz dwa poziomy:
 - `alpr.package.v1` - kompletny pakiet ALPR, ktory zawiera jawna pare `MT+MZ` albo pelny komplet `MP+MT+MZ` i opis pipeline mobilnego.
 
 To rozdzielenie jest celowe. Pojedynczy model nadal jest potrzebny do diagnostyki, rankingu i testow izolowanych, ale eksperyment wdrozeniowy na Androidzie powinien oceniac kompletny zestaw `MT+MZ` albo `MP+MT+MZ`, bo dopiero taki zestaw realizuje pelne rozpoznanie tablicy na obrazie. Model pojazdow `MP` jest przygotowywany w aplikacji desktopowej, jezeli ma byc czescia kaskady; telefon nie powinien pobierac surowego YOLO i konwertowac go lokalnie.
+
+Samodzielny eksport MP, MT lub MZ pozwala też podmienić tylko tę rolę na telefonie, zachowując pozostałe modele konfiguracji bazowej. Zestawy MP+MT i MP+MZ nie spełniają kontraktu kompletnego pakietu ALPR.
 
 ## 2. Znaczenie prawego panelu eksportu
 

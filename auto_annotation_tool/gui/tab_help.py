@@ -554,12 +554,12 @@ Workspace/
             "wybieramy modele, dokumentujemy parametry, tworzymy paczkę i sprawdzamy ją na urządzeniu.",
         )
 
-        self._section(widget, "Czym jest pakiet mobilny")
+        self._section(widget, "Model mobilny i kompletny pakiet ALPR")
         self._bullet_list(
             widget,
             [
-                "Pojedynczy model może być eksportowany jako alpr.model.v1: MP, MT albo MZ.",
-                "Pakiet alpr.package.v1 może zawierać jeden model, parę MT+MZ albo komplet MP+MT+MZ.",
+                "Model mobilny alpr.model.v1 zawiera jeden MP, MT albo MZ. Służy do testu izolowanego lub podmiany jednej roli na telefonie.",
+                "Kompletny pakiet ALPR alpr.package.v1 wymaga MT+MZ; opcjonalny MP rozszerza go do MP+MT+MZ.",
                 "MP jest opcjonalnym detektorem pojazdów. Jeśli ma trafić do paczki, ALPR Desktop pobiera lub wskazuje model i wykonuje konwersję przed przekazaniem go do Androida.",
                 "Paczka .alprmodel jest archiwum z manifestem, wariantami modeli, etykietami, progami, metadanymi i sumami SHA-256.",
             ],
@@ -605,7 +605,7 @@ Workspace/
                 "conf: próg pewności detekcji; niższy próg zwiększa czułość, ale może dodać fałszywe wykrycia.",
                 "IoU: próg NMS; decyduje, kiedy nachodzące detekcje są traktowane jako duplikaty.",
                 "Kwantyzacja: sposób zmniejszenia precyzji wag/aktywacji, zwykle po to, by przyspieszyć model i zmniejszyć rozmiar.",
-                "Nazwa paczki: powinna być generowana z ID projektu, iteracji, modeli, formatu i daty, ale użytkownik może ją doprecyzować.",
+                "Nazwa pliku eksportu: powinna być generowana z ID projektu, iteracji, modeli, formatu i daty, ale użytkownik może ją doprecyzować.",
             ],
         )
 
