@@ -78,6 +78,7 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
 from .z4_mobile_report_browser import open_mobile_report_browser
 from .z4_mobile_export_locations import MobileExportSourceLocations
+from .z4_mobile_export_contract import describe_mobile_export_selection
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
@@ -1935,13 +1936,13 @@ def _mobile_export_verbose_progress_message(percent: float | int | None, message
         lower = detail.lower()
 
     if not detail:
-        return prefix + "Pracuję nad eksportem pakietu mobilnego. Przygotowuję następny krok procesu."
+        return prefix + "Przygotowuję następny krok eksportu mobilnego."
 
     stage = detail
     if "przygot" in lower and "mt" in lower and "mz" in lower:
         stage = (
-            "Przygotowuję kompletny pakiet ALPR. Eksporter zbuduje osobny pakiet MT, "
-            "osobny pakiet MZ, a potem połączy je wspólnym manifestem dla aplikacji mobilnej."
+            "Przygotowuję kompletny pakiet ALPR. Eksporter zbuduje model mobilny MT, "
+            "model mobilny MZ i opcjonalny MP, a potem połączy je wspólnym manifestem dla aplikacji mobilnej."
         )
     elif "wczyt" in lower and "checkpoint" in lower:
         stage = (
@@ -1957,7 +1958,7 @@ def _mobile_export_verbose_progress_message(percent: float | int | None, message
         )
     elif "manifest" in lower or "sha" in lower:
         stage = (
-            f"{model_label}Tworzę manifest pakietu i liczę sumy SHA-256. Dzięki temu klient mobilny "
+            f"{model_label}Tworzę manifest i liczę sumy SHA-256. Dzięki temu klient mobilny "
             "może sprawdzić kompletność oraz integralność eksportowanych plików."
         )
     elif "pakuj" in lower or "archiw" in lower or "zestaw" in lower:
@@ -1965,7 +1966,7 @@ def _mobile_export_verbose_progress_message(percent: float | int | None, message
     elif "sprawdz" in lower or "sprawdzam" in lower or "zip" in lower:
         stage = f"{model_label}Otwieram zbudowaną paczkę ponownie i waliduję jej zawartość przed zapisaniem wyniku."
     elif "zweryfikowany" in lower or "dolacz" in lower:
-        stage = f"{model_label}Pojedynczy pakiet został sprawdzony i dołączony do kompletnego zestawu ALPR."
+        stage = f"{model_label}Model mobilny został sprawdzony i dołączony do kompletnego zestawu ALPR."
     elif "gotow" in lower:
         stage = f"{model_label}Eksport zakończony. Gotowy plik można przekazać do klienta mobilnego."
     elif model_label:
@@ -4176,7 +4177,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
     if best_weights is None:
         return messagebox.showerror(
             "Brak best.pt",
-            "Pakiet mobilny można zbudować dopiero z ukończonego runu, który ma plik best.pt."
+            "Model mobilny można wyeksportować dopiero z ukończonego runu, który ma plik best.pt."
         )
 
     role = _mobile_role_from_training_target(target)
@@ -4198,12 +4199,12 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
     try:
         self.app.style_dialog_window(
             dialog,
-            title="Eksport pakietu mobilnego ALPR",
+            title="Eksport modelu mobilnego",
             geometry="860x640",
             parent=self.frame,
         )
     except Exception:
-        dialog.title("Eksport pakietu mobilnego ALPR")
+        dialog.title("Eksport modelu mobilnego")
         dialog.geometry("860x640")
     dialog.transient(self.frame)
     try:
@@ -4339,7 +4340,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
 
     tk.Label(
         root,
-        text="Eksport pakietu dla klienta mobilnego",
+        text="Eksport modelu mobilnego",
         bg=bg,
         fg=fg,
         font=("Segoe UI", 14, "bold"),
@@ -4675,7 +4676,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             sync_primary_button()
             return False
         preflight_ready_state["ready"] = True
-        set_status("Eksport gotowy. Można zbudować pakiet mobilny.", "success")
+        set_status("Model gotowy do eksportu mobilnego.", "success")
         sync_primary_button()
         return True
 
@@ -4685,12 +4686,12 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         if str(initial_dir) == ".":
             initial_dir = Path.cwd()
         selected = filedialog.asksaveasfilename(
-            title="Eksportuj model jako pakiet ALPR",
+            title="Eksportuj model mobilny (.alprmodel)",
             parent=dialog,
             initialdir=str(initial_dir),
             initialfile=current.name,
             defaultextension=".alprmodel",
-            filetypes=(("Pakiet ALPR", "*.alprmodel"), ("ZIP", "*.zip"), ("Wszystkie pliki", "*.*")),
+            filetypes=(("Model mobilny lub pakiet ALPR", "*.alprmodel"), ("ZIP", "*.zip"), ("Wszystkie pliki", "*.*")),
         )
         if not selected:
             return None
@@ -4711,7 +4712,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             if worker_state.get("running"):
                 button.configure(text="Eksport trwa...", state=tk.DISABLED)
             elif preflight_ready_state.get("ready"):
-                button.configure(text="Eksportuj .alprmodel", state=tk.NORMAL)
+                button.configure(text="Eksportuj model mobilny (.alprmodel)", state=tk.NORMAL)
             else:
                 button.configure(text="Sprawdź gotowość eksportu", state=tk.NORMAL)
         except Exception:
@@ -4738,7 +4739,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             return
         destination = ask_destination()
         if destination is None:
-            set_status("Eksport anulowany. Pakiet nie został zapisany.", "info")
+            set_status("Eksport anulowany. Plik nie został zapisany.", "info")
             return
         destination_var.set(str(destination))
         if not run_preflight(show_dialog=True):
@@ -4750,7 +4751,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         set_status(
             _mobile_export_verbose_progress_message(
                 0.0,
-                "Eksportuję pakiet mobilny. To może potrwać, szczególnie dla LiteRT/TFLite.",
+                "Eksportuję model mobilny. To może potrwać, szczególnie dla LiteRT/TFLite.",
             ),
             "info",
         )
@@ -4783,27 +4784,27 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
                     progress.configure(mode="determinate")
                     progress_var.set(100.0)
                     progress_percent_var.set("100%")
-                    set_status(f"Pakiet gotowy: {package_path}", "success")
+                    set_status(f"Model mobilny gotowy: {package_path}", "success")
                     try:
-                        self._append_train_log(f"[MOBILE EXPORT] Utworzono pakiet .alprmodel: {package_path}")
+                        self._append_train_log(f"[MOBILE EXPORT] Utworzono model mobilny .alprmodel: {package_path}")
                     except Exception:
                         pass
                     messagebox.showinfo(
-                        "Pakiet mobilny gotowy",
-                        f"Utworzono pakiet dla klienta Android:\n{package_path}",
+                        "Model mobilny gotowy",
+                        f"Utworzono model mobilny dla klienta Android:\n{package_path}",
                         parent=dialog,
                     )
 
                 dialog.after(0, done)
             except Exception as exc:
-                logger.exception("Nie udało się wyeksportować pakietu mobilnego")
+                logger.exception("Nie udało się wyeksportować modelu mobilnego")
                 error_text = str(exc)
 
                 def failed() -> None:
                     set_running(False)
                     progress.stop()
                     progress.configure(mode="determinate")
-                    set_status(f"Nie udało się zbudować pakietu: {error_text}", "error")
+                    set_status(f"Nie udało się wyeksportować modelu mobilnego: {error_text}", "error")
                     messagebox.showerror("Błąd eksportu mobilnego", error_text, parent=dialog)
 
                 try:
@@ -5025,7 +5026,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         return messagebox.showwarning(
             "Brak kandydatów",
             "Nie znalazłem ukończonego treningu z plikiem best.pt.\n\n"
-            "Pakiet mobilny można zbudować dopiero z gotowego modelu.",
+            "Eksport mobilny wymaga gotowego modelu.",
         )
 
     for idx, candidate in enumerate(candidates):
@@ -5063,7 +5064,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         dialog.configure(bg=bg)
     except Exception:
         pass
-    dialog.title("Eksport pakietu mobilnego ALPR")
+    dialog.title("Centrum eksportu mobilnego")
     try:
         screen_width = int(dialog.winfo_screenwidth() or 1360)
         screen_height = int(dialog.winfo_screenheight() or 840)
@@ -6262,7 +6263,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
     title_label = tk.Label(
         root,
-        text="Eksport pakietu dla klienta mobilnego",
+        text="Centrum eksportu mobilnego",
         bg=bg,
         fg=fg,
         font=("Segoe UI", 13, "bold"),
@@ -6789,44 +6790,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
         return selected_candidates
 
     def _export_selection_validation() -> tuple[bool, str, str]:
-        selected_candidates = _selected_export_candidates()
-        markers = {_mobile_export_target_marker(candidate) for candidate in selected_candidates}
-        if not selected_candidates:
-            return (
-                False,
-                "brak wyboru",
-                "Do eksportu nie wybrano jeszcze modelu. Zaznacz pojedynczy MP, MT lub MZ albo komplet MT+MZ / MP+MT+MZ.",
-            )
-        if len(selected_candidates) == 1:
-            marker = _mobile_export_target_marker(selected_candidates[0])
-            if marker == "MP":
-                return (
-                    True,
-                    "pojedynczy model MP",
-                    "Do eksportu zaznaczono model pojazdów MP. To poprawny samodzielny eksport, jeśli aplikacja mobilna ma dostać tylko detektor pojazdów.",
-                )
-            return True, f"pojedynczy model {marker}", f"Do eksportu zaznaczono pojedynczy model {marker}."
-        if markers == {"MT", "MZ"}:
-            return True, "komplet MT+MZ", "Do eksportu zaznaczono komplet MT+MZ."
-        if markers == {"MP", "MT", "MZ"}:
-            return True, "pełny komplet MP+MT+MZ", "Do eksportu zaznaczono pełny komplet MP+MT+MZ."
-        if markers == {"MP", "MT"}:
-            return (
-                False,
-                "dodaj model MZ",
-                "Wybrano MP+MT. To nie jest jeszcze pełna kaskada ALPR. Dodaj model znaków MZ albo zostaw pojedynczy MP/MT.",
-            )
-        if markers == {"MP", "MZ"}:
-            return (
-                False,
-                "dodaj model MT",
-                "Wybrano MP+MZ. To nie jest jeszcze pełna kaskada ALPR. Dodaj model tablic MT albo zostaw pojedynczy MP/MZ.",
-            )
-        return (
-            False,
-            "niekompatybilny wybór",
-            "Eksport wielomodelowy wymaga pary MT+MZ. Model MP może być dodany tylko jako trzeci element pełnego kompletu MP+MT+MZ.",
+        selection = describe_mobile_export_selection(
+            _mobile_export_target_marker(candidate) for candidate in _selected_export_candidates()
         )
+        return selection.valid, selection.label, selection.message
 
     def _export_selection_candidate_label(candidate: dict) -> str:
         marker = _mobile_export_target_marker(candidate)
@@ -6877,7 +6844,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         package_title = _export_selection_package_title(selected)
         total_size_mb = _export_selection_total_size_mb(selected)
         weight_text = _export_selection_package_weight_text(selected)
-        state_text = "Gotowe do konfiguracji eksportu" if is_valid and selected else str(selection_message or "-")
+        state_text = str(selection_message or "-")
         try:
             selected_params_var.set(str(selection_label or package_title or "-"))
         except Exception:
@@ -6903,7 +6870,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
             selection_message=_selection_message,
         )
         if selected_candidates:
-            export_selection_var.set("\n".join(_export_selection_candidate_label(candidate) for candidate in selected_candidates))
+            export_selection_var.set(_selection_message + "\n" + "\n".join(
+                _export_selection_candidate_label(candidate) for candidate in selected_candidates
+            ))
             try:
                 export_selection_label.configure(fg=success if is_valid else warning)
             except Exception:
@@ -7088,8 +7057,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
         ("Wskazany model", selected_model_var, "info"),
         ("Rola / YOLO", selected_target_var, "info"),
         ("Jakość", selected_metric_var, "success"),
-        ("Pakiet", selected_params_var, "info"),
-        ("Waga pakietu", selected_size_var, "warning"),
+        ("Eksport", selected_params_var, "info"),
+        ("Waga modeli", selected_size_var, "warning"),
     )
     selected_canvas_state = {"after": None, "width": 0}
 
@@ -7788,7 +7757,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     summary_canvas.grid(row=0, column=0, sticky="ew", pady=(0, 8))
     summary_canvas_state = {"after": None, "width": 0}
     summary_rows = (
-        ("Pakiet", run_value_var),
+        ("Eksport", run_value_var),
         ("Waga", role_value_var),
         ("Status", checkpoint_value_var),
     )
@@ -9690,7 +9659,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ),
             (
                 "Brak" if format_problem else "Jest",
-                "Formaty pakietu",
+                "Formaty eksportu",
                 _formats_description(request),
             ),
             (
@@ -10112,14 +10081,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 )
             return False
         if update_status:
-            set_status("Eksport gotowy. Można zbudować pakiet mobilny.", "success")
+            set_status("Model gotowy do eksportu mobilnego.", "success")
         return True
 
     def _ask_mobile_package_destination(
         default_destination: Path,
         *,
         parent,
-        title: str = "Eksportuj pakiet ALPR",
+        title: str = "Zapisz eksport mobilny (.alprmodel)",
     ) -> Path | None:
         current = Path(default_destination or "model.alprmodel")
         initial_dir = current.parent
@@ -10131,7 +10100,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             initialdir=str(initial_dir),
             initialfile=current.name,
             defaultextension=".alprmodel",
-            filetypes=(("Pakiet ALPR", "*.alprmodel"), ("ZIP", "*.zip"), ("Wszystkie pliki", "*.*")),
+            filetypes=(("Model mobilny lub pakiet ALPR", "*.alprmodel"), ("ZIP", "*.zip"), ("Wszystkie pliki", "*.*")),
         )
         if not selected:
             return None
@@ -10206,7 +10175,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                             "warning",
                         )
                     else:
-                        set_status("Sprawdzenie wymagań OK. Można zbudować pakiet mobilny.", "success")
+                        set_status("Sprawdzenie wymagań modelu OK. Można rozpocząć eksport mobilny.", "success")
                 _mobile_export_perf_record(
                     "preflight_async",
                     (time.perf_counter() - scheduled_at) * 1000.0,
@@ -10812,12 +10781,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
         if len(selected_by_marker) != len(selected_candidates):
             return messagebox.showwarning(
                 "Nieobsługiwany wybór",
-                "Pakiet mobilny obsługuje pojedynczy MP/MT/MZ, komplet MT+MZ albo pełny komplet MP+MT+MZ.",
+                "Eksport obsługuje pojedynczy model mobilny MP, MT lub MZ oraz kompletny pakiet ALPR MT+MZ lub MP+MT+MZ.",
                 parent=dialog,
             )
 
+        artifact = describe_mobile_export_selection(selected_by_marker)
         executor_modal = tk.Toplevel(dialog)
-        title = "Eksport zaznaczonych modeli"
+        title = artifact.window_title
         try:
             self.app.style_dialog_window(
                 executor_modal,
@@ -10865,6 +10835,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         tk.Label(
             exec_root,
             text=(
+                artifact.message + "\n"
                 "Najpierw ustaw parametry dla każdego modelu. Potem możesz sprawdzić gotowość, uzupełnić braki "
                 "i zapisać gotowy plik .alprmodel dla klienta mobilnego. Przy eksporcie sprawdzenie uruchomi się automatycznie."
             ),
@@ -11488,7 +11459,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 primary_text = "Instaluję zależności..."
                 primary_state = tk.DISABLED
             elif ready:
-                primary_text = "Eksportuj pakiet mobilny"
+                primary_text = artifact.export_label
                 primary_state = tk.NORMAL
             elif installable:
                 primary_text = "Uzupełnij zależności"
@@ -11920,9 +11891,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     rows.append(("Brak", marker, "Sprawdzenie", clean))
 
             try:
-                rows.append(("Jest", "Pakiet", "Miejsce zapisu", str(_default_executor_destination())))
+                rows.append(("Jest", artifact.label, "Miejsce zapisu", str(_default_executor_destination())))
             except Exception as exc:
-                rows.append(("Brak", "Pakiet", "Miejsce zapisu", str(exc)))
+                rows.append(("Brak", artifact.label, "Miejsce zapisu", str(exc)))
 
             installable = bool(_executor_missing_install_requirements())
             exec_preflight_state.update(
@@ -12089,7 +12060,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             destination = _ask_mobile_package_destination(
                 default_destination,
                 parent=executor_modal,
-                title="Zapisz pakiet mobilny ALPR",
+                title=artifact.save_title,
             )
             if destination is None:
                 _set_executor_status("Eksport anulowany. Plik nie został zapisany.", "info")
@@ -12105,7 +12076,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             _set_executor_status(
                 _mobile_export_verbose_progress_message(
                     0.0,
-                    "Eksportuję pakiet mobilny. Postęp zapisuję poniżej.",
+                    artifact.progress_message + " Postęp zapisuję poniżej.",
                 ),
                 "info",
             )
@@ -12141,7 +12112,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         log_text = f"[MOBILE EXPORT] Utworzono pakiet ALPR {package_kind}: {package_path}"
                     else:
                         package_path = exporter.export(request, progress=progress_cb)
-                        log_text = f"[MOBILE EXPORT] Utworzono pakiet modelu mobilnego: {package_path}"
+                        log_text = f"[MOBILE EXPORT] Utworzono model mobilny: {package_path}"
 
                     def done() -> None:
                         set_running(False)
@@ -12150,21 +12121,21 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         exec_progress.configure(mode="determinate")
                         exec_progress_var.set(100.0)
                         exec_progress_percent_var.set("100%")
-                        _set_executor_status(f"Pakiet gotowy: {package_path}", "success")
-                        set_status(f"Pakiet mobilny gotowy: {package_path}", "success")
+                        _set_executor_status(f"{artifact.success_title}: {package_path}", "success")
+                        set_status(f"{artifact.success_title}: {package_path}", "success")
                         try:
                             self._append_train_log(log_text)
                         except Exception:
                             pass
                         messagebox.showinfo(
-                            "Pakiet mobilny gotowy",
-                            f"Utworzono pakiet dla klienta Android:\n{package_path}",
+                            artifact.success_title,
+                            f"{artifact.message}\n{package_path}",
                             parent=executor_modal,
                         )
 
                     executor_modal.after(0, done)
                 except Exception as exc:
-                    logger.exception("Nie udało się zbudować pakietu mobilnego")
+                    logger.exception("Nie udało się wykonać eksportu mobilnego")
                     error_text = str(exc)
 
                     def failed() -> None:
@@ -12173,7 +12144,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         exec_progress.stop()
                         exec_progress.configure(mode="determinate")
                         _set_executor_status(f"Błąd eksportu: {error_text}", "error")
-                        set_status(f"Nie udało się zbudować pakietu mobilnego: {error_text}", "error")
+                        set_status(f"Nie udało się wykonać eksportu mobilnego: {error_text}", "error")
                         messagebox.showerror("Błąd eksportu mobilnego", error_text, parent=executor_modal)
 
                     try:
@@ -12242,10 +12213,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
         destination = _ask_mobile_package_destination(
             Path(preview_request.destination),
             parent=dialog,
-            title="Eksportuj model jako pakiet ALPR",
+            title="Eksportuj model mobilny (.alprmodel)",
         )
         if destination is None:
-            set_status("Eksport anulowany. Pakiet nie został zapisany.", "info")
+            set_status("Eksport anulowany. Plik nie został zapisany.", "info")
             return
         destination_var.set(str(destination))
         if not run_preflight(show_dialog=True):
@@ -12257,7 +12228,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         set_status(
             _mobile_export_verbose_progress_message(
                 0.0,
-                "Eksportuję pakiet mobilny. To może potrwać, szczególnie dla LiteRT/TFLite.",
+                "Eksportuję model mobilny. To może potrwać, szczególnie dla LiteRT/TFLite.",
             ),
             "info",
         )
@@ -12291,27 +12262,27 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     progress.configure(mode="determinate")
                     progress_var.set(100.0)
                     progress_percent_var.set("100%")
-                    set_status(f"Pakiet gotowy: {package_path}", "success")
+                    set_status(f"Model mobilny gotowy: {package_path}", "success")
                     try:
-                        self._append_train_log(f"[MOBILE EXPORT] Utworzono pakiet .alprmodel: {package_path}")
+                        self._append_train_log(f"[MOBILE EXPORT] Utworzono model mobilny .alprmodel: {package_path}")
                     except Exception:
                         pass
                     messagebox.showinfo(
-                        "Pakiet mobilny gotowy",
-                        f"Utworzono pakiet dla klienta Android:\n{package_path}",
+                        "Model mobilny gotowy",
+                        f"Utworzono model mobilny dla klienta Android:\n{package_path}",
                         parent=dialog,
                     )
 
                 dialog.after(0, done)
             except Exception as exc:
-                logger.exception("Nie udało się wyeksportować pakietu mobilnego")
+                logger.exception("Nie udało się wyeksportować modelu mobilnego")
                 error_text = str(exc)
 
                 def failed() -> None:
                     set_running(False)
                     progress.stop()
                     progress.configure(mode="determinate")
-                    set_status(f"Nie udało się zbudować pakietu: {error_text}", "error")
+                    set_status(f"Nie udało się wyeksportować modelu mobilnego: {error_text}", "error")
                     messagebox.showerror("Błąd eksportu mobilnego", error_text, parent=dialog)
 
                 try:
@@ -12593,7 +12564,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     title="Eksportuj komplet MT+MZ jako pakiet ALPR",
                 )
                 if destination is None:
-                    package_status_var.set("Eksport anulowany. Pakiet nie został zapisany.")
+                    package_status_var.set("Eksport anulowany. Plik nie został zapisany.")
                     return
                 package_destination_state["last"] = str(destination)
                 package_id_seed = f"ALPR-{plate_candidate.get('model_label')}-{char_candidate.get('model_label')}"

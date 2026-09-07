@@ -34,14 +34,18 @@ Ten smoke test jest ostatnia reczna kontrola przed zamrozeniem SHA uzywanego w k
 ## 4. Eksport mobilny
 
 - [ ] Otworz `Integracje -> Eksport mobilny`.
-- [ ] Zaznacz pojedynczy model, duet `MT+MZ` albo komplet `MP+MT+MZ`.
+- [ ] Zaznacz osobno MP, MT i MZ: podsumowanie wskazuje „model mobilny”, schema `alpr.model.v1`.
+- [ ] Zaznacz MT+MZ i MP+MT+MZ: podsumowanie wskazuje „kompletny pakiet ALPR”, schema `alpr.package.v1`.
+- [ ] Sprawdź blokadę eksportu MP+MT i MP+MZ oraz komunikat wskazujący brakującą rolę.
 - [ ] Sprawdz, czy nie da sie zaznaczyc dwoch modeli tej samej roli.
-- [ ] Otworz wykonawczy modal eksportu.
+- [ ] Otwórz wykonawczy modal eksportu. Tytuł, przycisk po sprawdzeniu gotowości, okno zapisu i komunikat sukcesu rozróżniają model mobilny oraz pakiet ALPR.
 - [ ] Sprawdz, czy kazdy model ma wlasne `imgsz`, format, kwantyzacje i kalibracje.
 - [ ] Uruchom sprawdzenie gotowosci.
 - [ ] Jezeli sa braki zaleznosci, uzupelnij je z poziomu modala wykonawczego.
 - [ ] Wykonaj eksport stabilnego wariantu `LiteRT/TFLite FP32`.
-- [ ] Sprawdz, czy manifest paczki zapisuje role modeli, fingerprinty, formaty, kwantyzacje, progi, `imgsz` i zrodla kalibracji.
+- [ ] Sprawdź schemat wyniku: pojedynczy model ma `alpr.model.v1` i właściwe `role`; pakiet ma `alpr.package.v1`, wymagane `models.plate` i `models.character`, opcjonalne `models.vehicle`.
+- [ ] Sprawdź fingerprinty, formaty, kwantyzacje, progi, `imgsz` i źródła kalibracji.
+- [ ] Podmień pojedynczy MT na telefonie z konfiguracją MP+MT+MZ: MP i MZ pozostają z konfiguracji bazowej.
 
 ## 5. Import raportow Android
 

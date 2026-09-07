@@ -32,6 +32,10 @@ MobileFormat = Literal["litert", "onnx", "ncnn"]
 
 MOBILE_MODEL_SCHEMA = "alpr.model.v1"
 MOBILE_ALPR_PACKAGE_SCHEMA = "alpr.package.v1"
+COMPLETE_ALPR_MODELS_REQUIRED = (
+    "Kompletny pakiet ALPR wymaga modeli MT i MZ. "
+    "Jeżeli chcesz wyeksportować pojedynczy model, użyj eksportu modelu mobilnego."
+)
 MAX_PACKAGE_ENTRIES = 256
 MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_ALPR_PACKAGE_ENTRIES = 640
@@ -1439,7 +1443,7 @@ class MobileModelExporter:
             self.validate_package(temp_package)
 
             os.replace(str(temp_package), str(destination))
-            notify(100.0, f"Pakiet mobilny gotowy: {destination.name}")
+            notify(100.0, f"Model mobilny gotowy: {destination.name}")
             return destination
 
     def inspect_variant(self, variant: ExportedVariant, *, role: MobileRole) -> ExportedVariant:
@@ -2485,7 +2489,7 @@ class MobileAlprPackageExporter:
                     + "\n".join(f"- {item}" for item in problems)
                 )
         if not request.plate_package or not request.character_package:
-            raise MobileExportError("Do zlozenia pakietu wymagane sa paczki MT i MZ.")
+            raise MobileExportError(COMPLETE_ALPR_MODELS_REQUIRED)
 
         destination = Path(request.destination).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2498,7 +2502,7 @@ class MobileAlprPackageExporter:
                     pass
 
         package_label = "MP+MT+MZ" if request.vehicle_package else "MT+MZ"
-        notify(6.0, f"Sprawdzam pojedyncze pakiety {package_label}.")
+        notify(6.0, f"Sprawdzam modele mobilne {package_label}.")
         with tempfile.TemporaryDirectory(prefix="alpr_package_bundle_", dir=str(destination.parent)) as temp_name:
             temp_root = Path(temp_name)
             package_root = temp_root / "package"
@@ -2622,6 +2626,8 @@ class MobileAlprPackageExporter:
         has_request = child_request is not None
         if not required and not has_package and not has_request:
             return []
+        if required and not has_package and not has_request:
+            return [COMPLETE_ALPR_MODELS_REQUIRED]
         if has_package == has_request:
             return [f"{label}: wskaz dokladnie jedno zrodlo: gotowy .alprmodel albo checkpoint do eksportu."]
 
@@ -2817,6 +2823,8 @@ class MobileAlprPackageExporter:
         if not SAFE_MODEL_ID_RE.match(package_id):
             raise MobileExportError(f"Nieprawidlowy package_id: {package_id}")
         models = dict(manifest.get("models") or {})
+        if not models.get("plate") or not models.get("character"):
+            raise MobileExportError(COMPLETE_ALPR_MODELS_REQUIRED)
         roles = ["plate", "character"]
         has_vehicle = bool(isinstance(models.get("vehicle"), dict) and models.get("vehicle"))
         if has_vehicle:

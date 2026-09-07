@@ -6,6 +6,18 @@ Plik roboczy do prowadzenia:
 - pomysłów użytkownika,
 - decyzji wdrożeniowych wymagających ciągłości między sesjami.
 
+## 2026-09-07: model mobilny i kompletny pakiet ALPR
+
+Centrum eksportu, przyciski, okna zapisu i komunikaty rozróżniają model mobilny
+`alpr.model.v1` (jeden MP, MT lub MZ) oraz kompletny pakiet ALPR
+`alpr.package.v1` (MT+MZ albo MP+MT+MZ). Podsumowanie wyboru wskazuje schemat.
+Brak MT lub MZ w pakiecie daje czytelny błąd i odsyła do eksportu pojedynczego
+modelu. Osobna podmiana jednej roli na telefonie pozostaje wspierana.
+
+Ujednolicono pomoc, asystenta i dokumentację. Testy D1–D9 obejmują oba schematy,
+blokadę niepełnych kompletów, zachowanie metadanych i natywny interfejs eksportu.
+Szczegóły i przykłady manifestów: `docs/model_mobilny_vs_pakiet_alpr.md`.
+
 ## 2026-09-06: identyfikator datasetu po przygotowaniu obrazów
 
 Ultralytics może naprawić i nadpisać JPEG podczas budowania loaderów. Snapshot
@@ -2197,7 +2209,7 @@ Rekomendacja praktyczna:
 
 Rozszerzenie 2026-08-19:
 
-- eksporter rozroznia teraz pojedynczy pakiet `alpr.model.v1` i kompletny pakiet `alpr.package.v1`;
+- eksporter rozroznia teraz pojedynczy model mobilny `alpr.model.v1` i kompletny pakiet `alpr.package.v1`;
 - kompletny pakiet nie jest nowym formatem modelu, tylko kontenerem badawczo-wdrozeniowym dla pary `MT+MZ`;
 - wewnatrz kompletnego pakietu znajduja sie dwa zwykle `.alprmodel`, kazdy ze swoim manifestem, wariantami runtime, progami i sumami kontrolnymi;
 - manifest pakietu glownego opisuje pipeline: detekcja tablic, rektyfikacja, detekcja znakow i skladanie sekwencji;
@@ -2268,7 +2280,7 @@ Po przegladzie plikow TeX pracy dyplomowej doprecyzowano metodyke badan dla wybo
 
 Najwazniejsze ustalenia:
 
-- finalnym kandydatem do aplikacji Android nie jest pojedynczy model, tylko pakiet `MT+MZ` z manifestem i wariantami runtime;
+- kandydatem do badania pełnego potoku Android jest pakiet `MT+MZ` lub `MP+MT+MZ`; pojedynczy model mobilny pozwala osobno podmienić MP, MT lub MZ;
 - ranking pojedynczych modeli zostaje potrzebny, ale sluzy diagnostyce `MT` i `MZ`, a nie samodzielnemu wyborowi kompletnego systemu mobilnego;
 - uczciwe porownanie wymaga wspolnego toru testowego, osobnego od treningu i osobnego od koncowego testu raportowanego w pracy;
 - metryki desktopowe i mobilne musza byc laczone: `mAP`, `precision`, `recall`, `F1`, `CER`, dokladnosc calej tablicy, p50/p90/p95, RAM, rozmiar pakietu i stabilnosc runtime;
@@ -2702,7 +2714,7 @@ Decyzja:
 Zmiana:
 
 - modal wykonawczy eksportu dostal krotki przewodnik przy wyborze formatow;
-- modal wykonawczy eksportu ma jeden glowny CTA: najpierw sprawdza gotowosc, po powodzeniu zmienia sie w `Eksportuj pakiet mobilny`, a przy brakach bibliotek prowadzi do uzupelnienia zaleznosci;
+- modal wykonawczy eksportu ma jeden glowny CTA: najpierw sprawdza gotowosc, po powodzeniu zmienia się w `Eksportuj model mobilny (.alprmodel)` lub `Eksportuj pakiet ALPR (.alprmodel)`, zgodnie z wybranym zestawem, a przy brakach bibliotek prowadzi do uzupelnienia zaleznosci;
 - domyslna nazwa pliku eksportu jest czytelna i nietechniczna: `ALPR_data-godzina_typy-modeli_razem-rozmiar.alprmodel`, bez runow, metryk i dlugich identyfikatorow;
 - kazdy format ma opisany cel: `Android stabilny`, `Android lekki`, `Kontrola`, `Eksperyment`;
 - domyslnie zaznaczony jest tylko stabilny `LiteRT/TFLite FP32`; `ONNX`, `INT8` i `NCNN` uzytkownik wlacza swiadomie;

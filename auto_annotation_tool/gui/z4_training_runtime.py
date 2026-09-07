@@ -1949,7 +1949,7 @@ def _show_history_context_menu(self, event=None):
         pass
     try:
         menu.entryconfigure(
-            "Eksportuj pakiet mobilny (.alprmodel)",
+            "Eksportuj model mobilny (.alprmodel)",
             state=(tk.NORMAL if exportable else tk.DISABLED),
         )
     except Exception:

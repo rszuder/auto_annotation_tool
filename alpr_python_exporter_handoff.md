@@ -3,7 +3,7 @@
 > Dokument lokalny przekazywany pomiędzy agentami. Nie dodawać go do repozytorium klienta mobilnego.
 
 Stan kontraktu: 2026-08-21. Android obsługuje już paczki MT+MZ oraz MP+MT+MZ.
-Eksporter Python buduje pojedyncze pakiety `MP`, `MT`, `MZ` oraz kompletne paczki
+Eksporter Python buduje modele mobilne `MP`, `MT`, `MZ` (`alpr.model.v1`) oraz kompletne pakiety ALPR (`alpr.package.v1`)
 `MT+MZ` i `MP+MT+MZ`. Konwersja surowego modelu pojazdów YOLO nie powinna być
 wykonywana na telefonie, bo jest zbyt ciężka dla urządzenia mobilnego; desktop
 ma dostarczyć gotowy artefakt wykonawczy w paczce `.alprmodel`.
@@ -46,8 +46,10 @@ mobilnym czyta tylko jedną część handoffu, powinien zacząć tutaj.
 
 - Eksporter desktopowy dostarcza gotowy plik `.alprmodel`; klient mobilny nie
   pobiera checkpointów `.pt` i nie konwertuje modeli YOLO na telefonie.
-- Pakiet może zawierać jeden model logiczny `MP`, `MT` albo `MZ`, parę `MT+MZ`
-  albo pełny komplet `MP+MT+MZ`.
+- Model mobilny `alpr.model.v1` zawiera jeden model logiczny: `MP`, `MT` albo `MZ`.
+- Kompletny pakiet ALPR `alpr.package.v1` wymaga `MT+MZ`; opcjonalny `MP` rozszerza go do `MP+MT+MZ`.
+- `MP+MT` i `MP+MZ` są niepełne i nie mogą być eksportowane jako `alpr.package.v1`.
+- Pojedynczy model mobilny pozwala podmienić jedną rolę na telefonie, zachowując pozostałe modele konfiguracji bazowej.
 - `MP` jest opcjonalnym modelem pojazdów. Jeżeli jest w paczce, jest już
   wyeksportowany do wariantów wykonawczych i opisany w manifeście tak samo jak
   `MT` i `MZ`.
@@ -581,7 +583,7 @@ Zalecane metadane dodatkowe:
 
 ## 9. Kompletny pakiet ALPR `MT+MZ` lub `MP+MT+MZ`
 
-Pojedynczy pakiet `alpr.model.v1` opisuje jeden model logiczny. Pełny system ALPR
+Model mobilny `alpr.model.v1` opisuje jeden model logiczny: MP, MT albo MZ. Pełny system ALPR
 na telefonie potrzebuje co najmniej dwóch modeli, a opcjonalnie trzech:
 
 - `MP` — opcjonalny model pojazdów ograniczający analizę MT do ROI;
@@ -590,7 +592,7 @@ na telefonie potrzebuje co najmniej dwóch modeli, a opcjonalnie trzech:
 
 Eksporter Python musi potrafić utworzyć drugi poziom pakietu:
 `alpr.package.v1`. Format nie zastępuje `alpr.model.v1`, tylko pakuje dwa lub
-trzy już zwalidowane pakiety pojedynczych modeli w jeden komplet
+trzy już zwalidowane modele mobilne w jeden komplet
 wdrożeniowo-badawczy.
 
 Przykładowa struktura:
@@ -862,7 +864,7 @@ Punkt integracji: menu kontekstowe historii treningów obok „Eksportuj best.pt
 Nowa akcja:
 
 ```text
-Eksportuj pakiet dla klienta mobilnego (.alprmodel)
+Eksportuj model mobilny (.alprmodel)
 ```
 
 W widoku pozwalającym zestawić modele należy dodać drugą akcję:

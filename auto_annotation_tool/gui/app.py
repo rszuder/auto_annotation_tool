@@ -2685,7 +2685,7 @@ class AutoAnnotationApp:
                 location="[Z4] Trening i analiza",
                 goal=(
                     "Z4 przygotowuje warianty datasetów, uruchamia trening, porównuje modele, wybiera wynik bramki "
-                    "i buduje pakiet mobilny .alprmodel."
+                    "i eksportuje model mobilny lub kompletny pakiet ALPR .alprmodel."
                 ),
                 current=(
                     "Model startowy treningu i wynik bramki to dwa różne wybory. Model startowy rozpoczyna run, "
@@ -2696,7 +2696,7 @@ class AutoAnnotationApp:
                     "W PZ2 wybierz wariant, model startowy, parametry i uruchom trening.",
                     "Po treningu sprawdź historię, ranking i porównania na wspólnym torze testowym.",
                     "Jako wynik bramki wskaż model świadomie: z historii, rankingu albo sekcji wyboru wyniku.",
-                    "Do Androida eksportuj pojedynczy model do diagnostyki albo pakiet MT+MZ do testu end-to-end.",
+                    "Do Androida eksportuj pojedynczy MP, MT lub MZ do diagnostyki i podmiany modelu albo pakiet MT+MZ / MP+MT+MZ do testu end-to-end.",
                 ),
                 glossary=(
                     "wariant = konkretna wersja datasetu",
@@ -2704,7 +2704,7 @@ class AutoAnnotationApp:
                     "model startowy = checkpoint użyty na wejściu treningu",
                     "wynik bramki = model zatwierdzony jako rezultat pracy",
                     "data.yaml = opis datasetu YOLO; przy INT8 służy do kalibracji",
-                    "pakiet mobilny = plik .alprmodel z manifestem i wariantami wykonawczymi",
+                    "model mobilny = jeden MP, MT albo MZ; pakiet ALPR = MT+MZ lub MP+MT+MZ",
                     "kalibracja = pomiar zakresów aktywacji na reprezentatywnych obrazach",
                     "INT8 = wariant kwantyzowany wymagający kalibracji",
                 ),

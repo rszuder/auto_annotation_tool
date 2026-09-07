@@ -74,7 +74,9 @@ FREE_MODE_ASSISTANT_GLOSSARY: dict[str, str] = {
     "OCR": "rozpoznawanie znaków z obrazu, np. odczyt liter i cyfr z wyciętej tablicy.",
     "ONNX": "format kontrolny i diagnostyczny modelu; pomaga porównywać wynik eksportu z checkpointem, ale na Androidzie zwykle jest fallbackiem, nie główną ścieżką.",
     "overlay": "nakładka na obszar roboczy pokazująca stan procesu, postęp albo krótkie sterowanie bez przechodzenia do innej karty.",
-    "pakiet mobilny": "plik .alprmodel, czyli ZIP z manifestem, wariantami wykonawczymi modelu i metadanymi potrzebnymi aplikacji Android.",
+    "plik .alprmodel": "archiwum ZIP: jeden model mobilny alpr.model.v1 (MP, MT lub MZ) albo kompletny pakiet ALPR alpr.package.v1 (MT+MZ lub MP+MT+MZ).",
+    "model mobilny": "jeden MP, MT albo MZ w formacie alpr.model.v1; pozwala podmienić jedną rolę na telefonie lub wykonać test izolowany.",
+    "pakiet ALPR": "kompletny zestaw MT+MZ albo MP+MT+MZ w formacie alpr.package.v1, przeznaczony do pełnego rozpoznawania tablic.",
     "pakiet MT+MZ": "kompletny pakiet ALPR zawierający model tablic MT, model znaków MZ i opis pipeline; to właściwy kandydat do testu end-to-end na telefonie.",
     "perfect": "status oznaczający, że przykład jest sprawdzony i nadaje się do datasetu.",
     "poligon": "wielopunktowy obrys obiektu; dokładniejszy niż zwykły prostokątny box.",
@@ -226,8 +228,8 @@ FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
     "poligony": "poligon",
     "progi": "confidence",
     "próg": "confidence",
-    "alprmodel": "pakiet mobilny",
-    ".alprmodel": "pakiet mobilny",
+    "alprmodel": "plik .alprmodel",
+    ".alprmodel": "plik .alprmodel",
     "fp32": "FP32",
     "int8": "INT8",
     "iou": "IoU",
@@ -240,9 +242,11 @@ FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
     "ncnn": "NCNN",
     "nms": "NMS",
     "onnx": "ONNX",
-    "pakiet": "pakiet mobilny",
-    "pakietu": "pakiet mobilny",
-    "pakiet mobilny alpr": "pakiet mobilny",
+    "pakiet": "pakiet ALPR",
+    "pakietu": "pakiet ALPR",
+    "pakiet mobilny alpr": "pakiet ALPR",
+    "pakiet mobilny": "plik .alprmodel",
+    "pakiet alpr": "pakiet ALPR",
     "pakiet mt mz": "pakiet MT+MZ",
     "pakiet mt+mz": "pakiet MT+MZ",
     "ramka": "box",
@@ -280,17 +284,17 @@ FREE_MODE_ASSISTANT_GLOSSARY_ALIASES: dict[str, str] = {
 
 def get_mobile_export_assistant_context() -> dict:
     return {
-        "location": "[Eksport] Pakiet mobilny ALPR (.alprmodel)",
+        "location": "[Integracje] Eksport mobilny",
         "goal": (
-            "Ten ekran nie trenuje modelu. Bierze gotowy checkpoint best.pt i buduje pakiet, "
+            "Ten ekran eksportuje gotowe checkpointy jako model mobilny lub kompletny pakiet ALPR, "
             "który aplikacja Android może bezpiecznie zaimportować, zwalidować i uruchomić."
         ),
         "current": (
-            "Pojedynczy model MT albo MZ służy diagnostyce. Do pełnej demonstracji ALPR potrzebny jest pakiet "
-            "MT+MZ z manifestem, wariantami runtime i progami inferencji."
+            "Pojedynczy MP, MT albo MZ pozwala podmienić jedną rolę i wykonać test izolowany. Kompletny pakiet ALPR zawiera "
+            "MT+MZ albo MP+MT+MZ z manifestem, wariantami runtime i progami inferencji."
         ),
         "workflow": (
-            "Najpierw wybierz kandydata: pojedynczy model MT/MZ do diagnostyki albo komplet MT+MZ do testu całego ALPR.",
+            "Wybierz model mobilny MP, MT lub MZ do podmiany jednej roli albo pakiet ALPR MT+MZ lub MP+MT+MZ do testu całego potoku.",
             "Formaty w prawym panelu to warianty wykonawcze tego samego checkpointu, np. LiteRT/TFLite FP32, LiteRT/TFLite INT8, ONNX FP32 albo NCNN.",
             "data.yaml wskazujesz tylko wtedy, gdy eksportujesz INT8. To nie są importowane obrazy i nie jest trening, tylko próbka do kalibracji zakresów liczbowych.",
             "Modal eksportu podpowiada zgodne pliki data.yaml: najpierw dataset przypisany do modelu, potem zgodne datasety projektu i katalogi globalne danego toru.",
@@ -299,8 +303,8 @@ def get_mobile_export_assistant_context() -> dict:
             "Pakiet .alprmodel zawiera manifest, warianty modelu, etykiety, progi, metadane, wersję kontraktu i sumy SHA-256.",
         ),
         "glossary": (
-            "pakiet mobilny = plik .alprmodel, czyli ZIP z manifestem i wariantami modelu",
-            "pakiet MT+MZ = kompletny zestaw do testu end-to-end: model tablic + model znaków",
+            "model mobilny = pojedynczy MP, MT albo MZ, schema alpr.model.v1",
+            "pakiet ALPR = MT+MZ albo MP+MT+MZ do testu end-to-end, schema alpr.package.v1",
             "data.yaml = opis datasetu YOLO używany przy INT8 jako źródło kalibracji",
             "zgodny data.yaml = YAML z tego samego toru co model: MP->pojazdy, MT->tablice/pose, MZ->znaki",
             "kalibracja = pomiar zakresów aktywacji na reprezentatywnych obrazach",

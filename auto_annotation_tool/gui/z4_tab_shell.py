@@ -235,7 +235,7 @@ def get_free_mode_assistant_context(self) -> dict:
             "location": "[Z4] Trening i analiza / [PZ2] Trening i wyniki",
             "goal": (
                 "PZ2 korzysta z wariantu splitu przygotowanego w PZ1, wybiera model startowy treningu, "
-                "uruchamia run i pozwala zbudować pakiet mobilny z gotowego checkpointu."
+                "uruchamia run i pozwala wyeksportować model mobilny z gotowego checkpointu."
             ),
             "current": (
                 "Model startowy rozpoczyna trening. Wynik bramki to model jawnie wskazany po treningu, rankingu albo analizie historii runów."
@@ -253,7 +253,7 @@ def get_free_mode_assistant_context(self) -> dict:
                 "epoka = pełne przejście po danych",
                 "val = walidacja jakości",
                 "ranking = porównanie modeli",
-                "pakiet mobilny = plik .alprmodel z manifestem i wariantami wykonawczymi",
+                "model mobilny = jeden MP, MT albo MZ; pakiet ALPR = MT+MZ lub MP+MT+MZ",
                 "pakiet MT+MZ = komplet modelu tablic i modelu znaków do testu end-to-end",
                 "data.yaml = opis datasetu YOLO; w INT8 jest reprezentatywną próbką do kalibracji",
                 "kalibracja = pomiar zakresów aktywacji, a nie trening",
