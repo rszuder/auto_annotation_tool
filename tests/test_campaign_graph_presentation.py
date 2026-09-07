@@ -178,6 +178,62 @@ class GraphPresentationTkTests(unittest.TestCase):
         self.assertEqual(self.canvas.coords(node), [120, 130, 200, 200])
         self.assertEqual(self.canvas.coords(legend), [10, 680])
 
+    def gate_layout_namespace(self, *, width=900, zoom=1.0, local_zoom=1.0, title="T02 TRENUJ MODEL ZNAKÓW", status="WYBIERZ"):
+        from tkinter import font as tkfont
+        draw = next(node for node in self.renderer.body if isinstance(node, ast.FunctionDef) and node.name == "_draw")
+        gate = next(node for node in draw.body if isinstance(node, ast.FunctionDef) and node.name == "_draw_gate")
+        def assigns(node, name):
+            return isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
+        start = next(index for index, node in enumerate(gate.body) if assigns(node, "title_font"))
+        end = next(index for index, node in enumerate(gate.body) if assigns(node, "gate_h"))
+        fonts = [node for node in draw.body if isinstance(node, ast.FunctionDef) and node.name in {"_gate_font", "_gate_layout_font"}]
+        ns = {"tkfont": tkfont, "canvas": self.canvas, "width": width, "local_zoom": local_zoom,
+              "zoom_for_fonts": zoom, "graph_zoom_scale": zoom, "graph_base_font_scale": 1.22,
+              "gate_title_text": title, "status_text": status, "resource_status_value": "OK",
+              "work_status_value": "KONTROLUJ AT", "approve_display_label": "ZATWIERDŹ",
+              "rows": [(label, "", None, False) for label in ("BRAMKA", "ZASOBY", "PRACA", "ZATWIERDŹ")]}
+        exec(compile(ast.Module(body=fonts + gate.body[start:end + 1], type_ignores=[]), "gate_dimensions", "exec"), ns)
+        ns["status_body"] = next(node.body for node in ast.walk(gate)
+                                 if isinstance(node, ast.If) and ast.unparse(node.test) == "idx == 0")
+        return ns
+
+    def test_gate_dimensions_stay_fixed_while_sidebar_changes_viewport(self):
+        from auto_annotation_tool.campaign_transition_specs import TRANSITION_SPECS
+        for spec in TRANSITION_SPECS:
+            for local_zoom in (1.0, 1.4):
+                with self.subTest(gate=spec.badge_id, local_zoom=local_zoom):
+                    sizes = []
+                    for width in (900, 980, 1100, 1240, 1100, 900):
+                        ns = self.gate_layout_namespace(width=width, local_zoom=local_zoom,
+                            title=f"{spec.badge_id} {spec.badge_label}".upper())
+                        sizes.append((ns["gate_w"], ns["gate_h"], ns["title_h"], ns["row_heights"]))
+                    self.assertTrue(all(size == sizes[0] for size in sizes))
+                    if local_zoom > 1:
+                        normal = self.gate_layout_namespace(title=f"{spec.badge_id} {spec.badge_label}".upper())
+                        self.assertGreater(sizes[0][0], normal["gate_w"])
+
+    def test_gate_status_leaves_row_border_visible_at_all_zoom_levels(self):
+        for status in ("WYBIERZ", "OTWARTA", "ZAMKNIĘTA", "PRZERWANE", "WYBIERZ WYNIK", "DO KONTROLI"):
+            for zoom, local_zoom in ((0.7, 1.0), (1.0, 1.0), (1.4, 1.0), (1.0, 1.4)):
+                with self.subTest(status=status, zoom=zoom, local_zoom=local_zoom):
+                    self.canvas.delete("all")
+                    ns = self.gate_layout_namespace(zoom=zoom, local_zoom=local_zoom, status=status)
+                    row_width, row_height = ns["gate_w"], ns["row_heights"]["BRAMKA"]
+                    row = self.canvas.create_rectangle(20, 30, 20 + row_width, 30 + row_height,
+                        fill="#141e12", outline="#81ecd0", width=1)
+                    ns.update(x=20, y0=30, current_row_h=row_height, value=status,
+                              row_fill="#141e12", graph_card_muted="#a0b19a", value_color="#81ecd0", row_tags=("status",))
+                    exec(compile(ast.Module(body=ns["status_body"], type_ignores=[]), "gate_status", "exec"), ns)
+                    self.canvas.scale("all", 0, 0, zoom, zoom)
+                    for y in (30 * zoom, (30 + row_height) * zoom):
+                        for fraction in (0.6, 0.8, 0.95):
+                            x = (20 + row_width * fraction) * zoom
+                            self.assertEqual(self.canvas.find_overlapping(x, y, x, y)[-1], row)
+                    status_item = next(item for item in self.canvas.find_withtag("status") if self.canvas.type(item) == "text")
+                    box = self.canvas.bbox(status_item)
+                    self.assertGreater(box[1], 30 * zoom)
+                    self.assertLess(box[3], (30 + row_height) * zoom)
+
     def test_fading_preserves_geometry_bindings_and_visibility(self):
         for theme in THEME_DEFINITIONS:
             with self.subTest(theme=theme):

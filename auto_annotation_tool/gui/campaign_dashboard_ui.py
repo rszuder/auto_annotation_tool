@@ -19354,7 +19354,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 _inline_row_width("ZATWIERDŹ", "", approve=True),
             ]
             min_gate_w = 104 * local_zoom
-            max_gate_w = max(min_gate_w, min(width * 0.26, 330 * local_zoom))
+            # Card geometry is in world units. Resizing the viewport (including
+            # the project drawer animation) must not reflow its contents.
+            max_gate_w = 260 * local_zoom
             gate_w = max(min_gate_w, min(max_gate_w, max(content_widths or [min_gate_w])))
             title_line_h = _font_linespace_world(title_layout_font, 11 * local_zoom)
             row_line_h = _font_linespace_world(row_label_layout_font, 10 * local_zoom)
@@ -19871,46 +19873,15 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         status_value = str(value).strip().upper()
                         if status_value == "WYBIERZ":
                             status_value = "DO WYBORU"
-                        status_pill_font = _gate_font(8, local_zoom)
-                        status_pill_layout_font = _gate_layout_font(8, local_zoom)
-                        status_label_w = _measure_text_world_width("BRAMKA", row_label_layout_font)
-                        status_text_w = _measure_text_world_width(status_value, status_pill_layout_font)
-                        max_pill_w = max(
-                            46 * local_zoom,
-                            gate_w - status_label_w - 38 * local_zoom,
-                        )
-                        pill_w = min(
-                            max_pill_w,
-                            max(46 * local_zoom, status_text_w + 18 * local_zoom),
-                        )
-                        pill_h = max(
-                            17 * local_zoom,
-                            _font_linespace_world(status_pill_layout_font, 12 * local_zoom) + 7 * local_zoom,
-                        )
-                        pill_x1 = x + gate_w - 7 * local_zoom
-                        pill_x0 = pill_x1 - pill_w
-                        pill_y0 = y0 + (current_row_h - pill_h) / 2
-                        pill_y1 = pill_y0 + pill_h
-                        pill_fill = row_fill
-                        pill_outline = ""
-                        pill_text = graph_card_muted if status_value == "DO WYBORU" else value_color
-                        canvas.create_rectangle(
-                            pill_x0,
-                            pill_y0,
-                            pill_x1,
-                            pill_y1,
-                            fill=pill_fill,
-                            outline=pill_outline,
-                            width=1,
-                            tags=row_tags,
-                        )
+                        # The row already provides its background and border.
+                        # A second filled rectangle masks the row's outline.
                         canvas.create_text(
-                            (pill_x0 + pill_x1) / 2,
+                            x + gate_w - 12 * local_zoom,
                             y0 + current_row_h / 2,
                             text=status_value,
-                            fill=pill_text,
-                            anchor="center",
-                            font=status_pill_font,
+                            fill=graph_card_muted if status_value == "DO WYBORU" else value_color,
+                            anchor="e",
+                            font=_gate_font(8, local_zoom),
                             tags=row_tags,
                         )
                     else:
