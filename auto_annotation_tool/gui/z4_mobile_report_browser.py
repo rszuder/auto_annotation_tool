@@ -341,6 +341,8 @@ def _mobile_report_bundle_preview_dict(bundle: MobileReportBundle | None) -> dic
         "metadata": _compact_mobile_report_payload(bundle.metadata or {}),
         "pipeline_manifests": _compact_mobile_report_payload(getattr(bundle, "pipeline_manifests", {}) or {}),
         "model_refs": _compact_mobile_report_payload(getattr(bundle, "model_refs", {}) or {}),
+        "sample_schema": dict(bundle.sample_schema),
+        "collection_session": _compact_mobile_report_payload(bundle.collection_session),
         "report_payload_preview": _compact_mobile_report_payload(bundle.report_payload or {}),
         "artifacts": {
             "traces": _rows_preview(bundle.trace_rows, bundle.trace_total, bundle.trace_columns),
@@ -354,6 +356,7 @@ def _mobile_report_bundle_preview_dict(bundle: MobileReportBundle | None) -> dic
             },
             "crops": int(bundle.crop_count or 0),
             "annotations": int(bundle.annotation_count or 0),
+            "attempts": _rows_preview(bundle.attempt_rows, bundle.attempt_total, tuple(bundle.attempt_rows[0]) if bundle.attempt_rows else ()),
             "log_preview_chars": len(bundle.log_preview or ""),
         },
         "archive_entries": {
@@ -821,6 +824,20 @@ class MobileReportBrowser:
             return False
 
     def _request_close(self) -> None:
+        reviews = [panel for panel in getattr(self, "_sample_reviews", {}).values() if not panel._closed]
+        if reviews:
+            for panel in reviews:
+                panel.close()
+            if any(not panel._closed for panel in reviews):
+                def finish_close():
+                    if any(panel._saving for panel in reviews):
+                        self.window.after(80, finish_close)
+                    elif any(not panel._closed for panel in reviews):
+                        self._set_status("Nie udało się zapisać weryfikacji. Sprawdź komunikat w jej oknie.", "warning")
+                    else:
+                        self._request_close()
+                self.window.after(80, finish_close)
+                return
         self._closing = True
         self._import_cancel_requested = True
         try:
@@ -1228,6 +1245,8 @@ class MobileReportBrowser:
         self.btn_refresh_reports.grid(
             row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2
         )
+        self.btn_review_samples = ttk.Button(actions, text="Weryfikacja próbek", command=self.open_sample_review, state="disabled")
+        self.btn_review_samples.grid(row=0, column=2, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
         ttk.Button(actions, text="Zamknij", command=self._request_close).grid(row=0, column=4, sticky="e", ipadx=8, ipady=2)
 
         self.status_var = tk.StringVar(value="Gotowe. Wskaż raport lub kilka raportów z telefonu albo wybierz zapisany raport z listy.")
@@ -1735,6 +1754,9 @@ class MobileReportBrowser:
 
     def _show_empty(self) -> None:
         self.current_bundle = None
+        self.current_report = None
+        if hasattr(self, "btn_review_samples"):
+            self.btn_review_samples.configure(state="disabled")
         for var in self.card_vars.values():
             var.set("-")
         self.summary_table.set_rows([("Brak raportów", "Importuj raport z Androida", "Obsługiwane są .alprsession, ZIP benchmarku i JSON.")])
@@ -1751,6 +1773,9 @@ class MobileReportBrowser:
 
     def _show_report_hint(self, report_count: int) -> None:
         self.current_bundle = None
+        self.current_report = None
+        if hasattr(self, "btn_review_samples"):
+            self.btn_review_samples.configure(state="disabled")
         for var in self.card_vars.values():
             var.set("-")
         self.summary_table.set_rows(
@@ -1778,6 +1803,9 @@ class MobileReportBrowser:
             self._show_empty()
             return
         self.current_bundle = bundle
+        self.current_report = report
+        if hasattr(self, "btn_review_samples"):
+            self.btn_review_samples.configure(state="normal" if (bundle or report.source_path) else "disabled")
         self._update_cards(report, bundle)
         self._populate_summary(report, bundle)
         self._populate_comparison_guard(report, bundle)
@@ -1788,6 +1816,14 @@ class MobileReportBrowser:
         self._populate_diagnostics(report, bundle)
         self._populate_crops(report, bundle)
         self._populate_raw(report, bundle)
+
+    def open_sample_review(self) -> None:
+        report = getattr(self, "current_report", None)
+        if report is None:
+            self._set_status("Wybierz sesję z listy raportów.", "warning")
+            return
+        from .z4_mobile_sample_review import open_mobile_sample_review
+        open_mobile_sample_review(self, report, self.current_bundle)
 
     def _update_cards(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
         if bundle:
@@ -2284,6 +2320,20 @@ class MobileReportBrowser:
 
     def _populate_quality(self, report: MobileBenchmarkReport) -> None:
         quality = dict(report.quality or {})
+        if quality.get("quality_source") == "human_review":
+            def ratio(key):
+                value = quality.get(key)
+                return "—" if value is None else f"{float(value) * 100:.2f}%"
+            self.quality_table.set_rows([
+                ("Źródło jakości", "Weryfikacja człowieka", "Ukończona weryfikacja; surowe pomiary czasu i pamięci zachowane."),
+                ("Poprawne odczyty MZ", ratio("exact_read_rate"), "Jednostka: oceniany crop."),
+                ("Brak odczytu MZ", ratio("no_read_rate"), "Oceniany crop z GT, bez użytecznego odczytu."),
+                ("CER MZ", ratio("cer"), "Suma błędów / suma znaków GT. Wartość może przekraczać 100%."),
+                ("Skuteczność ALPR dla tablic", ratio("subject_success_rate"), "Co najmniej jeden poprawny odczyt lub wynik konsensusu."),
+                ("Skuteczność lokalizacji MT", ratio("mt_localization_success_rate"), "Ocenione próby z widoczną tablicą; nie jest to mAP."),
+                ("SHA-256 źródła", quality.get("source_archive_sha256", ""), "Tożsamość archiwum powiązanego z weryfikacją."),
+            ])
+            return
         if not quality:
             self.quality_table.set_rows([("Brak jakości", "-", "Raport nie zawiera sekcji quality.")])
             return
@@ -2298,7 +2348,7 @@ class MobileReportBrowser:
             ("Jednostka jakości", str(quality.get("unit") or "-"), "Nie liczymy kilku klatek tego samego tracku jako kilku prób."),
             ("Próbki GT", str(quality.get("ground_truth_samples") or 0), "Liczba unikalnych próbek z transkrypcją."),
             ("Exact match", _format_percent(quality.get("exact_match_rate")), "Odsetek pełnych trafień po normalizacji."),
-            ("CER", _format_percent(quality.get("cer")), "Character Error Rate: im mniej, tym lepiej."),
+            ("CER", "—" if _safe_float(quality.get("cer")) is None else f"{float(quality['cer']) * 100:.1f}%", "Suma błędów / znaki GT; wartość może przekraczać 100%."),
             (
                 "Śr. odległość edycyjna",
                 _format_number(quality.get("normalized_edit_distance_mean"), digits=4),

@@ -30,6 +30,9 @@ from .mobile_package_experiments import (
     iter_full_event_rows,
     iter_full_frame_flow_rows,
     iter_full_sample_rows,
+    iter_full_attempt_rows,
+    iter_full_sample_annotations,
+    read_mobile_sample_image,
     iter_full_thermal_rows,
     iter_full_trace_rows,
     read_mobile_report_bundle,
@@ -38,6 +41,7 @@ from .mobile_package_experiments import (
     read_alprmodel_manifest,
     score_mobile_report,
 )
+from .mobile_human_review import MobileHumanReview, MobileReviewSession, PlateTextAlignment, align_plate_text
 
 __all__ = [
     'AnnotationComparator',
@@ -52,6 +56,10 @@ __all__ = [
     'MobilePackageExperimentStore',
     'MobilePackageScore',
     'MobileReportBundle',
+    'MobileHumanReview',
+    'MobileReviewSession',
+    'PlateTextAlignment',
+    'align_plate_text',
     'ReportBundleEntry',
     'ReportBundleReader',
     'ReportBundleValidation',
@@ -63,6 +71,9 @@ __all__ = [
     'iter_full_event_rows',
     'iter_full_frame_flow_rows',
     'iter_full_sample_rows',
+    'iter_full_attempt_rows',
+    'iter_full_sample_annotations',
+    'read_mobile_sample_image',
     'iter_full_thermal_rows',
     'iter_full_trace_rows',
     'is_plate_pose_model_path',

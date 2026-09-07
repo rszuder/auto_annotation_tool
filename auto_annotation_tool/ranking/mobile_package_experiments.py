@@ -274,6 +274,11 @@ class MobileReportBundle:
     sample_total: int = 0
     crop_count: int = 0
     annotation_count: int = 0
+    sample_schema: dict[str, Any] = field(default_factory=dict)
+    collection_session: dict[str, Any] = field(default_factory=dict)
+    attempt_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    attempt_total: int = 0
+    attempts_available: bool = False
     log_preview: str = ""
     entries: tuple[ReportBundleEntry, ...] = field(default_factory=tuple)
     validation: ReportBundleValidation = field(
@@ -309,6 +314,11 @@ class MobileReportBundle:
             "sample_total": self.sample_total,
             "crop_count": self.crop_count,
             "annotation_count": self.annotation_count,
+            "sample_schema": dict(self.sample_schema),
+            "collection_session": dict(self.collection_session),
+            "attempt_rows": list(self.attempt_rows),
+            "attempt_total": self.attempt_total,
+            "attempts_available": self.attempts_available,
             "log_preview": self.log_preview,
             "entries": [entry.to_dict() for entry in self.entries],
             "validation": self.validation.to_dict(),
@@ -699,6 +709,7 @@ class ReportBundleReader:
             manifest = read_json("manifest.json", optional=True)
             bundle_schema = str(manifest.get("schema") or "")
             metadata = read_json("metadata.json", optional=True)
+            collection_session = read_json("session.json", optional=True)
             report_payload = read_json("report.json", optional=True)
             if not report_payload and metadata:
                 report_payload = _report_payload_from_thesis_metadata(metadata)
@@ -805,6 +816,11 @@ class ReportBundleReader:
                 optional=True,
                 max_rows=1000,
             )
+            sample_schema = read_json("samples/schema.json", optional=True)
+            attempt_rows, _attempt_columns, attempt_total = self._read_csv_from_zip(
+                archive, normalized_names, "samples/attempts.csv", optional=True, max_rows=1000,
+            )
+            attempts_available = "samples/attempts.csv" in normalized_names
             crop_count = sum(
                 1
                 for name in normalized_names
@@ -843,7 +859,8 @@ class ReportBundleReader:
                 "has_thermal": bool(thermal_total),
                 "has_frame_flow": bool(frame_flow_total),
                 "has_events": bool(event_total),
-                "has_samples": bool(sample_total or crop_count or annotation_count),
+                "has_samples": bool(sample_total or crop_count or annotation_count or attempt_total),
+                "has_mt_attempts": attempts_available,
                 "has_log": bool(log_preview),
             }
             artifact_counts = {
@@ -854,6 +871,7 @@ class ReportBundleReader:
                 "samples": sample_total,
                 "crops": crop_count,
                 "annotations": annotation_count,
+                "attempts": attempt_total,
             }
             report = MobileBenchmarkReport.from_dict(report_payload or {})
             report, experiment_session = _attach_report_ingest_metadata(
@@ -896,6 +914,11 @@ class ReportBundleReader:
                 sample_total=sample_total,
                 crop_count=crop_count,
                 annotation_count=annotation_count,
+                sample_schema=sample_schema,
+                collection_session=collection_session,
+                attempt_rows=tuple(attempt_rows),
+                attempt_total=attempt_total,
+                attempts_available=attempts_available,
                 log_preview=log_preview,
                 entries=tuple(entries),
                 validation=validation,
@@ -1177,6 +1200,62 @@ def iter_full_sample_rows(bundle_or_path) -> Any:
     yield from _iter_full_report_rows(bundle_or_path, "samples")
 
 
+def iter_full_attempt_rows(bundle_or_path) -> Any:
+    """Stream the full mobile MT attempt register, including attempts without crops."""
+    yield from _iter_full_report_rows(bundle_or_path, "attempts")
+
+
+def iter_full_sample_annotations(bundle_or_path) -> Any:
+    """Read original annotations without flattening nested evidence metadata."""
+    path = _full_report_source_path(bundle_or_path)
+    if path is None or not zipfile.is_zipfile(path):
+        return
+    with zipfile.ZipFile(path, "r") as archive:
+        entries = _normalized_zip_entries_for_full_read(archive)
+        info = entries.get("samples/annotations.jsonl")
+        if info is None:
+            return
+        with archive.open(info, "r") as binary:
+            while True:
+                line = binary.readline(MOBILE_REPORT_MAX_TEXT_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MOBILE_REPORT_MAX_TEXT_BYTES:
+                    raise ValueError("Zbyt duży rekord adnotacji próbki.")
+                if line.strip():
+                    record = json.loads(line.decode("utf-8-sig"))
+                    if not isinstance(record, dict):
+                        raise ValueError("Adnotacja próbki nie jest obiektem JSON.")
+                    yield record
+
+
+def read_mobile_sample_image(bundle_or_path, entry_name: str, *, max_entry_bytes: int = 20 * 1024 * 1024,
+                             max_dimension: int = 12000, max_pixels: int = 40_000_000):
+    """Decode one bounded crop/evidence image through the shared archive validator."""
+    from PIL import Image
+    safe, name = _archive_name_safe(str(entry_name))
+    if not safe or not name.startswith(("samples/crops/", "samples/evidence/")):
+        raise ValueError("Obraz musi należeć do cropów lub dowodów sesji.")
+    path = _full_report_source_path(bundle_or_path)
+    with zipfile.ZipFile(path, "r") as archive:
+        entries = _normalized_zip_entries_for_full_read(archive)
+        info = entries.get(name)
+        if info is None:
+            raise FileNotFoundError(f"Brak obrazu w sesji: {name}")
+        if info.file_size > max_entry_bytes:
+            raise ValueError("Obraz przekracza limit rozmiaru wpisu.")
+        with archive.open(info, "r") as handle:
+            data = handle.read(max_entry_bytes + 1)
+        if len(data) > max_entry_bytes:
+            raise ValueError("Obraz przekracza limit rozmiaru wpisu.")
+    with Image.open(io.BytesIO(data)) as source:
+        width, height = source.size
+        if max(width, height) > max_dimension or width * height > max_pixels:
+            raise ValueError("Obraz przekracza limit wymiarów po dekodowaniu.")
+        source.load()
+        return source.convert("RGB")
+
+
 _FULL_ROW_SOURCES = {
     "trace": {
         "csv": ("traces.csv", "tables/trace_data.csv"),
@@ -1199,6 +1278,7 @@ _FULL_ROW_SOURCES = {
         "csv": ("samples/index.csv",),
         "json": ("samples", "crop_session.records"),
     },
+    "attempts": {"csv": ("samples/attempts.csv",), "json": ("attempts",)},
 }
 
 
@@ -2133,9 +2213,16 @@ def score_mobile_report(
         ),
         default=0.0,
     )
-    cer = _metric01(_nested_value(quality_data, "cer", "character_error_rate"), default=0.0)
+    cer = max(0.0, _safe_float(_nested_value(quality_data, "cer", "character_error_rate"), 0.0) or 0.0)
     char_f1 = _metric01(_nested_value(quality_data, "char_f1", "f1", "f1_score"), default=0.0)
-    quality = max(exact_match, (1.0 - cer) * 0.65 + char_f1 * 0.35 if cer > 0 or char_f1 > 0 else 0.0)
+    quality = max(exact_match, max(0.0, 1.0 - cer) * 0.65 + char_f1 * 0.35 if cer > 0 or char_f1 > 0 else 0.0)
+    if quality_data.get("quality_source") == "human_review":
+        # Verified CER is an unbounded ratio, never a legacy percentage.
+        cer = max(0.0, _safe_float(quality_data.get("cer"), 0.0) or 0.0)
+        exact_match = _clamp01(quality_data.get("exact_read_rate"), 0.0)
+        quality = max(exact_match, max(0.0, 1.0 - cer) * 0.65)
+        if quality_data.get("review_status") != "COMPLETED" or not quality_data.get("available"):
+            quality = 0.0
 
     p95 = _safe_float(
         _nested_value(
@@ -2299,5 +2386,48 @@ class MobilePackageExperimentStore:
         weights: dict[str, float] | None = None,
         targets: dict[str, float] | None = None,
     ) -> list[MobilePackageScore]:
-        scores = [score_mobile_report(report, weights=weights, targets=targets) for report in self.reports]
+        scores = [score_mobile_report(self._current_review_quality(report), weights=weights, targets=targets) for report in self.reports]
         return sorted(scores, key=lambda score: (score.rejected, -score.total, score.package_id, score.variant_id))
+
+    @staticmethod
+    def _current_review_quality(report: MobileBenchmarkReport) -> MobileBenchmarkReport:
+        reference = report.raw.get("human_review", {})
+        if report.quality.get("quality_source") != "human_review" or not isinstance(reference, dict):
+            return report
+        try:
+            review = json.loads(Path(reference["sidecar_path"]).read_text(encoding="utf-8"))
+            current = (review.get("review_status") == "COMPLETED"
+                       and review.get("source_archive_sha256") == report.source_archive_sha256
+                       and review.get("review_revision") == reference.get("review_revision"))
+        except (OSError, ValueError, KeyError):
+            current = False
+        return report if current else replace(report, quality=dict(reference.get("original_quality", {})))
+
+    def apply_human_review(self, session, *, save: bool = True) -> bool:
+        """Publish completed quality; editing again restores the imported baseline."""
+        session.verify_source(force=session.review.review_status == "COMPLETED")
+        review = session.review
+        completed = review.review_status == "COMPLETED"
+        if completed and session.completion_issues():
+            raise ValueError("Weryfikacja nie ma wszystkich wymaganych decyzji.")
+        stats = session.statistics()["summary"] if completed else {}
+        changed = False
+        for index, report in enumerate(self.reports):
+            if report.source_archive_sha256 != review.source_archive_sha256:
+                continue
+            previous = report.raw.get("human_review", {})
+            if not completed and not previous:
+                continue
+            original = dict(previous.get("original_quality", report.quality))
+            reference = {"review_id": review.review_id, "review_revision": review.review_revision,
+                         "review_status": review.review_status, "source_archive_sha256": review.source_archive_sha256,
+                         "sidecar_path": str(session.sidecar_path.resolve()), "original_quality": original}
+            quality = dict(stats, quality_source="human_review", review_status="COMPLETED",
+                           source_archive_sha256=review.source_archive_sha256, units="ratio",
+                           available=bool(stats.get("evaluable_reads")), exact_match_rate=stats.get("exact_read_rate"),
+                           ground_truth_samples=stats.get("evaluable_subjects"), unit="crop") if completed else original
+            self.reports[index] = replace(report, quality=quality, raw=dict(report.raw, human_review=reference))
+            changed = True
+        if changed and save:
+            self.save()
+        return changed
