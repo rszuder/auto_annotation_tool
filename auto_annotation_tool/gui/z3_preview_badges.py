@@ -454,7 +454,7 @@ def get_preview_source_visual_style(host, source_tag: str):
             "legend": "OCR znak",
         },
         "yolo": {
-            "outline": palette.get("warning", "#f4c27a"),
+            "outline": "#0064e0",
             "guide": "#ffd79c",
             "char": "#fff1d6",
             "badge_fill": "#4d3310",
@@ -464,7 +464,9 @@ def get_preview_source_visual_style(host, source_tag: str):
             "legend": "YOLO znak",
         },
         "yolo_box": {
-            "outline": palette.get("warning", "#f4c27a"),
+            # Canvas geometry needs contrast against the photo, independently
+            # of the theme's warning colour (olive on light plates is too faint).
+            "outline": "#0064e0",
             "guide": "#ffd79c",
             "char": "#fff1d6",
             "badge_fill": "#4d3310",

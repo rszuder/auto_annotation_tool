@@ -206,10 +206,12 @@ class ProjectHistoryResourcesTests(unittest.TestCase):
     def test_approval_record_keeps_iteration_before_handler_advances(self):
         with patch.object(graph.CAMPAIGN, "get_active_project_name", return_value="demo"), \
              patch.object(graph.CAMPAIGN, "get_current_iteration_num", side_effect=[1, 2]), \
+             patch.object(graph.CAMPAIGN, "get_current_step", side_effect=[4, 1]), \
              patch.object(graph, "_execute_approve_step4", return_value=graph.CampaignGraphActionResult(True, "approve_step4", "OK")), \
              patch.object(graph.CAMPAIGN, "append_project_history_event") as append:
             graph.execute_campaign_graph_action(object(), "approve_step4")
         self.assertEqual(append.call_args.kwargs["iteration_num"], 1)
+        self.assertEqual(append.call_args.kwargs["status"], "ok")
 
     def test_model_rows_are_not_limited_to_last_twenty_runs(self):
         model = self.root / "best.pt"

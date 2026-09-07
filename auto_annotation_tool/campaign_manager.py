@@ -7,6 +7,7 @@ Zarządza listą projektów, iteracjami i fizycznym czyszczeniem dysku.
 
 import hashlib
 import json
+import os
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -19,6 +20,7 @@ from .campaign_project_registry import bind_campaign_project_registry_methods
 from .campaign_stage_state import bind_campaign_stage_state_methods
 from .campaign_project_history import bind_campaign_project_history_methods
 from .project_cache import PROJECT_CACHE
+from .image_directory_index import IMAGE_DIRECTORIES
 
 
 class CampaignManager:
@@ -708,34 +710,30 @@ class CampaignManager:
                 "manifest_cloned": False,
             }
 
-        stage_images = [
-            path for path in stage_images_dir.iterdir()
-            if path.is_file() and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-        ]
-        if not stage_images:
-            return {
-                "ok": False,
-                "reason": "missing_stage_images",
-                "source_dir": str(stage_images_dir.resolve()),
-                "target_dir": str(target_raw_dir.resolve()),
-                "copied_images": 0,
-                "manifest_images": 0,
-                "manifest_cloned": False,
-            }
-
+        # These are manifest links. Resolve the two parent directories once;
+        # resolving every future target repeatedly traversed missing Windows paths.
+        source_root = stage_images_dir.resolve()
+        target_root = target_raw_dir.resolve()
         selected_images = []
-        for source_path in stage_images:
-            if not source_path.exists() or not source_path.is_file():
-                continue
-            logical_target_path = target_raw_dir / source_path.name
-            selected_images.append(
-                {
-                    "name": source_path.name,
-                    "source_path": str(source_path.resolve()),
-                    "target_path": str(source_path.resolve()),
-                    "iteration_target_path": str(logical_target_path.resolve()),
-                }
-            )
+        try:
+            with os.scandir(source_root) as entries:
+                for entry in entries:
+                    try:
+                        if os.path.splitext(entry.name)[1].lower() not in CONFIG.IMAGE_EXTENSIONS or not entry.is_file():
+                            continue
+                        source_path = Path(entry.path)
+                        if entry.is_symlink():
+                            source_path = source_path.resolve()
+                        selected_images.append({
+                            "name": entry.name,
+                            "source_path": str(source_path),
+                            "target_path": str(source_path),
+                            "iteration_target_path": str(target_root / entry.name),
+                        })
+                    except OSError:
+                        continue
+        except OSError:
+            selected_images = []
 
         if not selected_images:
             return {
@@ -1312,22 +1310,9 @@ class CampaignManager:
 
         if not normalized_names and images_dir:
             try:
-                images_root = Path(images_dir)
-            except Exception:
-                images_root = None
-            if images_root is not None:
-                try:
-                    if images_root.exists() and images_root.is_dir():
-                        for image_path in images_root.rglob("*"):
-                            try:
-                                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
-                                    normalized = self._normalize_image_set_name(image_path.name)
-                                    if normalized:
-                                        normalized_names.append(normalized)
-                            except Exception:
-                                continue
-                except Exception:
-                    pass
+                return IMAGE_DIRECTORIES.snapshot(images_dir, CONFIG.IMAGE_EXTENSIONS, recursive=True).token
+            except (TypeError, ValueError, OSError):
+                return ""
 
         unique_names = sorted(set(normalized_names))
         if not unique_names:
@@ -2221,20 +2206,9 @@ class CampaignManager:
         if path_like is None:
             return 0
         try:
-            path = Path(path_like)
-        except Exception:
+            return IMAGE_DIRECTORIES.snapshot(path_like, CONFIG.IMAGE_EXTENSIONS, recursive=recursive).count
+        except (TypeError, ValueError, OSError):
             return 0
-        if not path.exists() or not path.is_dir():
-            return 0
-        count = 0
-        try:
-            iterator = path.rglob("*") if recursive else path.iterdir()
-            for image_path in iterator:
-                if image_path.is_file() and image_path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS:
-                    count += 1
-        except Exception:
-            return 0
-        return int(count)
 
     def get_iteration_manifest_image_count(self, iteration_num: int = None, project_name: str = None) -> int:
         project_name = self._resolve_project_name(project_name)

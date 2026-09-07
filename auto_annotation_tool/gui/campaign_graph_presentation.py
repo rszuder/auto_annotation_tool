@@ -9,6 +9,66 @@ from .app_theme_definitions import CAMPAIGN_GRAPH_STYLE
 from .web_slim_scrollbar import blend_hex_colors
 
 
+GRAPH_SIGNAL_SPEED_PX_S = 120.0
+GRAPH_SIGNAL_TAIL_PX = 29.0
+
+
+@dataclass
+class GraphSignalMotion:
+    """Distance in screen pixels; never normalize travel by path length."""
+
+    last_time: float
+    distance: float = -4.0
+    paused: bool = False
+    speed: float = GRAPH_SIGNAL_SPEED_PX_S
+
+    def advance(self, now: float, *, paused: bool = False) -> float:
+        elapsed = max(0.0, now - self.last_time)
+        self.last_time = now
+        if not paused and not self.paused:
+            self.distance += elapsed * self.speed
+        self.paused = paused
+        return self.distance
+
+    def finished(self, path_length: float) -> bool:
+        return self.distance > path_length + GRAPH_SIGNAL_TAIL_PX
+
+
+def graph_signal_color(palette):
+    background = palette.get("campaign_graph_bg", "#071009").lstrip("#")
+    light = sum(int(background[index:index + 2], 16) for index in (0, 2, 4)) > 3 * 150
+    return "#007e9b" if light else "#55dcf5"
+
+
+def gate_electrode_style(palette, *, selected=False, enabled=True):
+    background = palette.get("campaign_gate_surface", palette.get("panel", "#141e12"))
+    if not enabled:
+        muted = palette.get("campaign_card_disabled", "#4b5c48")
+        return {"fill": background, "border": blend_hex_colors(background, muted, 0.55),
+                "ink": muted, "rod": blend_hex_colors(background, muted, 0.75), "hover": background}
+    if selected:
+        return {"fill": "#14684f", "border": "#6be5b6", "ink": "#e0fff1",
+                "rod": "#a0ecd0", "hover": "#20825f"}
+    return {"fill": "#09556c", "border": "#4cd2ee", "ink": "#e0faff",
+            "rod": "#89d9e9", "hover": "#10768d"}
+
+
+def close_graph_dialogs(parent):
+    """Discard graph snapshots before leaving for an editor."""
+    try:
+        children = list(parent.winfo_children())
+    except (AttributeError, tk.TclError):
+        return
+    for child in children:
+        if bool(getattr(child, "_campaign_graph_dialog", False)):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        elif not isinstance(child, tk.Toplevel):
+            close_graph_dialogs(child)
+
+
 @dataclass(frozen=True)
 class WorkflowFocus:
     edges: frozenset[str]
@@ -33,6 +93,10 @@ def resolve_workflow_focus(graph, *, current_step, selected_edge="", selected_pa
 def _item_in_focus(tags, scope):
     if "graph_overlay_fixed" in tags or "graph_redraw_previous_frame" in tags:
         return None
+    # An available selector remains a visible way to switch routes even when
+    # its gate's informational fields belong to the dimmed branch.
+    if "gate_button" in tags and any(tag.startswith("gate:") and tag.endswith(":select") for tag in tags):
+        return True
     for prefix in ("gate-group:", "gate-connector:", "edge-line:", "graph_edge_arrow:", "gate_selector_arc_anim:"):
         for tag in tags:
             if tag.startswith(prefix):

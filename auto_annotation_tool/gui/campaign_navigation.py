@@ -36,6 +36,7 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
 from .campaign_models import WizardStageStatus
+from .campaign_t02_source import resolve_t02_review_source
 
 
 def _schedule_z2_right_panel_refresh(tab_ann, *delays_ms: int, lightweight: bool = False) -> None:
@@ -62,89 +63,32 @@ def _schedule_z2_right_panel_refresh(tab_ann, *delays_ms: int, lightweight: bool
             pass
 
 
-def _step_open_z2_from_step2_review(self, preferred_source_context: dict | None = None):
-    self._step_return_to_annotation_review(
-        mark_step3_rework=False,
-        preferred_source_context=preferred_source_context,
+def _step_open_z2_from_step2_review(self, preferred_source_context=None, *, on_complete=None):
+    return self._step_return_to_annotation_review(
+        mark_step3_rework=False, preferred_source_context=preferred_source_context, on_complete=on_complete,
     )
 
 
-def _step_open_z2_repair_from_later_stage(self, preferred_source_context: dict | None = None):
-    self._step_return_to_annotation_review(
-        mark_step3_rework=True,
-        preferred_source_context=preferred_source_context,
+def _step_open_z2_repair_from_later_stage(self, preferred_source_context=None, *, on_complete=None):
+    return self._step_return_to_annotation_review(
+        mark_step3_rework=True, preferred_source_context=preferred_source_context, on_complete=on_complete,
     )
 
 
 def _step_return_to_annotation_review(
-    self,
-    mark_step3_rework: bool = True,
-    preferred_source_context: dict | None = None,
+    self, mark_step3_rework=True, preferred_source_context=None, *, on_complete=None,
 ):
-    try:
-        self.app.update_status(
-            "Otwieram sprawdzanie tablic (Z2).",
-            "info",
-        )
-    except Exception:
-        pass
+    def _opened(result):
+        if result.get("ok") and self._get_iteration_target() == "char" and mark_step3_rework:
+            CAMPAIGN.set_current_step(3)
+            CAMPAIGN.set_step3_needs_rework()
+        if callable(on_complete):
+            on_complete(result)
 
-    iteration_target = self._get_iteration_target()
-    if iteration_target in {"plate", "char"}:
-        try:
-            if iteration_target == "char" and bool(mark_step3_rework) and CAMPAIGN.get_active_project_name():
-                CAMPAIGN.set_current_step(3)
-                CAMPAIGN.set_step3_needs_rework()
-        except Exception as e:
-            logger.debug(f"Nie udało się ustawić trybu naprawczego E3 przed powrotem do Z2: {e}")
-        if iteration_target == "char":
-            def _open_char_annotation_return():
-                try:
-                    self._step_goto_auto_annotation(
-                        force_annotation_tab=True,
-                        open_existing_run=True,
-                        preferred_source_context=preferred_source_context,
-                    )
-                except Exception as e:
-                    logger.error(f"Nie udało się otworzyc kampanijnego Z2 z odroczonym startem: {e}")
-
-            try:
-                self.app.update_status(
-                    "Przygotowuję kontekst naprawczy Z2 dla tego katalogu zdjęć.",
-                    "info",
-                )
-            except Exception:
-                pass
-            try:
-                self.frame.after_idle(_open_char_annotation_return)
-            except Exception:
-                _open_char_annotation_return()
-            return
-        try:
-            self._step_goto_auto_annotation(
-                force_annotation_tab=True,
-                open_existing_run=True,
-                preferred_source_context=preferred_source_context,
-            )
-            return
-        except Exception as e:
-            logger.error(f"Nie udało się otworzyc kampanijnego Z2 z kontekstem: {e}")
-
-    def _open_annotation_tab():
-        try:
-            annotation_tab = self.app.tabs.get("annotation")
-            if annotation_tab is None:
-                return
-            tab_widget = str(annotation_tab.frame)
-            self.app.notebook.tab(tab_widget, state="normal")
-            self.app.notebook.select(tab_widget)
-        except Exception as e:
-            logger.error(f"Nie udało się przelaczyc na Z2: {e}")
-
-    try:
-        self.frame.after_idle(_open_annotation_tab)
-    except Exception:
-        _open_annotation_tab()
+    return self._step_goto_auto_annotation(
+        force_annotation_tab=True, open_existing_run=True,
+        preferred_source_context=preferred_source_context, on_complete=_opened,
+    )
 
 
 def _step_goto_auto_annotation(
@@ -153,7 +97,27 @@ def _step_goto_auto_annotation(
     entry_strategy: str | None = None,
     open_existing_run: bool = True,
     preferred_source_context=None,
+    on_complete=None,
+    _retry_count: int = 0,
 ):
+    def _reject(message, reason="entry_blocked"):
+        self.app.update_status(message, "warning")
+        return {"ok": False, "message": message, "reason": reason}
+
+    entry_identity = (CAMPAIGN.get_active_project_name(), CAMPAIGN.get_current_iteration_num())
+
+    def _retry_open():
+        if entry_identity != (CAMPAIGN.get_active_project_name(), CAMPAIGN.get_current_iteration_num()):
+            result = _reject("Anulowano wejście do Z2: zmienił się projekt lub iteracja.")
+        else:
+            result = _step_goto_auto_annotation(
+                self, force_annotation_tab=force_annotation_tab, entry_strategy=entry_strategy,
+                open_existing_run=open_existing_run, preferred_source_context=preferred_source_context,
+                on_complete=on_complete, _retry_count=_retry_count + 1,
+            )
+        if callable(on_complete) and not result.get("pending"):
+            on_complete(result)
+
     source_context = dict(preferred_source_context or {})
     t02_at_review = bool(
         str(source_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
@@ -163,8 +127,12 @@ def _step_goto_auto_annotation(
         )
     )
     if not CAMPAIGN.get_active_project_name() or (CAMPAIGN.get_current_step() < 2 and not t02_at_review):
-        return
+        return _reject("Najpierw wybierz projekt i zatwierdź bramkę wejścia do E2.")
     if t02_at_review:
+        t02_source = resolve_t02_review_source(CAMPAIGN, source_context)
+        if not t02_source.get("ok"):
+            return _reject(t02_source["message"], t02_source["reason"])
+        source_context.update(t02_source.get("context") or {})
         try:
             CAMPAIGN.set_iteration_path("char_from_ready_plates")
             if hasattr(CAMPAIGN, "set_graph_selected_edge_key"):
@@ -195,15 +163,6 @@ def _step_goto_auto_annotation(
         source_context.setdefault("graph_transition_source", "E1")
         source_context.setdefault("graph_transition_target", "E3")
         source_context.setdefault("graph_path_key", "char_from_ready_plates")
-        if not str(source_context.get("restore_run_dir") or "").strip():
-            try:
-                self.app.update_status(
-                    "T02 nie ma jeszcze importu AT do kontroli. Najpierw wskaż pasujące anotacje tablic w zasobach bramki.",
-                    "warning",
-                )
-            except Exception:
-                pass
-            return
     if str(CAMPAIGN.get_step1_status() or "").strip().lower() != "approved" and not t02_at_review:
         try:
             self.step1_panel_expanded = True
@@ -218,7 +177,7 @@ def _step_goto_auto_annotation(
             )
         except Exception:
             pass
-        return
+        return _reject("Najpierw zatwierdź T01: wskaż obrazy i wybierz tor iteracji.")
 
     iteration_target = self._get_iteration_target()
     if iteration_target not in {"plate", "char"}:
@@ -229,7 +188,7 @@ def _step_goto_auto_annotation(
             )
         except Exception:
             pass
-        return
+        return _reject("Najpierw wybierz w E1 tor iteracji: tablice albo znaki.")
     try:
         current_iteration_path = normalize_iteration_path(CAMPAIGN.get_iteration_path())
     except Exception:
@@ -242,7 +201,7 @@ def _step_goto_auto_annotation(
     ):
         try:
             self.app.update_status(
-                "Ten tor korzysta z istniejącego źródła tablic i pomija Z2. Zatwierdź bramkę T03, aby przejść do pracy nad znakami.",
+                "Ten tor korzysta z istniejącego źródła tablic. Otwórz kontrolę AT przez T02 albo zatwierdź T02, aby przejść do znaków.",
                 "info",
             )
         except Exception:
@@ -252,7 +211,7 @@ def _step_goto_auto_annotation(
             self._refresh_dashboard()
         except Exception:
             pass
-        return
+        return _reject("Kontrolę istniejących tablic otwórz przez pole Praca bramki T02.")
 
     nav_started = perf_counter()
     nav_phase_started = nav_started
@@ -347,7 +306,7 @@ def _step_goto_auto_annotation(
     if raw_dir is None or auto_out is None:
         _hide_nav_overlay()
         _log_nav_preopen("missing_dirs")
-        return
+        return _reject("Nie znaleziono katalogów roboczych projektu. Otwórz projekt ponownie.")
 
     _show_nav_overlay(18.0, "Odtwarzam katalog obrazów bieżącej iteracji.")
     iter_num = CAMPAIGN.get_current_iteration_num()
@@ -359,7 +318,7 @@ def _step_goto_auto_annotation(
     v_mod = CAMPAIGN.get_global_model("vehicle")
     p_mod = CAMPAIGN.get_global_model("plate")
     _show_nav_overlay(28.0, "Sprawdzam model tablic i źródła poprzedniej pracy.")
-    plate_source_state = self._get_annotation_step2_source_state("plate")
+    plate_source_state = {} if t02_at_review else self._get_annotation_step2_source_state("plate")
     plate_model_ready = bool(plate_source_state.get("plate_model_ready"))
     if plate_model_ready and (not p_mod or not Path(p_mod).exists()):
         try:
@@ -368,13 +327,13 @@ def _step_goto_auto_annotation(
             p_mod = str(p_mod or "").strip()
     char_source_state = {}
     char_has_existing_source = False
-    if iteration_target == "char" and not force_annotation_tab:
+    if iteration_target == "char" and not force_annotation_tab and not t02_at_review:
         _show_nav_overlay(36.0, "Sprawdzam źródło tablic dla toru znaków.")
         char_source_state = self._get_char_route_source_state()
         char_has_existing_source = bool(char_source_state.get("has_source"))
     _mark_nav_phase("source_state")
 
-    if iteration_target == "char" and not force_annotation_tab:
+    if iteration_target == "char" and not force_annotation_tab and not t02_at_review:
         # STEP2-P1 is an entry into Z2, not an implicit approval of E2.
         # A ready plate source only enables the wizard badge; the user can still
         # enter Z2 to add more plate annotations before closing the stage.
@@ -403,31 +362,40 @@ def _step_goto_auto_annotation(
             logger.error(f"Nie udało się dociągnąć zakładki Z2 przed wejściem z grafu: {exc}")
             tab_ann = None
     if tab_ann is None or not callable(getattr(tab_ann, "open_campaign_step2_entry", None)):
-        if bool(getattr(self.app, "_lazy_tab_load_in_progress", False)):
+        if bool(getattr(self.app, "_lazy_tab_load_in_progress", False)) and _retry_count < 20:
             try:
                 _hide_nav_overlay()
                 _log_nav_preopen("lazy_retry")
                 self.frame.after(
                     250,
-                    lambda: _step_goto_auto_annotation(
-                        self,
-                        force_annotation_tab=force_annotation_tab,
-                        entry_strategy=entry_strategy,
-                        open_existing_run=open_existing_run,
-                        preferred_source_context=preferred_source_context,
-                    ),
+                    _retry_open,
                 )
                 self.app.update_status("Kończę ładowanie Z2 i ponowię wejście do pracy bramki.", "info")
             except Exception:
-                pass
-            return
+                return _reject("Nie udało się zaplanować ponownego wejścia do Z2. Otwórz projekt ponownie.")
+            return {"ok": True, "pending": True, "message": "Trwa ładowanie Z2."}
         try:
             _hide_nav_overlay()
             _log_nav_preopen("tab_unavailable")
             self.app.update_status("Nie udało się przygotować karty Z2 dla pracy tej bramki.", "warning")
         except Exception:
             pass
-        return
+        return _reject("Nie udało się przygotować karty Z2 dla pracy tej bramki.")
+
+    if t02_at_review:
+        try:
+            review_root = Path(auto_out) / f"t02_review_iter_{int(iter_num):03d}"
+            t02_source = resolve_t02_review_source(
+                CAMPAIGN, source_context,
+                build_approved_source=lambda: tab_ann._build_campaign_plate_approved_export_source(export_root=review_root),
+            )
+        except Exception as exc:
+            logger.exception("Nie udało się przygotować źródła T02: %s", exc)
+            t02_source = {"ok": False, "message": "Nie udało się przygotować zatwierdzonych tablic do kontroli w Z2."}
+        if not t02_source.get("ok"):
+            _hide_nav_overlay()
+            return _reject(t02_source["message"])
+        source_context.update(t02_source["context"])
 
     defer_preview_load = bool(force_annotation_tab or iteration_target == "plate")
     splash_token = 0
@@ -441,6 +409,15 @@ def _step_goto_auto_annotation(
         pass
 
     def _finish_open() -> None:
+        def _complete(ok, message):
+            self.app.update_status(message, "info" if ok else "warning")
+            if callable(on_complete):
+                on_complete({"ok": ok, "message": message})
+
+        if entry_identity != (CAMPAIGN.get_active_project_name(), CAMPAIGN.get_current_iteration_num()):
+            _hide_nav_overlay()
+            _complete(False, "Anulowano wejście do Z2: zmienił się projekt lub iteracja.")
+            return
         finish_started = perf_counter()
         entry_elapsed_ms = 0.0
         switch_elapsed_ms = 0.0
@@ -464,6 +441,7 @@ def _step_goto_auto_annotation(
                 tab_ann._hide_campaign_step2_splash(token=splash_token)
             except Exception:
                 pass
+            _complete(False, "Nie udało się otworzyć Z2. Szczegóły błędu zapisano w logu.")
             return
 
         if not result.get("ok"):
@@ -481,6 +459,7 @@ def _step_goto_auto_annotation(
                 )
             except Exception:
                 pass
+            _complete(False, str(result.get("message") or f"Nie udało się otworzyć Z2: {result.get('reason', 'brak kontekstu')}."))
             return
 
         try:
@@ -492,6 +471,9 @@ def _step_goto_auto_annotation(
             _show_nav_overlay(88.0, "Przełączam widok na Z2.")
             switch_started = perf_counter()
             self.app.open_controlled_tab("annotation")
+            selected_tab = getattr(self.app, "_get_selected_tab_key", None)
+            if callable(selected_tab) and selected_tab() != "annotation":
+                raise RuntimeError("Z2 was not selected after controlled navigation")
             try:
                 self.app.root.update_idletasks()
             except Exception:
@@ -504,7 +486,10 @@ def _step_goto_auto_annotation(
             logger.error(f"Nie udało się przelaczyc na Z2 po przygotowaniu wejscia: {e}")
             _hide_nav_overlay()
             _log_nav_preopen("switch_exception")
+            _complete(False, "Nie udało się przełączyć widoku na Z2. Szczegóły błędu zapisano w logu.")
             return
+
+        _complete(True, "Otworzono kontrolę AT w Z2." if t02_at_review else "Otworzono Z2 w kontekście bramki.")
 
         try:
             input_dir_local = Path(result.get("input_dir") or ".")
@@ -733,6 +718,7 @@ def _step_goto_auto_annotation(
         self.frame.after(25, _finish_open)
     except Exception:
         _finish_open()
+    return {"ok": True, "pending": True, "message": "Otwieram Z2…"}
 
 
 def _return_to_step1_for_char_source_rework(self, *, clear_target: bool = False) -> None:

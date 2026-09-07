@@ -2393,7 +2393,7 @@ def _build_campaign_plate_approved_preview_bundle(
 
     return bundle
 
-def _build_campaign_plate_approved_export_source(self) -> dict:
+def _build_campaign_plate_approved_export_source(self, *, export_root=None) -> dict:
     if self._is_free_mode_session_context():
         return {}
 
@@ -2410,7 +2410,7 @@ def _build_campaign_plate_approved_export_source(self) -> dict:
     if state_dir is None:
         return {}
 
-    export_root = Path(state_dir) / "plate_approved_export"
+    export_root = Path(export_root) if export_root is not None else Path(state_dir) / "plate_approved_export"
     try:
         if export_root.exists() and self._path_is_within(export_root, state_dir):
             shutil.rmtree(export_root)

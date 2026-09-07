@@ -2323,6 +2323,13 @@ class AutoAnnotationApp:
 
     # Delegates from app_menu_dropdown are bound after class creation.
 
+    def show_assistant_message(self, message: str, icon: str = "info"):
+        """Confirm a small action in the global strip and the open AS panel."""
+        self.update_status(message, icon)
+        overlay = getattr(self, "_free_mode_assistant_overlay", None)
+        if overlay is not None and bool(getattr(overlay, "_visible", False)):
+            overlay.show_notice(message)
+
     def update_status(self, message: str, icon: str = "info"):
         """Aktualizuje główny panel wskazówek (zapobiega migotaniu)."""
         new_text = self._format_help_panel_message(message, icon=icon)

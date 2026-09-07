@@ -931,7 +931,7 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         )
         if gate_id == "T02":
             intro = (
-                "Kontrolujesz import AT dla bramki T02. Panel pokazuje, ile materiału jest już w puli projektu "
+                "Kontrolujesz AT dla bramki T02. Panel pokazuje, ile materiału jest już w puli projektu "
                 "oraz ile nowych pozycji [OK] dojdzie po zapisaniu tej kontroli."
             )
     if repair_from_t07:

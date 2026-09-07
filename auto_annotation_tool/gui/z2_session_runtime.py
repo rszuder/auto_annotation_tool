@@ -1244,7 +1244,7 @@ def _annotation_input_dir_ready(self, path_like=None) -> bool:
     return False
 
 
-def prepare_campaign_iteration_transition(self, *, input_dir: Path | None = None) -> dict:
+def prepare_campaign_iteration_transition(self, *, input_dir: Path | None = None, refresh_ui: bool = True) -> dict:
     result = {"removed_snapshot": False}
 
     try:
@@ -1281,10 +1281,11 @@ def prepare_campaign_iteration_transition(self, *, input_dir: Path | None = None
         logger.debug(f"Nie udalo sie wyczyscic runtime Z2 przed nowa iteracja: {e}")
 
     self._campaign_context_project_name = ""
-    try:
-        self._refresh_step2_action_states()
-    except Exception:
-        pass
+    if refresh_ui:
+        try:
+            self._refresh_step2_action_states()
+        except Exception:
+            pass
     return result
 
 
