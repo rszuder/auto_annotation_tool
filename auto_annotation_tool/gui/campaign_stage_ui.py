@@ -112,6 +112,22 @@ def _rebuild_wizard_stage_ui(self):
     self.frame.after_idle(self._sync_right_panel_canvas_width)
 
 def _refresh_wizard_transition_graph(self, *, allow_pending_actions: bool = True):
+    if not self.frame.winfo_viewable():
+        pending = getattr(self, "_wizard_graph_deferred_request", None)
+        self._wizard_graph_deferred_request = bool(allow_pending_actions or pending is True)
+        if getattr(self, "_wizard_graph_map_bound", None) is not True:
+            def on_map(event):
+                if event.widget is not self.frame:
+                    return
+                def refresh_when_visible():
+                    request = getattr(self, "_wizard_graph_deferred_request", None)
+                    if isinstance(request, bool) and self.frame.winfo_viewable():
+                        self._refresh_wizard_transition_graph(allow_pending_actions=request)
+                self.frame.after_idle(refresh_when_visible)
+            self.frame.bind("<Map>", on_map, add="+")
+            self._wizard_graph_map_bound = True
+        return
+    self._wizard_graph_deferred_request = None
     refresh_started = perf_counter()
     try:
         ensure_ready = getattr(self, "_ensure_wizard_stage_ui_ready", None)

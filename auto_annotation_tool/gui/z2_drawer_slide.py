@@ -6,10 +6,10 @@ from .campaign_sidebar import ProjectSidebarToggle
 
 
 class PreviewDrawerSlide:
-    def __init__(self, owner, *, clock=perf_counter):
+    def __init__(self, owner, *, clock=perf_counter, host=None):
         self.owner = owner
         self.panel = owner.preview_overlay_dock
-        self.host = owner.canvas_frame
+        self.host = host if host is not None else owner.canvas_frame
         self.clock = clock
         self.hidden = False
         self.active = False
@@ -30,11 +30,11 @@ class PreviewDrawerSlide:
         if event.widget is self.panel and self._job is not None:
             return "break"
 
-    def place(self, frame_width, x, y, width, height, *, fullscreen):
+    def place(self, frame_width, x, y, width, height, *, fullscreen, toggle_y=6):
         if self._destroyed:
             return
         if fullscreen:
-            y = max(y, 12 + self.button._height)
+            y = max(y, toggle_y + 6 + self.button._height)
         self._geometry = (frame_width, x, y, width, height)
         if fullscreen != self.active:
             self._cancel()
@@ -45,7 +45,7 @@ class PreviewDrawerSlide:
             self.button.set_palette(palette)
         if fullscreen:
             self.button.set_collapsed(self.hidden)
-            self.button.place(relx=1, x=-10, y=6, anchor="ne")
+            self.button.place(relx=1, x=-10, y=toggle_y, anchor="ne")
             self.button.lift()
         else:
             self.button.place_forget()

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from ..campaign_manager import CAMPAIGN
 from ..config import logger
 from ..project_cache import PROJECT_CACHE
+from .z3_metadata_cache import file_signature, path_key
 from .z3_view_models import (
     Step3CampaignNavigationViewModel,
     Step3EntryFlowViewModel,
@@ -976,6 +977,32 @@ def resolve_step3_campaign_action_command(host: "CharacterAnnotationTab", comman
     return None
 
 
+def _campaign_preview_entry_key(xml_path, images_dir):
+    """Reuse an editor only within the same iteration and unchanged sources."""
+    try:
+        preview_dir = CAMPAIGN.get_step3_preview_dir()
+        if not preview_dir or not xml_path or not images_dir:
+            return None
+        return (
+            CAMPAIGN.get_active_project_name(), CAMPAIGN.get_current_iteration_num(),
+            file_signature(xml_path), file_signature(images_dir),
+            file_signature(Path(preview_dir) / "metadata.json"),
+        )
+    except OSError:
+        return None
+
+
+def _can_reuse_campaign_preview(host, key):
+    return bool(
+        key is not None
+        and key == getattr(host, "_last_campaign_preview_entry_key", None)
+        and path_key(getattr(host, "_loaded_meta_path", None)) == key[-1][0]
+        and getattr(host, "_detect_tab_built", False)
+        and getattr(host, "preview_metadata", None)
+        and getattr(host, "_listbox_pid_by_index", None)
+    )
+
+
 def open_campaign_step3_entry(
     host: "CharacterAnnotationTab",
     preferred_source_context: dict | None = None,
@@ -995,6 +1022,15 @@ def open_campaign_step3_entry(
 
     if not CAMPAIGN.get_active_project_name() or int(CAMPAIGN.get_current_step() or 0) < 3:
         return {"ok": False, "reason": "campaign_inactive"}
+
+    # Finish edits to the previous loaded run before replacing its UI context.
+    flush_preview = getattr(host, "_flush_scheduled_preview_metadata_save", None)
+    if callable(flush_preview):
+        flush_preview()
+    writer = getattr(host, "_preview_autosave_writer", None)
+    if writer is not None:
+        writer.close()
+        host._preview_autosave_writer = None
 
     raw_dir = CAMPAIGN.get_dir("raw")
     auto_dir = CAMPAIGN.get_dir("auto_ann")
@@ -1169,43 +1205,46 @@ def open_campaign_step3_entry(
         latest_xml = str(max(xml_files, key=lambda p: p.stat().st_mtime)) if xml_files else ""
     _mark_entry_phase("source_resolution")
 
-    host._set_preview_dir_runtime_value("", persist_registry=False)
-    try:
-        host._cancel_preview_char_label_interaction()
-    except Exception:
-        pass
-    host.preview_metadata = {}
-    host.preview_plate_ids = []
-    host._loaded_meta_path = None
-    host._loaded_meta_mtime = None
-    host._preview_active_pid = None
-    host._pz3_selected_path = "dataset"
-    host._pz3_cvat_expanded = False
-    try:
-        host._reset_pz3_runtime_ui(collapse_cards=False)
-    except Exception:
-        pass
-
-    try:
-        host.plates_listbox.delete(0, 999999)
-    except Exception:
-        pass
-
-    try:
-        host.preview_canvas.delete("all")
-    except Exception:
-        pass
-
-    try:
-        host.preview_info_lbl.config(text="Oczekuje na nowy zestaw zdjęć...", foreground="#2980b9")
-    except Exception:
-        pass
-
-    for attr_name in ("annotation_run_dir_var", "images_dir_var", "xml_path_var"):
+    entry_preview_key = _campaign_preview_entry_key(latest_xml, folder)
+    reuse_loaded_preview = _can_reuse_campaign_preview(host, entry_preview_key)
+    if not reuse_loaded_preview:
+        host._set_preview_dir_runtime_value("", persist_registry=False)
         try:
-            getattr(host, attr_name).set("")
+            host._cancel_preview_char_label_interaction()
         except Exception:
             pass
+        host.preview_metadata = {}
+        host.preview_plate_ids = []
+        host._loaded_meta_path = None
+        host._loaded_meta_mtime = None
+        host._preview_active_pid = None
+        host._pz3_selected_path = "dataset"
+        host._pz3_cvat_expanded = False
+        try:
+            host._reset_pz3_runtime_ui(collapse_cards=False)
+        except Exception:
+            pass
+
+        try:
+            host.plates_listbox.delete(0, 999999)
+        except Exception:
+            pass
+
+        try:
+            host.preview_canvas.delete("all")
+        except Exception:
+            pass
+
+        try:
+            host.preview_info_lbl.config(text="Oczekuje na nowy zestaw zdjęć...", foreground="#2980b9")
+        except Exception:
+            pass
+
+        for attr_name in ("annotation_run_dir_var", "images_dir_var", "xml_path_var"):
+            try:
+                getattr(host, attr_name).set("")
+            except Exception:
+                pass
     _mark_entry_phase("clear_preview_ui")
 
     try:
@@ -1457,7 +1496,7 @@ def open_campaign_step3_entry(
     _mark_entry_phase("restore_preview_context")
 
     try:
-        host._campaign_pz2_preview_loaded_this_entry = False
+        host._campaign_pz2_preview_loaded_this_entry = reuse_loaded_preview
     except Exception:
         pass
 
@@ -1629,6 +1668,8 @@ def open_campaign_step3_entry(
     except Exception as exc:
         logger.debug(f"Nie udało się automatycznie ustawić wejścia kampanii do Z3: {exc}")
     _mark_entry_phase("auto_progress")
+
+    host._last_campaign_preview_entry_key = _campaign_preview_entry_key(latest_xml, folder)
 
     elapsed_ms = (time.perf_counter() - entry_started) * 1000.0
     if elapsed_ms >= 250.0:

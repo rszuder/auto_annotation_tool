@@ -384,6 +384,7 @@ def build_detection_tab(
     )
     self.preview_canvas.grid(row=0, column=0, sticky="nsew")
     self.preview_canvas.bind("<Configure>", self._on_preview_canvas_configure)
+    self.preview_canvas.bind("<Map>", self._on_preview_canvas_configure, add="+")
     self.preview_canvas.bind("<Enter>", self._on_preview_canvas_enter, add="+")
     self.preview_canvas.bind("<ButtonPress-1>", self._on_preview_canvas_press, add="+")
     self.preview_canvas.bind("<ButtonPress-3>", self._on_preview_canvas_secondary_press, add="+")
@@ -3098,5 +3099,4 @@ def build_detection_tab(
             )
         except Exception:
             pass
-
 

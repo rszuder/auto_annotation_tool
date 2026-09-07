@@ -157,6 +157,12 @@ def reset_step3_subtab_flow(host: "CharacterAnnotationTab") -> None:
     except Exception:
         pass
     host._set_button_emphasis("btn_run_detection_frame", False)
+    if (getattr(host, "_startup_ui_ready", None) is False
+            and not getattr(host, "_detect_tab_built", False)
+            and not getattr(host, "_dataset_tab_built", False)):
+        # Initial construction only creates PZ1. Do not load a previous
+        # campaign's large preview to paint controls that do not exist yet.
+        return
 
     try:
         host._update_preview_path_lock()

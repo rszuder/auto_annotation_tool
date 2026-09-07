@@ -377,14 +377,15 @@ def format_preview_record_source_label(host: "CharacterAnnotationTab", data: dic
     return f"Źródło rekordu: {source_label}", tone
 
 
-def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, data: dict) -> str:
+def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, data: dict, *,
+                              ordinal: int | None = None, evaluate_status: bool = True) -> str:
     try:
         status = str(
-            host._get_preview_live_status(
+            (host._get_preview_live_status(
                 data,
                 chars=data.get("characters", []) if isinstance(data, dict) else None,
                 plate_id=plate_id,
-            )
+            ) if evaluate_status else data.get("status", "unknown"))
             or data.get("status", "unknown")
         ).strip().lower()
         if isinstance(data, dict) and status:
@@ -395,7 +396,8 @@ def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, da
         chars_txt = host._characters_to_display_text(data.get("characters", []), data=data, separator=" / ")
     else:
         chars_txt = host._characters_to_text(data.get("characters", []), data=data)
-    ordinal = host._get_plate_listbox_ordinal(plate_id)
+    if ordinal is None:
+        ordinal = host._get_plate_listbox_ordinal(plate_id)
 
     if status == "perfect":
         icon = "🟢"
@@ -643,6 +645,5 @@ def apply_preview_sort_bar_style(
             )
         except Exception:
             pass
-
 
 

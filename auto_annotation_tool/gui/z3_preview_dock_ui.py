@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from .web_slim_scrollbar import blend_hex_colors
 from .z3_preview_compass_ui import get_preview_legend_theme
+from .z2_drawer_slide import PreviewDrawerSlide, suspend_drawer
 
 if TYPE_CHECKING:
     from .tab_character_annotation import CharacterAnnotationTab
@@ -107,7 +108,7 @@ def _set_preview_dock_row_hover(host: "CharacterAnnotationTab", row_key: str, ac
     _apply_preview_dock_row_hover_style(host, key, bool(active))
 
 
-def _get_preview_dock_row_runtime_state(host: "CharacterAnnotationTab", row_key: str, theme: dict) -> dict:
+def _get_preview_dock_row_runtime_state(host: "CharacterAnnotationTab", row_key: str, theme: dict, *, gate_state=None) -> dict:
     key = str(row_key or "").strip()
     if key == "legend":
         visible = bool(getattr(host, "_preview_controls_legend_visible", True))
@@ -159,7 +160,8 @@ def _get_preview_dock_row_runtime_state(host: "CharacterAnnotationTab", row_key:
             "interactive": False,
         }
 
-    gate_state = host._get_preview_step3_gate_overlay_state()
+    if gate_state is None:
+        gate_state = host._get_preview_step3_gate_overlay_state()
     gate_visible = bool(gate_state.get("visible"))
     gate_id = str(gate_state.get("gate_id", "") or "").strip().upper()
     if key == "gate":
@@ -306,7 +308,6 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
     if dock is None:
         return 0, 0
 
-    host._preview_overlay_dock_expanded = True
     expanded = True
     compact = not bool(getattr(host, "_preview_fullscreen_active", False))
     legend_visible = bool(getattr(host, "_preview_controls_legend_visible", True))
@@ -330,15 +331,19 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
     hover_rows = getattr(host, "_preview_overlay_dock_hover_rows", set())
     if not isinstance(hover_rows, set):
         hover_rows = set()
+    row_states = {key: _get_preview_dock_row_runtime_state(host, key, theme, gate_state=gate_state)
+                  for key in (getattr(host, "_preview_overlay_dock_tool_rows", {}) or {})}
+    layout_state = _get_preview_dock_row_runtime_state(host, "layout", theme, gate_state=gate_state)
+    plate_state = _get_preview_dock_row_runtime_state(host, "plate_status", theme, gate_state=gate_state)
     render_key = (
         int(expanded),
         int(compact),
         int(legend_visible),
         int(assistant_visible),
-        str(_get_preview_dock_row_runtime_state(host, "layout", theme).get("status_text", "")),
-        str(_get_preview_dock_row_runtime_state(host, "layout", theme).get("tone", "")),
-        str(_get_preview_dock_row_runtime_state(host, "plate_status", theme).get("status_text", "")),
-        str(_get_preview_dock_row_runtime_state(host, "plate_status", theme).get("tone", "")),
+        str(layout_state.get("status_text", "")),
+        str(layout_state.get("tone", "")),
+        str(plate_state.get("status_text", "")),
+        str(plate_state.get("tone", "")),
         int(gate_visible),
         gate_id,
         gate_label,
@@ -368,7 +373,7 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
                 header.configure(bg=fill)
             if title is not None:
                 title.configure(
-                    text=("NARZĘDZIA | ENTER" if compact else "NARZĘDZIA"),
+                    text="NARZĘDZIA",
                     bg=fill,
                     fg=header_fg,
                     anchor="w",
@@ -391,7 +396,7 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
             if compact and row_key not in {"legend", "assistant", "layout", "plate_status", "gate"}:
                 _forget_preview_dock_row(widgets)
                 continue
-            row_state = _get_preview_dock_row_runtime_state(host, row_key, theme)
+            row_state = row_states[row_key]
             if not bool(row_state.get("visible")) and row_key not in {"legend", "assistant"}:
                 _forget_preview_dock_row(widgets)
                 continue
@@ -478,6 +483,7 @@ def place_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render: 
     if dock is None or canvas_host is None:
         return
     if not bool(getattr(host, "_preview_render_state", None)):
+        suspend_drawer(host)
         try:
             dock.place_forget()
         except Exception:
@@ -490,6 +496,7 @@ def place_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render: 
     except Exception:
         host_width = host_height = 0
     if host_width <= 180 or host_height <= 120:
+        suspend_drawer(host)
         try:
             dock.place_forget()
         except Exception:
@@ -513,16 +520,13 @@ def place_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render: 
     x = min(max(margin, x), max(margin, float(host_width) - float(dock_width) - margin))
     y = min(max(margin, y), max(margin, float(host_height) - float(dock_height) - margin))
     try:
-        dock.place(
-            in_=canvas_host,
-            x=int(round(x)),
-            y=int(round(y)),
-            width=int(dock_width),
-            height=int(dock_height),
-            anchor="nw",
+        slide = getattr(host, "_preview_drawer_slide", None)
+        if slide is None:
+            slide = host._preview_drawer_slide = PreviewDrawerSlide(host, host=canvas_host)
+        slide.place(
+            host_width, int(round(x)), int(round(y)), int(dock_width), int(dock_height),
+            fullscreen=True,
+            toggle_y=int(max(46, float(getattr(host, "_preview_overlay_top_bar_height", 38)) + 6)),
         )
-        dock.lift()
     except Exception:
         pass
-
-

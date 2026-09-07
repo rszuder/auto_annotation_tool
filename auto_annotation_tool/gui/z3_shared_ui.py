@@ -1055,6 +1055,8 @@ def refresh_pz3_status_panel_ui(
     host: "CharacterAnnotationTab",
     vm: Step3Pz3StatusPanelViewModel | None = None,
 ):
+    if vm is None and getattr(host, "_dataset_tab_built", None) is False:
+        return
     status_vm = vm or host._get_step3_pz3_status_panel_view_model()
 
     try:
@@ -1612,6 +1614,9 @@ def refresh_pz3_cards_ui(host: "CharacterAnnotationTab"):
 
 
 def refresh_step3_mode_specific_ui(host: "CharacterAnnotationTab"):
+    if (getattr(host, "_detect_tab_built", None) is False
+            and getattr(host, "_dataset_tab_built", None) is False):
+        return
     in_campaign = is_step3_campaign_runtime(host)
 
     host._set_grid_visibility(getattr(host, "preview_source_lf", None), (not in_campaign))

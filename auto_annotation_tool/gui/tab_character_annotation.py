@@ -21,6 +21,7 @@ import shutil
 import copy
 import math
 import time
+from .z3_metadata_cache import read_preview_metadata, mark_preview_metadata_changed
 import textwrap
 from types import SimpleNamespace
 
@@ -1478,12 +1479,17 @@ class CharacterAnnotationTab:
             pass
 
     def _on_preview_canvas_configure(self, event=None):
+        if getattr(self, "_preview_render_when_visible", False):
+            self._schedule_preview_select_render(delay_ms=35)
+            return
+        size = (getattr(event, "width", None), getattr(event, "height", None))
+        if event is not None and size == getattr(self, "_preview_last_canvas_size", None):
+            return
+        self._preview_last_canvas_size = size
         if bool(getattr(self, "_pz2_panel_resize_active", False)):
             self._pz2_panel_resize_pending_preview = True
             self._schedule_preview_overlay_relayout(delay_ms=90)
             return
-        self._ensure_preview_mode_overlay_position()
-        self._refresh_preview_typing_overlay_visibility()
         self._schedule_preview_stabilized_rerender(delay_ms=90)
 
     def _begin_pz2_panel_resize(self, event=None):
@@ -1518,6 +1524,8 @@ class CharacterAnnotationTab:
         include_legend: bool = True,
         refresh_legend: bool = True,
     ):
+        if getattr(self, "_preview_fullscreen_transition_active", False):
+            return
         canvas_host = getattr(self, "preview_canvas_host", None)
         if canvas_host is None:
             return
@@ -1568,6 +1576,16 @@ class CharacterAnnotationTab:
 
         def _rerender_after_layout_settles():
             self._preview_stabilized_render_after_id = None
+            if getattr(self, "_preview_fullscreen_transition_active", False):
+                old_size = getattr(self, "_preview_fullscreen_old_canvas_size", None)
+                current_size = (canvas.winfo_width(), canvas.winfo_height())
+                started = getattr(self, "_preview_fullscreen_transition_started", 0.0)
+                # Native maximize/restore can deliver its first Configure after
+                # the timer. Do not redraw the old viewport during that gap.
+                if old_size == current_size and time.perf_counter() - started < 0.4:
+                    self._schedule_preview_stabilized_rerender(delay_ms=45)
+                    return
+            self._preview_fullscreen_transition_active = False
             if getattr(self, "preview_canvas", None) is None:
                 return
             if not bool(getattr(self, "_preview_active_pid", None)):
@@ -1693,9 +1711,7 @@ class CharacterAnnotationTab:
     _get_preview_legend_context = z3_preview_editor_runtime._get_preview_legend_context
 
     def _is_preview_controls_legend_expanded(self) -> bool:
-        if bool(getattr(self, "_preview_fullscreen_active", False)):
-            return bool(getattr(self, "_preview_controls_legend_fullscreen_expanded", False))
-        return bool(getattr(self, "_preview_controls_legend_inline_expanded", False))
+        return bool(getattr(self, "_preview_controls_legend_expanded", False))
 
     _get_preview_legend_theme = get_preview_legend_theme
     _toggle_preview_controls_legend = toggle_preview_controls_legend
@@ -1965,8 +1981,7 @@ class CharacterAnnotationTab:
             if not meta_path.exists():
                 return False
 
-            with open(meta_path, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
+            loaded = read_preview_metadata(self, meta_path)
             if not isinstance(loaded, dict):
                 return False
 
@@ -2841,6 +2856,7 @@ class CharacterAnnotationTab:
         *,
         recalculate_statuses: bool = True,
     ):
+        mark_preview_metadata_changed(self)
         apply_started = time.perf_counter()
         recalc_ms = 0.0
         order_ms = 0.0
@@ -3537,8 +3553,14 @@ class CharacterAnnotationTab:
     def _atomic_write_json(self, path: Path, data: dict):
         tmp = path.with_suffix(path.suffix + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+            if path.name == "metadata.json":
+                f.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+            else:
+                json.dump(data, f, indent=2, ensure_ascii=False)
         tmp.replace(path)
+        if path.name == "metadata.json":
+            # A full save/import replaces the source fragments used by autosave.
+            self._preview_metadata_file_cache = None
 
     def _backup_json_before_import(self, path: Path) -> Path | None:
         if path is None or not path.exists() or not path.is_file():
