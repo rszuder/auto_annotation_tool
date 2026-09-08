@@ -11,6 +11,7 @@ from tkinter import filedialog, ttk
 from PIL import Image, ImageTk
 
 from ..ranking.mobile_human_review import MobileReviewSession, align_plate_text, normalize_registration
+from ..ranking.mobile_mt_invocations import DETECTION_STATUSES, detection_box_on_mt_input
 from ..ranking.mobile_package_experiments import MobilePackageExperimentStore, read_mobile_report_bundle
 
 REVIEW_LABELS = {"NOT_STARTED": "Nie rozpoczęto", "IN_PROGRESS": "W toku", "COMPLETED": "Zakończona"}
@@ -50,6 +51,8 @@ class MobileSampleReviewWindow:
         self._autosave_id = None
         self._image_token = 0
         self._image = None
+        self._image_source_size = None
+        self._image_entry = ""
         self._photo = None
         self._results = queue.Queue()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mobile-review")
@@ -191,6 +194,9 @@ class MobileSampleReviewWindow:
         self.invocation_choice = ttk.Combobox(invocation_bar, state="disabled", width=25, values=list(VISIBILITY_LABELS.values()))
         self.invocation_choice.grid(row=0, column=2, padx=3)
         self.invocation_choice.bind("<<ComboboxSelected>>", self.save_invocation_decision)
+        self.invocation_error_label = self._label(invocation_bar, font=("Segoe UI", 9), wraplength=800)
+        self.invocation_error_label.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.invocation_error_label.grid_remove()
         for column, (title, decision) in enumerate((
             ("To jest tablica", {"plate_visibility": "visible", "is_plate": True, "evaluable": True}),
             ("To nie jest tablica", {"is_plate": False, "evaluable": False}),
@@ -369,11 +375,14 @@ class MobileSampleReviewWindow:
                 if self.session.cancelled(row):
                     state = "Anulowana"
                 invocation = self.session.invocation_by_attempt.get(record_id if kind == "attempt" else row.get("attempt_id"), "")
+                group = self.session.mt_invocations.get(invocation)
+                if group and group.execution_failed and not group.cancelled:
+                    state = "Błąd wykonania MT"
                 index = row.get("mt_detection_index")
                 label = f"Detekcja {int(index) + 1}" if kind == "attempt" and index not in (None, "") else "Rekord MT" if kind == "attempt" else "Crop"
                 identity = f"{invocation} / {record_id}" if invocation and invocation != record_id else record_id
                 self.record_tree.insert("", "end", iid=iid, values=(label, identity,
-                    " / ".join(STAGE_LABELS.get(row.get(name), str(row.get(name, ""))) for name in ("mt_status", "mz_status")).strip(" /"), row.get("prediction", "") if visible else HIDDEN_PREDICTION, state))
+                    self._record_stages(row, group), row.get("prediction", "") if visible else HIDDEN_PREDICTION, state))
         if self._record_ids:
             iid = next((iid for iid, value in self._record_ids.items() if value == old), next(iter(self._record_ids)))
             self.current_record = None
@@ -383,6 +392,13 @@ class MobileSampleReviewWindow:
             self.current_record = None
             self._image = None
             self._paint_image()
+
+    def _record_stages(self, row, group):
+        mt = ("Anulowane MT" if group and group.cancelled else
+              "Błąd wykonania MT" if group and group.execution_failed else STAGE_LABELS.get(row.get("mt_status"), ""))
+        # MZ status itself can disclose a no-read before GT, even with OCR hidden.
+        mz = STAGE_LABELS.get(row.get("mz_status"), "") if self.session.predictions_visible(self.subject_key) else ""
+        return " / ".join(stage for stage in (mt, mz) if stage)
 
     def _select_record(self, event=None):
         selected = self.record_tree.selection()
@@ -397,7 +413,9 @@ class MobileSampleReviewWindow:
         self.current_invocation = self.session.invocation_by_attempt.get(attempt.get("id"), "")
         if self.current_invocation:
             group = self.session.mt_invocations[self.current_invocation]
-            for index, entry in enumerate(sorted(group.evidence_entries, key=lambda name: name not in self.session.entry_names)):
+            preferred = attempt.get("mt_input_evidence_entry")
+            for index, entry in enumerate(sorted(group.evidence_entries,
+                    key=lambda name: (name not in self.session.entry_names, name != preferred))):
                 self._image_rows.append((f"Wejście MT {index + 1}", {"image_entry": entry}))
         if attempt.get("evidence_entry"):
             self._image_rows.append(("Dowód próby", attempt))
@@ -414,7 +432,7 @@ class MobileSampleReviewWindow:
         else:
             self.image_choice.set("Brak zapisanego obrazu")
         label = "Rekord MT" if kind == "attempt" else "Crop"
-        self.record_label.configure(text=f"{label}: {key} • {STAGE_LABELS.get(row.get('mt_status'), '')} {STAGE_LABELS.get(row.get('mz_status'), '')}")
+        self.record_label.configure(text=f"{label}: {key} • {self._record_stages(row, self.session.mt_invocations.get(self.current_invocation))}")
         gt = self.session.review.subjects.get(self.subject_key, {}).get("ground_truth", "")
         prediction = str(row.get("prediction", ""))
         self.alignment_text.configure(state="normal")
@@ -453,13 +471,22 @@ class MobileSampleReviewWindow:
             self.accept_button.grid_remove()
         self.mode_choice.set(MODE_LABELS[self.session.review.review_mode])
         self.mode_choice.configure(state="disabled" if self._saving or self.session.review.review_mode_locked else "readonly")
+        self.invocation_error_label.grid_remove()
         if self.current_invocation:
             group = self.session.mt_invocations[self.current_invocation]
-            self.invocation_label.configure(text=f"Wywołanie MT: {self.current_invocation} • detekcje: {group.detection_count}")
+            state = "anulowane" if group.cancelled else "nie uruchomiono" if not group.executed else "błąd wykonania" if group.execution_failed else f"detekcje: {group.detection_count}"
+            self.invocation_label.configure(text=f"Wywołanie MT: {self.current_invocation} • {state}")
+            if group.execution_failed:
+                error = " ".join("; ".join(group.execution_errors).split())
+                error = error[:157] + "…" if len(error) > 160 else error
+                self.invocation_error_label.configure(text=f"{error}\nWywołanie technicznie nieukończone — poza jakością MT; nie wymaga oceny. Szczegóły: Sesja i modele.", fg=self.browser.warning)
+                self.invocation_error_label.grid()
             annotation = self.session.invocation_annotation(self.current_invocation)
             self.invocation_choice.set("Brak dawnej oceny liczby tablic" if annotation.get("decision_source") == "legacy_cardinality_unknown"
                                        else VISIBILITY_LABELS.get(annotation.get("visible_plate_count"), "Oceń całe wejście MT"))
-            self.invocation_choice.configure(state="disabled" if self._saving or group.cancelled or not group.executed else "readonly")
+            if group.execution_failed:
+                self.invocation_choice.set("Nie wymaga oceny MT")
+            self.invocation_choice.configure(state="disabled" if self._saving or group.cancelled or not group.executed or group.execution_failed else "readonly")
         else:
             self.invocation_label.configure(text="Wywołanie MT: niedostępne dla tego cropa")
             self.invocation_choice.set("")
@@ -475,6 +502,10 @@ class MobileSampleReviewWindow:
 
     def save_invocation_decision(self, event=None):
         key = self.current_invocation
+        group = self.session.mt_invocations.get(key) if self.session else None
+        if not group or group.cancelled or not group.executed or group.execution_failed:
+            self._sync_review_controls()
+            return
         value = next((key for key, label in VISIBILITY_LABELS.items() if label == self.invocation_choice.get()), None)
         if key and value:
             self._change(lambda: self.session.annotate_invocation(key, visible_plate_count=value, evaluable=value != "uncertain"))
@@ -493,6 +524,8 @@ class MobileSampleReviewWindow:
         self._image_token += 1
         token = self._image_token
         self._image = None
+        self._image_source_size = None
+        self._image_entry = ""
         self._paint_image("Wczytywanie obrazu…")
         index = self.image_choice.current()
         if not self._image_rows or index < 0:
@@ -502,13 +535,15 @@ class MobileSampleReviewWindow:
         def work():
             try:
                 image = self.session.image(row)
+                source_size = image.size
                 image.thumbnail((1600, 1000), Image.Resampling.LANCZOS)
-                return image, ""
+                return image, source_size, ""
             except Exception as error:
-                return None, str(error)
+                return None, None, str(error)
         def done(result):
             if token == self._image_token:
-                self._image, error = result
+                self._image, self._image_source_size, error = result
+                self._image_entry = row.get("image_entry") or row.get("evidence_entry") or ""
                 self._paint_image(error)
         self._submit(work, done)
 
@@ -522,7 +557,50 @@ class MobileSampleReviewWindow:
         scale = min(max(1, width - 16) / self._image.width, max(1, height - 16) / self._image.height, 4.0)
         image = self._image.resize((max(1, round(self._image.width * scale)), max(1, round(self._image.height * scale))), Image.Resampling.LANCZOS)
         self._photo = ImageTk.PhotoImage(image, master=self.canvas)
-        self.canvas.create_image(width / 2, height / 2, image=self._photo)
+        self.canvas.create_image(width / 2, height / 2, image=self._photo, tags=("evidence_image",))
+        self._paint_detection_overlay(image.width, image.height, (width - image.width) / 2, (height - image.height) / 2)
+
+    def _paint_detection_overlay(self, width, height, offset_x, offset_y):
+        if not self.current_record or not self.current_invocation:
+            return
+        kind, key = self.current_record
+        row = self.session.attempts.get(key if kind == "attempt" else self.session.samples[key].get("attempt_id"), {})
+        group = self.session.mt_invocations[self.current_invocation]
+        explicit_inputs = {child.get("mt_input_evidence_entry") for child in group.records}
+        # Legacy evidence can be inspected, but never treated as letterbox geometry.
+        if (not self._image_entry or self._image_entry not in group.evidence_entries
+                or self._image_entry.startswith("samples/crops/") or row.get("mt_status") not in DETECTION_STATUSES):
+            return
+        box = detection_box_on_mt_input(row) if self._image_entry in explicit_inputs else None
+        message = "Brak geometrii detekcji w tej sesji."
+        if box is not None and self._image_source_size != (float(row["input_width"]), float(row["input_height"])):
+            box = None
+            message = "Rozmiar obrazu nie odpowiada geometrii wejścia MT."
+        if box is None:
+            text_id = self.canvas.create_text(12, 12, anchor="nw", text=message, fill="#ffffff", width=max(50, self.canvas.winfo_width() - 24), tags=("detection_geometry_notice",))
+            self._canvas_text_background(text_id, "detection_geometry_notice")
+            return
+        scale_x, scale_y = width / float(row["input_width"]), height / float(row["input_height"])
+        left, top, right, bottom = box
+        coords = (offset_x + left * scale_x, offset_y + top * scale_y, offset_x + right * scale_x, offset_y + bottom * scale_y)
+        # A dark outer stroke keeps the cyan box readable on bright evidence too.
+        self.canvas.create_rectangle(*coords, outline="#10212b", width=6, tags=("detection_overlay",))
+        self.canvas.create_rectangle(*coords, outline="#40dcff", width=3, tags=("detection_overlay", "detection_box"))
+        ordinal = row.get("mt_detection_index")
+        title = f"Detekcja {int(ordinal) + 1} / {group.detection_count}" if ordinal not in (None, "") else "Detekcja"
+        if row.get("mt_status") == "DETECTION_INVALID_QUAD":
+            title += " • błędna geometria"
+        text_id = self.canvas.create_text(coords[0] + 5, max(offset_y + 3, coords[1] - 24),
+            anchor="nw", text=title, fill="#ffffff", font=("Segoe UI", 10, "bold"), tags=("detection_overlay", "detection_label"))
+        bounds = self.canvas.bbox(text_id)
+        self.canvas.move(text_id, min(0, self.canvas.winfo_width() - 8 - bounds[2]), 0)
+        self._canvas_text_background(text_id, "detection_overlay")
+
+    def _canvas_text_background(self, text_id, tag):
+        bounds = self.canvas.bbox(text_id)
+        background = self.canvas.create_rectangle(bounds[0] - 4, bounds[1] - 2, bounds[2] + 4, bounds[3] + 2,
+            fill="#10212b", outline="", tags=(tag,))
+        self.canvas.tag_lower(background, text_id)
 
     def _schedule_autosave(self, *args):
         if self._rendering or not self.subject_key:
@@ -659,7 +737,7 @@ class MobileSampleReviewWindow:
             "Tablice / ALPR": {"evaluable_subjects": "Tablice do oceny", "subjects_with_exact_read": "Z poprawnym odczytem", "subjects_without_exact_read": "Bez poprawnego odczytu", "subject_success_rate": "Skuteczność systemu dla tablic"},
             "Odczyty MZ": {"evaluable_reads": "Oceniane cropy", "exact_reads": "Poprawne odczyty", "incorrect_reads": "Niepoprawne odczyty", "no_reads": "Brak odczytu", "exact_read_rate": "Udział poprawnych odczytów", "no_read_rate": "Udział braku odczytu"},
             "Znaki MZ": {"gt_characters": "Znaki GT", "correct_characters": "Poprawnie rozpoznane znaki", "incorrect_characters": "Błędnie rozpoznane znaki", "missing_characters": "Brakujące znaki", "extra_characters": "Znaki nadmiarowe", "cer": "CER — suma błędów / suma znaków GT"},
-            "Lokalizacja MT": {"evaluable_mt_invocations": "Oceniane wywołania z jedną widoczną tablicą", "mt_successful_invocations": "Wywołania z poprawną lokalizacją", "mt_no_detection_invocations": "Wywołania bez detekcji", "mt_invalid_quad_invocations": "Wywołania z błędną geometrią", "mt_multi_plate_invocations": "Wywołania z wieloma tablicami", "mt_uncertain_invocations": "Wywołania niejednoznaczne", "mt_false_detections": "Fałszywe detekcje", "mt_localization_success_rate": "Skuteczność lokalizacji MT w wywołaniach z jedną tablicą"},
+            "Lokalizacja MT": {"evaluable_mt_invocations": "Oceniane wywołania z jedną widoczną tablicą", "mt_successful_invocations": "Wywołania z poprawną lokalizacją", "mt_no_detection_invocations": "Wywołania bez detekcji", "mt_execution_error_invocations": "Wywołania z błędem wykonania", "mt_invalid_quad_invocations": "Wywołania z błędną geometrią", "mt_multi_plate_invocations": "Wywołania z wieloma tablicami", "mt_uncertain_invocations": "Wywołania niejednoznaczne", "mt_false_detections": "Fałszywe detekcje", "mt_localization_success_rate": "Skuteczność lokalizacji MT w wywołaniach z jedną tablicą"},
             "Czas i próby": {"median_time_to_first_exact_ms": "Mediana czasu do próby z poprawnym odczytem [ms]", "p90_time_to_first_exact_ms": "P90 czasu do próby z poprawnym odczytem [ms]", "median_attempts_to_first_exact": "Mediana liczby prób do poprawnego odczytu"},
         }
         for section, fields in sections.items():
@@ -674,7 +752,8 @@ class MobileSampleReviewWindow:
                   "schemat próbek": self.session.bundle.sample_schema,
                   "eksperyment": self.session.bundle.experiment_session,
                   "capture": self.session.bundle.report_payload.get("capture", {}),
-                  "pochodzenie modeli i warianty": self.session.review.provenance}
+                  "pochodzenie modeli i warianty": self.session.review.provenance,
+                  "błędy wykonania MT": {key: list(group.execution_errors) for key, group in self.session.mt_invocations.items() if group.execution_failed}}
         def append(value, prefix=""):
             for key, item in value.items():
                 name = f"{prefix} / {key}" if prefix else str(key)

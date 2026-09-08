@@ -18,7 +18,7 @@ from auto_annotation_tool.ranking.mobile_package_experiments import (
 )
 
 
-def make_bundle(path, *, samples=None, attempts=None, annotations=None, image_size=(280, 80), image_text="", state="COMPLETED"):
+def make_bundle(path, *, samples=None, attempts=None, annotations=None, image_size=(280, 80), image_text="", state="COMPLETED", evidence_images=None):
     samples = samples if samples is not None else [dict(capture_id="c1", subject_key="s/sg-1/entity-1", prediction="WI1234A", attempt_id="a1")]
     payload = {"schema": "alpr.mobile_benchmark_report.v1", "report_id": "session-s", "session_id": "s",
                "package_id": "pkg", "variant_id": "ncnn-fp16", "state": state,
@@ -54,7 +54,7 @@ def make_bundle(path, *, samples=None, attempts=None, annotations=None, image_si
             archive.writestr("samples/attempts.csv", csv_text(attempts))
             for row in attempts:
                 if row.get("evidence_entry"):
-                    archive.writestr(row["evidence_entry"], image.getvalue())
+                    archive.writestr(row["evidence_entry"], (evidence_images or {}).get(row["evidence_entry"], image.getvalue()))
     return path
 
 

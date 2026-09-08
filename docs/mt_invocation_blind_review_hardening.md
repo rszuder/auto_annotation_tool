@@ -41,6 +41,7 @@ a UI w pierwszej kolejności pokazuje dostępny plik. Nie wybiera arbitralnie to
 
 - backend MT był wykonany,
 - żaden rekord grupy nie jest stale/cancelled,
+- żaden rekord grupy nie zawiera niepustego `execution_error`,
 - operator oznaczył całe wejście jako `visible_plate_count=one` i `evaluable=true`,
 - dowód wejścia jest dostępny w archiwum.
 
@@ -76,7 +77,7 @@ Nowy sidecar: `review_mode=blinded_gt_v1`. Przed pierwszym jawnym zatwierdzeniem
 - kolumna predykcji pokazuje „ukryta do czasu GT”,
 - nie ma tekstu predykcji/konsensusu, dopasowania ani wyniku exact/incorrect/no-read,
 - przycisk „Zgodne z predykcją” jest ukryty, a jego handler nie pozwala przepisać predykcji,
-- statusy MT i MZ mogą pozostać widoczne.
+- status MT pozostaje widoczny; status MZ jest ukryty, ponieważ może zdradzać brak odczytu.
 
 Autosave po 750 ms oraz zapis przy zmianie tablicy, innych akcjach i zamykaniu zachowują
 `draft_ground_truth`. Szkic nie staje się GT używanym do metryk.
@@ -127,3 +128,6 @@ Wyniki: **68 testów przeszło**; natywna próba zakończona z `errors: []`.
 
 SHA końcowego commita jest podane w odpowiedzi końcowej agenta. Wdrożenie przygotowuje desktop
 do pilotażu; nie zastępuje zebrania i oceny rzeczywistej sesji terenowej.
+
+Końcowe rozdzielenie błędów wykonania MT od braków detekcji oraz ramki aktywnej detekcji
+opisuje [raport finalnego hardeningu](execution_error_detection_overlay_final_hardening.md).

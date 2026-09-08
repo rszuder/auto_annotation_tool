@@ -1452,7 +1452,7 @@ class AutoAnnotationApp:
                 },
                 {
                     "kind": "command",
-                    "label": "Import raportów",
+                    "label": "Analiza i import raportów mobilnych",
                     "command": self._open_mobile_report_browser_from_menu,
                 },
             ],
@@ -1743,7 +1743,7 @@ class AutoAnnotationApp:
         except Exception as e:
             logger.error(f"Nie udało się przygotować importu raportów mobilnych: {e}")
             return self.themed_info(
-                "Import raportów",
+                "Analiza i import raportów mobilnych",
                 f"Nie udało się przygotować przeglądarki raportów:\n{e}",
                 parent=self.root,
                 tone="error",
