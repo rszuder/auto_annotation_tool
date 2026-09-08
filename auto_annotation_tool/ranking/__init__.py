@@ -42,6 +42,7 @@ from .mobile_package_experiments import (
     score_mobile_report,
 )
 from .mobile_human_review import MobileHumanReview, MobileReviewSession, PlateTextAlignment, align_plate_text
+from .mobile_mt_invocations import MtInvocationGroup
 
 __all__ = [
     'AnnotationComparator',
@@ -57,6 +58,7 @@ __all__ = [
     'MobilePackageScore',
     'MobileReportBundle',
     'MobileHumanReview',
+    'MtInvocationGroup',
     'MobileReviewSession',
     'PlateTextAlignment',
     'align_plate_text',

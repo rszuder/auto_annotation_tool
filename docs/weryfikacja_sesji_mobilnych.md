@@ -1,5 +1,10 @@
 # Weryfikacja sesji mobilnych — 2026-09-08
 
+Aktualizacja jednostki MT i zaślepienia: [raport hardeningu](mt_invocation_blind_review_hardening.md).
+Nowe review domyślnie używa `blinded_gt_v1`: autosave zachowuje szkic, a pierwsze odsłonięcie predykcji
+wymaga jawnego „Zapisz GT”. MT jest obecnie liczone per wywołanie backendu, nie per rekord detekcji.
+Poniższy opis dokumentuje także pierwotne wdrożenie; nowszy raport doprecyzowuje te dwa obszary.
+
 Implementacja handoffu `handoff_desktop_mobile_session_human_review_v1.md`, na bazie `1248b4b`.
 Kontrakt wejściowy porównano z lokalnym kodem Androida: `ResearchSessionStore.ATTEMPT_COLUMNS`,
 `AcquisitionAttemptRecord`, `ResearchSampleIdentity` oraz `ResearchArchive` w projekcie `ALPR_v1`.
