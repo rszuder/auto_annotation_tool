@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 import json
+import math
 
 
 DETECTION_STATUSES = {"VALID_QUAD", "DETECTION_INVALID_QUAD"}
@@ -45,6 +46,30 @@ def _integer(value):
         raise ValueError(f"Nieprawidłowy indeks lub liczba detekcji MT: {value}") from None
 
 
+def detection_box_on_mt_input(row) -> tuple[float, float, float, float] | None:
+    """Map a source-frame box through the recorded ROI/letterbox, without guessing."""
+    fields = ("plate_left", "plate_top", "plate_right", "plate_bottom", "roi_left", "roi_top",
+              "input_width", "input_height", "input_scale", "input_pad_x", "input_pad_y")
+    try:
+        if any(isinstance(row[name], bool) for name in fields):
+            return None
+        left, top, right, bottom, roi_x, roi_y, width, height, scale, pad_x, pad_y = (
+            float(row[name]) for name in fields)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if not all(math.isfinite(value) for value in (left, top, right, bottom, roi_x, roi_y,
+                                                  width, height, scale, pad_x, pad_y)):
+        return None
+    if width <= 0 or height <= 0 or scale <= 0:
+        return None
+    box = ((left - roi_x) * scale + pad_x, (top - roi_y) * scale + pad_y,
+           (right - roi_x) * scale + pad_x, (bottom - roi_y) * scale + pad_y)
+    if not all(math.isfinite(value) for value in box):
+        return None
+    left, top, right, bottom = (max(0.0, min(limit, value)) for value, limit in zip(box, (width, height, width, height)))
+    return (left, top, right, bottom) if right > left and bottom > top else None
+
+
 @dataclass(frozen=True)
 class MtInvocationGroup:
     mt_invocation_id: str
@@ -61,6 +86,8 @@ class MtInvocationGroup:
     cancelled: bool
     executed: bool
     legacy_identity: bool
+    execution_failed: bool = False
+    execution_errors: tuple[str, ...] = ()
 
     @property
     def evidence_entry(self):
@@ -113,6 +140,8 @@ def group_mt_invocations(attempts: dict[str, dict], session_id: str) -> dict[str
             if entry and entry not in entries:
                 entries.append(str(entry))
         first = rows[0]  # All shared geometry/identity fields have been validated.
+        errors = tuple(dict.fromkeys(str(row.get("execution_error") or "").strip() for row in rows
+                                     if str(row.get("execution_error") or "").strip()))
         groups[key] = MtInvocationGroup(
             key, str(first.get("session_id") or session_id), first.get("scene_generation"),
             frozenset(row["subject_key"] for row in rows), first.get("source_sequence"), first.get("source_timestamp_nanos"),
@@ -120,13 +149,14 @@ def group_mt_invocations(attempts: dict[str, dict], session_id: str) -> dict[str
             {name: first[name] for name in INPUT_FIELDS if name in first}, tuple(entries), tuple(rows), len(detected),
             any(true(row.get("stale_or_cancelled")) for row in rows),
             any(true(row.get("mt_executed")) if row.get("mt_executed") not in (None, "") else row.get("mt_status") in EXECUTED_STATUSES for row in rows),
-            not any(row.get("mt_invocation_id") for row in rows))
+            not any(row.get("mt_invocation_id") for row in rows), bool(errors), errors)
     return groups
 
 
 def calculate_mt_invocations(session):
     names = ("evaluable_mt_invocations", "mt_successful_invocations", "mt_no_detection_invocations",
-             "mt_invalid_quad_invocations", "mt_multi_plate_invocations", "mt_uncertain_invocations", "mt_false_detections")
+             "mt_invalid_quad_invocations", "mt_multi_plate_invocations", "mt_uncertain_invocations", "mt_false_detections",
+             "mt_execution_error_invocations")
     counts = dict.fromkeys(names, 0)
     results = []
     false_sample_attempts = {session.samples[key].get("attempt_id") for key, decision in session.review.sample_annotations.items()
@@ -135,7 +165,7 @@ def calculate_mt_invocations(session):
         annotation = session.invocation_annotation(key)
         visible = annotation.get("visible_plate_count")
         evidence = any(entry in session.entry_names for entry in group.evidence_entries)
-        active = group.executed and not group.cancelled
+        active = group.executed and not group.cancelled and not group.execution_failed
         included = active and annotation.get("evaluable") is True and evidence and visible == "one"
         valid, invalid, false = False, False, 0
         for row in group.records:
@@ -148,11 +178,18 @@ def calculate_mt_invocations(session):
                 is_plate = True
             if active and row.get("mt_status") in DETECTION_STATUSES and is_plate is False:
                 false += 1
-            if child.get("evaluable") is not False and is_plate is True:
+            if active and child.get("evaluable") is not False and is_plate is True:
                 valid |= row.get("mt_status") == "VALID_QUAD"
                 invalid |= row.get("mt_status") == "DETECTION_INVALID_QUAD"
         no_detection = not valid and any(row.get("mt_status") == "NO_DETECTION" for row in group.records)
         outcome = "success" if valid else "no_detection" if no_detection else "invalid_quad" if invalid else "no_valid_localization"
+        if group.cancelled:
+            outcome = "cancelled"
+        elif not group.executed:
+            outcome = "not_executed"
+        elif group.execution_failed:
+            outcome = "execution_error"
+            counts["mt_execution_error_invocations"] += 1
         counts["mt_false_detections"] += false
         counts["mt_multi_plate_invocations"] += active and visible == "multiple"
         counts["mt_uncertain_invocations"] += active and visible == "uncertain"
@@ -166,6 +203,8 @@ def calculate_mt_invocations(session):
                 counts["mt_invalid_quad_invocations"] += 1
         results.append({"mt_invocation_id": key, "subject_keys": sorted(group.subject_keys), "records": [row["id"] for row in group.records],
                         "detection_count": group.detection_count, "cancelled": group.cancelled, "evidence_available": evidence,
+                        "executed": group.executed, "execution_failed": group.execution_failed,
+                        "execution_errors": list(group.execution_errors),
                         "visible_plate_count": visible, "included": bool(included), "outcome": outcome,
                         "false_detections": false, "decision_source": annotation.get("decision_source", "operator")})
     denominator = counts["evaluable_mt_invocations"]

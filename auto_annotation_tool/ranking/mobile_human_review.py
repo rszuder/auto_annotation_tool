@@ -404,7 +404,7 @@ class MobileReviewSession:
 
     def invocation_completion_issues(self, key: str) -> list[str]:
         group = self.mt_invocations[key]
-        if group.cancelled or not group.executed:
+        if group.cancelled or not group.executed or group.execution_failed:
             return []
         decision = self.invocation_annotation(key)
         if decision.get("evaluable") is False or decision.get("visible_plate_count") == "uncertain":
