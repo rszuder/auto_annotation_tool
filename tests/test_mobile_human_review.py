@@ -128,10 +128,11 @@ def test_autosave_reopen_sha_binding_and_original_immutable(tmp_path):
     session.set_subject(key, ground_truth="WI1234A")
     assert load(path, tmp_path).review.review_revision == 1
     session.annotate("attempt", "a1", plate_visibility="visible", is_plate=True)
+    session.annotate_invocation("a1", visible_plate_count="one")
     session.complete()
     reopened = load(path, tmp_path)
     assert reopened.review.review_status == "COMPLETED"
-    assert reopened.review.review_revision == 3
+    assert reopened.review.review_revision == 4
     assert _file_sha256(path) == source_hash
     other = make_bundle(tmp_path / "other.alprsession", samples=[dict(capture_id="other", prediction="XX")])
     with pytest.raises(ValueError, match="SHA-256"):
@@ -189,8 +190,11 @@ def test_mt_miss_invisible_uncertain_cancelled_and_false_detection(tmp_path):
     session.set_subject(key, ground_truth="WI1234A")
     for row in rows:
         session.annotate("attempt", row["attempt_id"], plate_visibility="visible", is_plate=True)
+        session.annotate_invocation(row["attempt_id"], visible_plate_count="one")
     session.annotate("attempt", "no_plate", plate_visibility="invisible")
     session.annotate("attempt", "uncertain", plate_visibility="uncertain")
+    session.annotate_invocation("no_plate", visible_plate_count="none")
+    session.annotate_invocation("uncertain", visible_plate_count="uncertain")
     session.annotate("attempt", "false", is_plate=False)
     s = session.statistics()["summary"]
     assert s["evaluable_mt_attempts"] == 4
@@ -234,6 +238,7 @@ def test_completed_requires_gt_and_attempt_decisions(tmp_path):
     with pytest.raises(ValueError):
         session.complete()
     session.annotate("attempt", "a1", plate_visibility="uncertain")
+    session.annotate_invocation("a1", visible_plate_count="uncertain")
     session.complete()
     session.set_subject(key, ground_truth="NEW")
     assert session.review.review_status == "IN_PROGRESS"
@@ -324,9 +329,11 @@ def test_missing_evidence_must_be_explicitly_excluded(tmp_path):
     session.set_subject(next(iter(session.subjects)), ground_truth="WI1234A")
     session.annotate("attempt", "a1", plate_visibility="visible", is_plate=True)
     assert session.statistics()["summary"]["evaluable_mt_attempts"] == 0
+    session.annotate_invocation("a1", visible_plate_count="one")
     with pytest.raises(ValueError, match="Brak dowodu"):
         session.complete()
     session.annotate("attempt", "a1", evaluable=False)
+    session.annotate_invocation("a1", visible_plate_count="uncertain", evaluable=False)
     session.complete()
 
 
@@ -363,6 +370,9 @@ def test_pending_attempts_visible_in_subject_progress(tmp_path):
     assert not stats["subjects"][0]["reviewed"]
     assert stats["summary"]["not_reviewed_subjects"] == 1
     session.annotate("attempt", "a1", plate_visibility="visible", is_plate=True)
+    stats = session.statistics()
+    assert stats["subjects"][0]["pending_decisions"] == 1
+    session.annotate_invocation("a1", visible_plate_count="one")
     stats = session.statistics()
     assert stats["subjects"][0]["pending_decisions"] == 0
     assert stats["summary"]["reviewed_subjects"] == 1

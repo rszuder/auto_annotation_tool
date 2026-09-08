@@ -2326,11 +2326,12 @@ class MobileReportBrowser:
                 return "—" if value is None else f"{float(value) * 100:.2f}%"
             self.quality_table.set_rows([
                 ("Źródło jakości", "Weryfikacja człowieka", "Ukończona weryfikacja; surowe pomiary czasu i pamięci zachowane."),
+                ("Tryb weryfikacji", "Zaślepiona GT" if quality.get("review_mode") == "blinded_gt_v1" else "Asystowana", "Tryb zapisany w sidecarze weryfikacji."),
                 ("Poprawne odczyty MZ", ratio("exact_read_rate"), "Jednostka: oceniany crop."),
                 ("Brak odczytu MZ", ratio("no_read_rate"), "Oceniany crop z GT, bez użytecznego odczytu."),
                 ("CER MZ", ratio("cer"), "Suma błędów / suma znaków GT. Wartość może przekraczać 100%."),
                 ("Skuteczność ALPR dla tablic", ratio("subject_success_rate"), "Co najmniej jeden poprawny odczyt lub wynik konsensusu."),
-                ("Skuteczność lokalizacji MT", ratio("mt_localization_success_rate"), "Ocenione próby z widoczną tablicą; nie jest to mAP."),
+                ("Skuteczność lokalizacji MT", ratio("mt_localization_success_rate"), "Ocenione wywołania z jedną widoczną tablicą; nie jest to mAP."),
                 ("SHA-256 źródła", quality.get("source_archive_sha256", ""), "Tożsamość archiwum powiązanego z weryfikacją."),
             ])
             return

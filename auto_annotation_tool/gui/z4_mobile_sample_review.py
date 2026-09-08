@@ -14,6 +14,10 @@ from ..ranking.mobile_human_review import MobileReviewSession, align_plate_text,
 from ..ranking.mobile_package_experiments import MobilePackageExperimentStore, read_mobile_report_bundle
 
 REVIEW_LABELS = {"NOT_STARTED": "Nie rozpoczęto", "IN_PROGRESS": "W toku", "COMPLETED": "Zakończona"}
+MODE_LABELS = {"blinded_gt_v1": "Zaślepiona GT", "assisted": "Asystowana (diagnostyczna)"}
+VISIBILITY_LABELS = {"none": "Brak widocznej tablicy", "one": "Jedna widoczna tablica",
+                     "multiple": "Wiele widocznych tablic", "uncertain": "Niejednoznaczne"}
+HIDDEN_PREDICTION = "ukryta do czasu GT"
 STAGE_LABELS = {"VALID_QUAD": "Poprawny obszar", "NO_DETECTION": "Brak detekcji", "DETECTION_INVALID_QUAD": "Błędna geometria",
                 "NOT_RUN": "Nie uruchomiono", "NO_CHARACTERS": "Brak znaków", "READ": "Odczyt"}
 
@@ -35,6 +39,7 @@ class MobileSampleReviewWindow:
         self.stats = {}
         self.subject_key = ""
         self.current_record = None
+        self.current_invocation = ""
         self._subject_ids = {}
         self._record_ids = {}
         self._closed = False
@@ -144,7 +149,8 @@ class MobileSampleReviewWindow:
         self.gt_entry.grid(row=0, column=1, sticky="ew")
         self.gt_entry.bind("<Return>", lambda event: self.save_gt(explicit=True))
         self._button(gt, "Zapisz GT", lambda: self.save_gt(explicit=True), row=0, column=2)
-        self._button(gt, "Zgodne z predykcją", self.accept_prediction, row=0, column=3)
+        self.accept_button = self._button(gt, "Zgodne z predykcją", self.accept_prediction, row=0, column=3)
+        self.accept_button.grid_remove()
         self._button(gt, "Nie do oceny", self.exclude_subject, row=0, column=4)
         self.note_var = tk.StringVar()
         self._label(gt, "Notatka").grid(row=1, column=0, sticky="w")
@@ -176,15 +182,22 @@ class MobileSampleReviewWindow:
         self.alignment_text.tag_configure("extra", foreground=self.browser.warning)
         controls = tk.Frame(right, bg=self.bg)
         controls.grid(row=5, column=0, sticky="ew")
+        invocation_bar = tk.Frame(controls, bg=self.bg)
+        invocation_bar.grid(row=0, column=0, columnspan=3, sticky="ew")
+        invocation_bar.columnconfigure(0, weight=1)
+        self.invocation_label = self._label(invocation_bar, "Wywołanie MT: —", font=("Segoe UI", 9))
+        self.invocation_label.grid(row=0, column=0, sticky="w")
+        self._button(invocation_bar, "Pokaż wejście MT", self.show_invocation_input, row=0, column=1)
+        self.invocation_choice = ttk.Combobox(invocation_bar, state="disabled", width=25, values=list(VISIBILITY_LABELS.values()))
+        self.invocation_choice.grid(row=0, column=2, padx=3)
+        self.invocation_choice.bind("<<ComboboxSelected>>", self.save_invocation_decision)
         for column, (title, decision) in enumerate((
-            ("Tablica widoczna", {"plate_visibility": "visible", "is_plate": True, "evaluable": True}),
-            ("Tablica niewidoczna", {"plate_visibility": "invisible", "is_plate": False, "evaluable": False}),
-            ("Niejednoznaczne", {"plate_visibility": "uncertain", "is_plate": None, "evaluable": False}),
+            ("To jest tablica", {"plate_visibility": "visible", "is_plate": True, "evaluable": True}),
             ("To nie jest tablica", {"is_plate": False, "evaluable": False}),
-            ("Pomiń próbkę", {"evaluable": False}),
+            ("Pomiń detekcję / crop", {"evaluable": False}),
         )):
             self._button(controls, title, lambda decision=decision: self.annotate(decision),
-                         row=0, column=column, sticky="ew")
+                         row=1, column=column, sticky="ew")
             controls.columnconfigure(column, weight=1)
         frame, self.record_tree = self._table(right, ("Rodzaj", "Id", "MT / MZ", "Predykcja", "Ocena"), (65, 130, 140, 130, 120), height=4)
         frame.grid(row=6, column=0, sticky="nsew", pady=6)
@@ -205,6 +218,10 @@ class MobileSampleReviewWindow:
         self.reviewer_var = tk.StringVar()
         ttk.Entry(reviewer, textvariable=self.reviewer_var).grid(row=0, column=1)
         self._button(reviewer, "Zapisz", self.save_reviewer, row=0, column=2)
+        self._label(reviewer, "Tryb weryfikacji").grid(row=1, column=0, padx=5, pady=5)
+        self.mode_choice = ttk.Combobox(reviewer, state="disabled", width=29, values=list(MODE_LABELS.values()))
+        self.mode_choice.grid(row=1, column=1, columnspan=2, sticky="w")
+        self.mode_choice.bind("<<ComboboxSelected>>", self.change_review_mode)
         frame, self.details_tree = self._table(details, ("Pole", "Wartość"), (340, 750), height=20)
         frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
         self.status_var = tk.StringVar(value="Odczyt pełnego indeksu i kontrola SHA-256…")
@@ -218,6 +235,8 @@ class MobileSampleReviewWindow:
             self._saving = True
             self.gt_entry.configure(state="disabled")
             self.note_entry.configure(state="disabled")
+            self.mode_choice.configure(state="disabled")
+            self.invocation_choice.configure(state="disabled")
             for button in self.actions:
                 button.configure(state="disabled")
         def task():
@@ -247,6 +266,8 @@ class MobileSampleReviewWindow:
                     if saving and self._close_requested:
                         self.close()
                         return
+                if self.session:
+                    self._sync_review_controls()
         except queue.Empty:
             pass
         self._poll_id = self.window.after(40, self._poll)
@@ -272,6 +293,7 @@ class MobileSampleReviewWindow:
         self._refresh_subject_rows()
         self._refresh_stats()
         self._populate_details()
+        self._sync_review_controls()
         self.status_var.set("Gotowe. Zmiany zapisują się automatycznie. Lokalizacja zapisu: zakładka „Sesja i modele”.")
         if self._subject_ids:
             first = next(iter(self._subject_ids))
@@ -283,10 +305,12 @@ class MobileSampleReviewWindow:
         for index, (iid, key) in enumerate(self._subject_ids.items(), 1):
             decision = self.session.review.subjects.get(key, {})
             state = "Pominięta" if decision.get("evaluable") is False else "Gotowa" if decision.get("ground_truth") else "Oczekuje"
+            if decision.get("draft_ground_truth") and not self.session.predictions_visible(key):
+                state = "Szkic GT"
             pending = self._subject_stats.get(key, {}).get("pending_decisions", 0)
             if pending and decision.get("ground_truth"):
                 state = f"Decyzje: {pending}"
-            values = (index, state, decision.get("ground_truth", ""))
+            values = (index, state, self.session.subject_draft(key))
             if self.subject_tree.exists(iid):
                 self.subject_tree.item(iid, values=values)
             else:
@@ -314,14 +338,23 @@ class MobileSampleReviewWindow:
         subject = self.session.subjects[key]
         decision = self.session.review.subjects.get(key, {})
         self._rendering = True
-        self.gt_var.set(decision.get("ground_truth", ""))
+        self.gt_var.set(self.session.subject_draft(key))
         self.note_var.set(decision.get("note", ""))
         self._rendering = False
         number = list(self.session.subjects).index(key) + 1
         legacy = " • tożsamość legacy" if subject["legacy_identity"] else ""
         stats = self._subject_stats.get(key, {})
-        self.subject_label.configure(text=f"Tablica {number} / {len(self.session.subjects)} • próby: {len(subject['attempts'])} • cropy: {len(subject['samples'])} • "
-            f"MT miss: {_display(stats.get('mt_no_detections'))} • odczyty MZ: {stats.get('evaluable_reads', 0)}{legacy}")
+        invocations = {self.session.invocation_by_attempt[item] for item in subject["attempts"]}
+        invocation_count = sum(self.session.mt_invocations[item].executed for item in invocations) if self.session.attempts_available else None
+        self.subject_label.configure(text=f"Tablica {number} / {len(self.session.subjects)} • wywołania MT: {_display(invocation_count)} • cropy: {len(subject['samples'])} • "
+            f"MT miss: {_display(stats.get('mt_no_detection_invocations'))} • odczyty MZ: {stats.get('evaluable_reads', 0)}{legacy}")
+        visible = self.session.predictions_visible(key)
+        self._sync_review_controls()
+        if not visible:
+            self.alignment_label.configure(text="Wpisz GT z obrazu i wybierz „Zapisz GT”.")
+            self.alignment_text.configure(state="normal")
+            self.alignment_text.delete("1.0", "end")
+            self.alignment_text.configure(state="disabled")
         old = self.current_record
         self.record_tree.delete(*self.record_tree.get_children())
         self._record_ids = {}
@@ -335,8 +368,12 @@ class MobileSampleReviewWindow:
                 state = {"visible": "Widoczna", "invisible": "Niewidoczna", "uncertain": "Niejednoznaczna"}.get(state, state)
                 if self.session.cancelled(row):
                     state = "Anulowana"
-                self.record_tree.insert("", "end", iid=iid, values=("Próba" if kind == "attempt" else "Crop", record_id,
-                    " / ".join(STAGE_LABELS.get(row.get(name), str(row.get(name, ""))) for name in ("mt_status", "mz_status")).strip(" /"), row.get("prediction", ""), state))
+                invocation = self.session.invocation_by_attempt.get(record_id if kind == "attempt" else row.get("attempt_id"), "")
+                index = row.get("mt_detection_index")
+                label = f"Detekcja {int(index) + 1}" if kind == "attempt" and index not in (None, "") else "Rekord MT" if kind == "attempt" else "Crop"
+                identity = f"{invocation} / {record_id}" if invocation and invocation != record_id else record_id
+                self.record_tree.insert("", "end", iid=iid, values=(label, identity,
+                    " / ".join(STAGE_LABELS.get(row.get(name), str(row.get(name, ""))) for name in ("mt_status", "mz_status")).strip(" /"), row.get("prediction", "") if visible else HIDDEN_PREDICTION, state))
         if self._record_ids:
             iid = next((iid for iid, value in self._record_ids.items() if value == old), next(iter(self._record_ids)))
             self.current_record = None
@@ -357,6 +394,11 @@ class MobileSampleReviewWindow:
         row = (self.session.attempts if kind == "attempt" else self.session.samples)[key]
         self._image_rows = []
         attempt = row if kind == "attempt" else self.session.attempts.get(row.get("attempt_id"), {})
+        self.current_invocation = self.session.invocation_by_attempt.get(attempt.get("id"), "")
+        if self.current_invocation:
+            group = self.session.mt_invocations[self.current_invocation]
+            for index, entry in enumerate(sorted(group.evidence_entries, key=lambda name: name not in self.session.entry_names)):
+                self._image_rows.append((f"Wejście MT {index + 1}", {"image_entry": entry}))
         if attempt.get("evidence_entry"):
             self._image_rows.append(("Dowód próby", attempt))
         if kind == "sample" and row.get("image_entry"):
@@ -371,13 +413,15 @@ class MobileSampleReviewWindow:
             self.image_choice.current(0)
         else:
             self.image_choice.set("Brak zapisanego obrazu")
-        label = "Próba" if kind == "attempt" else "Crop"
+        label = "Rekord MT" if kind == "attempt" else "Crop"
         self.record_label.configure(text=f"{label}: {key} • {STAGE_LABELS.get(row.get('mt_status'), '')} {STAGE_LABELS.get(row.get('mz_status'), '')}")
         gt = self.session.review.subjects.get(self.subject_key, {}).get("ground_truth", "")
         prediction = str(row.get("prediction", ""))
         self.alignment_text.configure(state="normal")
         self.alignment_text.delete("1.0", "end")
-        if self.session.cancelled(row):
+        if not self.session.predictions_visible(self.subject_key):
+            self.alignment_label.configure(text="Wpisz GT z obrazu i wybierz „Zapisz GT”. Predykcje i porównanie pozostają ukryte; autosave chroni szkic.")
+        elif self.session.cancelled(row):
             self.alignment_label.configure(text=f"Próba anulowana — poza metrykami. Zapisana predykcja: {prediction or '—'}")
         elif str(row.get("mz_status", "")).upper() == "NOT_RUN":
             self.alignment_label.configure(text="MZ nie został uruchomiony w tej próbie. Oceń widoczność tablicy dla MT.")
@@ -395,7 +439,55 @@ class MobileSampleReviewWindow:
         else:
             self.alignment_label.configure(text=f"Predykcja: {prediction or 'brak odczytu'} • wpisz GT dla tej tablicy.")
         self.alignment_text.configure(state="disabled")
+        self._sync_review_controls()
         self._load_image()
+
+    def _sync_review_controls(self):
+        if not self.session:
+            return
+        if self.subject_key and self.session.predictions_visible(self.subject_key):
+            self.accept_button.grid()
+            self.accept_button.configure(state="disabled" if self._saving else "normal")
+        else:
+            self.accept_button.configure(state="disabled")
+            self.accept_button.grid_remove()
+        self.mode_choice.set(MODE_LABELS[self.session.review.review_mode])
+        self.mode_choice.configure(state="disabled" if self._saving or self.session.review.review_mode_locked else "readonly")
+        if self.current_invocation:
+            group = self.session.mt_invocations[self.current_invocation]
+            self.invocation_label.configure(text=f"Wywołanie MT: {self.current_invocation} • detekcje: {group.detection_count}")
+            annotation = self.session.invocation_annotation(self.current_invocation)
+            self.invocation_choice.set("Brak dawnej oceny liczby tablic" if annotation.get("decision_source") == "legacy_cardinality_unknown"
+                                       else VISIBILITY_LABELS.get(annotation.get("visible_plate_count"), "Oceń całe wejście MT"))
+            self.invocation_choice.configure(state="disabled" if self._saving or group.cancelled or not group.executed else "readonly")
+        else:
+            self.invocation_label.configure(text="Wywołanie MT: niedostępne dla tego cropa")
+            self.invocation_choice.set("")
+            self.invocation_choice.configure(state="disabled")
+
+    def show_invocation_input(self):
+        for index, (label, _) in enumerate(getattr(self, "_image_rows", [])):
+            if label.startswith("Wejście MT"):
+                self.image_choice.current(index)
+                self._load_image()
+                return
+        self.status_var.set("Brak dowodu całego wejścia MT. Oznacz wywołanie jako niejednoznaczne.")
+
+    def save_invocation_decision(self, event=None):
+        key = self.current_invocation
+        value = next((key for key, label in VISIBILITY_LABELS.items() if label == self.invocation_choice.get()), None)
+        if key and value:
+            self._change(lambda: self.session.annotate_invocation(key, visible_plate_count=value, evaluable=value != "uncertain"))
+
+    def change_review_mode(self, event=None):
+        mode = next((key for key, label in MODE_LABELS.items() if label == self.mode_choice.get()), None)
+        if mode:
+            key, text, note = self.subject_key, self.gt_var.get(), self.note_var.get()
+            def change():
+                self.session.set_review_mode(mode)
+                if key and (text or note):
+                    self.session.save_subject_draft(key, ground_truth=text, note=note)
+            self._change(change, save_draft=False)
 
     def _load_image(self):
         self._image_token += 1
@@ -435,6 +527,7 @@ class MobileSampleReviewWindow:
     def _schedule_autosave(self, *args):
         if self._rendering or not self.subject_key:
             return
+        self.mode_choice.configure(state="disabled")
         if self._autosave_id:
             self.window.after_cancel(self._autosave_id)
         self._autosave_id = self.window.after(750, self.save_gt)
@@ -444,8 +537,8 @@ class MobileSampleReviewWindow:
         def save():
             if key:
                 old = self.session.review.subjects.get(key, {})
-                if normalize_registration(gt) != old.get("ground_truth", "") or note != old.get("note", ""):
-                    self.session.set_subject(key, ground_truth=gt, note=note, evaluable=True if normalize_registration(gt) else None)
+                if normalize_registration(gt) != normalize_registration(self.session.subject_draft(key)) or note != old.get("note", ""):
+                    self.session.save_subject_draft(key, ground_truth=gt, note=note)
         return save
 
     def _change(self, operation, *, save_draft=True, after=None):
@@ -503,11 +596,18 @@ class MobileSampleReviewWindow:
         key, gt, note = self.subject_key, self.gt_var.get(), self.note_var.get()
         old = self.session.review.subjects.get(key, {})
         normalized = normalize_registration(gt)
-        if old.get("ground_truth", "") == normalized and old.get("note", "") == note and not (explicit and normalized and old.get("evaluable") is not True):
+        needs_confirmation = explicit and normalized and (not self.session.predictions_visible(key) or old.get("evaluable") is not True)
+        if normalize_registration(self.session.subject_draft(key)) == normalized and old.get("note", "") == note and not needs_confirmation:
             return
-        self._change(lambda: self.session.set_subject(key, ground_truth=gt, note=note, evaluable=True if normalized else None), save_draft=False)
+        if explicit:
+            self._change(lambda: self.session.set_subject(key, ground_truth=gt, note=note, evaluable=True if normalized else None), save_draft=False)
+        else:
+            self._change(lambda: self.session.save_subject_draft(key, ground_truth=gt, note=note), save_draft=False)
 
     def accept_prediction(self):
+        if not self.session.predictions_visible(self.subject_key):
+            self.status_var.set("Najpierw zapisz GT odczytane z obrazu.")
+            return
         if self.current_record:
             kind, key = self.current_record
             row = (self.session.attempts if kind == "attempt" else self.session.samples)[key]
@@ -552,14 +652,14 @@ class MobileSampleReviewWindow:
 
     def _refresh_stats(self):
         summary = self.stats["summary"]
-        self.progress_label.configure(text=f"Tablice: {summary['subject_count']} • próby: {summary['attempt_count']} • cropy: {summary['crop_count']} • "
-            f"ocenione: {summary['reviewed_subjects']} • oczekujące: {summary['not_reviewed_subjects']} • {REVIEW_LABELS[self.session.review.review_status]}")
+        self.progress_label.configure(text=f"Tablice: {summary['subject_count']} • wywołania MT: {_display(summary['mt_invocation_count'])} • cropy: {summary['crop_count']} • "
+            f"ocenione: {summary['reviewed_subjects']} • oczekujące: {summary['not_reviewed_subjects']} • {REVIEW_LABELS[self.session.review.review_status]} • {MODE_LABELS[self.session.review.review_mode]}")
         self.stats_tree.delete(*self.stats_tree.get_children())
         sections = {
             "Tablice / ALPR": {"evaluable_subjects": "Tablice do oceny", "subjects_with_exact_read": "Z poprawnym odczytem", "subjects_without_exact_read": "Bez poprawnego odczytu", "subject_success_rate": "Skuteczność systemu dla tablic"},
             "Odczyty MZ": {"evaluable_reads": "Oceniane cropy", "exact_reads": "Poprawne odczyty", "incorrect_reads": "Niepoprawne odczyty", "no_reads": "Brak odczytu", "exact_read_rate": "Udział poprawnych odczytów", "no_read_rate": "Udział braku odczytu"},
             "Znaki MZ": {"gt_characters": "Znaki GT", "correct_characters": "Poprawnie rozpoznane znaki", "incorrect_characters": "Błędnie rozpoznane znaki", "missing_characters": "Brakujące znaki", "extra_characters": "Znaki nadmiarowe", "cer": "CER — suma błędów / suma znaków GT"},
-            "Lokalizacja MT": {"evaluable_mt_attempts": "Oceniane próby z widoczną tablicą", "mt_valid_localizations": "Poprawne lokalizacje", "mt_no_detections": "Brak detekcji mimo widocznej tablicy", "mt_invalid_quads": "Nieprawidłowa geometria", "mt_false_detections": "Fałszywe detekcje", "mt_localization_success_rate": "Skuteczność lokalizacji MT w próbach mobilnych"},
+            "Lokalizacja MT": {"evaluable_mt_invocations": "Oceniane wywołania z jedną widoczną tablicą", "mt_successful_invocations": "Wywołania z poprawną lokalizacją", "mt_no_detection_invocations": "Wywołania bez detekcji", "mt_invalid_quad_invocations": "Wywołania z błędną geometrią", "mt_multi_plate_invocations": "Wywołania z wieloma tablicami", "mt_uncertain_invocations": "Wywołania niejednoznaczne", "mt_false_detections": "Fałszywe detekcje", "mt_localization_success_rate": "Skuteczność lokalizacji MT w wywołaniach z jedną tablicą"},
             "Czas i próby": {"median_time_to_first_exact_ms": "Mediana czasu do próby z poprawnym odczytem [ms]", "p90_time_to_first_exact_ms": "P90 czasu do próby z poprawnym odczytem [ms]", "median_attempts_to_first_exact": "Mediana liczby prób do poprawnego odczytu"},
         }
         for section, fields in sections.items():

@@ -2420,6 +2420,7 @@ class MobilePackageExperimentStore:
                 continue
             original = dict(previous.get("original_quality", report.quality))
             reference = {"review_id": review.review_id, "review_revision": review.review_revision,
+                         "review_mode": review.review_mode,
                          "review_status": review.review_status, "source_archive_sha256": review.source_archive_sha256,
                          "sidecar_path": str(session.sidecar_path.resolve()), "original_quality": original}
             quality = dict(stats, quality_source="human_review", review_status="COMPLETED",

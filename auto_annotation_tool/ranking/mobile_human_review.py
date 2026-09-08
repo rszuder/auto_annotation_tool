@@ -21,6 +21,7 @@ from .mobile_package_experiments import (
     iter_full_sample_annotations, iter_full_sample_rows, read_mobile_report_bundle,
     read_mobile_sample_image,
 )
+from .mobile_mt_invocations import DETECTION_STATUSES, group_mt_invocations, calculate_mt_invocations
 
 REVIEW_SCHEMA = "alpr.mobile_human_review.v1"
 NORMALIZATION_POLICY = "uppercase_alphanumeric.v1"
@@ -133,9 +134,13 @@ class MobileHumanReview:
     reviewer_id: str = ""
     review_status: str = "NOT_STARTED"
     review_revision: int = 0
+    review_mode: str = "blinded_gt_v1"
+    review_mode_locked: bool = False
+    mt_review_policy: str = "invocation_v1"
     normalization_policy: str = NORMALIZATION_POLICY
     subjects: dict[str, dict] = field(default_factory=dict)
     attempt_annotations: dict[str, dict] = field(default_factory=dict)
+    invocation_annotations: dict[str, dict] = field(default_factory=dict)
     sample_annotations: dict[str, dict] = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
 
@@ -150,13 +155,21 @@ class MobileHumanReview:
             raise ValueError("Weryfikacja dotyczy innego archiwum (SHA-256 lub identyfikator sesji).")
         if data.get("normalization_policy", NORMALIZATION_POLICY) != NORMALIZATION_POLICY:
             raise ValueError("Weryfikacja używa innej polityki normalizacji tekstu.")
-        result = cls(**{key: value for key, value in data.items() if key in cls.__dataclass_fields__})
+        values = {key: value for key, value in data.items() if key in cls.__dataclass_fields__}
+        values.setdefault("review_mode", "assisted")
+        values.setdefault("mt_review_policy", "legacy_visibility_v1")
+        values.setdefault("review_mode_locked", bool(data.get("subjects") or data.get("attempt_annotations") or data.get("sample_annotations")))
+        result = cls(**values)
+        if result.review_mode not in {"blinded_gt_v1", "assisted"} or result.mt_review_policy not in {"invocation_v1", "legacy_visibility_v1"}:
+            raise ValueError("Nieobsługiwany tryb lub kontrakt weryfikacji.")
         result.review_status = result.review_status.upper()
         if result.review_status not in {"NOT_STARTED", "IN_PROGRESS", "COMPLETED"}:
             raise ValueError("Nieprawidłowy status weryfikacji.")
-        for mapping in (result.subjects, result.attempt_annotations, result.sample_annotations):
+        for mapping in (result.subjects, result.attempt_annotations, result.sample_annotations, result.invocation_annotations):
             if not isinstance(mapping, dict) or any(not isinstance(value, dict) for value in mapping.values()):
                 raise ValueError("Nieprawidłowy zapis decyzji operatora.")
+        result.review_mode_locked = bool(result.review_mode_locked or any((result.subjects, result.attempt_annotations,
+                                                                         result.sample_annotations, result.invocation_annotations)))
         return result
 
 
@@ -230,6 +243,8 @@ class MobileReviewSession:
             self._assign_subject(row, "samples")
         if annotations:
             self.warnings.append(f"Adnotacje poza indeksem cropów: {len(annotations)}. Nie są liczone jako odczyty.")
+        self.mt_invocations = group_mt_invocations(self.attempts, self.session_id)
+        self.invocation_by_attempt = {row["id"]: key for key, group in self.mt_invocations.items() for row in group.records}
         self.verify_source()
         self.sidecar_path = Path(sidecar_path) if sidecar_path else (
             CONFIG.DIR_7_RANKINGS_MOBILE_PACKAGES / "human_reviews" / f"{bundle.source_archive_sha256}.review.json")
@@ -249,6 +264,9 @@ class MobileReviewSession:
             self._validate_decisions(self.review)
             if self.review.review_status == "COMPLETED" and self.completion_issues():
                 raise ValueError("Zapis oznaczono jako ukończony mimo brakujących decyzji.")
+            if any(group.executed and not group.cancelled and self.invocation_annotation(key).get("decision_source") == "legacy_cardinality_unknown"
+                   for key, group in self.mt_invocations.items()):
+                self.warnings.append("Starsza weryfikacja nie zawiera liczby tablic na całym wejściu MT. Te wywołania wymagają nowej oceny, aby wejść do głównej miary MT.")
 
     @classmethod
     def open(cls, path: Path, **kwargs) -> "MobileReviewSession":
@@ -281,15 +299,17 @@ class MobileReviewSession:
 
     def _validate_decisions(self, review: MobileHumanReview) -> None:
         for decisions, records in ((review.subjects, self.subjects), (review.attempt_annotations, self.attempts),
-                                   (review.sample_annotations, self.samples)):
+                                   (review.sample_annotations, self.samples), (review.invocation_annotations, self.mt_invocations)):
             if set(decisions) - set(records):
                 raise ValueError("Weryfikacja zawiera identyfikatory spoza źródłowej sesji.")
             for value in decisions.values():
-                for name in ("evaluable", "is_plate"):
+                for name in ("evaluable", "is_plate", "gt_confirmed"):
                     if name in value and value[name] is not None and not isinstance(value[name], bool):
                         raise ValueError("Decyzja operatora musi mieć wartość logiczną.")
                 if "plate_visibility" in value and value["plate_visibility"] not in {"visible", "invisible", "uncertain"}:
                     raise ValueError("Nieprawidłowa ocena widoczności tablicy.")
+                if "visible_plate_count" in value and value["visible_plate_count"] not in {"none", "one", "multiple", "uncertain"}:
+                    raise ValueError("Nieprawidłowa ocena liczby tablic na wejściu MT.")
         for subject in review.subjects.values():
             if subject.get("evaluable") is True and not normalize_registration(subject.get("ground_truth")):
                 raise ValueError("Oceniana tablica wymaga niepustego GT.")
@@ -297,6 +317,10 @@ class MobileReviewSession:
     def _save_change(self, changed: MobileHumanReview) -> None:
         self.verify_source()
         self._validate_decisions(changed)
+        if self.review.review_mode_locked and changed.review_mode != self.review.review_mode:
+            raise ValueError("Tryb weryfikacji jest stały po pierwszej zapisanej decyzji.")
+        changed.review_mode_locked = self.review.review_mode_locked or any((changed.subjects, changed.attempt_annotations,
+                                                                          changed.sample_annotations, changed.invocation_annotations))
         if self.sidecar_path.exists():
             saved = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
             if (saved.get("review_id") != self.review.review_id
@@ -316,9 +340,88 @@ class MobileReviewSession:
             raise ValueError("GT jest zbyt długie.")
         changed = copy.deepcopy(self.review)
         changed.subjects[key] = {"ground_truth": gt, "evaluable": evaluable, "note": note,
+                                 "gt_confirmed": bool(gt) and (evaluable is True or self.review.subjects.get(key, {}).get("gt_confirmed", False)),
                                  "legacy_identity": self.subjects[key]["legacy_identity"]}
         changed.review_status = "IN_PROGRESS"
         self._save_change(changed)
+
+    def predictions_visible(self, key: str) -> bool:
+        subject = self.review.subjects.get(key, {})
+        return self.review.review_mode == "assisted" or bool(subject.get("gt_confirmed") and subject.get("ground_truth"))
+
+    def subject_draft(self, key: str) -> str:
+        subject = self.review.subjects.get(key, {})
+        return str(subject.get("draft_ground_truth", subject.get("ground_truth", "")))
+
+    def save_subject_draft(self, key: str, *, ground_truth: str, note: str = "") -> None:
+        if key not in self.subjects:
+            raise KeyError(key)
+        gt = normalize_registration(ground_truth)
+        if len(gt) > 256:
+            raise ValueError("GT jest zbyt długie.")
+        if self.predictions_visible(key):
+            self.set_subject(key, ground_truth=ground_truth, note=note, evaluable=True if gt else None)
+            return
+        changed = copy.deepcopy(self.review)
+        decision = dict(changed.subjects.get(key, {}))
+        decision.update(draft_ground_truth=str(ground_truth), note=note, legacy_identity=self.subjects[key]["legacy_identity"])
+        if gt != normalize_registration(self.subject_draft(key)):
+            decision["evaluable"] = None
+        changed.subjects[key] = decision
+        changed.review_status = "IN_PROGRESS"
+        self._save_change(changed)
+
+    def set_review_mode(self, mode: str) -> None:
+        if mode not in {"blinded_gt_v1", "assisted"}:
+            raise ValueError("Nieznany tryb weryfikacji.")
+        changed = copy.deepcopy(self.review)
+        changed.review_mode = mode
+        self._save_change(changed)
+
+    def annotate_invocation(self, key: str, *, visible_plate_count: str, evaluable: bool = True) -> None:
+        changed = copy.deepcopy(self.review)
+        changed.invocation_annotations[key] = {"visible_plate_count": visible_plate_count, "evaluable": evaluable}
+        changed.review_status = "IN_PROGRESS"
+        self._save_change(changed)
+
+    def invocation_annotation(self, key: str) -> dict:
+        if key in self.review.invocation_annotations:
+            return self.review.invocation_annotations[key]
+        if self.review.mt_review_policy != "legacy_visibility_v1":
+            return {}
+        group = self.mt_invocations[key]
+        # Old per-record visibility never established the count in the full MT
+        # input, even when the backend returned only one detection. Preserve the
+        # historical review, but do not manufacture a one-plate decision.
+        excluded = (all(self.review.subjects.get(s, {}).get("evaluable") is False for s in group.subject_keys)
+                    or all(self.review.attempt_annotations.get(row["id"], {}).get("evaluable") is False
+                           or self.review.attempt_annotations.get(row["id"], {}).get("plate_visibility") == "uncertain" for row in group.records))
+        historical_complete = self.review.review_status == "COMPLETED"
+        if historical_complete or excluded or any(row["id"] in self.review.attempt_annotations for row in group.records):
+            return {"visible_plate_count": "uncertain" if historical_complete or excluded else None,
+                    "evaluable": False if historical_complete or excluded else None, "decision_source": "legacy_cardinality_unknown"}
+        return {}
+
+    def invocation_completion_issues(self, key: str) -> list[str]:
+        group = self.mt_invocations[key]
+        if group.cancelled or not group.executed:
+            return []
+        decision = self.invocation_annotation(key)
+        if decision.get("evaluable") is False or decision.get("visible_plate_count") == "uncertain":
+            return []
+        if decision.get("visible_plate_count") not in {"none", "one", "multiple"}:
+            return [f"Brak oceny liczby tablic w wywołaniu MT: {key}"]
+        evidence = any(entry in self.entry_names for entry in group.evidence_entries)
+        if not evidence:
+            return [f"Brak dowodu wejścia MT; oznacz wywołanie jako nie do oceny: {key}"]
+        if self.review.mt_review_policy == "legacy_visibility_v1" and key not in self.review.invocation_annotations:
+            return []
+        if decision.get("visible_plate_count") == "none":
+            return []
+        return [f"Brak oceny detekcji: {row['id']}" for row in group.records
+                if row.get("mt_status") in DETECTION_STATUSES
+                and self.review.attempt_annotations.get(row["id"], {}).get("evaluable") is not False
+                and self.review.attempt_annotations.get(row["id"], {}).get("is_plate") not in (True, False)]
 
     def annotate(self, kind: str, key: str, **decision) -> None:
         if kind not in {"attempt", "sample"}:
@@ -350,24 +453,18 @@ class MobileReviewSession:
         if rows and all(self.cancelled(row) for row in rows):
             return issues
         decision = self.review.subjects.get(key, {})
-        if decision.get("evaluable") is False:
-            return issues
-        if not decision.get("evaluable") or not normalize_registration(decision.get("ground_truth")):
+        if decision.get("evaluable") is not False and (not decision.get("evaluable") or not normalize_registration(decision.get("ground_truth"))):
             issues.append(f"Brak GT lub decyzji „nie do oceny”: {key}")
-        for attempt_id in subject["attempts"]:
-            row = self.attempts[attempt_id]
-            annotation = self.review.attempt_annotations.get(attempt_id, {})
-            if not self.cancelled(row) and annotation.get("evaluable") is not False and not annotation.get("plate_visibility"):
-                issues.append(f"Brak oceny widoczności: {attempt_id}")
-            elif (not self.cancelled(row) and not self.attempt_has_evidence(row)
-                  and annotation.get("evaluable") is not False and annotation.get("plate_visibility") != "uncertain"):
-                issues.append(f"Brak dowodu; oznacz próbę jako nie do oceny: {attempt_id}")
+        elif decision.get("evaluable") is True and not self.predictions_visible(key):
+            issues.append(f"GT wymaga jawnego zatwierdzenia: {key}")
+        for invocation in dict.fromkeys(self.invocation_by_attempt[attempt_id] for attempt_id in subject["attempts"]):
+            issues.extend(self.invocation_completion_issues(invocation))
         return issues
 
     def completion_issues(self) -> list[str]:
         if not self.subjects:
             return ["Sesja nie zawiera próbek ani prób do weryfikacji."]
-        return [issue for key in self.subjects for issue in self.subject_completion_issues(key)]
+        return list(dict.fromkeys(issue for key in self.subjects for issue in self.subject_completion_issues(key)))
 
     def complete(self) -> None:
         issues = self.completion_issues()
@@ -424,19 +521,21 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
     summary = Counter()
     confusion = Counter()
     reads, subjects, mt_rows = [], [], []
+    mt_summary, invocations = calculate_mt_invocations(session)
+    invocation_results = {row["mt_invocation_id"]: row for row in invocations}
+    misses_by_subject = Counter(key for row in invocations if row["included"] and row["outcome"] == "no_detection" for key in row["subject_keys"])
     summary.update(subject_count=len(session.subjects), attempt_count=len(session.attempts), crop_count=len(session.samples))
     for key, subject in session.subjects.items():
         decision = review.subjects.get(key, {})
         gt = normalize_registration(decision.get("ground_truth"))
         all_rows = [session.samples[k] for k in subject["samples"]] + [session.attempts[k] for k in subject["attempts"]]
         all_cancelled = all(session.cancelled(row) for row in all_rows)
-        evaluable = decision.get("evaluable") is True and bool(gt) and not all_cancelled
+        evaluable = decision.get("evaluable") is True and bool(gt) and not all_cancelled and session.predictions_visible(key)
         pending = len(session.subject_completion_issues(key))
         reviewed = not pending
         summary["reviewed_subjects" if reviewed else "not_reviewed_subjects"] += 1
         summary["evaluable_subjects"] += evaluable
         summary["pending_decisions"] += pending
-        mt_misses_before = summary["mt_no_detections"]
         subject_reads = []
         for sample_id in subject["samples"]:
             sample = session.samples[sample_id]
@@ -475,28 +574,17 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
             cancelled = session.cancelled(row)
             false_detection = (not cancelled and status in {"VALID_QUAD", "DETECTION_INVALID_QUAD"}
                                and (annotation.get("is_plate") is False or linked_false))
-            summary["mt_false_detections"] += false_detection
-            included = (not cancelled and annotation.get("evaluable") is not False
-                        and session.attempt_has_evidence(row)
-                        and decision.get("evaluable") is not False and annotation.get("plate_visibility") == "visible"
-                        and status in {"VALID_QUAD", "NO_DETECTION", "DETECTION_INVALID_QUAD"})
-            if included:
-                summary["evaluable_mt_attempts"] += 1
-                if status == "VALID_QUAD" and not false_detection:
-                    summary["mt_valid_localizations"] += 1
-                elif status == "NO_DETECTION":
-                    summary["mt_no_detections"] += 1
-                elif status == "DETECTION_INVALID_QUAD":
-                    summary["mt_invalid_quads"] += 1
+            invocation = invocation_results[session.invocation_by_attempt[attempt_id]]
             mt_rows.append({"attempt_id": attempt_id, "subject_key": key, "mt_status": status,
-                            "included": included, "false_detection": false_detection})
+                            "mt_invocation_id": invocation["mt_invocation_id"], "invocation_included": invocation["included"],
+                            "false_detection": false_detection})
             if (not cancelled and annotation.get("evaluable") is not False and not false_detection
                     and annotation.get("plate_visibility") not in {"invisible", "uncertain"}):
                 valid_attempts.append(row)
         result = {"subject_key": key, "ground_truth": gt, "evaluable": evaluable,
                   "legacy_identity": subject["legacy_identity"], "reviewed": reviewed,
                   "pending_decisions": pending, "evaluable_reads": len(subject_reads),
-                  "mt_no_detections": summary["mt_no_detections"] - mt_misses_before if session.attempts_available else None,
+                  "mt_no_detection_invocations": misses_by_subject[key] if session.attempts_available else None,
                   "sample_count": len(subject["samples"]), "attempt_count": len(subject["attempts"]),
                   "subject_exact_success": None, "attempts_to_first_exact": None, "time_to_first_exact_ms": None,
                   "time_basis": None, "first_exact_capture_source": None, "first_exact_camera_zoom_ratio": None,
@@ -538,23 +626,20 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
         subjects.append(result)
     for name in ("reviewed_subjects", "not_reviewed_subjects", "evaluable_subjects", "subjects_with_exact_read",
                  "subjects_without_exact_read", "evaluable_reads", "exact_reads", "incorrect_reads", "no_reads",
-                 "gt_characters", "correct_characters", "incorrect_characters", "missing_characters", "extra_characters",
-                 "evaluable_mt_attempts", "mt_valid_localizations", "mt_no_detections", "mt_invalid_quads", "mt_false_detections"):
+                 "gt_characters", "correct_characters", "incorrect_characters", "missing_characters", "extra_characters"):
         summary.setdefault(name, 0)
     summary = dict(summary)
     summary.update(subject_success_rate=_rate(summary["subjects_with_exact_read"], summary["evaluable_subjects"]),
                    exact_read_rate=_rate(summary["exact_reads"], summary["evaluable_reads"]),
                    no_read_rate=_rate(summary["no_reads"], summary["evaluable_reads"]),
                    cer=_rate(sum(summary[name] for name in ("incorrect_characters", "missing_characters", "extra_characters")), summary["gt_characters"]),
-                   mt_available=session.attempts_available,
-                   mt_localization_success_rate=_rate(summary["mt_valid_localizations"], summary["evaluable_mt_attempts"]) if session.attempts_available else None)
-    if not session.attempts_available:
-        for name in ("evaluable_mt_attempts", "mt_valid_localizations", "mt_no_detections", "mt_invalid_quads", "mt_false_detections"):
-            summary[name] = None
+                   mt_available=session.attempts_available, review_mode=review.review_mode)
+    summary.update(mt_summary)
+    summary["mt_invocation_count"] = sum(group.executed for group in session.mt_invocations.values()) if session.attempts_available else None
     times = [row["time_to_first_exact_ms"] for row in subjects if row["time_to_first_exact_ms"] is not None]
     attempts = [row["attempts_to_first_exact"] for row in subjects if row["attempts_to_first_exact"] is not None]
     summary.update(median_time_to_first_exact_ms=_percentile(times, .5), p90_time_to_first_exact_ms=_percentile(times, .9),
                    median_attempts_to_first_exact=_percentile(attempts, .5))
-    return {"summary": summary, "subjects": subjects, "reads": reads, "mt_attempts": mt_rows,
+    return {"summary": summary, "subjects": subjects, "reads": reads, "mt_attempts": mt_rows, "mt_invocations": invocations,
             "character_confusion": [{"ground_truth": gt, "prediction": pred, "count": count}
                                     for (gt, pred), count in sorted(confusion.items(), key=lambda item: (-item[1], item[0]))]}
