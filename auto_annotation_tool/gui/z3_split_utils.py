@@ -70,6 +70,19 @@ def build_split_entries(
     counts = allocate_split_counts(len(working_entries), ratios)
     split_entries = {name: [] for name in split_names}
 
+    if any(isinstance(entry, dict) and entry.get("dataset_group") for entry in working_entries):
+        groups = {}
+        for index, entry in enumerate(working_entries):
+            group = entry.get("dataset_group") if isinstance(entry, dict) else None
+            key = ("source", str(group)) if group else ("entry", index)
+            groups.setdefault(key, []).append(entry)
+        eligible = [name for name in split_names if float(ratios.get(name, 0)) > 0] or split_names[:1]
+        # Keep each acquisition session together, accepting approximate split ratios.
+        for group in sorted(groups.values(), key=len, reverse=True):
+            target = max(eligible, key=lambda name: counts.get(name, 0) - len(split_entries[name]))
+            split_entries[target].extend(group)
+        return split_entries, {name: len(items) for name, items in split_entries.items()}
+
     start_idx = 0
     for split_name in split_names:
         take_count = max(0, int(counts.get(split_name, 0) or 0))

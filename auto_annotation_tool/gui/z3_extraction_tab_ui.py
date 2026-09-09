@@ -2713,6 +2713,15 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     self._bind_extract_entry_card(manual_card, "manual")
     self._paint_extract_entry_cards_first()
 
+    from .z3_mobile_acquisition import open_crop_acquisition
+
+    self.mobile_acquisition_btn = ttk.Button(
+        self.extract_entry_section,
+        text="Akwizycja Androida",
+        command=lambda: open_crop_acquisition(self),
+    )
+    self.mobile_acquisition_btn.pack(anchor=tk.W, pady=(12, 0))
+
     self.extract_source_section = ttk.Frame(self.extract_workflow_shell_inner, style="Panel.TFrame")
     self.extract_source_section.pack(fill=tk.X, pady=(18, 0))
     self.extract_source_section.pack_forget()

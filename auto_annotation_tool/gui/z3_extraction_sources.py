@@ -281,18 +281,29 @@ def get_extract_preview_manifest_state(host: "CharacterAnnotationTab", preview_d
     try:
         preview_path = Path(preview_dir_raw)
         manifest_path = preview_path / "extract_manifest.json"
+        acquisition_manifest = preview_path / "acquisition_import.json"
+        is_acquisition = acquisition_manifest.is_file()
+        if is_acquisition:
+            manifest_path = acquisition_manifest
         if not manifest_path.exists():
             return state
         state["manifest_exists"] = True
         manifest = PROJECT_CACHE.load_json(manifest_path, default={})
         if not isinstance(manifest, dict):
             return state
+        if is_acquisition and manifest.get("schema") != "alpr.desktop_crop_import.v1":
+            return state
         plate_count = int(manifest.get("plate_count", 0) or 0)
         state["plate_count"] = max(0, plate_count)
         if plate_count <= 0:
             return state
 
-        source_matches = extract_manifest_matches_current_source(host, manifest)
+        source_matches = (
+            preview_matches_current_extract_source(host, preview_path)
+            if is_acquisition else extract_manifest_matches_current_source(host, manifest)
+        )
+        if is_acquisition:
+            source_matches = source_matches and host._is_usable_step3_preview_dir(preview_path, require_plates=True)
 
         meets_minimum = True
         try:
@@ -312,6 +323,13 @@ def get_extract_preview_manifest_state(host: "CharacterAnnotationTab", preview_d
 def preview_matches_current_extract_source(host: "CharacterAnnotationTab", preview_dir=None) -> bool:
     manifest_path = extract_source_manifest_path(host, preview_dir)
     current = current_extract_source_payload(host)
+    if manifest_path is not None:
+        acquisition_manifest = manifest_path.parent / "acquisition_import.json"
+        if acquisition_manifest.is_file():
+            payload = PROJECT_CACHE.load_json(acquisition_manifest, default={})
+            return bool(isinstance(payload, dict)
+                        and payload.get("schema") == "alpr.desktop_crop_import.v1"
+                        and not any(current.values()))
     try:
         binding_result = dict(getattr(host, "_extract_last_source_binding_result", {}) or {})
         expected_plate_count = int(binding_result.get("plate_count") or 0)
@@ -946,6 +964,8 @@ def backfill_preview_expected_texts_from_sources(host, metadata_map: dict) -> bo
     changed = False
     for plate_id, data in metadata_map.items():
         if not isinstance(data, dict):
+            continue
+        if data.get("source_expected_text_source") == "mobile_crop_human_review":
             continue
         source_image = str(
             data.get("source_image")

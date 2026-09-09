@@ -15,6 +15,7 @@ from .z3_metadata_cache import read_preview_metadata
 import cv2
 
 from ..campaign_manager import CAMPAIGN
+from ..mobile_acquisition import acquisition_provenance
 from .web_slim_scrollbar import blend_hex_colors
 
 
@@ -140,6 +141,10 @@ def get_gold_export_split_percentages(host) -> tuple[float, float, float]:
 def build_gold_export_plate_unique_key(data: dict) -> str:
     if not isinstance(data, dict):
         return ""
+
+    acquisition = data.get("mobile_acquisition")
+    if isinstance(acquisition, dict) and acquisition.get("archive_sha256") and acquisition.get("group_key"):
+        return "mobile:" + acquisition["archive_sha256"] + ":" + acquisition["group_key"]
 
     source_image = str(data.get("source_image", "u") or "u")
     source_bbox = data.get("source_bbox") or []
@@ -713,6 +718,7 @@ def run_yolo_gold_export(
                     "source_bucket": source_bucket,
                     "source_pid": pid,
                     "source_image": str(data.get("source_image", "") or ""),
+                    **acquisition_provenance(data),
                     "layout": layout_meta,
                     "characters": exported_chars_meta,
                 }
@@ -857,6 +863,7 @@ def run_yolo_gold_export(
                     "pid": str(item.get("pid", "")),
                     "source_pid": str(item.get("source_pid", "")),
                     "source_image": str(item.get("source_image", "")),
+                    **acquisition_provenance(item),
                     "split": split_name,
                     "image_path": (
                         f"images/{split_name}/{item.get('pid')}.jpg"
@@ -1257,6 +1264,7 @@ def run_char_classification_export(
                         "image": crop,
                         "plate_id": pid,
                         "source_image": str(data.get("source_image", "") or ""),
+                        **acquisition_provenance(data),
                         "strategy_bucket": strategy_bucket,
                         "fusion_strategy": str(data.get("fusion_strategy", "") or ""),
                         "source_tag": str(source_tag or ""),
@@ -1312,6 +1320,7 @@ def run_char_classification_export(
                         "character": str(item["symbol"]),
                         "plate_id": str(item["plate_id"]),
                         "source_image": str(item["source_image"]),
+                        **acquisition_provenance(item),
                         "strategy_bucket": str(item["strategy_bucket"]),
                         "fusion_strategy": str(item["fusion_strategy"]),
                         "source_tag": str(item["source_tag"]),

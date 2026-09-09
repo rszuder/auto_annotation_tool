@@ -99,6 +99,8 @@ def _merge_preview_expected_text_values(*groups) -> list[str]:
 
 def _get_preview_filename_expected_texts(self, data: dict | None = None) -> list[str]:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if isinstance(source_data, dict) and source_data.get("source_expected_text_source") == "mobile_crop_human_review":
+        return []
     normalized = []
     seen = set()
     for candidate in self._get_preview_reference_text_values(source_data):

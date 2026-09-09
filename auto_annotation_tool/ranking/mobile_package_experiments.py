@@ -710,6 +710,12 @@ class ReportBundleReader:
             bundle_schema = str(manifest.get("schema") or "")
             metadata = read_json("metadata.json", optional=True)
             collection_session = read_json("session.json", optional=True)
+            if collection_session.get("schema") == "alpr_crop_session_v1":
+                errors.append(
+                    "To paczka Akwizycji Androida, a nie sesja badawcza. "
+                    "Otwórz ją przez Z3 > Akwizycja Androida. "
+                    "Selekcja niepustych MZ nie pozwala ocenić jakości całego pipeline'u."
+                )
             report_payload = read_json("report.json", optional=True)
             if not report_payload and metadata:
                 report_payload = _report_payload_from_thesis_metadata(metadata)
