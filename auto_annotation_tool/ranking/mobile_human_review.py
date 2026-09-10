@@ -237,7 +237,21 @@ class MobileReviewSession:
             self._assign_subject(row, "samples")
         if annotations:
             self.warnings.append(f"Adnotacje poza indeksem cropów: {len(annotations)}. Nie są liczone jako odczyty.")
-        self.mt_invocations = group_mt_invocations(self.attempts, self.session_id)
+        capabilities = bundle.sample_schema.get(
+            "capabilities",
+            {},
+        )
+
+        strict_mt_contract = (
+            isinstance(capabilities, dict)
+            and capabilities.get("mt_invocation_identity") is True
+        )
+
+        self.mt_invocations = group_mt_invocations(
+            self.attempts,
+            self.session_id,
+            strict_contract=strict_mt_contract,
+        )
         self.invocation_by_attempt = {row["id"]: key for key, group in self.mt_invocations.items() for row in group.records}
         self.verify_source()
         self.sidecar_path = Path(sidecar_path) if sidecar_path else (
@@ -544,9 +558,45 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
             summary["missing_crop_count"] += not has_image
             if excluded or not has_image:
                 continue
-            aligned = align_plate_text(gt, str(sample.get("prediction", sample.get("text", "")) or ""))
-            outcome = "no_read" if not aligned.prediction else "exact" if aligned.exact_match else "incorrect"
-            result = dict(asdict(aligned), sample_id=sample_id, subject_key=key, outcome=outcome)
+            raw_prediction = str(
+                sample.get(
+                    "raw_prediction",
+                    sample.get(
+                        "prediction",
+                        sample.get("text", ""),
+                    ),
+                )
+                or ""
+            )
+
+            aligned = align_plate_text(
+                gt,
+                raw_prediction,
+            )
+
+            outcome = (
+                "no_read"
+                if not aligned.prediction
+                else "exact"
+                if aligned.exact_match
+                else "incorrect"
+            )
+
+            result = dict(
+                asdict(aligned),
+
+                # Dokładny wynik zapisany przez Android/model.
+                raw_prediction=raw_prediction,
+
+                # Wartość użyta rzeczywiście do porównania.
+                normalized_prediction=aligned.prediction,
+
+                normalization_policy=NORMALIZATION_POLICY,
+
+                sample_id=sample_id,
+                subject_key=key,
+                outcome=outcome,
+            )
             reads.append(result)
             subject_reads.append(result)
             summary["evaluable_reads"] += 1

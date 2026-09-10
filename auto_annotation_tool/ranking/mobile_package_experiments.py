@@ -242,6 +242,105 @@ class ReportBundleValidation:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+def _declared_capability(
+    capabilities: dict[str, Any],
+    name: str,
+) -> bool | None:
+    value = capabilities.get(name)
+
+    if isinstance(value, bool):
+        return value
+
+    return None
+
+
+def _derive_mobile_report_capabilities(
+    sample_schema: dict[str, Any],
+    collection_session: dict[str, Any],
+    model_refs: dict[str, Any],
+    manifest: dict[str, Any],
+    checked_hashes: int,
+    skipped_hashes: int,
+) -> dict[str, Any]:
+    declared = sample_schema.get("capabilities", {})
+
+    if not isinstance(declared, dict):
+        declared = {}
+
+    collection_complete = collection_session.get(
+        "collection_complete"
+    )
+
+    if not isinstance(collection_complete, bool):
+        collection_complete = None
+
+    raw_hashes = (
+        manifest.get("entry_sha256")
+        or manifest.get("sha256")
+        or {}
+    )
+
+    if not isinstance(raw_hashes, dict):
+        raw_hashes = {}
+
+    declared_hashes = sum(
+        1
+        for name, digest in raw_hashes.items()
+        if name != "manifest.json"
+        and str(digest or "").strip()
+    )
+
+    return {
+        "attempt_registry": _declared_capability(
+            declared,
+            "attempt_registry",
+        ),
+        "mt_invocation_identity": _declared_capability(
+            declared,
+            "mt_invocation_identity",
+        ),
+        "mt_input_evidence_references": _declared_capability(
+            declared,
+            "mt_input_evidence_references",
+        ),
+        "raw_prediction": _declared_capability(
+            declared,
+            "raw_prediction",
+        ),
+        "registration_key": _declared_capability(
+            declared,
+            "registration_key",
+        ),
+        "source_timestamp_domain": _declared_capability(
+            declared,
+            "source_timestamp_domain",
+        ),
+        "actual_backend_fields": _declared_capability(
+            declared,
+            "actual_backend_fields",
+        ),
+
+        # Nie zgadujemy brakujących możliwości.
+        "fresh_mz_result": _declared_capability(
+            declared,
+            "fresh_mz_result",
+        ),
+
+        "model_refs": True if model_refs else None,
+        "collection_complete": collection_complete,
+
+        "hash_coverage": {
+            "manifest_present": bool(manifest),
+            "declared_entries": declared_hashes,
+            "checked_entries": checked_hashes,
+            "skipped_entries": skipped_hashes,
+            "complete": (
+                declared_hashes > 0
+                and checked_hashes == declared_hashes
+                and skipped_hashes == 0
+            ),
+        },
+    }
 
 @dataclass(frozen=True)
 class MobileReportBundle:
@@ -281,6 +380,11 @@ class MobileReportBundle:
     attempts_available: bool = False
     log_preview: str = ""
     entries: tuple[ReportBundleEntry, ...] = field(default_factory=tuple)
+
+    capabilities: dict[str, Any] = field(
+        default_factory=dict
+    )
+
     validation: ReportBundleValidation = field(
         default_factory=lambda: ReportBundleValidation(ok=True)
     )
@@ -321,6 +425,7 @@ class MobileReportBundle:
             "attempts_available": self.attempts_available,
             "log_preview": self.log_preview,
             "entries": [entry.to_dict() for entry in self.entries],
+            "capabilities": dict(self.capabilities),
             "validation": self.validation.to_dict(),
             "imported_at": self.imported_at,
         }
@@ -708,6 +813,19 @@ class ReportBundleReader:
 
             manifest = read_json("manifest.json", optional=True)
             bundle_schema = str(manifest.get("schema") or "")
+
+            supported_bundle_schemas = {
+                MOBILE_RESEARCH_BUNDLE_SCHEMA,
+                MOBILE_THESIS_BUNDLE_SCHEMA,
+                MOBILE_BENCHMARK_REPORT_SCHEMA,
+            }
+
+            if manifest and bundle_schema not in supported_bundle_schemas:
+                errors.append(
+                    f"Nieobsługiwany schemat manifestu raportu: "
+                    f"{bundle_schema or 'brak'}."
+                )
+
             metadata = read_json("metadata.json", optional=True)
             collection_session = read_json("session.json", optional=True)
             if collection_session.get("schema") == "alpr_crop_session_v1":
@@ -850,13 +968,24 @@ class ReportBundleReader:
                 bundle_kind = "alprsession"
             elif bundle_schema == MOBILE_THESIS_BUNDLE_SCHEMA:
                 bundle_kind = "thesis"
-            else:
+            elif bundle_schema == MOBILE_BENCHMARK_REPORT_SCHEMA:
                 bundle_kind = "legacy_zip"
+            else:
+                bundle_kind = "unknown"
 
             validation = ReportBundleValidation(
                 ok=not errors,
                 errors=tuple(errors),
                 warnings=tuple(warnings),
+                checked_hashes=checked_hashes,
+                skipped_hashes=skipped_hashes,
+            )
+
+            capabilities = _derive_mobile_report_capabilities(
+                sample_schema=sample_schema,
+                collection_session=collection_session,
+                model_refs=model_refs,
+                manifest=manifest,
                 checked_hashes=checked_hashes,
                 skipped_hashes=skipped_hashes,
             )
@@ -927,7 +1056,8 @@ class ReportBundleReader:
                 attempts_available=attempts_available,
                 log_preview=log_preview,
                 entries=tuple(entries),
-                validation=validation,
+                capabilities=capabilities,
+                validation=validation
             )
 
     def _verify_manifest_hashes(

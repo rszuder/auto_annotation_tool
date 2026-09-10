@@ -2598,16 +2598,80 @@ class MobileAlprPackageExporter:
 
             with tempfile.TemporaryDirectory(prefix="alpr_nested_validate_") as temp_name:
                 temp_root = Path(temp_name)
+
                 for role in roles_to_validate:
                     item = dict(models.get(role) or {})
-                    package_file = str(item.get("package_file") or "").replace("\\", "/")
-                    nested_path = temp_root / f"{role}.alprmodel"
-                    nested_path.write_bytes(archive.read(package_file))
-                    self.single_model_exporter.validate_package(nested_path)
-                    nested_manifest = self._read_single_manifest(nested_path)
-                    if _normalize_role(str(nested_manifest.get("role") or "")) != role:
-                        raise MobileExportError(f"Zagniezdzony pakiet {role} ma niewlasciwa role.")
 
+                    package_file = str(
+                        item.get("package_file") or ""
+                    ).replace("\\", "/")
+
+                    manifest_file = str(
+                        item.get("manifest_file") or ""
+                    ).replace("\\", "/")
+
+                    nested_path = temp_root / f"{role}.alprmodel"
+
+                    nested_path.write_bytes(
+                        archive.read(package_file)
+                    )
+
+                    # Najpierw pełna walidacja samego pakietu dziecka.
+                    self.single_model_exporter.validate_package(
+                        nested_path
+                    )
+
+                    nested_manifest = self._read_single_manifest(
+                        nested_path
+                    )
+
+                    # Kompletny pakiet przechowuje również kopię
+                    # manifestu dziecka jako osobny plik.
+                    sidecar_manifest = json.loads(
+                        archive.read(manifest_file).decode("utf-8")
+                    )
+
+                    actual_role = _normalize_role(
+                        str(nested_manifest.get("role") or "")
+                    )
+
+                    if actual_role != role:
+                        raise MobileExportError(
+                            f"Zagniezdzony pakiet {role} ma niewlasciwa role."
+                        )
+
+                    # Metadane modelu w głównym manifeście muszą
+                    # odpowiadać faktycznie zagnieżdżonemu modelowi.
+                    for field in (
+                        "model_id",
+                        "role",
+                        "task",
+                        "schema",
+                    ):
+                        outer_value = str(
+                            item.get(field) or ""
+                        )
+
+                        nested_value = str(
+                            nested_manifest.get(field) or ""
+                        )
+
+                        if outer_value != nested_value:
+                            raise MobileExportError(
+                                f"Model {role} ma niespojny {field} "
+                                f"miedzy manifestem pakietu "
+                                f"i zagniezdzonym modelem."
+                            )
+
+                    # models/<role>/manifest.json nie może być
+                    # inną wersją manifestu niż ta znajdująca się
+                    # wewnątrz models/<role>/model.alprmodel.
+                    if sidecar_manifest != nested_manifest:
+                        raise MobileExportError(
+                            f"Model {role}: kopia manifestu "
+                            f"nie odpowiada manifestowi "
+                            f"zagniezdzonego pakietu."
+                        )
     def _preflight_model_source(self, request: MobileAlprPackageRequest, role: str, *, required: bool) -> list[str]:
         if role == "vehicle":
             package = request.vehicle_package
