@@ -16,6 +16,25 @@ IDENTITY_FIELDS = ("session_id", "scene_generation", "visual_epoch", "camera_tra
 def true(value):
     return value is True or str(value).lower() in {"true", "1", "yes"}
 
+def _optional_bool(value):
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, bool):
+        return value
+
+    text = str(value).strip().lower()
+
+    if text in {"true", "1", "yes"}:
+        return True
+
+    if text in {"false", "0", "no"}:
+        return False
+
+    raise ValueError(
+        f"Nieprawidłowa wartość logiczna MT: {value}"
+    )
+
 
 def _canonical(value):
     if value is None or value == "":
@@ -94,10 +113,122 @@ class MtInvocationGroup:
         return self.evidence_entries[0] if self.evidence_entries else ""
 
 
-def group_mt_invocations(attempts: dict[str, dict], session_id: str) -> dict[str, MtInvocationGroup]:
+def group_mt_invocations(
+    attempts: dict[str, dict],
+    session_id: str,
+    *,
+    strict_contract: bool = False,
+) -> dict[str, MtInvocationGroup]:
     buckets = {}
+
     for row in attempts.values():
-        key = str(row.get("mt_invocation_id") or row["id"])
+        invocation_id = str(
+            row.get("mt_invocation_id") or ""
+        ).strip()
+
+        if strict_contract:
+            status = str(
+                row.get("mt_status") or ""
+            ).strip().upper()
+
+            executed = _optional_bool(
+                row.get("mt_executed")
+            )
+
+            detection_count = row.get(
+                "mt_detection_count"
+            )
+
+            detection_index = row.get(
+                "mt_detection_index"
+            )
+
+            if status not in (
+                EXECUTED_STATUSES | {"NOT_RUN"}
+            ):
+                raise ValueError(
+                    f"Nieprawidłowy status MT: {status!r}"
+                )
+
+            # Jeśli backend MT został uruchomiony,
+            # wywołanie musi mieć swoją tożsamość.
+            if executed is True and not invocation_id:
+                raise ValueError(
+                    "Wykonane MT wymaga mt_invocation_id."
+                )
+
+            # Statusy powstałe po wejściu do backendu
+            # muszą odpowiadać rzeczywistemu wywołaniu.
+            if status in EXECUTED_STATUSES:
+                if executed is not True:
+                    raise ValueError(
+                        f"Status {status} wymaga mt_executed=true."
+                    )
+
+                if not invocation_id:
+                    raise ValueError(
+                        f"Status {status} wymaga mt_invocation_id."
+                    )
+
+            # NOT_RUN oznacza, że backend w ogóle
+            # nie został wywołany.
+            if status == "NOT_RUN":
+                if executed is not False:
+                    raise ValueError(
+                        "NOT_RUN wymaga mt_executed=false."
+                    )
+
+                if invocation_id:
+                    raise ValueError(
+                        "NOT_RUN nie może mieć mt_invocation_id."
+                    )
+
+                if detection_count not in (None, ""):
+                    raise ValueError(
+                        "NOT_RUN nie może mieć mt_detection_count."
+                    )
+
+                if detection_index not in (None, ""):
+                    raise ValueError(
+                        "NOT_RUN nie może mieć mt_detection_index."
+                    )
+
+            # Faktyczne wywołanie bez detekcji.
+            if status == "NO_DETECTION":
+                if detection_count in (None, ""):
+                    raise ValueError(
+                        "NO_DETECTION wymaga mt_detection_count=0."
+                    )
+
+                if _integer(detection_count) != 0:
+                    raise ValueError(
+                        "NO_DETECTION wymaga mt_detection_count=0."
+                    )
+
+                if detection_index not in (None, ""):
+                    raise ValueError(
+                        "NO_DETECTION nie może mieć mt_detection_index."
+                    )
+
+            # Każda rzeczywista detekcja jest jednym
+            # rekordem N-elementowego wyniku.
+            if status in DETECTION_STATUSES:
+                if detection_count in (None, ""):
+                    raise ValueError(
+                        "Detekcja MT wymaga mt_detection_count."
+                    )
+
+                if _integer(detection_count) <= 0:
+                    raise ValueError(
+                        "Detekcja MT wymaga mt_detection_count > 0."
+                    )
+
+                if detection_index in (None, ""):
+                    raise ValueError(
+                        "Detekcja MT wymaga mt_detection_index."
+                    )
+
+        key = invocation_id or str(row["id"])
         buckets.setdefault(key, []).append(row)
     groups = {}
     for key, rows in buckets.items():
