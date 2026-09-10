@@ -22,17 +22,11 @@ from .mobile_package_experiments import (
     read_mobile_sample_image,
 )
 from .mobile_mt_invocations import DETECTION_STATUSES, group_mt_invocations, calculate_mt_invocations
+from ..registration_text import NORMALIZATION_POLICY, normalize_registration
 
 REVIEW_SCHEMA = "alpr.mobile_human_review.v1"
-NORMALIZATION_POLICY = "uppercase_alphanumeric.v1"
 LEGACY_NOTICE = ("Sesja nie zawiera pełnego rejestru prób MT. "
                  "Możliwa jest weryfikacja cropów MZ / odczytu end-to-end.")
-
-
-def normalize_registration(value: Any) -> str:
-    # Matches the desktop OCR cleanup; deliberately no O/0 or I/1 correction.
-    return "".join(char for char in str(value or "").upper() if char.isalnum())
-
 
 @dataclass(frozen=True)
 class PlateTextAlignment:
