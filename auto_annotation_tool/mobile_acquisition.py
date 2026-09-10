@@ -17,18 +17,52 @@ from datetime import datetime, timezone
 import zipfile
 
 from PIL import Image
+from .registration_text import NORMALIZATION_POLICY, normalize_registration
 
 
 CROP_SCHEMA = "alpr_crop_session_v1"
 REVIEW_SCHEMA = "alpr.mobile_crop_review.v1"
-GROUPING_POLICY = "uppercase.v1"
+
+LEGACY_GROUPING_POLICY = "uppercase.v1"
+GROUPING_POLICY = NORMALIZATION_POLICY
+
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_IMAGE_PIXELS = 25_000_000
 
 
 def registration_key(text: str) -> str:
-    """Ignore case only; retain whitespace and punctuation from the prediction."""
-    return text.upper()
+    """Canonical Android/Desktop registration key."""
+    return normalize_registration(text)
+
+
+def _grouping_policy(manifest: dict) -> str:
+    """
+    Nowe paczki jawnie deklarują normalization_policy.
+    Brak pola oznacza starą paczkę uppercase.v1.
+    """
+    declared = str(manifest.get("normalization_policy") or "").strip()
+
+    if not declared:
+        return LEGACY_GROUPING_POLICY
+
+    if declared != GROUPING_POLICY:
+        raise ValueError(
+            f"Unsupported acquisition normalization_policy: {declared!r}"
+        )
+
+    return declared
+
+
+def _registration_key_for_policy(text: str, policy: str) -> str:
+    if policy == LEGACY_GROUPING_POLICY:
+        return str(text or "").upper()
+
+    if policy == GROUPING_POLICY:
+        return registration_key(text)
+
+    raise ValueError(
+        f"Unsupported acquisition grouping policy: {policy!r}"
+    )
 
 
 def file_sha256(path: Path) -> str:
@@ -114,6 +148,10 @@ class CropSession:
     def session_id(self) -> str:
         return self.manifest["session_id"]
 
+    @property
+    def grouping_policy(self) -> str:
+        return _grouping_policy(self.manifest)
+
     def read_image(self, group: CropGroup, crop_index: int = 0) -> Image.Image:
         crop = group.crops[crop_index]
         with zipfile.ZipFile(self.path) as archive:
@@ -142,6 +180,9 @@ def read_crop_session(path: Path, *, max_entries=50_000,
             raise ValueError(f"Expected {CROP_SCHEMA}, got {manifest.get('schema')!r}")
         if not isinstance(manifest.get("session_id"), str) or not manifest["session_id"].strip():
             raise ValueError("Missing session_id")
+
+        grouping_policy = _grouping_policy(manifest)
+
         rows = manifest.get("crops")
         if not isinstance(rows, list) or not rows:
             raise ValueError("Acquisition session contains no crops")
@@ -152,8 +193,44 @@ def read_crop_session(path: Path, *, max_entries=50_000,
                 raise ValueError("Invalid crop record")
             text = crop.get("text")
             name = crop.get("image")
+
             if not isinstance(text, str) or not text.strip():
-                raise ValueError("Normal acquisition crop requires a nonempty prediction")
+                raise ValueError(
+                    "Normal acquisition crop requires a nonempty prediction"
+                )
+
+            raw_prediction = crop.get("raw_prediction", text)
+
+            if not isinstance(raw_prediction, str) or not raw_prediction.strip():
+                raise ValueError(
+                    "Normal acquisition crop requires a nonempty raw_prediction"
+                )
+
+            if grouping_policy == GROUPING_POLICY and raw_prediction != text:
+                raise ValueError(
+                    f"Crop text/raw_prediction mismatch: {name!r}"
+                )
+
+            expected_key = _registration_key_for_policy(
+                raw_prediction,
+                grouping_policy,
+            )
+
+            declared_key = crop.get("registration_key")
+
+            if grouping_policy == GROUPING_POLICY:
+                if (
+                    not isinstance(declared_key, str)
+                    or declared_key != expected_key
+                ):
+                    raise ValueError(
+                        f"Invalid registration_key for crop: {name!r}"
+                    )
+
+                group_key = declared_key
+            else:
+                group_key = expected_key
+
             if not isinstance(name, str) or not re.fullmatch(r"crop-[0-9]+\.jpg", name) or name in images:
                 raise ValueError(f"Invalid or repeated crop image: {name!r}")
             images.add(name)
@@ -174,8 +251,52 @@ def read_crop_session(path: Path, *, max_entries=50_000,
                     raise ValueError(f"Missing or duplicate observation_id: {name}")
                 observation_ids.add(identity)
                 prediction = observation.get("text")
-                if not isinstance(prediction, str) or registration_key(prediction) != registration_key(text):
-                    raise ValueError(f"Observation prediction does not match crop: {name}")
+
+                if not isinstance(prediction, str):
+                    raise ValueError(
+                        f"Observation prediction does not match crop: {name}"
+                    )
+
+                raw_observation = observation.get(
+                    "raw_prediction",
+                    prediction,
+                )
+
+                if not isinstance(raw_observation, str):
+                    raise ValueError(
+                        f"Invalid raw_prediction in observation: {name}"
+                    )
+
+                if (
+                    grouping_policy == GROUPING_POLICY
+                    and raw_observation != prediction
+                ):
+                    raise ValueError(
+                        f"Observation text/raw_prediction mismatch: {name}"
+                    )
+
+                observation_key = _registration_key_for_policy(
+                    raw_observation,
+                    grouping_policy,
+                )
+
+                if grouping_policy == GROUPING_POLICY:
+                    declared_observation_key = observation.get(
+                        "registration_key"
+                    )
+
+                    if (
+                        not isinstance(declared_observation_key, str)
+                        or declared_observation_key != observation_key
+                    ):
+                        raise ValueError(
+                            f"Invalid registration_key in observation: {name}"
+                        )
+
+                if observation_key != group_key:
+                    raise ValueError(
+                        f"Observation prediction does not match crop: {name}"
+                    )
             characters = crop.get("characters")
             if not isinstance(characters, list):
                 raise ValueError(f"Invalid character list: {name}")
@@ -192,7 +313,7 @@ def read_crop_session(path: Path, *, max_entries=50_000,
                 _image(_read_entry(archive, archive.getinfo(name), MAX_IMAGE_BYTES), size).close()
             except KeyError as exc:
                 raise ValueError(f"Missing crop image: {name}") from exc
-            grouped.setdefault(registration_key(text), []).append(crop)
+            grouped.setdefault(group_key, []).append(crop)
     if file_sha256(path) != source_hash:
         raise ValueError("Acquisition archive changed while reading")
     groups = tuple(CropGroup(f"plate_{index:06d}", key, tuple(crops))
@@ -225,7 +346,7 @@ class CropReview:
             if (payload.get("schema") != REVIEW_SCHEMA
                     or payload.get("archive_sha256") != session.archive_sha256
                     or payload.get("session_id") != session.session_id
-                    or payload.get("grouping_policy") != GROUPING_POLICY):
+                    or payload.get("grouping_policy") != session.grouping_policy):
                 raise ValueError("Review does not belong to this acquisition archive")
             self.revision = int(payload["revision"])
             self.decisions = payload["decisions"]
@@ -262,9 +383,14 @@ class CropReview:
         self.revision += 1
 
     def to_dict(self):
-        return {"schema": REVIEW_SCHEMA, "archive_sha256": self.session.archive_sha256,
-                "session_id": self.session.session_id, "grouping_policy": GROUPING_POLICY,
-                "revision": self.revision, "decisions": copy.deepcopy(self.decisions)}
+        return {
+            "schema": REVIEW_SCHEMA,
+            "archive_sha256": self.session.archive_sha256,
+            "session_id": self.session.session_id,
+            "grouping_policy": self.session.grouping_policy,
+            "revision": self.revision,
+            "decisions": copy.deepcopy(self.decisions),
+        }
 
 
 def export_annotation_preview(review: CropReview, destination: Path) -> Path:
@@ -310,7 +436,7 @@ def export_annotation_preview(review: CropReview, destination: Path) -> Path:
                     "dataset_group": "mobile-session:" + session.session_id,
                     "mobile_acquisition": {
                         "schema": CROP_SCHEMA, "archive_sha256": session.archive_sha256,
-                        "session_id": session.session_id, "grouping_policy": GROUPING_POLICY,
+                        "session_id": session.session_id,"grouping_policy": session.grouping_policy,
                         "group_key": group.key, "base_image": crop["image"],
                         "crops": copy.deepcopy(list(group.crops)),
                         "review_revision": review.revision,
@@ -321,7 +447,7 @@ def export_annotation_preview(review: CropReview, destination: Path) -> Path:
         _atomic_json(staging / "acquisition_import.json", {
             "schema": "alpr.desktop_crop_import.v1", "source_schema": CROP_SCHEMA,
             "session_id": session.session_id, "archive_sha256": session.archive_sha256,
-            "source_archive": str(session.path), "grouping_policy": GROUPING_POLICY,
+            "source_archive": str(session.path), "grouping_policy": session.grouping_policy,
             "imported_at": datetime.now(timezone.utc).isoformat(),
             "plate_count": len(selected), "selection_policy": "nonempty_fresh_mz",
             "pipeline_quality_available": False,
