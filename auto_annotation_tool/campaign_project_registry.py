@@ -24,6 +24,7 @@ def _iter_project_workspace_dirs(root: Path) -> list[Path]:
     datasets_root = root / "4_training_datasets"
     runs_root = root / "5_training_runs"
     models_root = root / "6_models"
+    trained_models_root = models_root / "trained"
     rankings_root = root / "7_rankings"
     presets_root = root / "8_presets"
     staging_root = root / "_staging"
@@ -34,7 +35,17 @@ def _iter_project_workspace_dirs(root: Path) -> list[Path]:
         root / "3_cropped_characters",
         datasets_root,
         runs_root,
+        runs_root / "plates",
+        runs_root / "chars",
+        runs_root / "vehicles",
         models_root,
+        models_root / "base",
+        models_root / "base" / "pose",
+        models_root / "base" / "detect",
+        trained_models_root,
+        trained_models_root / "plates",
+        trained_models_root / "chars",
+        trained_models_root / "vehicles",
         rankings_root,
         presets_root,
         presets_root / "ocr",

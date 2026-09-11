@@ -27,6 +27,14 @@ class CampaignManager:
     def __init__(self):
         self.state_file = CONFIG.WORKSPACE_DIR / "campaigns_registry.json"
         self.state = self._load_state()
+        for project_data in (self.state.get("projects", {}) or {}).values():
+            folder_name = str(project_data.get("folder_name", "") or "").strip()
+            if not folder_name:
+                continue
+            try:
+                self._ensure_project_workspace_tree(CONFIG.DIR_9_PROJECTS / folder_name)
+            except Exception as error:
+                logger.warning(f"Nie udało się sprawdzić drzewa modeli projektu {folder_name}: {error}")
         self._plate_approved_stats_cache: Dict[tuple[str, int, int], Dict[str, Any]] = {}
         self._plate_approved_manifest_runtime_cache: Dict[str, Dict[str, Any]] = {}
         self._plate_approved_stats_runtime_cache: Dict[str, Dict[str, Any]] = {}

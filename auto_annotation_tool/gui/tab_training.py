@@ -83,6 +83,7 @@ from .z4_shared_ui import (
     guide_step4_finish_action,
     guide_step4_next_action,
     guide_step4_route_selection,
+    guide_step4_training_action,
     mark_step4_dataset_ready,
     open_step4_dataset_stage,
     refresh_step4_campaign_builder_inputs_ui,
@@ -418,43 +419,8 @@ class TrainingTab:
             except Exception:
                 pass
 
-        def run_training_refresh():
-            if not bool(getattr(self, "_step4_train_tab_built", False)):
-                return
-            try:
-                self._refresh_base_model_choices()
-            except Exception:
-                pass
-            try:
-                self._refresh_dataset_variant_choices()
-            except Exception:
-                pass
-            try:
-                self._refresh_step4_training_inputs_mode_ui()
-            except Exception:
-                pass
-
-        def run_history_refresh():
-            if not bool(getattr(self, "_step4_train_tab_built", False)):
-                return
-            try:
-                self._load_history()
-            except Exception:
-                pass
-
-        def run_ranking_refresh():
-            if not bool(getattr(self, "_step4_train_tab_built", False)):
-                return
-            try:
-                self._load_ranking()
-            except Exception:
-                pass
-
         try:
             frame.after_idle(run_lightweight_refresh)
-            frame.after(80, run_training_refresh)
-            frame.after(180, run_history_refresh)
-            frame.after(320, run_ranking_refresh)
         except Exception:
             run_lightweight_refresh()
 

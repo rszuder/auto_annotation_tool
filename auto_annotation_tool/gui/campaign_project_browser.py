@@ -806,7 +806,7 @@ def _clear_project_contexts(
                     setattr(tab, "_campaign_graph_entry_context", {})
                 except Exception:
                     pass
-                if lightweight_tab_clear:
+                if lightweight_tab_clear and tab_key != "training":
                     try:
                         setattr(tab, "_campaign_lightweight_context_detached", True)
                     except Exception:
