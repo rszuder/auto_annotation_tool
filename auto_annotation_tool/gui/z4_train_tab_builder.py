@@ -1362,8 +1362,6 @@ def _build_train_tab(self):
     self._register_train_left_wrap_target(self.train_metric_reference_lbl, padding=16, min_wrap=220)
     self._refresh_training_metric_reference()
     self._set_train_live_metrics(None)
-    self._refresh_training_recommendation_table()
-    self._refresh_training_start_state()
 
     terminal_tools = ttk.Frame(root, style="Panel.TFrame")
     terminal_tools.grid(row=1, column=0, sticky="ew", pady=(8, 0))

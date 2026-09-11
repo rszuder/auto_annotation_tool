@@ -29,7 +29,11 @@ from ..config import (
     is_cuda_available,
 )
 from ..utils import cleanup_gpu_memory, safe_load_yaml
-from ..validators import validate_model_file
+from ..validators import (
+    validate_model_file,
+    read_model_metadata_sidecar,
+    write_model_metadata_sidecar,
+)
 from .dataset_augmentation import ensure_yolo_dataset_yaml_points_to_root
 from .model_provenance import (
     build_checkpoint_training_snapshot,
@@ -1981,6 +1985,24 @@ class YOLOPoseTrainer:
 
                     shutil.copy2(best_weights, target_path)
                     logger.info(f"[OK] Skopiowano najlepszy model do: {target_path.name}")
+
+                    source_metadata = read_model_metadata_sidecar(best_weights)
+                    if source_metadata is not None:
+                        metadata_info = source_metadata[2] if len(source_metadata) >= 3 else {}
+                        write_model_metadata_sidecar(
+                            target_path,
+                            metadata_info,
+                            validation_ok=bool(source_metadata[0]),
+                            validation_message=str(source_metadata[1] or ""),
+                        )
+                    else:
+                        validate_model_file(
+                            target_path,
+                            prefer_sidecar=False,
+                            allow_heavy_load=True,
+                            write_sidecar=True,
+                        )
+                    logger.info(f"[OK] Zapisano metadata modelu: {target_path.name}.metadata.json")
 
                     # =========================================================
                     # AUTO-WIRING: aktualizacja modeli aktywnego projektu

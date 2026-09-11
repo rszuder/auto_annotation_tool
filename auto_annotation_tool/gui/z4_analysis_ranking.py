@@ -10,6 +10,7 @@ Pomost datasetowy pozostaje tylko na potrzeby kampanii.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import queue
 import re
@@ -40,7 +41,11 @@ from ..config import (
     logger,
 )
 from ..icons import IconManager
-from ..validators import validate_model_file, format_yolo_model_identity
+from ..validators import (
+    validate_model_file,
+    format_yolo_model_identity,
+    read_model_metadata_sidecar,
+)
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
 from ..training.training_report import TrainingReportGenerator
 from ..ranking import ModelRanking, format_ranking_model_label, is_plate_pose_model_path
@@ -843,6 +848,27 @@ def _collect_project_ranking_model_candidates(self, target: str | None = None) -
 
     candidates: list[Path] = []
     seen: set[str] = set()
+    seen_content: set[str] = set()
+    content_hash_cache: dict[str, str] = {}
+
+    def model_content_key(path: Path) -> str:
+        try:
+            path_key = str(path.resolve()).lower()
+        except Exception:
+            path_key = str(path).lower()
+        cached = content_hash_cache.get(path_key)
+        if cached is not None:
+            return cached
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            value = digest.hexdigest()
+        except Exception:
+            value = f"path:{path_key}"
+        content_hash_cache[path_key] = value
+        return value
 
     def add_path(path_like) -> None:
         if not path_like:
@@ -863,6 +889,23 @@ def _collect_project_ranking_model_candidates(self, target: str | None = None) -
             return
         seen.add(key)
         candidates.append(resolved)
+
+    try:
+        project_root = CAMPAIGN.get_active_project_root_dir()
+        if project_root is not None:
+            trained_dir = Path(project_root) / "6_models" / "trained"
+            target_dir_name = {
+                "plate": "plates",
+                "char": "chars",
+                "vehicle": "vehicles",
+            }.get(normalized_target, "")
+            if target_dir_name:
+                project_models_dir = trained_dir / target_dir_name
+                if project_models_dir.exists() and project_models_dir.is_dir():
+                    for path in sorted(project_models_dir.rglob("*.pt")):
+                        add_path(path)
+    except Exception:
+        pass
 
     for history in histories:
         try:
@@ -927,7 +970,11 @@ def _collect_ranking_model_candidates(self, models_dir: Path, target: str | None
             key = str(path).lower()
         if key in seen:
             return
+        content_key = model_content_key(resolved)
+        if content_key in seen_content:
+            return
         seen.add(key)
+        seen_content.add(content_key)
         candidates.append(resolved)
 
     try:
@@ -952,12 +999,14 @@ def _get_ranking_scope(self) -> str:
             raw = str(scope_var.get() or "").strip()
     except Exception:
         raw = ""
-    if raw in {"Projekt", "Globalne", "Wszystkie"}:
+    if raw == "Wszystkie":
+        return "Globalne"
+    if raw in {"Projekt", "Globalne"}:
         return raw
     try:
-        return "Projekt" if CAMPAIGN.get_active_project_name() else "Wszystkie"
+        return "Projekt" if CAMPAIGN.get_active_project_name() else "Globalne"
     except Exception:
-        return "Wszystkie"
+        return "Globalne"
 
 
 def _format_ranking_scope_label(self, scope: str | None = None, target: str | None = None) -> str:
@@ -966,9 +1015,7 @@ def _format_ranking_scope_label(self, scope: str | None = None, target: str | No
     short_name = "MZ" if normalized_target == "char" else "MT"
     if selected_scope == "Projekt":
         return f"Projektowe {short_name}"
-    if selected_scope == "Globalne":
-        return f"Globalne {short_name}"
-    return f"Wszystkie {short_name}"
+    return f"Globalne {short_name}"
 
 
 def _ranking_model_candidate_scope(self, path_like, target: str | None = None) -> str:
@@ -1015,11 +1062,34 @@ def _collect_ranking_participant_candidates(
     if normalized_target not in {"plate", "char"}:
         normalized_target = "plate"
     selected_scope = scope or _get_ranking_scope(self)
-    if selected_scope not in {"Projekt", "Globalne", "Wszystkie"}:
-        selected_scope = "Wszystkie"
+    if selected_scope == "Wszystkie":
+        selected_scope = "Globalne"
+    if selected_scope not in {"Projekt", "Globalne"}:
+        selected_scope = "Globalne"
 
     candidates: list[Path] = []
     seen: set[str] = set()
+    seen_content: set[str] = set()
+    content_hash_cache: dict[str, str] = {}
+
+    def model_content_key(path: Path) -> str:
+        try:
+            path_key = str(path.resolve()).lower()
+        except Exception:
+            path_key = str(path).lower()
+        cached = content_hash_cache.get(path_key)
+        if cached is not None:
+            return cached
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            value = digest.hexdigest()
+        except Exception:
+            value = f"path:{path_key}"
+        content_hash_cache[path_key] = value
+        return value
 
     def add_path(path_like, *, require_domain_name: bool = True, force_scope: str | None = None) -> None:
         if not path_like:
@@ -1036,7 +1106,7 @@ def _collect_ranking_participant_candidates(
             if normalized_target == "char" and not _is_char_detect_model_path(path):
                 return
         candidate_scope = force_scope or _ranking_model_candidate_scope(self, path, normalized_target)
-        if selected_scope in {"Projekt", "Globalne"} and candidate_scope != selected_scope:
+        if selected_scope == "Projekt" and candidate_scope != "Projekt":
             return
         try:
             resolved = path.resolve()
@@ -1046,24 +1116,138 @@ def _collect_ranking_participant_candidates(
             key = str(path).lower()
         if key in seen:
             return
+        content_key = model_content_key(resolved)
+        if content_key in seen_content:
+            return
         seen.add(key)
+        seen_content.add(content_key)
         candidates.append(resolved)
 
-    if selected_scope in {"Projekt", "Wszystkie"}:
+    if selected_scope in {"Projekt", "Globalne"}:
         for path in _collect_project_ranking_model_candidates(self, normalized_target):
             # Wyniki projektu często mają nazwę best.pt; domenę znamy z historii runu.
             add_path(path, require_domain_name=False, force_scope="Projekt")
 
-    if selected_scope in {"Globalne", "Wszystkie"} and models_dir is not None:
-        try:
-            root = Path(models_dir)
-            if root.exists() and root.is_dir():
-                for path in sorted(root.rglob("*.pt")):
-                    add_path(path, require_domain_name=True)
-        except Exception:
-            pass
+    if selected_scope in {"Projekt", "Globalne"}:
+        target_dir_name = {
+            "plate": "plates",
+            "char": "chars",
+            "vehicle": "vehicles",
+        }.get(normalized_target, "")
+        if target_dir_name:
+            try:
+                projects_root = Path(CONFIG.DIR_9_PROJECTS)
+                for project_root in sorted(projects_root.iterdir(), key=lambda item: item.name.lower()):
+                    project_models_dir = project_root / "6_models" / "trained" / target_dir_name
+                    if not project_models_dir.is_dir():
+                        continue
+                    for path in sorted(project_models_dir.rglob("*.pt")):
+                        add_path(path, require_domain_name=False, force_scope="Projekt")
+            except Exception:
+                pass
+        if selected_scope == "Globalne" and models_dir is not None:
+            try:
+                root = Path(models_dir)
+                if root.exists() and root.is_dir():
+                    for path in sorted(root.rglob("*.pt")):
+                        add_path(path, require_domain_name=True)
+            except Exception:
+                pass
 
     return candidates
+
+
+def _resolve_ranking_run_for_model_path(self, model_path: Path, target: str | None = None):
+    """Resolve copied ranking models back to the history that owns their metrics."""
+    try:
+        safe_path = Path(model_path).resolve()
+    except Exception:
+        safe_path = Path(model_path)
+    normalized_target = CONFIG.normalize_task_target(target or self._get_ranking_task_target())
+    cache_key = f"{normalized_target}:{_ranking_path_key(safe_path)}"
+    run_cache = getattr(self, "_ranking_run_resolution_cache", None)
+    if not isinstance(run_cache, dict):
+        run_cache = {}
+        self._ranking_run_resolution_cache = run_cache
+    if cache_key in run_cache:
+        return run_cache[cache_key]
+
+    history_dirs: list[Path] = []
+
+    try:
+        project_root = CAMPAIGN.get_active_project_root_dir()
+        if project_root is not None and _ranking_model_candidate_scope(self, safe_path, normalized_target) == "Projekt":
+            history_dirs.append(Path(project_root) / "5_training_runs")
+    except Exception:
+        pass
+
+    try:
+        history_dirs.append(CONFIG.get_training_history_dir(normalized_target))
+    except Exception:
+        target_dir = {"plate": "plates", "char": "chars", "vehicle": "vehicles"}.get(normalized_target, "plates")
+        history_dirs.append(Path(CONFIG.DIR_5_RUNS) / target_dir)
+
+    current_history = getattr(self, "history", None)
+    if current_history is not None:
+        history_dirs.append(Path(getattr(current_history, "history_dir", "")))
+
+    # Free-mode candidates can come from any project. Their copied model path
+    # contains the run id, while the original best.pt may already be gone.
+    try:
+        projects_root = Path(CONFIG.DIR_9_PROJECTS)
+        if projects_root.is_dir():
+            for project_root in projects_root.iterdir():
+                project_history = project_root / "5_training_runs"
+                if project_history.is_dir():
+                    history_dirs.append(project_history)
+    except Exception:
+        pass
+
+    seen_dirs: set[str] = set()
+    history_cache = getattr(self, "_ranking_history_runs_cache", None)
+    if not isinstance(history_cache, dict):
+        history_cache = {}
+        self._ranking_history_runs_cache = history_cache
+    for history_dir in history_dirs:
+        if not str(history_dir):
+            continue
+        try:
+            history_key = str(history_dir.resolve()).lower()
+        except Exception:
+            history_key = str(history_dir).lower()
+        if history_key in seen_dirs:
+            continue
+        seen_dirs.add(history_key)
+        if history_key not in history_cache:
+            try:
+                history = TrainingHistory(history_dir=history_dir)
+                history_cache[history_key] = list(history.get_all_runs() or [])
+            except Exception:
+                history_cache[history_key] = []
+        runs = history_cache[history_key]
+        for run in runs:
+            run_id = str(getattr(run, "id", "") or "").strip()
+            best_weights = str(getattr(run, "best_weights", "") or "").strip()
+            output_dir = str(getattr(run, "output_dir", "") or "").strip()
+            if best_weights:
+                try:
+                    if Path(best_weights).resolve() == safe_path:
+                        run_cache[cache_key] = run
+                        return run
+                except Exception:
+                    pass
+            if output_dir:
+                try:
+                    if Path(output_dir).resolve() in safe_path.parents:
+                        run_cache[cache_key] = run
+                        return run
+                except Exception:
+                    pass
+            if run_id and run_id in safe_path.name:
+                run_cache[cache_key] = run
+                return run
+    run_cache[cache_key] = None
+    return None
 
 
 def _collect_plate_ranking_model_candidates(self, models_dir: Path) -> list[Path]:
@@ -2425,7 +2609,6 @@ def _open_ranking_track_modal(self):
             tree.delete(*tree.get_children())
         except Exception:
             pass
-        participant_paths_by_item.clear()
         rows = _collect_ranking_track_candidates(self)
         for index, row in enumerate(rows):
             path_key = _ranking_path_key(row.get("path"))
@@ -2536,7 +2719,7 @@ def _open_ranking_participants_modal(self):
 
     palette = getattr(self.app, "palette", {})
     if not hasattr(self, "rank_scope_var"):
-        default_scope = "Projekt" if CAMPAIGN.get_active_project_name() else "Wszystkie"
+        default_scope = "Projekt" if CAMPAIGN.get_active_project_name() else "Globalne"
         self.rank_scope_var = tk.StringVar(value=default_scope)
 
     dialog = tk.Toplevel(getattr(self, "frame", None))
@@ -2603,7 +2786,6 @@ def _open_ranking_participants_modal(self):
     for label, value in (
         ("Projektowe", "Projekt"),
         ("Globalne", "Globalne"),
-        ("Wszystkie", "Wszystkie"),
     ):
         ttk.Radiobutton(
             toolbar,
@@ -2628,7 +2810,7 @@ def _open_ranking_participants_modal(self):
             return
         try:
             self.rank_models_dir.set(selected)
-            self.rank_scope_var.set("Wszystkie")
+            self.rank_scope_var.set("Globalne")
         except Exception:
             pass
         refresh_after_scope_change()
@@ -2662,7 +2844,7 @@ def _open_ranking_participants_modal(self):
     }
     self._ranking_participants_start_icons = start_icons
 
-    cols = ("scope", "participant", "family", "size", "created", "epochs", "map", "train", "file", "source")
+    cols = ("participant", "family", "variant", "size", "created", "epochs", "map", "train", "file")
     tree = ttk.Treeview(
         table_frame,
         columns=cols,
@@ -2703,16 +2885,15 @@ def _open_ranking_participants_modal(self):
             pass
 
     headings = {
-        "scope": "Zakres",
         "participant": "Uczestnik",
         "family": "Rodzina",
+        "variant": "Rozmiar",
         "size": "MB",
         "created": "Utworzono",
         "epochs": "Epoki",
         "map": "mAP50-95",
         "train": "Obrazy train",
         "file": "Wagi",
-        "source": "Źródło modelu",
     }
 
     def refresh_sort_headings() -> None:
@@ -2728,16 +2909,16 @@ def _open_ranking_participants_modal(self):
 
     refresh_sort_headings()
     tree.column("#0", width=88, minwidth=76, anchor=tk.CENTER, stretch=False)
-    tree.column("scope", width=132, minwidth=96, anchor=tk.W, stretch=False)
     tree.column("participant", width=170, minwidth=140, anchor=tk.W, stretch=False)
     tree.column("family", width=92, minwidth=74, anchor=tk.CENTER, stretch=False)
+    tree.column("variant", width=70, minwidth=58, anchor=tk.CENTER, stretch=False)
     tree.column("size", width=64, minwidth=54, anchor=tk.CENTER, stretch=False)
     tree.column("created", width=124, minwidth=108, anchor=tk.CENTER, stretch=False)
     tree.column("epochs", width=76, minwidth=64, anchor=tk.CENTER, stretch=False)
     tree.column("map", width=88, minwidth=76, anchor=tk.CENTER, stretch=False)
     tree.column("train", width=94, minwidth=80, anchor=tk.CENTER, stretch=False)
     tree.column("file", width=136, minwidth=106, anchor=tk.W, stretch=False)
-    tree.column("source", width=330, minwidth=240, anchor=tk.W, stretch=True)
+    tree.column("file", stretch=True)
     try:
         tree.tag_configure("project", foreground=palette.get("success", "#2ecc71"))
         tree.tag_configure("global", foreground=palette.get("fg", "#f3f3f3"))
@@ -2761,13 +2942,30 @@ def _open_ranking_participants_modal(self):
     status_lbl.grid(row=4, column=0, sticky="ew", pady=(8, 0))
     participant_paths_by_item: dict[str, Path] = {}
 
-    def scope_cell_label(candidate_scope: str) -> str:
-        if candidate_scope == "Projekt":
-            try:
-                return str(CAMPAIGN.get_active_project_name() or "").strip() or "Projekt"
-            except Exception:
-                return "Projekt"
-        return "Globalne"
+    def model_metadata_payload(path: Path) -> dict:
+        metadata_path = Path(path).with_suffix(f"{Path(path).suffix}.metadata.json")
+        try:
+            if not metadata_path.is_file():
+                return {}
+            with metadata_path.open("r", encoding="utf-8-sig") as handle:
+                payload = json.load(handle)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def model_metadata_sections(path: Path) -> tuple[dict, dict, dict]:
+        payload = model_metadata_payload(path)
+        model = payload.get("model") if isinstance(payload.get("model"), dict) else {}
+        info = model.get("info") if isinstance(model.get("info"), dict) else {}
+        run_snapshot = payload.get("run_snapshot") if isinstance(payload.get("run_snapshot"), dict) else {}
+        training = payload.get("training") if isinstance(payload.get("training"), dict) else {}
+        merged_training = dict(training)
+        for key, value in run_snapshot.items():
+            if key == "dataset" and isinstance(value, dict) and isinstance(merged_training.get(key), dict):
+                merged_training[key] = {**merged_training[key], **value}
+            else:
+                merged_training.setdefault(key, value)
+        return info, merged_training, run_snapshot
 
     def model_family_label(path: Path, run) -> str:
         raw = ""
@@ -2794,6 +2992,18 @@ def _open_ranking_participants_modal(self):
         except Exception:
             return "-"
 
+    def model_variant_label(path: Path) -> str:
+        try:
+            metadata_result = read_model_metadata_sidecar(Path(path))
+            metadata_info = metadata_result[2] if metadata_result and len(metadata_result) >= 3 else {}
+            for key in ("model_scale", "yolo_size"):
+                value = str(metadata_info.get(key) or "").strip().lower()
+                if value in {"n", "s", "m", "l", "x"}:
+                    return value
+        except Exception:
+            pass
+        return "-"
+
     def format_timestamp_label(timestamp: float | None) -> str:
         if not timestamp:
             return "-"
@@ -2802,10 +3012,12 @@ def _open_ranking_participants_modal(self):
         except Exception:
             return "-"
 
-    def model_created_info(path: Path, run) -> tuple[str, float]:
+    def model_created_info(path: Path, run, metadata_training: dict) -> tuple[str, float]:
         raw = ""
         if run is not None:
             raw = str(getattr(run, "created_at", "") or getattr(run, "started_at", "") or "").strip()
+        if not raw:
+            raw = str(metadata_training.get("created_at", "") or metadata_training.get("started_at", "") or "").strip()
         if raw:
             try:
                 dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -2818,21 +3030,20 @@ def _open_ranking_participants_modal(self):
         except Exception:
             return "-", 0.0
 
-    def model_epochs_info(run) -> tuple[str, int]:
-        if run is None:
-            return "-", -1
-        current = int(getattr(run, "current_epoch", 0) or 0)
-        target = int(getattr(run, "epochs", 0) or 0)
+    def model_epochs_info(run, metadata_training: dict) -> tuple[str, int]:
+        current = int(getattr(run, "current_epoch", 0) or 0) if run is not None else 0
+        target = int(getattr(run, "epochs", 0) or 0) if run is not None else 0
+        current = int(metadata_training.get("current_epoch", 0) or metadata_training.get("run_epochs_completed", 0) or current)
+        target = int(metadata_training.get("epochs", 0) or metadata_training.get("total_epochs", 0) or metadata_training.get("run_epochs_planned", 0) or target)
         if target <= 0 and current <= 0:
             return "-", -1
         if current > 0 and target > 0:
             return f"{current}/{target}", current
         return str(target or current), target or current
 
-    def model_map_info(run) -> tuple[str, float]:
-        if run is None:
-            return "-", -1.0
-        value = float(getattr(run, "best_map50_95", 0.0) or 0.0)
+    def model_map_info(run, metadata_training: dict) -> tuple[str, float]:
+        value = float(getattr(run, "best_map50_95", 0.0) or 0.0) if run is not None else 0.0
+        value = float(metadata_training.get("best_map50_95", 0.0) or metadata_training.get("map50_95", 0.0) or value)
         if value <= 0:
             return "-", -1.0
         percent = value * 100.0 if 0.0 < value <= 1.0 else value
@@ -2840,8 +3051,13 @@ def _open_ranking_participants_modal(self):
 
     dataset_train_count_cache: dict[str, tuple[str, int]] = {}
 
-    def dataset_train_images_info(run) -> tuple[str, int]:
+    def dataset_train_images_info(run, metadata_training: dict) -> tuple[str, int]:
+        dataset_info = metadata_training.get("dataset") if isinstance(metadata_training.get("dataset"), dict) else {}
         raw = str(getattr(run, "dataset_path", "") or "").strip() if run is not None else ""
+        raw = str(metadata_training.get("dataset_path", "") or dataset_info.get("data_yaml", "") or dataset_info.get("local_path_hint", "") or raw).strip()
+        metadata_train_count = int(metadata_training.get("run_train_images", 0) or dataset_info.get("train_images", 0) or 0)
+        if metadata_train_count > 0:
+            return str(metadata_train_count), metadata_train_count
         if not raw:
             return "-", -1
         try:
@@ -2908,14 +3124,6 @@ def _open_ranking_participants_modal(self):
         except Exception:
             pass
         update_status_label(len(participant_paths_by_item))
-        try:
-            self._refresh_ranking_reference_ui()
-        except Exception:
-            pass
-        try:
-            self._load_ranking()
-        except Exception:
-            pass
 
     def on_tree_click(event):
         try:
@@ -2959,6 +3167,9 @@ def _open_ranking_participants_modal(self):
     tree.bind("<Leave>", on_tree_leave, add="+")
 
     def model_run_for_path(path: Path):
+        resolved = _resolve_ranking_run_for_model_path(self, path, self._get_ranking_task_target())
+        if resolved is not None:
+            return resolved
         resolver = getattr(self, "_resolve_training_run_from_model_path", None)
         if callable(resolver):
             try:
@@ -3017,45 +3228,44 @@ def _open_ranking_participants_modal(self):
             candidate_scope = _ranking_model_candidate_scope(self, model_path, target)
             label, source = model_labels(model_path, candidate_scope)
             run = model_run_for_path(model_path)
+            metadata_info, metadata_training, metadata_run_snapshot = model_metadata_sections(model_path)
             enabled = _is_ranking_participant_enabled(self, model_path)
-            created_label, created_sort = model_created_info(model_path, run)
-            epochs_label, epochs_sort = model_epochs_info(run)
-            map_label, map_sort = model_map_info(run)
-            train_label, train_sort = dataset_train_images_info(run)
+            created_label, created_sort = model_created_info(model_path, run, metadata_training)
+            epochs_label, epochs_sort = model_epochs_info(run, metadata_training)
+            map_label, map_sort = model_map_info(run, metadata_training)
+            train_label, train_sort = dataset_train_images_info(run, metadata_training)
             size_label = model_size_label(model_path)
             try:
                 size_sort = float(size_label)
             except Exception:
                 size_sort = -1.0
-            scope_label = scope_cell_label(candidate_scope)
             family_label = model_family_label(model_path, run)
+            variant_label = model_variant_label(model_path)
             item_id = tree.insert("", tk.END, values=(
-                scope_cell_label(candidate_scope),
                 label,
                 family_label,
+                variant_label,
                 size_label,
                 created_label,
                 epochs_label,
                 map_label,
                 train_label,
                 model_path.name,
-                source,
             ), tags=participant_tags(candidate_scope, enabled))
             update_start_cell(str(item_id), enabled)
             participant_paths_by_item[str(item_id)] = model_path
             participant_sort_values[str(item_id)] = {
                 "start": bool(enabled),
-                "scope": scope_label,
                 "scope_key": candidate_scope,
                 "participant": label,
                 "family": family_label,
+                "variant": variant_label,
                 "size": size_sort,
                 "created": created_sort,
                 "epochs": epochs_sort,
                 "map": map_sort,
                 "train": train_sort,
                 "file": model_path.name,
-                "source": source,
             }
         update_status_label(len(participants))
 
@@ -3138,7 +3348,7 @@ def _build_ranking_panel_v2(self, parent):
     self.rank_data_dir = tk.StringVar()
     self.rank_split_var = tk.StringVar(value="test")
     if not hasattr(self, "rank_scope_var"):
-        default_scope = "Projekt" if CAMPAIGN.get_active_project_name() else "Wszystkie"
+        default_scope = "Projekt" if CAMPAIGN.get_active_project_name() else "Globalne"
         self.rank_scope_var = tk.StringVar(value=default_scope)
     self.rank_progress_var = tk.DoubleVar(value=0.0)
     self.btn_run_rank = None
