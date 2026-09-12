@@ -23,6 +23,12 @@ from .repository import RegistryRepository
 
 TRACK_SCHEMA = "alpr.evaluation_track.v1"
 SEAL_SCHEMA = "alpr.evaluation_track_seal.v1"
+GT_COMPLETENESS_ATTESTATION_SCHEMA = "alpr.gt_completeness_attestation.v1"
+GT_COMPLETENESS_ATTESTATION_STATEMENT = (
+    "Ręcznie sprawdzono wszystkie obrazy toru i "
+    "potwierdzono, że Ground Truth zawiera wszystkie "
+    "widoczne obiekty docelowe."
+)
 
 STATUS_DRAFT = "DRAFT"
 STATUS_VERIFIED = "VERIFIED"
@@ -73,6 +79,10 @@ class ControlledTrackReference:
     member_sha256: tuple[str, ...]
     pose_corner_ready: bool
     pose_corner_order: str = ""
+    manual_gt_complete: bool = False
+    manual_gt_attested_at: str = ""
+    manual_gt_attestation_schema: str = ""
+    manual_gt_attestation_statement: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +102,10 @@ class ControlledTrackReference:
             "member_sha256": list(self.member_sha256),
             "pose_corner_ready": self.pose_corner_ready,
             "pose_corner_order": self.pose_corner_order,
+            "manual_gt_complete": self.manual_gt_complete,
+            "manual_gt_attested_at": self.manual_gt_attested_at,
+            "manual_gt_attestation_schema": self.manual_gt_attestation_schema,
+            "manual_gt_attestation_statement": self.manual_gt_attestation_statement,
         }
 
     @property
@@ -302,43 +316,79 @@ class EvaluationTrackService:
         self._write_manifest(track_id)
         return destination
 
-    def verify(self, track_id: str) -> dict[str, Any]:
+    def verify(
+        self,
+        track_id: str,
+        *,
+        manual_gt_complete: bool = False,
+    ) -> dict[str, Any]:
         track = self._require_status(track_id, STATUS_DRAFT)
         members = self.repository.list_evaluation_track_members(track_id)
         if not members:
-            raise EvaluationTrackError("Nie można zweryfikować pustego toru.")
+            raise EvaluationTrackError(
+                "Nie można zweryfikować pustego toru."
+            )
 
         gt_format = str(track["gt_format"] or "").strip().lower()
         gt_relative = str(track["gt_relative_path"] or "").strip()
         gt_sha = str(track["gt_sha256"] or "").strip().lower()
         if not gt_format or not gt_relative or not gt_sha:
-            raise EvaluationTrackError("Tor nie ma kompletnego Ground Truth.")
+            raise EvaluationTrackError(
+                "Tor nie ma kompletnego Ground Truth."
+            )
 
         gt_path = self.workspace / gt_relative
         if not gt_path.exists() or self._sha256(gt_path) != gt_sha:
-            raise EvaluationTrackError("Plik GT nie istnieje albo zmienił zawartość.")
+            raise EvaluationTrackError(
+                "Plik GT nie istnieje albo zmienił zawartość."
+            )
 
         for member in members:
-            member_path = self._track_root(track) / str(member["track_relative_path"])
-            expected = str(member["sha256"] or "").strip().lower()
-            if not member_path.exists() or self._sha256(member_path) != expected:
+            member_path = (
+                self._track_root(track)
+                / str(member["track_relative_path"])
+            )
+            expected = str(
+                member["sha256"] or ""
+            ).strip().lower()
+            if (
+                not member_path.exists()
+                or self._sha256(member_path) != expected
+            ):
                 raise EvaluationTrackError(
-                    f"Obraz toru zmienił zawartość: {member['original_name']}"
+                    "Obraz toru zmienił zawartość: "
+                    f"{member['original_name']}"
                 )
 
         if gt_format != "cvat_xml":
-            raise EvaluationTrackError(f"Brak walidatora GT dla formatu: {gt_format}")
+            raise EvaluationTrackError(
+                f"Brak walidatora GT dla formatu: {gt_format}"
+            )
 
-        verification = self._verify_cvat_xml(track, members, gt_path)
+        verification = self._verify_cvat_xml(
+            track,
+            members,
+            gt_path,
+        )
         verified_at = self._utc_now()
-        # Najpierw przygotuj manifest VERIFIED. Jeśli zapis DB się nie powiedzie,
-        # tor pozostaje DRAFT i weryfikację można bezpiecznie powtórzyć.
+        self._apply_manual_gt_attestation(
+            verification,
+            complete=bool(manual_gt_complete),
+            attested_at=(
+                verified_at
+                if manual_gt_complete
+                else ""
+            ),
+        )
+
         self._write_manifest(
             track_id,
             verification=verification,
             status_override=STATUS_VERIFIED,
             verified_at_override=verified_at,
-            object_count_override=int(verification["object_count"]),
+            object_count_override=int(
+                verification["object_count"]
+            ),
         )
         self.repository.update_evaluation_track(
             track_id,
@@ -348,6 +398,77 @@ class EvaluationTrackService:
             verified_at=verified_at,
         )
         return verification
+
+    def get_verification(
+        self,
+        track_id: str,
+    ) -> dict[str, Any]:
+        track = self._require_track(track_id)
+        manifest_path = (
+            self._track_root(track)
+            / "track_manifest.json"
+        )
+        if not manifest_path.exists():
+            return {}
+        manifest = self._read_json(manifest_path)
+        verification = manifest.get("verification")
+        if not isinstance(verification, Mapping):
+            return {}
+        return dict(verification)
+
+    def attest_ground_truth_completeness(
+        self,
+        track_id: str,
+    ) -> dict[str, Any]:
+        """Dodaj ręczne potwierdzenie kompletności GT do VERIFIED."""
+
+        self._require_status(track_id, STATUS_VERIFIED)
+        preflight = self._content_integrity(track_id)
+        if not preflight.ok:
+            raise EvaluationTrackError(
+                "Nie można potwierdzić kompletności GT: "
+                + "; ".join(preflight.issues)
+            )
+
+        verification = self.get_verification(track_id)
+        if bool(verification.get("manual_gt_complete")):
+            return verification
+
+        self._apply_manual_gt_attestation(
+            verification,
+            complete=True,
+            attested_at=self._utc_now(),
+        )
+        self._write_manifest(
+            track_id,
+            verification=verification,
+        )
+        return verification
+
+    @staticmethod
+    def _apply_manual_gt_attestation(
+        verification: dict[str, Any],
+        *,
+        complete: bool,
+        attested_at: str,
+    ) -> None:
+        is_complete = bool(complete)
+        verification["manual_gt_complete"] = is_complete
+        verification["manual_gt_attestation_schema"] = (
+            GT_COMPLETENESS_ATTESTATION_SCHEMA
+            if is_complete
+            else ""
+        )
+        verification["manual_gt_attestation_statement"] = (
+            GT_COMPLETENESS_ATTESTATION_STATEMENT
+            if is_complete
+            else ""
+        )
+        verification["manual_gt_attested_at"] = (
+            str(attested_at or "").strip()
+            if is_complete
+            else ""
+        )
 
     def seal(self, track_id: str) -> TrackIntegrityResult:
         track = self._require_status(track_id, STATUS_VERIFIED)
@@ -885,6 +1006,7 @@ class EvaluationTrackService:
         *,
         required_target: str | None = None,
         require_pose_corners: bool = False,
+        require_manual_gt_complete: bool = False,
     ) -> ControlledTrackReference:
         """Zbuduj zamrożony uchwyt tylko dla poprawnego toru SEALED."""
 
@@ -893,45 +1015,101 @@ class EvaluationTrackService:
         if not integrity.ok:
             raise EvaluationTrackError(
                 "Tor nie może być użyty w eksperymencie kontrolowanym: "
-                + "; ".join(integrity.issues or (integrity.status,))
+                + "; ".join(
+                    integrity.issues
+                    or (integrity.status,)
+                )
             )
 
         if required_target:
             normalized = self._normalize_target(required_target)
             if not normalized:
                 raise EvaluationTrackError(
-                    f"Nieobsługiwany wymagany target: {required_target!r}."
+                    "Nieobsługiwany wymagany target: "
+                    f"{required_target!r}."
                 )
             if str(track["target"]) != normalized:
                 raise EvaluationTrackError(
-                    f"Tor ma target {track['target']}, wymagany jest {normalized}."
+                    f"Tor ma target {track['target']}, "
+                    f"wymagany jest {normalized}."
                 )
 
         manifest = self._read_json(
-            self._track_root(track) / "track_manifest.json"
+            self._track_root(track)
+            / "track_manifest.json"
         )
         verification = manifest.get("verification")
         if not isinstance(verification, Mapping):
             verification = {}
-        pose_corner_ready = bool(verification.get("pose_corner_ready"))
+
+        pose_corner_ready = bool(
+            verification.get("pose_corner_ready")
+        )
         pose_corner_order = str(
             verification.get("pose_corner_order") or ""
         ).strip().lower()
         if require_pose_corners and (
             not pose_corner_ready
-            or pose_corner_order != CORNER_ORDER_TL_TR_BR_BL
+            or pose_corner_order
+            != CORNER_ORDER_TL_TR_BR_BL
         ):
             raise EvaluationTrackError(
-                "Tor nie ma zweryfikowanego GT z dokładnie czterema "
-                "narożnikami zapisanymi w kolejności TL, TR, BR, BL."
+                "Tor nie ma zweryfikowanego GT z dokładnie "
+                "czterema narożnikami zapisanymi w kolejności "
+                "TL, TR, BR, BL."
             )
 
-        members = self.repository.list_evaluation_track_members(track_id)
-        source_ids = tuple(str(row["source_image_id"] or "") for row in members)
-        member_sha = tuple(str(row["sha256"] or "").lower() for row in members)
+        manual_gt_complete = bool(
+            verification.get("manual_gt_complete")
+        )
+        manual_gt_attestation_schema = str(
+            verification.get(
+                "manual_gt_attestation_schema"
+            )
+            or ""
+        ).strip()
+        manual_gt_attestation_statement = str(
+            verification.get(
+                "manual_gt_attestation_statement"
+            )
+            or ""
+        ).strip()
+        manual_gt_attested_at = str(
+            verification.get("manual_gt_attested_at")
+            or ""
+        ).strip()
+
+        if require_manual_gt_complete and (
+            not manual_gt_complete
+            or manual_gt_attestation_schema
+            != GT_COMPLETENESS_ATTESTATION_SCHEMA
+            or manual_gt_attestation_statement
+            != GT_COMPLETENESS_ATTESTATION_STATEMENT
+            or not manual_gt_attested_at
+        ):
+            raise EvaluationTrackError(
+                "Tor nie ma ręcznego, zapieczętowanego "
+                "potwierdzenia kompletności Ground Truth. "
+                "Przed eksperymentem controlled trzeba ręcznie "
+                "sprawdzić wszystkie obrazy i potwierdzić, że GT "
+                "zawiera wszystkie widoczne obiekty docelowe."
+            )
+
+        members = self.repository.list_evaluation_track_members(
+            track_id
+        )
+        source_ids = tuple(
+            str(row["source_image_id"] or "")
+            for row in members
+        )
+        member_sha = tuple(
+            str(row["sha256"] or "").lower()
+            for row in members
+        )
         if (
             not members
-            or len(members) != int(track["member_count"] or 0)
+            or len(members)
+            != int(track["member_count"] or 0)
             or any(not value for value in source_ids)
             or any(not value for value in member_sha)
         ):
@@ -946,18 +1124,33 @@ class EvaluationTrackService:
             target=str(track["target"]),
             purpose=str(track["purpose"]),
             scope=str(track["scope"]),
-            manifest_sha256=str(track["manifest_sha256"] or "").lower(),
-            seal_sha256=str(track["seal_sha256"] or "").lower(),
+            manifest_sha256=str(
+                track["manifest_sha256"] or ""
+            ).lower(),
+            seal_sha256=str(
+                track["seal_sha256"] or ""
+            ).lower(),
             gt_format=str(track["gt_format"] or ""),
-            gt_sha256=str(track["gt_sha256"] or "").lower(),
+            gt_sha256=str(
+                track["gt_sha256"] or ""
+            ).lower(),
             member_count=len(members),
-            object_count=int(track["object_count"] or 0),
+            object_count=int(
+                track["object_count"] or 0
+            ),
             source_image_ids=source_ids,
             member_sha256=member_sha,
             pose_corner_ready=pose_corner_ready,
             pose_corner_order=pose_corner_order,
+            manual_gt_complete=manual_gt_complete,
+            manual_gt_attested_at=manual_gt_attested_at,
+            manual_gt_attestation_schema=(
+                manual_gt_attestation_schema
+            ),
+            manual_gt_attestation_statement=(
+                manual_gt_attestation_statement
+            ),
         )
-
 
     def list_tracks(
         self,

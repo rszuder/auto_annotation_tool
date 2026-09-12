@@ -126,6 +126,13 @@ class ExperimentService:
             clean_target == "plate"
             and clean_options.get("require_pose_corners")
         )
+        require_manual_gt_complete = (
+            clean_mode == MODE_CONTROLLED
+        )
+        clean_options.setdefault(
+            "require_manual_gt_complete",
+            require_manual_gt_complete,
+        )
 
         if not clean_name:
             raise ExperimentGuardError(
@@ -157,6 +164,9 @@ class ExperimentService:
                 clean_track_id,
                 required_target=clean_target,
                 require_pose_corners=require_pose_corners,
+                require_manual_gt_complete=(
+                    require_manual_gt_complete
+                ),
             )
         except Exception as exc:
             raise ExperimentGuardError(
@@ -507,6 +517,10 @@ class ExperimentService:
                 "object_count": int(track_ref.object_count),
                 "pose_corner_ready": bool(track_ref.pose_corner_ready),
                 "pose_corner_order": str(track_ref.pose_corner_order or ""),
+                "manual_gt_complete": bool(track_ref.manual_gt_complete),
+                "manual_gt_attested_at": str(track_ref.manual_gt_attested_at or ""),
+                "manual_gt_attestation_schema": str(track_ref.manual_gt_attestation_schema or ""),
+                "manual_gt_attestation_statement": str(track_ref.manual_gt_attestation_statement or ""),
             },
             "participants": [
                 {

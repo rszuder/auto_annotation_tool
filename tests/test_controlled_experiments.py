@@ -117,9 +117,15 @@ class ExperimentServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def _sealed_track(self):
-        image = Path(self.temp.name) / "one.jpg"
-        image.write_bytes(b"track")
+    def _sealed_track(
+        self,
+        *,
+        manual_gt_complete=True,
+        image_name="one.jpg",
+        payload=b"track",
+    ):
+        image = Path(self.temp.name) / image_name
+        image.write_bytes(payload)
         gt = Path(self.temp.name) / "gt.xml"
         _gt(gt, image.name)
 
@@ -131,7 +137,10 @@ class ExperimentServiceTests(unittest.TestCase):
         )
         self.track_service.add_member(track_id, image)
         self.track_service.set_ground_truth(track_id, gt)
-        self.track_service.verify(track_id)
+        self.track_service.verify(
+            track_id,
+            manual_gt_complete=manual_gt_complete,
+        )
         self.track_service.seal(track_id)
         return track_id
 
@@ -210,6 +219,27 @@ class ExperimentServiceTests(unittest.TestCase):
                 for row in participants
             )
         )
+
+    def test_controlled_requires_manual_gt_completeness(self):
+        self.track_id = self._sealed_track(
+            manual_gt_complete=False,
+            image_name="unattested.jpg",
+            payload=b"unattested-track",
+        )
+        service = self._service(
+            {
+                "MODEL-A": INDEPENDENCE_PASS,
+                "MODEL-B": INDEPENDENCE_PASS,
+            }
+        )
+        with self.assertRaises(ExperimentGuardError):
+            service.create(
+                name="no manual GT",
+                target="plate",
+                track_id=self.track_id,
+                model_ids=("MODEL-A", "MODEL-B"),
+                mode=MODE_CONTROLLED,
+            )
 
     def test_controlled_unknown_blocks_and_writes_nothing(self):
         service = self._service(

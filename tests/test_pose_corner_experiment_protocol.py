@@ -106,7 +106,10 @@ class PoseCornerExperimentProtocolTests(unittest.TestCase):
         )
         self.tracks.add_member(track_id, image)
         self.tracks.set_ground_truth(track_id, gt)
-        self.tracks.verify(track_id)
+        self.tracks.verify(
+            track_id,
+            manual_gt_complete=True,
+        )
         self.tracks.seal(track_id)
         return track_id
 
