@@ -207,6 +207,7 @@ class Config:
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
     DIR_9_PROJECTS: Path    = WORKSPACE_DIR / "9_projects"
 
+    DIR_10_EVALUATION_TRACKS: Path = WORKSPACE_DIR / "10_evaluation_tracks"
     # Lokalny rejestr SQLite pochodzenia danych, modeli i eksperymentów.
     DIR_REGISTRY: Path = WORKSPACE_DIR / "_registry"
     DIR_REGISTRY_BACKUPS: Path = DIR_REGISTRY / "backups"
@@ -557,6 +558,7 @@ class Config:
             self.DIR_8_PRESETS_TRAINING_CHARS,
             self.DIR_8_PRESETS_RANKING_SCENARIOS,
             self.DIR_9_PROJECTS,
+            self.DIR_10_EVALUATION_TRACKS,
             self.DIR_REGISTRY,
             self.DIR_REGISTRY_BACKUPS,
             self.DIR_REGISTRY_RECOVERY,
@@ -579,6 +581,7 @@ class Config:
                 "6_models             : Modele bazowe w base/, wytrenowane w trained/plates/, trained/chars/ i trained/vehicles/.\n"
                 "7_rankings           : Raporty z testów i walidacji, rozdzielone według typu modelu.\n"
                 "8_presets            : Presety modułów: ocr/, detection_pipeline/, augmentation/, training/.\n"
+                "10_evaluation_tracks : Wersjonowane i pieczętowane tory testowe do eksperymentów.\n"
                 "_registry            : Lokalny rejestr SQLite pochodzenia danych, modeli i eksperymentów.\n"
             )
             readme_path.write_text(readme_text, encoding="utf-8")
