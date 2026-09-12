@@ -1605,6 +1605,25 @@ class RegistryRepository:
             ).fetchone()
 
 
+
+    def list_experiment_results(
+        self,
+        experiment_id: str,
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM experiment_results
+                    WHERE experiment_id = ?
+                    ORDER BY model_id
+                    """,
+                    (str(experiment_id or "").strip(),),
+                ).fetchall()
+            )
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",

@@ -27,6 +27,8 @@ STATUS_READY = "READY"
 STATUS_READY_WITH_WARNINGS = "READY_WITH_WARNINGS"
 STATUS_RUNNING = "RUNNING"
 STATUS_COMPLETED = "COMPLETED"
+STATUS_CANCELLED = "CANCELLED"
+STATUS_FAILED = "FAILED"
 
 PROTOCOL_SCHEMA = "alpr.experiment_protocol.v1"
 
@@ -75,7 +77,7 @@ class ExperimentService:
     Oba tryby wymagają poprawnej pieczęci toru. Różnica dotyczy wyłącznie
     niezależności modeli:
     - ``controlled``: każdy model musi mieć PASS,
-    - ``working``: UNKNOWN/FAIL może zostać zapisany jawnie jako ostrzeżenie.
+    - ``working``: UNKNOWN może zostać zapisany jawnie jako ostrzeżenie; FAIL blokuje.
     """
 
     def __init__(
@@ -379,6 +381,45 @@ class ExperimentService:
         self.repository.update_experiment_lifecycle(
             experiment_id,
             status=STATUS_COMPLETED,
+            finished_at=_utc_now(),
+        )
+
+
+    def cancel(self, experiment_id: str) -> None:
+        row = self._require_experiment(experiment_id)
+        status = str(row["status"] or "")
+        if status == STATUS_CANCELLED:
+            return
+        if status not in {
+            STATUS_READY,
+            STATUS_READY_WITH_WARNINGS,
+            STATUS_RUNNING,
+        }:
+            raise ExperimentGuardError(
+                f"Nie można anulować eksperymentu ze statusu {status}."
+            )
+        self.repository.update_experiment_lifecycle(
+            experiment_id,
+            status=STATUS_CANCELLED,
+            finished_at=_utc_now(),
+        )
+
+    def fail(self, experiment_id: str) -> None:
+        row = self._require_experiment(experiment_id)
+        status = str(row["status"] or "")
+        if status == STATUS_FAILED:
+            return
+        if status not in {
+            STATUS_READY,
+            STATUS_READY_WITH_WARNINGS,
+            STATUS_RUNNING,
+        }:
+            raise ExperimentGuardError(
+                f"Nie można oznaczyć eksperymentu jako FAILED ze statusu {status}."
+            )
+        self.repository.update_experiment_lifecycle(
+            experiment_id,
+            status=STATUS_FAILED,
             finished_at=_utc_now(),
         )
 

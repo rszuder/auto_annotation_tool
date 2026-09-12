@@ -112,6 +112,14 @@ class ModelRankingEntry:
     map50_95: float = 0.0
     split_name: str = ""
     metrics_source: str = ""
+    experiment_id: str = ""
+    experiment_mode: str = ""
+    model_id: str = ""
+    model_sha256: str = ""
+    track_id: str = ""
+    protocol_sha256: str = ""
+    track_manifest_sha256: str = ""
+    independence_status: str = ""
     
     @property
     def f1_score(self) -> float:
@@ -240,8 +248,10 @@ class ModelRanking:
                   task_type: str = "Tablice (Pose)",
                   reference_name: str = "",
                   reference_path: str = "",
-                  save: bool = True) -> ModelRankingEntry:
+                  save: bool = True,
+                  experiment_context: Optional[Dict] = None) -> ModelRankingEntry:
         """Dodaje wpis do bazy, obsługując kategorie zadań."""
+        experiment_payload = dict(experiment_context or {})
         entry = ModelRankingEntry(
             model_name=model_name,
             model_path=model_path,
@@ -264,6 +274,14 @@ class ModelRanking:
             map50_95=_percent_metric(comparison_stats.get("map50_95", 0)),
             split_name=str(comparison_stats.get("split_name", "") or "").strip(),
             metrics_source=str(comparison_stats.get("metrics_source", "") or "").strip(),
+            experiment_id=str(experiment_payload.get("experiment_id") or "").strip(),
+            experiment_mode=str(experiment_payload.get("experiment_mode") or "").strip(),
+            model_id=str(experiment_payload.get("model_id") or "").strip(),
+            model_sha256=str(experiment_payload.get("model_sha256") or "").strip().lower(),
+            track_id=str(experiment_payload.get("track_id") or "").strip(),
+            protocol_sha256=str(experiment_payload.get("protocol_sha256") or "").strip().lower(),
+            track_manifest_sha256=str(experiment_payload.get("track_manifest_sha256") or "").strip().lower(),
+            independence_status=str(experiment_payload.get("independence_status") or "").strip().upper(),
         )
         
         new_identity = self._entry_identity(entry)
