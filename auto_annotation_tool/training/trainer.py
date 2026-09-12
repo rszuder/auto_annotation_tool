@@ -1200,6 +1200,53 @@ class YOLOPoseTrainer:
         except Exception:
             return None, "unknown"
 
+
+    def _guard_training_dataset_reservations(
+        self,
+        dataset_path: str | Path,
+        *,
+        stage: str,
+    ):
+        """Zablokuj train/val zawierające źródło zapieczętowanego toru."""
+
+        try:
+            from ..registry.reservation_service import (
+                CHECK_UNKNOWN,
+                check_training_dataset_reservations,
+            )
+
+            result = check_training_dataset_reservations(
+                dataset_path,
+                history_dir=getattr(self.history, "history_dir", None),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Nie udało się wykonać kontroli rezerwacji torów testowych. "
+                "Trening nie zostanie uruchomiony, aby nie ominąć blokady "
+                f"przecieku danych: {exc}"
+            ) from exc
+
+        if result.skipped:
+            logger.debug(
+                f"[RESERVATION] {stage}: {result.message()}"
+            )
+            return result
+
+        if result.blocked:
+            raise RuntimeError(result.message())
+
+        if result.status == CHECK_UNKNOWN:
+            logger.warning(
+                f"[RESERVATION] {stage}: {result.message()} "
+                "Trening może zostać wykonany, ale późniejszy kontrolowany "
+                "eksperyment nie może traktować takiej sytuacji jako PASS."
+            )
+        else:
+            logger.info(
+                f"[RESERVATION] {stage}: {result.message()}"
+            )
+        return result
+
     def start_training(
         self,
         name: str,
@@ -1257,6 +1304,19 @@ class YOLOPoseTrainer:
         report_preflight("Zbiór danych sprawdzony", 20.0, ", ".join(
             f"{split}={counts.get(f'{split}_images', 0)}" for split in ("train", "val", "test")
         ))
+
+        phase_started = time.perf_counter()
+        report_preflight("Sprawdzam rezerwacje torów testowych", 22.0, str(dataset_path))
+        try:
+            self._guard_training_dataset_reservations(
+                dataset_path,
+                stage="preflight",
+            )
+        except RuntimeError as reservation_error:
+            finish_phase("reservation_guard", phase_started)
+            logger.error(str(reservation_error))
+            return None
+        finish_phase("reservation_guard", phase_started)
 
         if kwargs.pop("validate_custom_model", False):
             phase_started = time.perf_counter()
@@ -1484,6 +1544,10 @@ class YOLOPoseTrainer:
         dataset_root = Path(dataset_path)
         if not (dataset_root / "data.yaml").is_file():
             raise RuntimeError("Brak data.yaml podczas potwierdzania przygotowanego datasetu.")
+        self._guard_training_dataset_reservations(
+            dataset_root,
+            stage="prepared_dataset",
+        )
         prepared = build_training_dataset_snapshot(dataset_root, target=run.training_target)
         if not prepared.get("split_sha256") or not prepared.get("total_images"):
             raise RuntimeError("Nie udało się potwierdzić plików przygotowanego datasetu.")

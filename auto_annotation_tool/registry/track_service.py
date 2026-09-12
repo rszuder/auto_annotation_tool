@@ -392,9 +392,8 @@ class EvaluationTrackService:
         seal_sha = self._sha256(seal_path)
         if not seal_sha:
             raise EvaluationTrackError("Nie udało się policzyć SHA-256 seal.json.")
-        self.repository.update_evaluation_track(
+        self.repository.seal_evaluation_track_with_reservations(
             track_id,
-            status=STATUS_SEALED,
             sealed_at=sealed_at,
             manifest_sha256=manifest_sha,
             seal_sha256=seal_sha,
