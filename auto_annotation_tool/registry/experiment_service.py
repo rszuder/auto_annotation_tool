@@ -121,6 +121,11 @@ class ExperimentService:
         clean_target = self._normalize_target(target)
         clean_track_id = str(track_id or "").strip()
         clean_mode = str(mode or "").strip().lower()
+        clean_options = dict(protocol_options or {})
+        require_pose_corners = bool(
+            clean_target == "plate"
+            and clean_options.get("require_pose_corners")
+        )
 
         if not clean_name:
             raise ExperimentGuardError(
@@ -151,6 +156,7 @@ class ExperimentService:
             track_ref = self.track_service.build_controlled_reference(
                 clean_track_id,
                 required_target=clean_target,
+                require_pose_corners=require_pose_corners,
             )
         except Exception as exc:
             raise ExperimentGuardError(
@@ -265,7 +271,7 @@ class ExperimentService:
             target=clean_target,
             track_ref=track_ref,
             audits=audits,
-            protocol_options=protocol_options or {},
+            protocol_options=clean_options,
             independence_confirmed=independence_confirmed,
         )
         protocol_json = _canonical_json(protocol)
@@ -499,6 +505,8 @@ class ExperimentService:
                 "gt_sha256": track_ref.gt_sha256,
                 "member_count": int(track_ref.member_count),
                 "object_count": int(track_ref.object_count),
+                "pose_corner_ready": bool(track_ref.pose_corner_ready),
+                "pose_corner_order": str(track_ref.pose_corner_order or ""),
             },
             "participants": [
                 {
