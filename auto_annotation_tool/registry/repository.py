@@ -181,6 +181,382 @@ class RegistryRepository:
             member_rows=len(rows.dataset_members),
         )
 
+    def upsert_dataset_snapshot(
+        self,
+        snapshot: Mapping[str, Any],
+        *,
+        registered_at: str | None = None,
+    ) -> str:
+        """Zarejestruj historyczną tożsamość datasetu bez udawania członkostwa plików."""
+
+        dataset_id = str(snapshot.get("dataset_id") or "").strip()
+        if not dataset_id:
+            return ""
+
+        payload = {
+            "dataset_id": dataset_id,
+            "target": str(snapshot.get("target") or ""),
+            "name": str(snapshot.get("name") or ""),
+            "manifest_sha256": str(snapshot.get("manifest_sha256") or ""),
+            "split_sha256": str(snapshot.get("split_sha256") or ""),
+            "provenance_status": str(
+                snapshot.get("provenance_status") or "legacy_partial"
+            ),
+        }
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT target, name, manifest_sha256, split_sha256,
+                       provenance_status, registered_at
+                FROM datasets
+                WHERE dataset_id = ?
+                """,
+                (dataset_id,),
+            ).fetchone()
+
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO datasets (
+                        dataset_id,
+                        owner_project_id,
+                        target,
+                        name,
+                        purpose,
+                        relative_path,
+                        manifest_sha256,
+                        split_sha256,
+                        provenance_status,
+                        created_at,
+                        registered_at
+                    ) VALUES (?, NULL, ?, ?, 'training', NULL, ?, ?, ?, NULL, ?)
+                    """,
+                    (
+                        dataset_id,
+                        payload["target"],
+                        payload["name"],
+                        payload["manifest_sha256"],
+                        payload["split_sha256"],
+                        payload["provenance_status"],
+                        registered_at,
+                    ),
+                )
+                return dataset_id
+
+            merged_status = self._stronger_status(
+                str(existing["provenance_status"] or "legacy_partial"),
+                payload["provenance_status"],
+            )
+            connection.execute(
+                """
+                UPDATE datasets
+                SET target = CASE
+                        WHEN COALESCE(target, '') = '' THEN ?
+                        ELSE target
+                    END,
+                    name = CASE
+                        WHEN COALESCE(name, '') = '' THEN ?
+                        ELSE name
+                    END,
+                    manifest_sha256 = CASE
+                        WHEN COALESCE(manifest_sha256, '') = '' THEN ?
+                        ELSE manifest_sha256
+                    END,
+                    split_sha256 = CASE
+                        WHEN COALESCE(split_sha256, '') = '' THEN ?
+                        ELSE split_sha256
+                    END,
+                    provenance_status = ?,
+                    registered_at = COALESCE(registered_at, ?)
+                WHERE dataset_id = ?
+                """,
+                (
+                    payload["target"],
+                    payload["name"],
+                    payload["manifest_sha256"],
+                    payload["split_sha256"],
+                    merged_status,
+                    registered_at,
+                    dataset_id,
+                ),
+            )
+
+        return dataset_id
+
+    def upsert_training_run(
+        self,
+        *,
+        run_id: str,
+        project_id: str | None,
+        target: str,
+        dataset_id: str | None,
+        status: str,
+        base_model: str,
+        config_sha256: str,
+        output_relative_path: str,
+        started_at: str | None,
+        finished_at: str | None,
+        provenance_status: str,
+    ) -> None:
+        self.initialize()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT provenance_status
+                FROM training_runs
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            merged_status = provenance_status
+            if existing is not None:
+                merged_status = self._stronger_status(
+                    str(existing["provenance_status"] or "legacy_unknown"),
+                    provenance_status,
+                )
+
+            connection.execute(
+                """
+                INSERT INTO training_runs (
+                    run_id,
+                    project_id,
+                    target,
+                    dataset_id,
+                    parent_run_id,
+                    status,
+                    base_model,
+                    config_sha256,
+                    output_relative_path,
+                    started_at,
+                    finished_at,
+                    provenance_status
+                ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    project_id = COALESCE(training_runs.project_id, excluded.project_id),
+                    target = CASE
+                        WHEN COALESCE(training_runs.target, '') = '' THEN excluded.target
+                        ELSE training_runs.target
+                    END,
+                    dataset_id = COALESCE(training_runs.dataset_id, excluded.dataset_id),
+                    status = CASE
+                        WHEN COALESCE(excluded.status, '') <> '' THEN excluded.status
+                        ELSE training_runs.status
+                    END,
+                    base_model = CASE
+                        WHEN COALESCE(training_runs.base_model, '') = '' THEN excluded.base_model
+                        ELSE training_runs.base_model
+                    END,
+                    config_sha256 = CASE
+                        WHEN COALESCE(excluded.config_sha256, '') <> '' THEN excluded.config_sha256
+                        ELSE training_runs.config_sha256
+                    END,
+                    output_relative_path = CASE
+                        WHEN COALESCE(excluded.output_relative_path, '') <> ''
+                            THEN excluded.output_relative_path
+                        ELSE training_runs.output_relative_path
+                    END,
+                    started_at = COALESCE(training_runs.started_at, excluded.started_at),
+                    finished_at = COALESCE(excluded.finished_at, training_runs.finished_at),
+                    provenance_status = ?
+                """,
+                (
+                    run_id,
+                    project_id,
+                    target,
+                    dataset_id,
+                    status,
+                    base_model,
+                    config_sha256,
+                    output_relative_path,
+                    started_at,
+                    finished_at,
+                    provenance_status,
+                    merged_status,
+                ),
+            )
+
+    def set_training_run_parent(
+        self,
+        run_id: str,
+        parent_run_id: str | None,
+    ) -> None:
+        if not parent_run_id:
+            return
+        self.initialize()
+        with self.database.transaction() as connection:
+            parent_exists = connection.execute(
+                "SELECT 1 FROM training_runs WHERE run_id = ?",
+                (parent_run_id,),
+            ).fetchone()
+            if parent_exists is None:
+                return
+            connection.execute(
+                """
+                UPDATE training_runs
+                SET parent_run_id = ?
+                WHERE run_id = ?
+                """,
+                (parent_run_id, run_id),
+            )
+
+    def upsert_model_location(
+        self,
+        *,
+        model_id: str,
+        sha256: str,
+        project_id: str | None,
+        run_id: str | None,
+        target: str,
+        task_type: str,
+        yolo_family: str,
+        yolo_scale: str,
+        checkpoint_kind: str,
+        provenance_status: str,
+        created_at: str | None,
+        location_key: str,
+        relative_path: str | None,
+        external_path: str | None,
+        is_primary: bool,
+    ) -> str:
+        """Zarejestruj logiczny model i jedną jego fizyczną lokalizację."""
+
+        sha = str(sha256 or "").strip().lower()
+        if not sha:
+            raise ValueError("Model bez SHA-256 nie może trafić do rejestru.")
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT model_id, project_id, run_id, target, task_type,
+                       yolo_family, yolo_scale, checkpoint_kind,
+                       provenance_status, created_at
+                FROM models
+                WHERE sha256 = ?
+                """,
+                (sha,),
+            ).fetchone()
+
+            actual_model_id = model_id
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO models (
+                        model_id,
+                        project_id,
+                        run_id,
+                        target,
+                        task_type,
+                        yolo_family,
+                        yolo_scale,
+                        checkpoint_kind,
+                        sha256,
+                        provenance_status,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        model_id,
+                        project_id,
+                        run_id,
+                        target,
+                        task_type,
+                        yolo_family,
+                        yolo_scale or "unknown",
+                        checkpoint_kind,
+                        sha,
+                        provenance_status,
+                        created_at,
+                    ),
+                )
+            else:
+                actual_model_id = str(existing["model_id"])
+                merged_status = self._stronger_status(
+                    str(existing["provenance_status"] or "legacy_unknown"),
+                    provenance_status,
+                )
+                connection.execute(
+                    """
+                    UPDATE models
+                    SET project_id = COALESCE(project_id, ?),
+                        run_id = COALESCE(run_id, ?),
+                        target = CASE
+                            WHEN COALESCE(target, '') = '' OR target = 'unknown'
+                                THEN ?
+                            ELSE target
+                        END,
+                        task_type = CASE
+                            WHEN COALESCE(task_type, '') = '' OR task_type = 'unknown'
+                                THEN ?
+                            ELSE task_type
+                        END,
+                        yolo_family = CASE
+                            WHEN COALESCE(yolo_family, '') = '' THEN ?
+                            ELSE yolo_family
+                        END,
+                        yolo_scale = CASE
+                            WHEN COALESCE(yolo_scale, '') = '' OR yolo_scale = 'unknown'
+                                THEN ?
+                            ELSE yolo_scale
+                        END,
+                        checkpoint_kind = CASE
+                            WHEN COALESCE(checkpoint_kind, '') = '' THEN ?
+                            ELSE checkpoint_kind
+                        END,
+                        provenance_status = ?,
+                        created_at = COALESCE(created_at, ?)
+                    WHERE model_id = ?
+                    """,
+                    (
+                        project_id,
+                        run_id,
+                        target,
+                        task_type,
+                        yolo_family,
+                        yolo_scale or "unknown",
+                        checkpoint_kind,
+                        merged_status,
+                        created_at,
+                        actual_model_id,
+                    ),
+                )
+
+            connection.execute(
+                """
+                INSERT INTO model_locations (
+                    model_id,
+                    location_key,
+                    project_id,
+                    relative_path,
+                    external_path,
+                    is_primary,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(model_id, location_key) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    relative_path = excluded.relative_path,
+                    external_path = excluded.external_path,
+                    is_primary = excluded.is_primary,
+                    created_at = COALESCE(
+                        model_locations.created_at,
+                        excluded.created_at
+                    )
+                """,
+                (
+                    actual_model_id,
+                    location_key,
+                    project_id,
+                    relative_path,
+                    external_path,
+                    1 if is_primary else 0,
+                    created_at,
+                ),
+            )
+
+        return actual_model_id
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",
@@ -440,3 +816,9 @@ class RegistryRepository:
         left_rank = _STATUS_RANK.get(str(left or ""), 99)
         right_rank = _STATUS_RANK.get(str(right or ""), 99)
         return left if left_rank >= right_rank else right
+
+    @staticmethod
+    def _stronger_status(left: str, right: str) -> str:
+        left_rank = _STATUS_RANK.get(str(left or ""), 99)
+        right_rank = _STATUS_RANK.get(str(right or ""), 99)
+        return left if left_rank <= right_rank else right
