@@ -54,6 +54,40 @@ class _EpochLineageResult:
     lineage: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
+@dataclass(frozen=True)
+class DatasetFileInventoryEntry:
+    """Pojedynczy plik tworzący zamrożoną zawartość datasetu YOLO.
+
+    absolute_path jest wyłącznie lokalną wskazówką wykonawczą.
+    Tożsamość fingerprintu pozostaje zgodna z historycznym algorytmem.
+    """
+
+    split: str
+    relative_path: str
+    sha256: str
+    size: int
+    role: str
+    absolute_path: str = ""
+
+    @property
+    def is_image(self) -> bool:
+        return self.role == "image"
+
+    def fingerprint_payload(self) -> dict[str, Any]:
+        return {
+            "split": self.split,
+            "relative_path": self.relative_path,
+            "sha256": self.sha256,
+            "size": int(self.size),
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.fingerprint_payload(),
+            "role": self.role,
+            "absolute_path": self.absolute_path,
+            "is_image": self.is_image,
+        }
 
 def build_model_training_provenance(
     run_like: Any,
@@ -1128,14 +1162,68 @@ def _dataset_split_counts(root: Path, cfg: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
-def _dataset_split_fingerprint(root: Path, cfg: Mapping[str, Any]) -> dict[str, Any]:
-    entries: list[dict[str, Any]] = []
+def _build_dataset_file_inventory(
+    root: Path,
+    cfg: Mapping[str, Any],
+) -> list[DatasetFileInventoryEntry]:
+    entries: list[DatasetFileInventoryEntry] = []
+
     for split in ("train", "val", "test"):
         for source in _split_sources(root, cfg, split):
-            entries.extend(_fingerprint_entries_for_source(root, source, split, image=True))
+            entries.extend(
+                _inventory_entries_for_source(
+                    root,
+                    source,
+                    split,
+                    image=True,
+                )
+            )
+
         for label_dir in _label_dirs_for_split(root, split):
-            entries.extend(_fingerprint_entries_for_source(root, label_dir, split, image=False))
-    entries.sort(key=lambda item: (str(item.get("split")), str(item.get("relative_path"))))
+            entries.extend(
+                _inventory_entries_for_source(
+                    root,
+                    label_dir,
+                    split,
+                    image=False,
+                )
+            )
+
+    entries.sort(
+        key=lambda item: (
+            str(item.split),
+            str(item.relative_path),
+        )
+    )
+    return entries
+
+
+def build_dataset_file_inventory(
+    dataset_path: Path | str | None,
+) -> list[DatasetFileInventoryEntry]:
+    """Zwróć pełny inwentarz plików używany przez fingerprint datasetu."""
+
+    root = _dataset_root(dataset_path)
+    if root is None:
+        return []
+
+    cfg = _safe_yaml(root / "data.yaml")
+    return _build_dataset_file_inventory(root, cfg)
+
+
+def _dataset_split_fingerprint(
+    root: Path,
+    cfg: Mapping[str, Any],
+) -> dict[str, Any]:
+    inventory = _build_dataset_file_inventory(root, cfg)
+
+    # Zgodność wsteczna:
+    # do split_sha256 trafiają dokładnie te same cztery pola co wcześniej.
+    entries = [
+        entry.fingerprint_payload()
+        for entry in inventory
+    ]
+
     return {
         "sha256": _json_sha256(entries),
         "file_count": len(entries),
@@ -1172,39 +1260,83 @@ def _label_dirs_for_split(root: Path, split: str) -> list[Path]:
     return result
 
 
-def _fingerprint_entries_for_source(root: Path, source: Path, split: str, *, image: bool) -> list[dict[str, Any]]:
+def _inventory_entries_for_source(
+    root: Path,
+    source: Path,
+    split: str,
+    *,
+    image: bool,
+) -> list[DatasetFileInventoryEntry]:
     paths: list[Path] = []
+
     if source.is_file():
         paths.append(source)
+
         if image and source.suffix.lower() not in _IMAGE_SUFFIXES:
             try:
-                for line in source.read_text(encoding="utf-8", errors="ignore").splitlines():
+                for line in source.read_text(
+                    encoding="utf-8",
+                    errors="ignore",
+                ).splitlines():
                     text = str(line or "").strip()
+
                     if not text or text.startswith("#"):
                         continue
+
                     child = Path(text)
+
                     if not child.is_absolute():
                         child = source.parent / child
-                    if child.exists() and child.suffix.lower() in _IMAGE_SUFFIXES:
+
+                    if (
+                        child.exists()
+                        and child.suffix.lower() in _IMAGE_SUFFIXES
+                    ):
                         paths.append(child)
             except Exception:
                 pass
+
     elif source.is_dir():
         suffixes = _IMAGE_SUFFIXES if image else {".txt"}
+
         try:
-            paths.extend(path for path in source.rglob("*") if path.is_file() and path.suffix.lower() in suffixes)
+            paths.extend(
+                path
+                for path in source.rglob("*")
+                if path.is_file()
+                and path.suffix.lower() in suffixes
+            )
         except Exception:
             paths = []
-    entries: list[dict[str, Any]] = []
+
+    entries: list[DatasetFileInventoryEntry] = []
+
     for path in paths:
+        if image:
+            role = (
+                "image"
+                if path.suffix.lower() in _IMAGE_SUFFIXES
+                else "image_list"
+            )
+        else:
+            role = "label"
+
+        try:
+            absolute_path = str(path.resolve())
+        except Exception:
+            absolute_path = str(path)
+
         entries.append(
-            {
-                "split": split,
-                "relative_path": _relative_path(root, path),
-                "sha256": _file_sha256(path),
-                "size": _file_size(path),
-            }
+            DatasetFileInventoryEntry(
+                split=split,
+                relative_path=_relative_path(root, path),
+                sha256=_file_sha256(path),
+                size=_file_size(path),
+                role=role,
+                absolute_path=absolute_path,
+            )
         )
+
     return entries
 
 
