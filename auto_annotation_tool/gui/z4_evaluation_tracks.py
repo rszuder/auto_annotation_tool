@@ -83,6 +83,30 @@ def target_label(target: str | None) -> str:
     }.get(normalized, normalized or "-")
 
 
+def manual_gt_attestation_prompt(
+    target: str | None,
+) -> str:
+    normalized = str(target or "").strip().lower()
+    object_text = {
+        "plate": "wszystkie widoczne tablice rejestracyjne",
+        "char": "wszystkie widoczne znaki docelowe",
+        "vehicle": "wszystkie widoczne pojazdy docelowe",
+    }.get(
+        normalized,
+        "wszystkie widoczne obiekty docelowe",
+    )
+    return (
+        "Potwierdź tylko po ręcznym przejrzeniu każdego obrazu "
+        "toru.\n\n"
+        "Czy potwierdzasz, że Ground Truth zawiera "
+        f"{object_text} i że żaden taki obiekt nie został "
+        "pominięty?\n\n"
+        "To oświadczenie zostanie zapisane w manifeście "
+        "i po zapieczętowaniu stanie się częścią protokołu "
+        "eksperymentu."
+    )
+
+
 def status_label(status: str | None) -> str:
     normalized = str(status or "").strip().upper()
     return {
@@ -574,6 +598,9 @@ class EvaluationTracksPanel:
         try:
             track = self.service.get_track(track_id)
             members = self.service.list_members(track_id)
+            verification = self.service.get_verification(
+                track_id
+            )
         except Exception as exc:
             self._show_error("Nie udało się odczytać toru", exc)
             return
@@ -597,6 +624,8 @@ class EvaluationTracksPanel:
             f"Obrazy: {int(track.get('member_count') or 0)}",
             f"Obiekty GT: {int(track.get('object_count') or 0)}",
             f"GT: {track.get('gt_format') or '-'}",
+            f"Kompletność GT (ręczna): {'TAK' if bool(verification.get('manual_gt_complete')) else 'NIE'}",
+            f"Potwierdzenie GT: {verification.get('manual_gt_attested_at') or '-'}",
             f"Manifest: {_short_hash(track.get('manifest_sha256'))}",
             f"Seal: {_short_hash(track.get('seal_sha256'))}",
             f"Rezerwacja: {track.get('reservation_policy') or 'none'}",
@@ -709,37 +738,119 @@ class EvaluationTracksPanel:
         track_id = self._require_current_track()
         if not track_id:
             return
+
         try:
-            result = self.service.verify(track_id)
+            track = self.service.get_track(track_id)
         except Exception as exc:
-            self._show_error("Weryfikacja toru nie powiodła się", exc)
+            self._show_error(
+                "Nie udało się odczytać toru",
+                exc,
+            )
             return
+
+        if not messagebox.askyesno(
+            "Ręczne potwierdzenie kompletności GT",
+            manual_gt_attestation_prompt(
+                track.get("target")
+            ),
+            parent=self.parent,
+        ):
+            self._set_status(
+                "Weryfikacja anulowana — nie zapisano "
+                "potwierdzenia kompletności Ground Truth."
+            )
+            return
+
+        try:
+            result = self.service.verify(
+                track_id,
+                manual_gt_complete=True,
+            )
+        except Exception as exc:
+            self._show_error(
+                "Weryfikacja toru nie powiodła się",
+                exc,
+            )
+            return
+
         self.refresh_tracks(select_track_id=track_id)
         self._set_status(
-            "Tor zweryfikowany. "
-            f"Obiekty GT: {int(result.get('object_count') or 0)}, "
-            f"pose_corner_ready={bool(result.get('pose_corner_ready'))}."
+            "Tor zweryfikowany z ręcznym potwierdzeniem "
+            "kompletności GT. "
+            f"Obiekty GT: "
+            f"{int(result.get('object_count') or 0)}, "
+            f"pose_corner_ready="
+            f"{bool(result.get('pose_corner_ready'))}."
         )
 
     def seal_track(self) -> None:
         track_id = self._require_current_track()
         if not track_id:
             return
+
+        try:
+            track = self.service.get_track(track_id)
+            verification = self.service.get_verification(
+                track_id
+            )
+        except Exception as exc:
+            self._show_error(
+                "Nie udało się odczytać toru",
+                exc,
+            )
+            return
+
+        if not bool(
+            verification.get("manual_gt_complete")
+        ):
+            if not messagebox.askyesno(
+                "Brak potwierdzenia kompletności GT",
+                (
+                    "Ten tor ma walidację strukturalną, ale nie "
+                    "ma ręcznego potwierdzenia kompletności "
+                    "Ground Truth.\n\n"
+                    + manual_gt_attestation_prompt(
+                        track.get("target")
+                    )
+                ),
+                parent=self.parent,
+            ):
+                return
+            try:
+                self.service.attest_ground_truth_completeness(
+                    track_id
+                )
+            except Exception as exc:
+                self._show_error(
+                    "Nie udało się zapisać "
+                    "potwierdzenia kompletności GT",
+                    exc,
+                )
+                return
+
         if not messagebox.askyesno(
             "Zapieczętować tor?",
-            "Po zapieczętowaniu zawartości toru nie będzie można edytować. "
-            "Zmiany wymagają utworzenia nowej wersji.",
+            "Po zapieczętowaniu zawartości toru nie będzie "
+            "można edytować. Zmiany wymagają utworzenia "
+            "nowej wersji.",
             parent=self.parent,
         ):
             return
+
         try:
             result = self.service.seal(track_id)
         except Exception as exc:
-            self._show_error("Nie udało się zapieczętować toru", exc)
+            self._show_error(
+                "Nie udało się zapieczętować toru",
+                exc,
+            )
             return
+
         self.refresh_tracks(select_track_id=track_id)
         self._set_status(
-            f"Tor zapieczętowany. Integralność: {result.status}."
+            "Tor zapieczętowany z ręcznym "
+            "potwierdzeniem kompletności GT. "
+            f"Integralność: {result.status}."
         )
 
     def check_integrity(self) -> None:
