@@ -11,6 +11,7 @@ EXPECTED_TABLES = {
     "source_images",
     "image_artifacts",
     "datasets",
+    "dataset_locations",
     "dataset_members",
     "training_runs",
     "models",
