@@ -202,6 +202,12 @@ class EvaluationTrackService:
         if not sha:
             raise EvaluationTrackError(f"Nie udało się policzyć SHA-256: {source}")
 
+        if not source_image_id and not source_artifact_id:
+            known_artifact = self.repository.find_unique_image_artifact_by_sha256(sha)
+            if known_artifact is not None:
+                source_image_id = str(known_artifact["source_image_id"] or "") or None
+                source_artifact_id = str(known_artifact["artifact_id"] or "") or None
+
         resolved_source_id = self.repository.resolve_or_create_source_image(
             sha256=sha,
             source_image_id=source_image_id,
@@ -937,6 +943,32 @@ class EvaluationTrackService:
             member_sha256=member_sha,
             pose_corner_ready=pose_corner_ready,
         )
+
+
+    def list_tracks(
+        self,
+        *,
+        target: str | None = None,
+        purpose: str | None = None,
+        status: str | None = None,
+        include_retired: bool = False,
+    ) -> list[dict[str, Any]]:
+        normalized_target = (
+            self._normalize_target(target)
+            if str(target or "").strip()
+            else None
+        )
+        if target and not normalized_target:
+            raise EvaluationTrackError(
+                f"Nieobsługiwany target toru: {target!r}."
+            )
+        rows = self.repository.list_evaluation_tracks(
+            target=normalized_target,
+            purpose=str(purpose or "").strip().lower() or None,
+            status=str(status or "").strip().upper() or None,
+            include_retired=bool(include_retired),
+        )
+        return [dict(row) for row in rows]
 
     def get_track(self, track_id: str) -> dict[str, Any]:
         row = self._require_track(track_id)

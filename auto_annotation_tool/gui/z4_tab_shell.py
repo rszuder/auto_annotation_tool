@@ -91,6 +91,7 @@ from .z4_shared_ui import (
     step4_train_go_back,
 )
 from . import z4_dataset_sources
+from . import z4_evaluation_tracks
 from . import z4_training_metrics
 from . import z4_dataset_builder
 from . import z4_analysis_ranking
@@ -126,16 +127,20 @@ def _build_ui(self):
 
     self.tab_dataset = ttk.Frame(self.main_nb)
     self.tab_train = ttk.Frame(self.main_nb)
+    self.tab_tracks = ttk.Frame(self.main_nb)
     self.tab_val = None
     self.tab_ranking = None
 
     self.main_nb.add(self.tab_dataset, text="[PZ1] Wariant treningowy")
     self.main_nb.add(self.tab_train, text="[PZ2] Trening i wyniki")
+    self.main_nb.add(self.tab_tracks, text="[PZ3] Tory testowe")
     self.main_nb.bind("<<NotebookTabChanged>>", self._on_main_nb_tab_changed, add="+")
     self._step4_dataset_tab_visible = True
 
+    self._step4_tracks_tab_built = False
     self._build_dataset_tab()
     self._build_train_tab_placeholder()
+    self._build_tracks_tab_placeholder()
     self._update_step4_notebook_mode()
 
 def _build_train_tab_placeholder(self):
@@ -175,13 +180,66 @@ def _ensure_step4_train_tab_built(self) -> bool:
 
     return True
 
+
+def _build_tracks_tab_placeholder(self):
+    for child in self.tab_tracks.winfo_children():
+        try:
+            child.destroy()
+        except Exception:
+            pass
+    placeholder = ttk.Frame(self.tab_tracks, padding=18)
+    placeholder.pack(fill=tk.BOTH, expand=True)
+    ttk.Label(
+        placeholder,
+        text=(
+            "PZ3 tworzy wersjonowane tory testowe z pełnym Ground Truth. "
+            "Tor przechodzi DRAFT → VERIFIED → SEALED i dopiero wtedy może "
+            "stać się podstawą kontrolowanego eksperymentu."
+        ),
+        style="PanelMuted.TLabel",
+        justify=tk.LEFT,
+        wraplength=620,
+    ).pack(anchor=tk.W)
+
+
+def _ensure_step4_tracks_tab_built(self) -> bool:
+    if bool(getattr(self, "_step4_tracks_tab_built", False)):
+        return True
+
+    for child in self.tab_tracks.winfo_children():
+        try:
+            child.destroy()
+        except Exception:
+            pass
+
+    self._step4_tracks_tab_built = True
+    try:
+        z4_evaluation_tracks.build_evaluation_tracks_tab(
+            self,
+            self.tab_tracks,
+        )
+    except Exception as exc:
+        self._step4_tracks_tab_built = False
+        logger.exception(
+            f"Nie udało się zbudować PZ3 torów testowych: {exc}"
+        )
+        self._build_tracks_tab_placeholder()
+        return False
+    return True
+
 def _on_main_nb_tab_changed(self, event=None):
     if event is not None and getattr(event, "widget", None) is not self.main_nb:
         return
     try:
-        if str(self.main_nb.select()) == str(getattr(self, "tab_train", "")):
+        selected_widget = str(self.main_nb.select())
+        if selected_widget == str(getattr(self, "tab_train", "")):
             self._ensure_step4_train_tab_built()
             self._refresh_training_cockpit()
+        elif selected_widget == str(getattr(self, "tab_tracks", "")):
+            self._ensure_step4_tracks_tab_built()
+            panel = getattr(self, "evaluation_tracks_panel", None)
+            if panel is not None:
+                panel.refresh_tracks()
     except Exception:
         pass
     try:
@@ -229,6 +287,46 @@ def get_free_mode_assistant_context(self) -> dict:
             ),
             "references": ("docs/mapa_funkcji_i_kodu.md", "docs/siatka_eksperymentow_mobilnych_alpr.md"),
         }
+
+    if selected_tab == str(getattr(self, "tab_tracks", "")):
+        return {
+            "location": "[Z4] Trening i analiza / [PZ3] Tory testowe",
+            "goal": (
+                "PZ3 tworzy kontrolowany zbiór testowy niezależny od zwykłego "
+                "splitu treningowego. Tor ma własną wersję, Ground Truth, "
+                "manifest i pieczęć integralności."
+            ),
+            "current": (
+                "DRAFT można uzupełniać. VERIFIED przeszedł walidację GT. "
+                "SEALED jest zamrożony i może być później użyty do audytu "
+                "niezależności modeli oraz eksperymentów."
+            ),
+            "workflow": (
+                "Utwórz DRAFT i wybierz target MT, MZ albo MP.",
+                "Dodaj obrazy; znane SHA zachowują istniejący source_image_id.",
+                "Wskaż kompletne Ground Truth w CVAT XML.",
+                "Uruchom weryfikację zgodności obrazów i GT.",
+                "Zapieczętuj VERIFIED; od tej chwili zmiany wymagają nowej wersji.",
+                "Dla SEALED możesz sprawdzić integralność, utworzyć nową wersję lub wycofać tor.",
+            ),
+            "glossary": (
+                "DRAFT = edytowalna wersja robocza",
+                "VERIFIED = GT i zawartość przeszły walidację",
+                "SEALED = zamrożony tor z SHA-256 manifestu, seal i plików",
+                "RETIRED = historyczny, wycofany tor",
+                "source_image_id = logiczna tożsamość źródła używana później do wykrywania przecieku",
+            ),
+            "caution": (
+                "Dla final_test i ranking zapisywana jest polityka "
+                "reserve_from_training. Faktyczne blokowanie przecieku treningowego "
+                "zostanie aktywowane w następnym etapie rezerwacji."
+            ),
+            "references": (
+                "docs/podbudowa_literaturowa_metodyki_testow_alpr.md",
+                "docs/siatka_eksperymentow_mobilnych_alpr.md",
+            ),
+        }
+
     if selected_tab == str(getattr(self, "tab_train", "")):
         mobile_export = get_mobile_export_assistant_context()
         return {
