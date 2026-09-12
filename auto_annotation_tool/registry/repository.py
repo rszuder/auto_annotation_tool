@@ -570,6 +570,279 @@ class RegistryRepository:
 
         return actual_model_id
 
+
+    def resolve_or_create_source_image(
+        self,
+        *,
+        sha256: str,
+        source_image_id: str | None = None,
+        origin_status: str = "exact_hash_only",
+    ) -> str:
+        sha = str(sha256 or "").strip().lower()
+        requested_id = str(source_image_id or "").strip()
+        if not sha:
+            raise ValueError("SHA-256 obrazu nie może być pusty.")
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            if requested_id:
+                existing_id = connection.execute(
+                    """
+                    SELECT source_image_id, canonical_sha256
+                    FROM source_images
+                    WHERE source_image_id = ?
+                    """,
+                    (requested_id,),
+                ).fetchone()
+                if existing_id is not None:
+                    canonical = str(existing_id["canonical_sha256"] or "").strip().lower()
+                    if canonical and canonical != sha:
+                        raise ValueError(
+                            "source_image_id istnieje, ale ma inny canonical_sha256."
+                        )
+                    return requested_id
+
+            existing_sha = connection.execute(
+                """
+                SELECT source_image_id
+                FROM source_images
+                WHERE canonical_sha256 = ?
+                """,
+                (sha,),
+            ).fetchone()
+            if existing_sha is not None:
+                existing_source_id = str(existing_sha["source_image_id"])
+                if requested_id and existing_source_id != requested_id:
+                    raise ValueError(
+                        "Podany source_image_id koliduje z istniejącą tożsamością SHA-256."
+                    )
+                return existing_source_id
+
+            resolved_id = requested_id or f"SRC-SHA256-{sha.upper()}"
+            connection.execute(
+                """
+                INSERT INTO source_images (
+                    source_image_id,
+                    canonical_sha256,
+                    origin_status,
+                    created_at
+                ) VALUES (?, ?, ?, NULL)
+                """,
+                (resolved_id, sha, origin_status),
+            )
+            return resolved_id
+
+    def create_evaluation_track(
+        self,
+        *,
+        track_id: str,
+        owner_project_id: str | None,
+        name: str,
+        target: str,
+        purpose: str,
+        scope: str,
+        status: str,
+        version: int,
+        parent_track_id: str | None,
+        relative_path: str,
+        reservation_policy: str,
+        created_at: str | None,
+    ) -> None:
+        self.initialize()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO evaluation_tracks (
+                    track_id,
+                    owner_project_id,
+                    name,
+                    target,
+                    purpose,
+                    scope,
+                    status,
+                    version,
+                    parent_track_id,
+                    relative_path,
+                    member_count,
+                    object_count,
+                    reservation_policy,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+                """,
+                (
+                    track_id,
+                    owner_project_id,
+                    name,
+                    target,
+                    purpose,
+                    scope,
+                    status,
+                    int(version),
+                    parent_track_id,
+                    relative_path,
+                    reservation_policy,
+                    created_at,
+                ),
+            )
+
+    def get_evaluation_track(self, track_id: str) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM evaluation_tracks
+                WHERE track_id = ?
+                """,
+                (track_id,),
+            ).fetchone()
+
+    def list_evaluation_track_members(
+        self,
+        track_id: str,
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM evaluation_track_members
+                    WHERE track_id = ?
+                    ORDER BY member_index
+                    """,
+                    (track_id,),
+                ).fetchall()
+            )
+
+    def next_evaluation_track_member_index(self, track_id: str) -> int:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(member_index), -1) + 1
+                FROM evaluation_track_members
+                WHERE track_id = ?
+                """,
+                (track_id,),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def add_evaluation_track_member(
+        self,
+        *,
+        track_id: str,
+        member_index: int,
+        source_image_id: str,
+        source_artifact_id: str | None,
+        track_artifact_id: str,
+        original_name: str,
+        track_relative_path: str,
+        sha256: str,
+        artifact_relative_path: str,
+        artifact_size_bytes: int | None,
+    ) -> None:
+        self.initialize()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO image_artifacts (
+                    artifact_id,
+                    source_image_id,
+                    relative_path,
+                    external_path,
+                    sha256,
+                    size_bytes,
+                    kind,
+                    derived_from_artifact_id,
+                    width,
+                    height,
+                    created_at
+                ) VALUES (?, ?, ?, NULL, ?, ?, 'evaluation_track_image', NULL, NULL, NULL, NULL)
+                """,
+                (
+                    track_artifact_id,
+                    source_image_id,
+                    artifact_relative_path,
+                    sha256,
+                    artifact_size_bytes,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO evaluation_track_members (
+                    track_id,
+                    member_index,
+                    source_image_id,
+                    source_artifact_id,
+                    track_artifact_id,
+                    original_name,
+                    track_relative_path,
+                    sha256
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    track_id,
+                    int(member_index),
+                    source_image_id,
+                    source_artifact_id,
+                    track_artifact_id,
+                    original_name,
+                    track_relative_path,
+                    sha256,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE evaluation_tracks
+                SET member_count = (
+                    SELECT COUNT(*)
+                    FROM evaluation_track_members
+                    WHERE track_id = ?
+                )
+                WHERE track_id = ?
+                """,
+                (track_id, track_id),
+            )
+
+    def update_evaluation_track(
+        self,
+        track_id: str,
+        **fields: Any,
+    ) -> None:
+        allowed = {
+            "status",
+            "gt_format",
+            "gt_relative_path",
+            "gt_sha256",
+            "manifest_sha256",
+            "member_count",
+            "object_count",
+            "reservation_policy",
+            "verified_at",
+            "sealed_at",
+        }
+        unknown = sorted(set(fields) - allowed)
+        if unknown:
+            raise ValueError(
+                "Niedozwolone pola evaluation_tracks: " + ", ".join(unknown)
+            )
+        if not fields:
+            return
+
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        params = tuple(fields[name] for name in fields) + (track_id,)
+        self.initialize()
+        with self.database.transaction() as connection:
+            connection.execute(
+                f"""
+                UPDATE evaluation_tracks
+                SET {assignments}
+                WHERE track_id = ?
+                """,
+                params,
+            )
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",
@@ -581,6 +854,8 @@ class RegistryRepository:
             "training_runs",
             "models",
             "model_locations",
+            "evaluation_track_members",
+            "evaluation_tracks",
         }
         if table_name not in allowed:
             raise ValueError(f"Niedozwolona tabela: {table_name}")
