@@ -20,6 +20,8 @@ _STATUS_RANK = {
     "legacy_unknown": 4,
 }
 
+_UNSET = object()
+
 
 @dataclass(frozen=True)
 class DatasetBundleWriteSummary:
@@ -299,6 +301,7 @@ class RegistryRepository:
         started_at: str | None,
         finished_at: str | None,
         provenance_status: str,
+        replace_provenance_status: bool = False,
     ) -> None:
         self.initialize()
         with self.database.transaction() as connection:
@@ -311,7 +314,7 @@ class RegistryRepository:
                 (run_id,),
             ).fetchone()
             merged_status = provenance_status
-            if existing is not None:
+            if existing is not None and not replace_provenance_status:
                 merged_status = self._stronger_status(
                     str(existing["provenance_status"] or "legacy_unknown"),
                     provenance_status,
@@ -339,7 +342,11 @@ class RegistryRepository:
                         WHEN COALESCE(training_runs.target, '') = '' THEN excluded.target
                         ELSE training_runs.target
                     END,
-                    dataset_id = COALESCE(training_runs.dataset_id, excluded.dataset_id),
+                    dataset_id = CASE
+                        WHEN COALESCE(excluded.dataset_id, '') <> ''
+                            THEN excluded.dataset_id
+                        ELSE training_runs.dataset_id
+                    END,
                     status = CASE
                         WHEN COALESCE(excluded.status, '') <> '' THEN excluded.status
                         ELSE training_runs.status
@@ -419,9 +426,15 @@ class RegistryRepository:
         relative_path: str | None,
         external_path: str | None,
         is_primary: bool,
+        location_project_id: Any = _UNSET,
     ) -> str:
         """Zarejestruj logiczny model i jedną jego fizyczną lokalizację."""
 
+        resolved_location_project_id = (
+            project_id
+            if location_project_id is _UNSET
+            else location_project_id
+        )
         sha = str(sha256 or "").strip().lower()
         if not sha:
             raise ValueError("Model bez SHA-256 nie może trafić do rejestru.")
@@ -547,7 +560,7 @@ class RegistryRepository:
                 (
                     actual_model_id,
                     location_key,
-                    project_id,
+                    resolved_location_project_id,
                     relative_path,
                     external_path,
                     1 if is_primary else 0,

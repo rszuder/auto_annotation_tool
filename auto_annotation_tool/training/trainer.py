@@ -2003,6 +2003,21 @@ class YOLOPoseTrainer:
                             write_sidecar=True,
                         )
                     logger.info(f"[OK] Zapisano metadata modelu: {target_path.name}.metadata.json")
+                    try:
+                        from ..registry.runtime_service import register_exported_model
+
+                        register_exported_model(
+                            self.history.history_dir,
+                            self.history.get_run(run.id) or run,
+                            target_path,
+                            target=task_tag,
+                        )
+                    except Exception as registry_err:
+                        logger.warning(
+                            "[REGISTRY] Model wyeksportowano, ale nie udalo sie "
+                            f"zarejestrowac jego lokalizacji: {registry_err}"
+                        )
+
 
                     # =========================================================
                     # AUTO-WIRING: aktualizacja modeli aktywnego projektu

@@ -141,6 +141,28 @@ class TrainingHistory:
         "plates": "plate",
         "vehicles": "vehicle",
     }
+    _REGISTRY_SYNC_FIELDS = frozenset({
+        "status",
+        "dataset_path",
+        "base_model",
+        "started_at",
+        "finished_at",
+        "paused_at",
+        "lineage_mode",
+        "parent_run_id",
+        "parent_model_path",
+        "parent_model_name",
+        "parent_model_target",
+        "training_target",
+        "training_dataset_snapshot",
+        "training_dataset_input_snapshot",
+        "dataset_preparation",
+        "input_checkpoint_snapshot",
+        "output_checkpoint_snapshot",
+        "best_weights",
+        "last_weights",
+    })
+
     
     def __init__(self, history_dir: Path = None):
         self.history_dir = Path(history_dir) if history_dir else Path(CONFIG.DEFAULT_TRAINING_DIR)
@@ -551,6 +573,19 @@ class TrainingHistory:
         except Exception as e:
             logger.error(f"BĹ‚Ä…d zapisywania: {e}")
     
+    def _sync_registry_run_best_effort(self, run: TrainingRun) -> None:
+        try:
+            from ..registry.runtime_service import sync_training_run
+
+            result = sync_training_run(self.history_dir, run)
+            for warning in getattr(result, "warnings", ()) or ():
+                logger.warning(f"[REGISTRY] {warning}")
+        except Exception as exc:
+            logger.warning(
+                "[REGISTRY] Nie udalo sie zsynchronizowac runu "
+                f"{getattr(run, 'id', '')}: {exc}"
+            )
+
     def create_run(self, name: str, **kwargs) -> TrainingRun:
         """Tworzy nowy trening."""
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -568,6 +603,7 @@ class TrainingHistory:
         
         self.runs[run_id] = run
         self._save()
+        self._sync_registry_run_best_effort(run)
         
         logger.info(f"Utworzono trening: {run_id}")
         return run
@@ -583,6 +619,8 @@ class TrainingHistory:
                 setattr(run, key, value)
         
         self._save()
+        if self._REGISTRY_SYNC_FIELDS.intersection(kwargs):
+            self._sync_registry_run_best_effort(run)
     
     def add_metrics(self, run_id: str, epoch: int, metrics: Dict):
         """Dodaje metryki."""
