@@ -131,6 +131,9 @@ class ModelRankingEntry:
     corner_error_max: float = 0.0
     corner_matched_pairs: int = 0
     corner_skipped_pairs: int = 0
+    evidence_status: str = ""
+    evidence_note: str = ""
+    registry_experiment_status: str = ""
     
     @property
     def f1_score(self) -> float:
@@ -204,6 +207,26 @@ class ModelRanking:
         return str(getattr(entry, "date_evaluated", "") or "").strip()
 
     @classmethod
+    def _entry_preference_key(
+        cls,
+        entry: ModelRankingEntry,
+    ) -> tuple[int, str]:
+        priority = {
+            "CONTROLLED_REGISTERED": 70,
+            "CONTROLLED_LEGACY_PROTOCOL": 60,
+            "WORKING_REGISTERED": 50,
+            "REGISTERED_INCOMPLETE": 40,
+            "": 30,
+            "LEGACY_UNREGISTERED": 20,
+            "ORPHANED_EXPERIMENT": 10,
+            "REGISTRY_MISMATCH": 0,
+        }.get(
+            str(getattr(entry, "evidence_status", "") or "").strip().upper(),
+            15,
+        )
+        return priority, cls._entry_time_key(entry)
+
+    @classmethod
     def _unique_entries(cls, entries: List[ModelRankingEntry]) -> List[ModelRankingEntry]:
         by_identity: Dict[tuple[str, str, str, str, str], ModelRankingEntry] = {}
         fallback: List[ModelRankingEntry] = []
@@ -213,7 +236,11 @@ class ModelRanking:
                 fallback.append(entry)
                 continue
             current = by_identity.get(key)
-            if current is None or cls._entry_time_key(entry) >= cls._entry_time_key(current):
+            if (
+                current is None
+                or cls._entry_preference_key(entry)
+                >= cls._entry_preference_key(current)
+            ):
                 by_identity[key] = entry
         return [*by_identity.values(), *fallback]
 
@@ -319,6 +346,28 @@ class ModelRanking:
             self._save()
         
         return entry
+
+    def reconcile_registry(
+        self,
+        repository,
+        *,
+        target: str | None = None,
+    ):
+        """Połącz ranking JSON z wiarygodnymi wynikami SQLite."""
+        from .legacy_compatibility import (
+            RankingRegistryCompatibility,
+        )
+
+        report = RankingRegistryCompatibility(
+            repository
+        ).reconcile(
+            self.entries,
+            target=target,
+        )
+        self.entries = list(report.entries)
+        self._dedupe_entries()
+        self._sort()
+        return report
 
     def flush(self):
         self._save()

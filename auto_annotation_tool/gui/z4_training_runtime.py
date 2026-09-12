@@ -49,7 +49,12 @@ from ..training import (
     DatasetSplitter,
     format_resource_sample_line,
 )
-from ..ranking import ModelRanking, format_ranking_model_label
+from ..ranking import (
+    EVIDENCE_CONTROLLED,
+    ModelRanking,
+    format_ranking_model_label,
+    ranking_evidence_label,
+)
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
@@ -2678,6 +2683,11 @@ def _load_ranking(self):
         return fallback, model_file or fallback, None
 
     def entry_scope(entry) -> str:
+        stored_scope = str(
+            getattr(entry, "comparison_scope", "") or ""
+        ).strip()
+        if stored_scope in {"Projekt", "Globalne"}:
+            return stored_scope
         model_path_raw = str(getattr(entry, "model_path", "") or "").strip()
         if not model_path_raw:
             return "Globalne"
@@ -2753,13 +2763,17 @@ def _load_ranking(self):
     def entry_decision(entry, scope: str, index: int) -> str:
         if index == 0:
             if scope == "Projekt":
-                return "WYGRANY - wybierz jawnie"
-            return "WYGRANY referencyjny"
-        if scope == "Projekt":
-            return "Kandydat projektu"
-        if scope == "Globalne":
-            return "Model referencyjny"
-        return "Kandydat"
+                base = "WYGRANY"
+            else:
+                base = "WYGRANY ref."
+        elif scope == "Projekt":
+            base = "Kandydat"
+        else:
+            base = "Referencyjny"
+        evidence = ranking_evidence_label(
+            getattr(entry, "evidence_status", "")
+        )
+        return f"{base} · {evidence}"
 
     def entry_reference_label(entry) -> str:
         raw_path = str(getattr(entry, "reference_path", "") or "").strip()
@@ -2910,10 +2924,28 @@ def _load_ranking(self):
             f"Zakres: {best_scope}. Zestaw odniesienia: {best_reference}. "
             "To kandydat spoza historii projektu, więc nie ma podpisu runu z wyboru wyniku."
         )
+    best_evidence_status = str(
+        getattr(best, "evidence_status", "") or ""
+    ).strip().upper()
+    best_evidence_label = ranking_evidence_label(
+        best_evidence_status
+    )
+    best_hint += (
+        f" Status dowodu: {best_evidence_label}."
+    )
+    if best_evidence_status != EVIDENCE_CONTROLLED:
+        best_hint += (
+            " Ten wynik nie powinien być przedstawiany jako finalny "
+            "wniosek eksperymentu controlled."
+        )
     set_leader(
         best_title,
         best_hint,
-        tone="success" if best_scope == "Projekt" else "warning",
+        tone=(
+            "success"
+            if best_evidence_status == EVIDENCE_CONTROLLED
+            else "warning"
+        ),
     )
 
     ranked_model_keys: set[str] = set()

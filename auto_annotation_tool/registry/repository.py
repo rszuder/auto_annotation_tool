@@ -1625,6 +1625,66 @@ class RegistryRepository:
             )
 
 
+    def list_experiment_result_bundles(
+        self,
+        *,
+        target: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """Zwróć wyniki wraz z zamrożonym kontekstem eksperymentu."""
+
+        conditions: list[str] = []
+        params: list[Any] = []
+        normalized_target = str(target or "").strip().lower()
+        if normalized_target:
+            conditions.append(
+                "LOWER(COALESCE(experiment.target, '')) = ?"
+            )
+            params.append(normalized_target)
+
+        where = (
+            "WHERE " + " AND ".join(conditions)
+            if conditions
+            else ""
+        )
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        experiment.experiment_id,
+                        experiment.target AS experiment_target,
+                        experiment.mode AS experiment_mode,
+                        experiment.status AS experiment_status,
+                        experiment.protocol_json,
+                        experiment.protocol_sha256,
+                        experiment.track_id,
+                        experiment.track_manifest_sha256,
+                        participant.model_id,
+                        participant.model_sha256,
+                        participant.independence_status,
+                        participant.overlap_count,
+                        result.metrics_json,
+                        result.result_relative_path,
+                        result.created_at AS result_created_at
+                    FROM experiment_results AS result
+                    JOIN experiments AS experiment
+                      ON experiment.experiment_id = result.experiment_id
+                    JOIN experiment_participants AS participant
+                      ON participant.experiment_id = result.experiment_id
+                     AND participant.model_id = result.model_id
+                    {where}
+                    ORDER BY
+                        result.created_at,
+                        experiment.experiment_id,
+                        participant.position,
+                        participant.model_id
+                    """,
+                    tuple(params),
+                ).fetchall()
+            )
+
+
     def list_model_comparison_rows(
         self,
         *,
