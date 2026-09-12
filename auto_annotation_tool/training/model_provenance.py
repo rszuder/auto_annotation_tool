@@ -89,6 +89,31 @@ class DatasetFileInventoryEntry:
             "is_image": self.is_image,
         }
 
+def _effective_dataset_provenance_status(
+    dataset: Mapping[str, Any],
+) -> str:
+    """Interpretuj stare snapshoty zgodnie z kontraktem content identity.
+
+    Historyczny status ``partial`` oznaczał także sam brak manifestu
+    generatora. Jeżeli snapshot zamroził dataset_id, data.yaml oraz pełny
+    fingerprint splitów, zawartość użyta do treningu jest jednoznacznie
+    identyfikowalna bez dodatkowego manifestu generatora.
+    """
+
+    status = str(dataset.get("provenance_status") or "").strip().lower()
+    dataset_id = str(dataset.get("dataset_id") or "").strip()
+    split_sha = str(dataset.get("split_sha256") or "").strip()
+    manifest_sha = str(dataset.get("manifest_sha256") or "").strip()
+    data_yaml_sha = str(dataset.get("data_yaml_sha256") or "").strip()
+    frozen_content_identity = bool(
+        dataset_id
+        and split_sha
+        and (manifest_sha or data_yaml_sha)
+    )
+    if status == "partial" and frozen_content_identity:
+        return "complete"
+    return status
+
 def build_model_training_provenance(
     run_like: Any,
     *,
@@ -142,7 +167,7 @@ def build_model_training_provenance(
     pretrained_origin = _pretrained_origin(run)
     status = lineage_result.provenance_status
     warnings = list(lineage_result.warnings)
-    dataset_status = str(dataset.get("provenance_status") or "").strip().lower()
+    dataset_status = _effective_dataset_provenance_status(dataset)
     if provenance_capture != "frozen_at_training_start":
         status = _weaken_status(status)
         if provenance_capture == "reconstructed_at_export":
@@ -157,8 +182,11 @@ def build_model_training_provenance(
     elif dataset_status == "partial":
         status = _weaken_status(status)
     if resolved_dataset_path and not dataset.get("manifest_sha256"):
-        status = _weaken_status(status)
-        warnings.append("Dataset treningowy nie ma jawnego manifestu generatora.")
+        warnings.append(
+            "Dataset treningowy nie ma jawnego manifestu generatora; "
+            "tożsamość jego zawartości opiera się na zamrożonym data.yaml "
+            "i pełnym fingerprintcie splitów."
+        )
     if include_dataset_fingerprint and resolved_dataset_path and not dataset.get("split_sha256"):
         status = _weaken_status(status)
         warnings.append("Nie udało się policzyć fingerprintu splitu datasetu treningowego.")
@@ -308,6 +336,12 @@ def build_dataset_training_provenance(
     identity_seed = _json_sha256(identity_payload) or str(root.resolve() if root.exists() else root)
     dataset_id = f"DS-{_target_code(resolved_target)}-{identity_seed[:10].upper()}" if identity_seed else ""
     total_images = int(counts.get("train", 0) or 0) + int(counts.get("val", 0) or 0) + int(counts.get("test", 0) or 0)
+    content_identity_complete = bool(data_yaml_sha and split_sha)
+    provenance_basis = (
+        "manifest+content_fingerprint"
+        if manifest_sha and content_identity_complete
+        else ("content_fingerprint" if content_identity_complete else "incomplete")
+    )
     return _json_safe(
         {
             "dataset_id": dataset_id,
@@ -329,7 +363,8 @@ def build_dataset_training_provenance(
             "local_path_hint": str(root),
             "data_yaml": str(yaml_path) if yaml_path.exists() else "",
             "dataset_id_strategy": "composite_v2",
-            "provenance_status": "complete" if manifest_sha and split_sha else "partial",
+            "provenance_basis": provenance_basis,
+            "provenance_status": "complete" if content_identity_complete else "partial",
         }
     )
 
