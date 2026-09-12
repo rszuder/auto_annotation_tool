@@ -1343,6 +1343,268 @@ class RegistryRepository:
             )
 
 
+
+    def create_experiment_bundle(
+        self,
+        *,
+        experiment: Mapping[str, Any],
+        participants: list[Mapping[str, Any]],
+        overlaps: list[Mapping[str, Any]],
+    ) -> None:
+        """Atomowo zapisz plan eksperymentu, uczestników i znane overlap items."""
+
+        experiment_id = str(
+            experiment.get("experiment_id") or ""
+        ).strip()
+        if not experiment_id:
+            raise ValueError("experiment_id nie może być pusty.")
+        if not participants:
+            raise ValueError(
+                "Eksperyment musi mieć uczestników."
+            )
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO experiments (
+                    experiment_id,
+                    owner_project_id,
+                    name,
+                    target,
+                    mode,
+                    track_id,
+                    status,
+                    protocol_json,
+                    protocol_sha256,
+                    track_manifest_sha256,
+                    created_at,
+                    sealed_at,
+                    started_at,
+                    finished_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    experiment_id,
+                    experiment.get("owner_project_id"),
+                    str(experiment.get("name") or ""),
+                    str(experiment.get("target") or ""),
+                    str(experiment.get("mode") or ""),
+                    experiment.get("track_id"),
+                    str(experiment.get("status") or ""),
+                    str(experiment.get("protocol_json") or ""),
+                    str(experiment.get("protocol_sha256") or ""),
+                    str(
+                        experiment.get(
+                            "track_manifest_sha256"
+                        )
+                        or ""
+                    ),
+                    experiment.get("created_at"),
+                    experiment.get("sealed_at"),
+                    experiment.get("started_at"),
+                    experiment.get("finished_at"),
+                ),
+            )
+
+            for participant in participants:
+                connection.execute(
+                    """
+                    INSERT INTO experiment_participants (
+                        experiment_id,
+                        model_id,
+                        position,
+                        model_sha256,
+                        independence_status,
+                        overlap_count
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        experiment_id,
+                        str(participant.get("model_id") or ""),
+                        int(participant.get("position") or 0),
+                        str(
+                            participant.get("model_sha256")
+                            or ""
+                        ),
+                        str(
+                            participant.get(
+                                "independence_status"
+                            )
+                            or "UNKNOWN"
+                        ),
+                        int(
+                            participant.get("overlap_count")
+                            or 0
+                        ),
+                    ),
+                )
+
+            for overlap in overlaps:
+                connection.execute(
+                    """
+                    INSERT INTO experiment_overlap_items (
+                        experiment_id,
+                        model_id,
+                        source_image_id,
+                        training_dataset_id,
+                        training_run_id,
+                        reason
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        experiment_id,
+                        str(overlap.get("model_id") or ""),
+                        str(
+                            overlap.get("source_image_id")
+                            or ""
+                        ),
+                        overlap.get("training_dataset_id"),
+                        overlap.get("training_run_id"),
+                        str(overlap.get("reason") or ""),
+                    ),
+                )
+
+    def get_experiment(
+        self,
+        experiment_id: str,
+    ) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM experiments
+                WHERE experiment_id = ?
+                """,
+                (str(experiment_id or "").strip(),),
+            ).fetchone()
+
+    def list_experiment_participants(
+        self,
+        experiment_id: str,
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM experiment_participants
+                    WHERE experiment_id = ?
+                    ORDER BY position, model_id
+                    """,
+                    (str(experiment_id or "").strip(),),
+                ).fetchall()
+            )
+
+    def list_experiment_overlap_items(
+        self,
+        experiment_id: str,
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM experiment_overlap_items
+                    WHERE experiment_id = ?
+                    ORDER BY
+                        model_id,
+                        training_run_id,
+                        training_dataset_id,
+                        source_image_id
+                    """,
+                    (str(experiment_id or "").strip(),),
+                ).fetchall()
+            )
+
+    def update_experiment_lifecycle(
+        self,
+        experiment_id: str,
+        *,
+        status: str,
+        started_at: str | None = None,
+        finished_at: str | None = None,
+    ) -> None:
+        self.initialize()
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE experiments
+                SET status = ?,
+                    started_at = COALESCE(?, started_at),
+                    finished_at = COALESCE(?, finished_at)
+                WHERE experiment_id = ?
+                """,
+                (
+                    str(status or ""),
+                    started_at,
+                    finished_at,
+                    str(experiment_id or "").strip(),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    f"Nie znaleziono eksperymentu: {experiment_id}"
+                )
+
+    def upsert_experiment_result(
+        self,
+        *,
+        experiment_id: str,
+        model_id: str,
+        metrics_json: str,
+        result_relative_path: str | None,
+        created_at: str | None,
+    ) -> None:
+        self.initialize()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO experiment_results (
+                    experiment_id,
+                    model_id,
+                    metrics_json,
+                    result_relative_path,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(experiment_id, model_id) DO UPDATE SET
+                    metrics_json = excluded.metrics_json,
+                    result_relative_path = excluded.result_relative_path,
+                    created_at = excluded.created_at
+                """,
+                (
+                    str(experiment_id or "").strip(),
+                    str(model_id or "").strip(),
+                    str(metrics_json or ""),
+                    result_relative_path,
+                    created_at,
+                ),
+            )
+
+    def get_experiment_result(
+        self,
+        experiment_id: str,
+        model_id: str,
+    ) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM experiment_results
+                WHERE experiment_id = ?
+                  AND model_id = ?
+                """,
+                (
+                    str(experiment_id or "").strip(),
+                    str(model_id or "").strip(),
+                ),
+            ).fetchone()
+
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",
@@ -1357,6 +1619,10 @@ class RegistryRepository:
             "evaluation_track_members",
             "evaluation_tracks",
             "reservations",
+            "experiment_results",
+            "experiment_overlap_items",
+            "experiment_participants",
+            "experiments",
         }
         if table_name not in allowed:
             raise ValueError(f"Niedozwolona tabela: {table_name}")
