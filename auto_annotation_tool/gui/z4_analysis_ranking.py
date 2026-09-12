@@ -49,8 +49,11 @@ from ..validators import (
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
 from ..training.training_report import TrainingReportGenerator
 from ..ranking import (
+    ModelComparisonCatalog,
     ModelRanking,
     RankingExperimentBridge,
+    active_project_id_from_root,
+    comparison_scope_label,
     format_ranking_model_label,
     is_plate_pose_model_path,
 )
@@ -1004,23 +1007,24 @@ def _get_ranking_scope(self) -> str:
             raw = str(scope_var.get() or "").strip()
     except Exception:
         raw = ""
+
+    try:
+        has_active_project = bool(CAMPAIGN.get_active_project_name())
+    except Exception:
+        has_active_project = False
+
     if raw == "Wszystkie":
+        raw = "Globalne"
+    if raw == "Projekt" and not has_active_project:
         return "Globalne"
     if raw in {"Projekt", "Globalne"}:
         return raw
-    try:
-        return "Projekt" if CAMPAIGN.get_active_project_name() else "Globalne"
-    except Exception:
-        return "Globalne"
+    return "Projekt" if has_active_project else "Globalne"
 
 
 def _format_ranking_scope_label(self, scope: str | None = None, target: str | None = None) -> str:
     selected_scope = scope or _get_ranking_scope(self)
-    normalized_target = CONFIG.normalize_task_target(target or self._get_ranking_task_target())
-    short_name = "MZ" if normalized_target == "char" else "MT"
-    if selected_scope == "Projekt":
-        return f"Projektowe {short_name}"
-    return f"Globalne {short_name}"
+    return comparison_scope_label(selected_scope, target)
 
 
 def _ranking_model_candidate_scope(self, path_like, target: str | None = None) -> str:
@@ -1127,6 +1131,28 @@ def _collect_ranking_participant_candidates(
         seen.add(key)
         seen_content.add(content_key)
         candidates.append(resolved)
+
+    try:
+        active_project_root = CAMPAIGN.get_active_project_root_dir()
+    except Exception:
+        active_project_root = None
+    try:
+        catalog = ModelComparisonCatalog(CONFIG.WORKSPACE_DIR)
+        registered_candidates = catalog.list_candidates(
+            target=normalized_target,
+            scope=selected_scope,
+            active_project_root=active_project_root,
+        )
+        for candidate in registered_candidates:
+            add_path(
+                candidate.path,
+                require_domain_name=False,
+                force_scope=selected_scope,
+            )
+    except Exception as exc:
+        logger.debug(
+            f"Katalog modeli porównawczych niedostępny: {exc}"
+        )
 
     if selected_scope in {"Projekt", "Globalne"}:
         for path in _collect_project_ranking_model_candidates(self, normalized_target):
@@ -1385,8 +1411,17 @@ def _collect_current_ranking_report_context(self) -> dict:
             return str(Path(raw)).lower()
 
     def entry_scope(entry) -> str:
+        stored_scope = str(
+            getattr(entry, "comparison_scope", "") or ""
+        ).strip()
+        if stored_scope in {"Projekt", "Globalne"}:
+            return stored_scope
         try:
-            return _ranking_model_candidate_scope(self, getattr(entry, "model_path", ""), target)
+            return _ranking_model_candidate_scope(
+                self,
+                getattr(entry, "model_path", ""),
+                target,
+            )
         except Exception:
             return "Globalne"
 
@@ -2823,10 +2858,21 @@ def _open_ranking_participants_modal(self):
             pass
         load_rows()
 
-    for label, value in (
-        ("Projektowe", "Projekt"),
-        ("Globalne", "Globalne"),
-    ):
+    try:
+        has_active_project = bool(CAMPAIGN.get_active_project_name())
+    except Exception:
+        has_active_project = False
+    scope_options = []
+    if has_active_project:
+        scope_options.append(("Projektowe", "Projekt"))
+    else:
+        try:
+            self.rank_scope_var.set("Globalne")
+        except Exception:
+            pass
+    scope_options.append(("Cały Workspace", "Globalne"))
+
+    for label, value in scope_options:
         ttk.Radiobutton(
             toolbar,
             text=label,
@@ -4228,10 +4274,9 @@ def _run_ranking_v2(self):
     selected_scope = _get_ranking_scope(self)
     models_dir_raw = str(getattr(self, "rank_models_dir", tk.StringVar()).get() or "").strip()
     reference_raw = str(getattr(self, "rank_data_dir", tk.StringVar()).get() or "").strip()
-    models_dir = Path(models_dir_raw) if models_dir_raw else Path(".")
-
-    if selected_scope == "Globalne" and (not models_dir.exists() or not models_dir.is_dir()):
-        return messagebox.showerror("Błąd", "Wskaż poprawny folder z modelami .pt.")
+    models_dir = Path(models_dir_raw) if models_dir_raw else None
+    if models_dir is not None and (not models_dir.exists() or not models_dir.is_dir()):
+        models_dir = None
 
     reference_info = self._resolve_ranking_reference_source(reference_raw)
     if not reference_info.get("ok"):
@@ -4262,7 +4307,9 @@ def _run_ranking_v2(self):
     )
     self._append_ranking_log(f"Start przygotowania rankingu: {target_task}.")
     self._append_ranking_log(f"Zakres koni: {_format_ranking_scope_label(self, selected_scope, target)}.")
-    self._append_ranking_log(f"Folder modeli: {models_dir}")
+    self._append_ranking_log(
+        f"Dodatkowy katalog modeli: {models_dir if models_dir is not None else '[brak]'}"
+    )
     if reference_raw:
         self._append_ranking_log(f"Wybrany tor testowy: {reference_raw}")
     else:
@@ -4430,13 +4477,23 @@ def _run_ranking_v2(self):
                 )
 
             def persist_ranking_result(model_path: Path, stats: dict):
-                metadata = (
+                metadata = dict(
                     ranking_experiment_bridge.entry_metadata(
                         ranking_experiment,
                         model_path,
                     )
                     if ranking_experiment is not None
-                    else None
+                    else {}
+                )
+                metadata["comparison_scope"] = selected_scope
+                try:
+                    active_project_root = CAMPAIGN.get_active_project_root_dir()
+                except Exception:
+                    active_project_root = None
+                metadata["comparison_project_id"] = (
+                    active_project_id_from_root(active_project_root)
+                    if selected_scope == "Projekt"
+                    else ""
                 )
                 entry = self.ranking_engine.add_entry(
                     model_name=model_path.name,

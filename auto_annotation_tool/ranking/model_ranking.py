@@ -120,6 +120,8 @@ class ModelRankingEntry:
     protocol_sha256: str = ""
     track_manifest_sha256: str = ""
     independence_status: str = ""
+    comparison_scope: str = ""
+    comparison_project_id: str = ""
     
     @property
     def f1_score(self) -> float:
@@ -173,7 +175,7 @@ class ModelRanking:
             return str(Path(raw)).lower()
 
     @classmethod
-    def _entry_identity(cls, entry: ModelRankingEntry) -> tuple[str, str, str, str]:
+    def _entry_identity(cls, entry: ModelRankingEntry) -> tuple[str, str, str, str, str]:
         model_key = cls._path_key(getattr(entry, "model_path", ""))
         if not model_key:
             model_key = str(getattr(entry, "model_name", "") or "").strip().lower()
@@ -185,6 +187,7 @@ class ModelRanking:
             str(getattr(entry, "task_type", "") or "").strip().lower(),
             reference_key,
             str(getattr(entry, "split_name", "") or "").strip().lower(),
+            str(getattr(entry, "comparison_scope", "") or "").strip().lower(),
         )
 
     @staticmethod
@@ -193,7 +196,7 @@ class ModelRanking:
 
     @classmethod
     def _unique_entries(cls, entries: List[ModelRankingEntry]) -> List[ModelRankingEntry]:
-        by_identity: Dict[tuple[str, str, str, str], ModelRankingEntry] = {}
+        by_identity: Dict[tuple[str, str, str, str, str], ModelRankingEntry] = {}
         fallback: List[ModelRankingEntry] = []
         for entry in list(entries or []):
             key = cls._entry_identity(entry)
@@ -282,6 +285,8 @@ class ModelRanking:
             protocol_sha256=str(experiment_payload.get("protocol_sha256") or "").strip().lower(),
             track_manifest_sha256=str(experiment_payload.get("track_manifest_sha256") or "").strip().lower(),
             independence_status=str(experiment_payload.get("independence_status") or "").strip().upper(),
+            comparison_scope=str(experiment_payload.get("comparison_scope") or "").strip(),
+            comparison_project_id=str(experiment_payload.get("comparison_project_id") or "").strip(),
         )
         
         new_identity = self._entry_identity(entry)
