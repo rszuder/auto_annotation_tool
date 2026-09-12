@@ -57,6 +57,7 @@ from ..ranking import (
     evaluate_pose_corner_metrics,
     format_ranking_model_label,
     is_plate_pose_model_path,
+    ranking_evidence_label,
 )
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
@@ -1479,6 +1480,10 @@ def _collect_current_ranking_report_context(self) -> dict:
                 "label": label,
                 "model_file": model_file,
                 "scope": entry_scope(entry),
+                "evidence_status": str(getattr(entry, "evidence_status", "") or ""),
+                "evidence_label": ranking_evidence_label(getattr(entry, "evidence_status", "")),
+                "evidence_note": str(getattr(entry, "evidence_note", "") or ""),
+                "registry_experiment_status": str(getattr(entry, "registry_experiment_status", "") or ""),
                 "score": _ranking_report_percent(getattr(entry, "ranking_score", 0)),
                 "precision": precision,
                 "recall": recall,
@@ -1733,6 +1738,7 @@ def _ranking_report_markdown(context: dict) -> str:
                 f"- Ocena: **{_ranking_report_percent_text(winner.get('score'))}**",
                 f"- Precyzja / czułość: {_ranking_report_percent_text(winner.get('precision'))} / {_ranking_report_percent_text(winner.get('recall'))}",
                 f"- Źródło metryk: {winner.get('metrics_source') or '-'}",
+                f"- Status dowodu: {winner.get('evidence_label') or 'NIEZNANY'}",
             ]
         )
     else:
@@ -1742,16 +1748,17 @@ def _ranking_report_markdown(context: dict) -> str:
             "",
             "## Tabela wyników",
             "",
-            "| # | Model | Zakres | Ocena | Precyzja | Czułość | F1 | mAP50 | mAP50-95 | E_corner mean | E_corner p95 | Próbka | Oceniono |",
-            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| # | Model | Zakres | Dowód | Ocena | Precyzja | Czułość | F1 | mAP50 | mAP50-95 | E_corner mean | E_corner p95 | Próbka | Oceniono |",
+            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for row in rows:
         lines.append(
-            "| {rank} | {label} | {scope} | {score} | {precision} | {recall} | {f1} | {map50} | {map50_95} | {corner_mean} | {corner_p95} | {sample} | {evaluated_at} |".format(
+            "| {rank} | {label} | {scope} | {evidence} | {score} | {precision} | {recall} | {f1} | {map50} | {map50_95} | {corner_mean} | {corner_p95} | {sample} | {evaluated_at} |".format(
                 rank=int(row.get("rank", 0) or 0),
                 label=str(row.get("label") or "-").replace("|", "\\|"),
                 scope=str(row.get("scope") or "-"),
+                evidence=str(row.get("evidence_label") or "NIEZNANY"),
                 score=_ranking_report_percent_text(row.get("score")),
                 precision=_ranking_report_percent_text(row.get("precision")),
                 recall=_ranking_report_percent_text(row.get("recall")),
@@ -1789,6 +1796,7 @@ def _ranking_report_markdown(context: dict) -> str:
             "## Ograniczenia interpretacji",
             "",
             "Porównanie modeli trenowanych na różnych datasetach jest sensowne dopiero wtedy, gdy wszystkie modele zostaną sprawdzone na tym samym torze rankingowym. Zmiana toru, splitu albo zakresu uczestników tworzy nowy eksperyment i wymaga osobnego raportu.",
+            "Wpis oznaczony jako LEGACY, WORKING, REGISTERED LEGACY, NIEKOMPLETNY, OSIEROCONY albo NIEZGODNY może pozostać w rankingu historycznym, ale nie jest finalnym dowodem eksperymentu controlled. Taki status nie jest automatycznie podnoszony na podstawie podobieństwa ścieżek ani metryk.",
             "",
         ]
     )
@@ -2261,6 +2269,8 @@ def _export_ranking_analysis_report(self):
                     "model",
                     "plik_modelu",
                     "zakres",
+                    "status_dowodu",
+                    "status_rejestru",
                     "ocena_pct",
                     "precyzja_pct",
                     "czulosc_pct",
@@ -2299,6 +2309,8 @@ def _export_ranking_analysis_report(self):
                         row.get("label", ""),
                         row.get("model_file", ""),
                         row.get("scope", ""),
+                        row.get("evidence_label", ""),
+                        row.get("registry_experiment_status", ""),
                         f"{float(row.get('score', 0) or 0):.4f}",
                         f"{float(row.get('precision', 0) or 0):.4f}",
                         f"{float(row.get('recall', 0) or 0):.4f}",

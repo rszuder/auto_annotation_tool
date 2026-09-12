@@ -1528,7 +1528,8 @@ class TrainingTab:
         return str(self._get_ranking_models_default_dir())
 
     def _ensure_plate_ranking_engine(self):
-        ranking_dir = Path(CONFIG.get_ranking_dir(self._get_ranking_task_target()))
+        target = self._get_ranking_task_target()
+        ranking_dir = Path(CONFIG.get_ranking_dir(target))
         current_dir = Path(getattr(self.ranking_engine, "ranking_dir", ranking_dir))
         try:
             same_dir = current_dir.resolve() == ranking_dir.resolve()
@@ -1537,6 +1538,21 @@ class TrainingTab:
 
         if not same_dir:
             self.ranking_engine = ModelRanking(ranking_dir=ranking_dir)
+
+        try:
+            from ..registry.repository import RegistryRepository
+
+            repository = RegistryRepository.for_workspace(
+                CONFIG.WORKSPACE_DIR
+            )
+            self.ranking_engine.reconcile_registry(
+                repository,
+                target=target,
+            )
+        except Exception as exc:
+            logger.debug(
+                f"Nie udało się uzgodnić rankingu z rejestrem SQLite: {exc}"
+            )
 
     def _get_default_ranking_reference_dir(self) -> str:
         if self._get_ranking_task_target() == "char":
