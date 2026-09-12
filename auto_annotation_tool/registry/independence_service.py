@@ -12,6 +12,8 @@ from .repository import RegistryRepository
 from .track_service import (
     EvaluationTrackError,
     EvaluationTrackService,
+    INDEPENDENT_ACQUISITION_ATTESTATION_SCHEMA,
+    INDEPENDENT_ACQUISITION_ATTESTATION_STATEMENT,
 )
 
 INDEPENDENCE_PASS = "PASS"
@@ -48,6 +50,7 @@ class ModelTrackIndependenceAudit:
     checked_dataset_ids: tuple[str, ...] = ()
     overlaps: tuple[IndependenceOverlap, ...] = ()
     unknown_reasons: tuple[str, ...] = ()
+    evidence_basis: tuple[str, ...] = ()
     audited_at: str = ""
 
     @property
@@ -152,6 +155,22 @@ class ModelTrackIndependenceService:
                 audited_at=audited_at,
             )
 
+        independent_acquisition_attested = bool(
+            track_ref.independent_acquisition
+            and track_ref.not_derived_from_training_data
+            and track_ref.acquisition_source_pool
+            and track_ref.independent_acquisition_attested_at
+            and track_ref.independent_acquisition_attestation_schema
+            == INDEPENDENT_ACQUISITION_ATTESTATION_SCHEMA
+            and track_ref.independent_acquisition_attestation_statement
+            == INDEPENDENT_ACQUISITION_ATTESTATION_STATEMENT
+        )
+        evidence_basis: list[str] = ["artifact_sha256"]
+        if independent_acquisition_attested:
+            evidence_basis.append(
+                "sealed_independent_acquisition_attestation"
+            )
+
         track_rows = self.repository.list_evaluation_track_member_lineage(
             track_id
         )
@@ -174,11 +193,13 @@ class ModelTrackIndependenceService:
             if origin_status not in _FULL_LINEAGE:
                 weak_track_lineage += 1
 
-        if weak_track_lineage:
+        if weak_track_lineage and not independent_acquisition_attested:
             unknown_reasons.append(
                 "Rodowód części obrazów toru nie jest w pełni potwierdzony "
                 f"({weak_track_lineage} wpisów; exact_hash_only/legacy nie daje PASS)."
             )
+        elif not weak_track_lineage:
+            evidence_basis.append("source_image_lineage")
 
         model_provenance = str(
             model["provenance_status"] or ""
@@ -203,6 +224,9 @@ class ModelTrackIndependenceService:
                 checked_dataset_ids=checked_dataset_ids,
                 overlaps=overlaps,
                 unknown_reasons=unknown_reasons,
+                independent_acquisition_attested=(
+                    independent_acquisition_attested
+                ),
             )
 
         status = (
@@ -230,6 +254,7 @@ class ModelTrackIndependenceService:
             checked_dataset_ids=tuple(checked_dataset_ids),
             overlaps=tuple(overlaps),
             unknown_reasons=tuple(_dedupe(unknown_reasons)),
+            evidence_basis=tuple(_dedupe(evidence_basis)),
             audited_at=audited_at,
         )
 
@@ -243,6 +268,7 @@ class ModelTrackIndependenceService:
         checked_dataset_ids: list[str],
         overlaps: list[IndependenceOverlap],
         unknown_reasons: list[str],
+        independent_acquisition_attested: bool,
     ) -> None:
         current_id = str(start_run_id or "").strip()
         seen: set[str] = set()
@@ -295,6 +321,9 @@ class ModelTrackIndependenceService:
                     track_shas=track_shas,
                     overlaps=overlaps,
                     unknown_reasons=unknown_reasons,
+                    independent_acquisition_attested=(
+                        independent_acquisition_attested
+                    ),
                 )
 
             parent_id = str(run["parent_run_id"] or "").strip()
@@ -311,6 +340,7 @@ class ModelTrackIndependenceService:
         track_shas: Mapping[str, Mapping[str, Any]],
         overlaps: list[IndependenceOverlap],
         unknown_reasons: list[str],
+        independent_acquisition_attested: bool,
     ) -> None:
         dataset = self.repository.get_dataset(dataset_id)
         if dataset is None:
@@ -382,11 +412,12 @@ class ModelTrackIndependenceService:
             if origin_status not in _FULL_LINEAGE:
                 weak_lineage += 1
 
-        if weak_lineage:
+        if weak_lineage and not independent_acquisition_attested:
             unknown_reasons.append(
                 f"Dataset {dataset_id}: {weak_lineage} obrazów train/val "
                 "ma rodowód exact_hash_only/legacy, więc brak overlapu "
-                "nie może dać PASS."
+                "nie może dać PASS bez zapieczętowanego oświadczenia "
+                "o niezależnym pozyskaniu toru."
             )
 
 

@@ -29,6 +29,14 @@ GT_COMPLETENESS_ATTESTATION_STATEMENT = (
     "potwierdzono, że Ground Truth zawiera wszystkie "
     "widoczne obiekty docelowe."
 )
+INDEPENDENT_ACQUISITION_ATTESTATION_SCHEMA = (
+    "alpr.independent_acquisition_attestation.v1"
+)
+INDEPENDENT_ACQUISITION_ATTESTATION_STATEMENT = (
+    "Wszystkie obrazy toru pochodzą z niezależnie pozyskanej puli, "
+    "która nie była użyta w train/val ocenianych modeli, i nie są "
+    "pochodnymi danych treningowych ani walidacyjnych tych modeli."
+)
 
 STATUS_DRAFT = "DRAFT"
 STATUS_VERIFIED = "VERIFIED"
@@ -83,6 +91,12 @@ class ControlledTrackReference:
     manual_gt_attested_at: str = ""
     manual_gt_attestation_schema: str = ""
     manual_gt_attestation_statement: str = ""
+    independent_acquisition: bool = False
+    not_derived_from_training_data: bool = False
+    acquisition_source_pool: str = ""
+    independent_acquisition_attested_at: str = ""
+    independent_acquisition_attestation_schema: str = ""
+    independent_acquisition_attestation_statement: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +120,12 @@ class ControlledTrackReference:
             "manual_gt_attested_at": self.manual_gt_attested_at,
             "manual_gt_attestation_schema": self.manual_gt_attestation_schema,
             "manual_gt_attestation_statement": self.manual_gt_attestation_statement,
+            "independent_acquisition": self.independent_acquisition,
+            "not_derived_from_training_data": self.not_derived_from_training_data,
+            "acquisition_source_pool": self.acquisition_source_pool,
+            "independent_acquisition_attested_at": self.independent_acquisition_attested_at,
+            "independent_acquisition_attestation_schema": self.independent_acquisition_attestation_schema,
+            "independent_acquisition_attestation_statement": self.independent_acquisition_attestation_statement,
         }
 
     @property
@@ -439,6 +459,45 @@ class EvaluationTrackService:
             complete=True,
             attested_at=self._utc_now(),
         )
+        self._write_manifest(
+            track_id,
+            verification=verification,
+        )
+        return verification
+
+    def attest_independent_acquisition(
+        self,
+        track_id: str,
+        *,
+        source_pool: str = "new_independent_acquisition",
+    ) -> dict[str, Any]:
+        """Zapisz ręczne oświadczenie o niezależnym pochodzeniu toru."""
+
+        self._require_status(track_id, STATUS_VERIFIED)
+        preflight = self._content_integrity(track_id)
+        if not preflight.ok:
+            raise EvaluationTrackError(
+                "Nie można potwierdzić niezależnego pozyskania: "
+                + "; ".join(preflight.issues)
+            )
+
+        clean_pool = str(source_pool or "").strip()
+        if not clean_pool:
+            raise EvaluationTrackError(
+                "Oświadczenie o niezależnym pozyskaniu wymaga nazwy puli źródłowej."
+            )
+
+        verification = self.get_verification(track_id)
+        verification["independent_acquisition"] = True
+        verification["not_derived_from_training_data"] = True
+        verification["acquisition_source_pool"] = clean_pool
+        verification["independent_acquisition_attestation_schema"] = (
+            INDEPENDENT_ACQUISITION_ATTESTATION_SCHEMA
+        )
+        verification["independent_acquisition_attestation_statement"] = (
+            INDEPENDENT_ACQUISITION_ATTESTATION_STATEMENT
+        )
+        verification["independent_acquisition_attested_at"] = self._utc_now()
         self._write_manifest(
             track_id,
             verification=verification,
@@ -1007,6 +1066,7 @@ class EvaluationTrackService:
         required_target: str | None = None,
         require_pose_corners: bool = False,
         require_manual_gt_complete: bool = False,
+        require_independent_acquisition: bool = False,
     ) -> ControlledTrackReference:
         """Zbuduj zamrożony uchwyt tylko dla poprawnego toru SEALED."""
 
@@ -1079,6 +1139,48 @@ class EvaluationTrackService:
             or ""
         ).strip()
 
+        independent_acquisition = bool(
+            verification.get("independent_acquisition")
+        )
+        not_derived_from_training_data = bool(
+            verification.get("not_derived_from_training_data")
+        )
+        acquisition_source_pool = str(
+            verification.get("acquisition_source_pool") or ""
+        ).strip()
+        independent_acquisition_attestation_schema = str(
+            verification.get(
+                "independent_acquisition_attestation_schema"
+            )
+            or ""
+        ).strip()
+        independent_acquisition_attestation_statement = str(
+            verification.get(
+                "independent_acquisition_attestation_statement"
+            )
+            or ""
+        ).strip()
+        independent_acquisition_attested_at = str(
+            verification.get("independent_acquisition_attested_at")
+            or ""
+        ).strip()
+        independent_acquisition_valid = bool(
+            independent_acquisition
+            and not_derived_from_training_data
+            and acquisition_source_pool
+            and independent_acquisition_attestation_schema
+            == INDEPENDENT_ACQUISITION_ATTESTATION_SCHEMA
+            and independent_acquisition_attestation_statement
+            == INDEPENDENT_ACQUISITION_ATTESTATION_STATEMENT
+            and independent_acquisition_attested_at
+        )
+
+        if require_independent_acquisition and not independent_acquisition_valid:
+            raise EvaluationTrackError(
+                "Tor nie ma zapieczętowanego oświadczenia o niezależnym "
+                "pozyskaniu obrazów i braku pochodzenia z train/val."
+            )
+
         if require_manual_gt_complete and (
             not manual_gt_complete
             or manual_gt_attestation_schema
@@ -1149,6 +1251,20 @@ class EvaluationTrackService:
             ),
             manual_gt_attestation_statement=(
                 manual_gt_attestation_statement
+            ),
+            independent_acquisition=independent_acquisition,
+            not_derived_from_training_data=(
+                not_derived_from_training_data
+            ),
+            acquisition_source_pool=acquisition_source_pool,
+            independent_acquisition_attested_at=(
+                independent_acquisition_attested_at
+            ),
+            independent_acquisition_attestation_schema=(
+                independent_acquisition_attestation_schema
+            ),
+            independent_acquisition_attestation_statement=(
+                independent_acquisition_attestation_statement
             ),
         )
 
