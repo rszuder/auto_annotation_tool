@@ -43,6 +43,7 @@ class TrackActionState:
     can_check_integrity: bool
     can_clone: bool
     can_retire: bool
+    can_delete_draft: bool
 
 
 def action_state_for_status(status: str | None) -> TrackActionState:
@@ -55,6 +56,7 @@ def action_state_for_status(status: str | None) -> TrackActionState:
         can_check_integrity=normalized in {STATUS_SEALED, STATUS_RETIRED},
         can_clone=normalized in {STATUS_SEALED, STATUS_RETIRED},
         can_retire=normalized == STATUS_SEALED,
+        can_delete_draft=normalized == STATUS_DRAFT,
     )
 
 
@@ -461,6 +463,11 @@ class EvaluationTracksPanel:
             text="Wycofaj",
             command=self.retire_track,
         )
+        self.btn_delete_draft = ttk.Button(
+            actions,
+            text="Usuń DRAFT",
+            command=self.delete_draft,
+        )
         for index, button in enumerate(
             (
                 self.btn_add_images,
@@ -470,6 +477,7 @@ class EvaluationTracksPanel:
                 self.btn_integrity,
                 self.btn_clone,
                 self.btn_retire,
+                self.btn_delete_draft,
             )
         ):
             button.grid(
@@ -1015,6 +1023,61 @@ class EvaluationTracksPanel:
             "Utworzono nową wersję DRAFT na podstawie zapieczętowanego toru."
         )
 
+
+    def delete_draft(self) -> None:
+        track_id = self._require_current_track()
+        if not track_id:
+            return
+
+        try:
+            track = self.service.get_track(track_id)
+        except Exception as exc:
+            self._show_error(
+                "Nie udało się odczytać toru",
+                exc,
+            )
+            return
+
+        if str(track.get("status") or "").upper() != STATUS_DRAFT:
+            messagebox.showwarning(
+                "Tory testowe",
+                "Fizycznie usunąć można wyłącznie tor DRAFT. "
+                "Tor SEALED należy wycofać do RETIRED.",
+                parent=self.parent,
+            )
+            return
+
+        name = str(
+            track.get("name") or track_id
+        ).strip()
+        if not messagebox.askyesno(
+            "Usunąć DRAFT?",
+            (
+                f"Tor „{name}” nie został zapieczętowany.\n\n"
+                "Usunięty zostanie jego katalog roboczy oraz "
+                "wpis z rejestru. Tożsamości źródłowych obrazów "
+                "pozostaną w rejestrze do wykrywania duplikatów.\n\n"
+                "Tej operacji nie można cofnąć."
+            ),
+            parent=self.parent,
+        ):
+            return
+
+        try:
+            self.service.delete_draft(track_id)
+        except Exception as exc:
+            self._show_error(
+                "Nie udało się usunąć DRAFT",
+                exc,
+            )
+            return
+
+        self.current_track_id = ""
+        self.refresh_tracks()
+        self._set_status(
+            f"Usunięto DRAFT: {name}."
+        )
+
     def retire_track(self) -> None:
         track_id = self._require_current_track()
         if not track_id:
@@ -1055,6 +1118,7 @@ class EvaluationTracksPanel:
             (self.btn_integrity, state.can_check_integrity),
             (self.btn_clone, state.can_clone),
             (self.btn_retire, state.can_retire),
+            (self.btn_delete_draft, state.can_delete_draft),
         )
         for button, enabled in mapping:
             try:

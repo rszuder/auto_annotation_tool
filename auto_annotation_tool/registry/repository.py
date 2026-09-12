@@ -1007,6 +1007,136 @@ class RegistryRepository:
             )
 
 
+    def delete_draft_evaluation_track(
+        self,
+        track_id: str,
+    ) -> tuple[str, ...]:
+        """Usuń wyłącznie roboczy DRAFT i jego kopie-artefakty.
+
+        Tożsamości ``source_images`` pozostają w rejestrze, dzięki czemu
+        późniejsze dodanie tego samego pliku nadal może zostać rozpoznane.
+        """
+
+        clean_id = str(track_id or "").strip()
+        if not clean_id:
+            raise ValueError("track_id nie może być pusty.")
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            track = connection.execute(
+                """
+                SELECT status
+                FROM evaluation_tracks
+                WHERE track_id = ?
+                """,
+                (clean_id,),
+            ).fetchone()
+            if track is None:
+                raise ValueError(
+                    f"Nie znaleziono toru: {clean_id}"
+                )
+            if str(track["status"] or "") != "DRAFT":
+                raise ValueError(
+                    "Fizycznie usuwać można wyłącznie tor DRAFT."
+                )
+
+            child = connection.execute(
+                """
+                SELECT track_id
+                FROM evaluation_tracks
+                WHERE parent_track_id = ?
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+            if child is not None:
+                raise ValueError(
+                    "Nie można usunąć DRAFT będącego rodzicem "
+                    "innej wersji toru."
+                )
+
+            experiment = connection.execute(
+                """
+                SELECT experiment_id
+                FROM experiments
+                WHERE track_id = ?
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+            if experiment is not None:
+                raise ValueError(
+                    "Nie można usunąć DRAFT powiązanego "
+                    "z eksperymentem."
+                )
+
+            artifact_rows = connection.execute(
+                """
+                SELECT DISTINCT track_artifact_id
+                FROM evaluation_track_members
+                WHERE track_id = ?
+                  AND COALESCE(track_artifact_id, '') <> ''
+                """,
+                (clean_id,),
+            ).fetchall()
+            artifact_ids = tuple(
+                str(row["track_artifact_id"])
+                for row in artifact_rows
+            )
+
+            connection.execute(
+                """
+                DELETE FROM reservations
+                WHERE track_id = ?
+                """,
+                (clean_id,),
+            )
+            connection.execute(
+                """
+                DELETE FROM evaluation_track_members
+                WHERE track_id = ?
+                """,
+                (clean_id,),
+            )
+            connection.execute(
+                """
+                DELETE FROM evaluation_tracks
+                WHERE track_id = ?
+                """,
+                (clean_id,),
+            )
+
+            removed_artifacts: list[str] = []
+            for artifact_id in artifact_ids:
+                cursor = connection.execute(
+                    """
+                    DELETE FROM image_artifacts
+                    WHERE artifact_id = ?
+                      AND kind = 'evaluation_track_image'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM evaluation_track_members AS member
+                          WHERE member.source_artifact_id =
+                                image_artifacts.artifact_id
+                             OR member.track_artifact_id =
+                                image_artifacts.artifact_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM image_artifacts AS child
+                          WHERE child.derived_from_artifact_id =
+                                image_artifacts.artifact_id
+                      )
+                    """,
+                    (artifact_id,),
+                )
+                if int(cursor.rowcount or 0) > 0:
+                    removed_artifacts.append(artifact_id)
+
+        return tuple(removed_artifacts)
+
+
+
     def seal_evaluation_track_with_reservations(
         self,
         track_id: str,
