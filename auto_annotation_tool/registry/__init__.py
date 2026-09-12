@@ -24,6 +24,14 @@ from .independence_service import (
     INDEPENDENCE_FAIL,
     INDEPENDENCE_UNKNOWN,
 )
+from .experiment_service import (
+    ExperimentGuardError,
+    ExperimentParticipantSnapshot,
+    ExperimentPlan,
+    ExperimentService,
+    MODE_CONTROLLED,
+    MODE_WORKING,
+)
 from .repository import DatasetBundleWriteSummary, RegistryRepository
 from .reservation_service import (
     ReservationOverlap,
@@ -43,6 +51,12 @@ __all__ = [
     "RegistryDatabase",
     "RegistryRepository",
     "DatasetBundleWriteSummary",
+    "ExperimentService",
+    "ExperimentPlan",
+    "ExperimentParticipantSnapshot",
+    "ExperimentGuardError",
+    "MODE_CONTROLLED",
+    "MODE_WORKING",
     "ModelTrackIndependenceService",
     "ModelTrackIndependenceAudit",
     "IndependenceOverlap",
