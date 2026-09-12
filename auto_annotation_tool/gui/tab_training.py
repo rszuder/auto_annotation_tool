@@ -3565,6 +3565,12 @@ class TrainingTab:
     def _ensure_step4_train_tab_built(self, *args, **kwargs):
         return z4_tab_shell._ensure_step4_train_tab_built(self, *args, **kwargs)
 
+    def _build_tracks_tab_placeholder(self, *args, **kwargs):
+        return z4_tab_shell._build_tracks_tab_placeholder(self, *args, **kwargs)
+
+    def _ensure_step4_tracks_tab_built(self, *args, **kwargs):
+        return z4_tab_shell._ensure_step4_tracks_tab_built(self, *args, **kwargs)
+
     def _on_main_nb_tab_changed(self, *args, **kwargs):
         return z4_tab_shell._on_main_nb_tab_changed(self, *args, **kwargs)
 
