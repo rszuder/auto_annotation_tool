@@ -207,6 +207,12 @@ class Config:
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
     DIR_9_PROJECTS: Path    = WORKSPACE_DIR / "9_projects"
 
+    # Lokalny rejestr SQLite pochodzenia danych, modeli i eksperymentów.
+    DIR_REGISTRY: Path = WORKSPACE_DIR / "_registry"
+    DIR_REGISTRY_BACKUPS: Path = DIR_REGISTRY / "backups"
+    DIR_REGISTRY_RECOVERY: Path = DIR_REGISTRY / "recovery"
+    REGISTRY_DB_PATH: Path = DIR_REGISTRY / "alpr_registry.sqlite3"
+
     DIR_2_AUTO_ANN_PLATES: Path = DIR_2_AUTO_ANN / "plates"
     DIR_2_AUTO_ANN_CHARS: Path = DIR_2_AUTO_ANN / "chars"
 
@@ -551,6 +557,9 @@ class Config:
             self.DIR_8_PRESETS_TRAINING_CHARS,
             self.DIR_8_PRESETS_RANKING_SCENARIOS,
             self.DIR_9_PROJECTS,
+            self.DIR_REGISTRY,
+            self.DIR_REGISTRY_BACKUPS,
+            self.DIR_REGISTRY_RECOVERY,
         ]
         
         for directory in directories:
@@ -570,6 +579,7 @@ class Config:
                 "6_models             : Modele bazowe w base/, wytrenowane w trained/plates/, trained/chars/ i trained/vehicles/.\n"
                 "7_rankings           : Raporty z testów i walidacji, rozdzielone według typu modelu.\n"
                 "8_presets            : Presety modułów: ocr/, detection_pipeline/, augmentation/, training/.\n"
+                "_registry            : Lokalny rejestr SQLite pochodzenia danych, modeli i eksperymentów.\n"
             )
             readme_path.write_text(readme_text, encoding="utf-8")
 
