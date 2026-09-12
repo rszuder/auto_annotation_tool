@@ -6,7 +6,7 @@ pochodzenie, relacje, sumy kontrolne i stan eksperymentów.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -384,5 +384,12 @@ SCHEMA_V2_STATEMENTS: tuple[str, ...] = (
     """
     CREATE INDEX IF NOT EXISTS idx_dataset_locations_project
     ON dataset_locations(project_id, dataset_id)
+    """,
+)
+
+SCHEMA_V3_STATEMENTS: tuple[str, ...] = (
+    """
+    ALTER TABLE evaluation_tracks
+    ADD COLUMN seal_sha256 TEXT
     """,
 )

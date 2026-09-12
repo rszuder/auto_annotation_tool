@@ -44,6 +44,58 @@ class TrackIntegrityResult:
         return self.status == INTEGRITY_PASS
 
 
+CONTROLLED_REFERENCE_SCHEMA = "alpr.evaluation_track_reference.v1"
+
+
+@dataclass(frozen=True)
+class ControlledTrackReference:
+    """Niemutowalny uchwyt toru gotowego do kontrolowanego eksperymentu."""
+
+    schema: str
+    track_id: str
+    version: int
+    target: str
+    purpose: str
+    scope: str
+    manifest_sha256: str
+    seal_sha256: str
+    gt_format: str
+    gt_sha256: str
+    member_count: int
+    object_count: int
+    source_image_ids: tuple[str, ...]
+    member_sha256: tuple[str, ...]
+    pose_corner_ready: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "track_id": self.track_id,
+            "version": self.version,
+            "target": self.target,
+            "purpose": self.purpose,
+            "scope": self.scope,
+            "manifest_sha256": self.manifest_sha256,
+            "seal_sha256": self.seal_sha256,
+            "gt_format": self.gt_format,
+            "gt_sha256": self.gt_sha256,
+            "member_count": self.member_count,
+            "object_count": self.object_count,
+            "source_image_ids": list(self.source_image_ids),
+            "member_sha256": list(self.member_sha256),
+            "pose_corner_ready": self.pose_corner_ready,
+        }
+
+    @property
+    def reference_sha256(self) -> str:
+        canonical = json.dumps(
+            self.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
 class EvaluationTrackService:
     """Tworzy, weryfikuje i pieczętuje samowystarczalne tory testowe."""
 
@@ -138,9 +190,10 @@ class EvaluationTrackService:
         name = str(original_name or source.name).strip()
         if not name or Path(name).name != name:
             raise EvaluationTrackError("Nazwa obrazu toru musi być samą nazwą pliku.")
+        existing_members = self.repository.list_evaluation_track_members(track_id)
         existing_names = {
             str(row["original_name"] or "")
-            for row in self.repository.list_evaluation_track_members(track_id)
+            for row in existing_members
         }
         if name in existing_names:
             raise EvaluationTrackError(f"Tor zawiera już obraz o nazwie: {name}")
@@ -154,6 +207,14 @@ class EvaluationTrackService:
             source_image_id=source_image_id,
             origin_status="exact_hash_only" if not source_image_id else "known",
         )
+        for row in existing_members:
+            if (
+                str(row["source_image_id"] or "") == resolved_source_id
+                or str(row["sha256"] or "").strip().lower() == sha
+            ):
+                raise EvaluationTrackError(
+                    "Tor zawiera już to samo logiczne źródło obrazu."
+                )
         member_index = self.repository.next_evaluation_track_member_index(track_id)
 
         track_root = self._track_root(track)
@@ -320,16 +381,23 @@ class EvaluationTrackService:
             "algorithm": "sha256",
             "files": files,
         }
-        self._atomic_json(self._track_root(track) / "seal.json", seal_payload)
+        seal_path = self._track_root(track) / "seal.json"
+        self._atomic_json(seal_path, seal_payload)
+        seal_sha = self._sha256(seal_path)
+        if not seal_sha:
+            raise EvaluationTrackError("Nie udało się policzyć SHA-256 seal.json.")
         self.repository.update_evaluation_track(
             track_id,
             status=STATUS_SEALED,
             sealed_at=sealed_at,
             manifest_sha256=manifest_sha,
+            seal_sha256=seal_sha,
         )
         return self.verify_integrity(track_id)
 
     def verify_integrity(self, track_id: str) -> TrackIntegrityResult:
+        """Porównaj SQLite, manifest, seal i faktyczny zestaw plików toru."""
+
         track = self._require_track(track_id)
         status = str(track["status"] or "")
         if status not in {STATUS_SEALED, STATUS_RETIRED}:
@@ -342,57 +410,399 @@ class EvaluationTrackService:
         track_root = self._track_root(track)
         manifest_path = track_root / "track_manifest.json"
         seal_path = track_root / "seal.json"
-        issues: list[str] = []
+        hard_issues: list[str] = []
+        unknown_issues: list[str] = []
 
         if not manifest_path.exists():
-            issues.append("Brak track_manifest.json.")
+            hard_issues.append("Brak track_manifest.json.")
         if not seal_path.exists():
-            issues.append("Brak seal.json.")
-        if issues:
+            hard_issues.append("Brak seal.json.")
+        if hard_issues:
             return TrackIntegrityResult(
                 status=INTEGRITY_FAIL,
                 track_id=track_id,
-                issues=tuple(issues),
+                issues=tuple(hard_issues),
             )
 
         try:
-            seal = json.loads(seal_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            return TrackIntegrityResult(
-                status=INTEGRITY_FAIL,
-                track_id=track_id,
-                issues=(f"Nie można odczytać seal.json: {exc}",),
-            )
+            manifest = self._read_json(manifest_path)
+        except EvaluationTrackError as exc:
+            hard_issues.append(str(exc))
+            manifest = {}
+        try:
+            seal = self._read_json(seal_path)
+        except EvaluationTrackError as exc:
+            hard_issues.append(str(exc))
+            seal = {}
 
         manifest_sha = self._sha256(manifest_path)
-        expected_manifest = str(seal.get("manifest_sha256") or "").strip().lower()
-        db_manifest = str(track["manifest_sha256"] or "").strip().lower()
-        if manifest_sha != expected_manifest:
-            issues.append("SHA-256 manifestu nie zgadza się z seal.json.")
-        if db_manifest and manifest_sha != db_manifest:
-            issues.append("SHA-256 manifestu nie zgadza się z rejestrem SQLite.")
+        seal_sha = self._sha256(seal_path)
+        db_manifest_sha = str(track["manifest_sha256"] or "").strip().lower()
+        db_seal_sha = str(track["seal_sha256"] or "").strip().lower()
 
-        for item in seal.get("files") or []:
-            if not isinstance(item, Mapping):
-                issues.append("Niepoprawny wpis files w seal.json.")
+        if not db_manifest_sha:
+            unknown_issues.append(
+                "Brak zakotwiczonego SHA-256 manifestu w SQLite."
+            )
+        elif manifest_sha != db_manifest_sha:
+            hard_issues.append(
+                "SHA-256 track_manifest.json nie zgadza się z rejestrem SQLite."
+            )
+
+        if not db_seal_sha:
+            unknown_issues.append(
+                "Brak zakotwiczonego SHA-256 seal.json w SQLite."
+            )
+        elif seal_sha != db_seal_sha:
+            hard_issues.append(
+                "SHA-256 seal.json nie zgadza się z rejestrem SQLite."
+            )
+
+        if manifest:
+            if str(manifest.get("schema") or "") != TRACK_SCHEMA:
+                hard_issues.append(
+                    "Nieobsługiwany schema track_manifest.json."
+                )
+            if str(manifest.get("track_id") or "") != track_id:
+                hard_issues.append(
+                    "track_id manifestu nie zgadza się z rejestrem."
+                )
+            try:
+                if int(manifest.get("version")) != int(track["version"]):
+                    hard_issues.append(
+                        "Wersja manifestu nie zgadza się z rejestrem."
+                    )
+            except Exception:
+                hard_issues.append(
+                    "Niepoprawna wersja w track_manifest.json."
+                )
+
+            # RETIRED jest wyłącznie stanem lifecycle w DB; zamrożony manifest
+            # pozostaje SEALED.
+            if str(manifest.get("status") or "") != STATUS_SEALED:
+                hard_issues.append(
+                    "Manifest zapieczętowanego toru nie ma statusu SEALED."
+                )
+
+            top_level_pairs = (
+                ("name", str(track["name"])),
+                ("target", str(track["target"])),
+                ("purpose", str(track["purpose"])),
+                ("scope", str(track["scope"])),
+                ("parent_track_id", track["parent_track_id"]),
+                ("reservation_policy", track["reservation_policy"]),
+                ("created_at", track["created_at"]),
+                ("verified_at", track["verified_at"]),
+                ("sealed_at", track["sealed_at"]),
+            )
+            for field, expected in top_level_pairs:
+                if manifest.get(field) != expected:
+                    hard_issues.append(
+                        f"Manifest i rejestr różnią się w polu: {field}."
+                    )
+            try:
+                if int(manifest.get("object_count")) != int(
+                    track["object_count"] or 0
+                ):
+                    hard_issues.append(
+                        "object_count manifestu nie zgadza się z rejestrem."
+                    )
+            except Exception:
+                hard_issues.append(
+                    "Niepoprawny object_count w manifeście."
+                )
+
+        if seal:
+            if str(seal.get("schema") or "") != SEAL_SCHEMA:
+                hard_issues.append("Nieobsługiwany schema seal.json.")
+            if str(seal.get("track_id") or "") != track_id:
+                hard_issues.append(
+                    "track_id seal.json nie zgadza się z rejestrem."
+                )
+            try:
+                if int(seal.get("version")) != int(track["version"]):
+                    hard_issues.append(
+                        "Wersja seal.json nie zgadza się z rejestrem."
+                    )
+            except Exception:
+                hard_issues.append("Niepoprawna wersja w seal.json.")
+            if seal.get("sealed_at") != track["sealed_at"]:
+                hard_issues.append(
+                    "sealed_at seal.json nie zgadza się z rejestrem."
+                )
+            if (
+                str(seal.get("manifest_sha256") or "").strip().lower()
+                != manifest_sha
+            ):
+                hard_issues.append(
+                    "SHA-256 manifestu zapisany w seal.json jest niepoprawny."
+                )
+
+        db_members = self.repository.list_evaluation_track_members(track_id)
+        manifest_members = (
+            manifest.get("members")
+            if isinstance(manifest.get("members"), list)
+            else []
+        )
+        manifest_by_index: dict[int, Mapping[str, Any]] = {}
+        for raw in manifest_members:
+            if not isinstance(raw, Mapping):
+                hard_issues.append(
+                    "Manifest zawiera niepoprawny wpis members."
+                )
                 continue
-            relative = str(item.get("path") or "").strip()
-            expected = str(item.get("sha256") or "").strip().lower()
+            try:
+                index = int(raw.get("member_index"))
+            except Exception:
+                hard_issues.append(
+                    "Manifest zawiera member_index niebędący liczbą."
+                )
+                continue
+            if index in manifest_by_index:
+                hard_issues.append(
+                    "Manifest zawiera zduplikowany member_index."
+                )
+                continue
+            manifest_by_index[index] = raw
+
+        if len(manifest_members) != len(db_members):
+            hard_issues.append(
+                "Liczba członków manifestu nie zgadza się z rejestrem SQLite."
+            )
+        try:
+            if int(manifest.get("member_count")) != len(db_members):
+                hard_issues.append(
+                    "member_count manifestu nie zgadza się z rejestrem SQLite."
+                )
+        except Exception:
+            hard_issues.append(
+                "Niepoprawny member_count w manifeście."
+            )
+
+        seal_files = (
+            seal.get("files") if isinstance(seal.get("files"), list) else []
+        )
+        seal_by_path: dict[str, str] = {}
+        for raw in seal_files:
+            if not isinstance(raw, Mapping):
+                hard_issues.append(
+                    "seal.json zawiera niepoprawny wpis files."
+                )
+                continue
+            relative = str(raw.get("path") or "").strip().replace("\\", "/")
+            expected = str(raw.get("sha256") or "").strip().lower()
+            if not relative or not expected:
+                hard_issues.append(
+                    "seal.json zawiera niekompletny wpis files."
+                )
+                continue
             candidate = track_root / relative
             if not self._is_within(candidate, track_root):
-                issues.append(f"Ścieżka w seal.json wychodzi poza tor: {relative}")
+                hard_issues.append(
+                    f"Ścieżka w seal.json wychodzi poza tor: {relative}"
+                )
                 continue
-            if not candidate.exists():
-                issues.append(f"Brak pliku toru: {relative}")
+            if relative in seal_by_path:
+                hard_issues.append(
+                    f"seal.json zawiera zduplikowaną ścieżkę: {relative}"
+                )
                 continue
-            actual = self._sha256(candidate)
-            if actual != expected:
-                issues.append(f"Zmieniła się zawartość pliku: {relative}")
+            seal_by_path[relative] = expected
+
+        expected_content: dict[str, str] = {}
+        seen_sources: set[str] = set()
+        for row in db_members:
+            index = int(row["member_index"])
+            source_id = str(row["source_image_id"] or "")
+            if source_id in seen_sources:
+                hard_issues.append(
+                    f"Logiczne źródło obrazu występuje w torze więcej niż raz: "
+                    f"{source_id}"
+                )
+            seen_sources.add(source_id)
+
+            relative = str(
+                row["track_relative_path"] or ""
+            ).replace("\\", "/")
+            expected_sha = str(row["sha256"] or "").strip().lower()
+            manifest_row = manifest_by_index.get(index)
+            if manifest_row is None:
+                hard_issues.append(
+                    f"Brak członka {index} w track_manifest.json."
+                )
+            else:
+                pairs = (
+                    ("source_image_id", source_id),
+                    ("source_artifact_id", row["source_artifact_id"]),
+                    ("track_artifact_id", row["track_artifact_id"]),
+                    ("original_name", str(row["original_name"] or "")),
+                    ("track_relative_path", relative),
+                    ("sha256", expected_sha),
+                )
+                for field, db_value in pairs:
+                    manifest_value = manifest_row.get(field)
+                    if field == "sha256":
+                        manifest_value = str(
+                            manifest_value or ""
+                        ).lower()
+                    elif field == "track_relative_path":
+                        manifest_value = str(
+                            manifest_value or ""
+                        ).replace("\\", "/")
+                    if manifest_value != db_value:
+                        hard_issues.append(
+                            "Manifest i rejestr różnią się dla "
+                            f"członka {index}: {field}."
+                        )
+
+            expected_content[relative] = expected_sha
+            if seal_by_path.get(relative) != expected_sha:
+                hard_issues.append(
+                    "seal.json nie zgadza się z rejestrem dla: "
+                    f"{relative}"
+                )
+            candidate = track_root / relative
+            if not self._is_within(candidate, track_root):
+                hard_issues.append(
+                    f"Ścieżka członka wychodzi poza tor: {relative}"
+                )
+            elif not candidate.exists():
+                hard_issues.append(
+                    f"Brak pliku toru: {relative}"
+                )
+            elif self._sha256(candidate) != expected_sha:
+                hard_issues.append(
+                    f"Zmieniła się zawartość pliku: {relative}"
+                )
+
+        gt_relative_db = str(track["gt_relative_path"] or "").strip()
+        gt_sha_db = str(track["gt_sha256"] or "").strip().lower()
+        gt_format_db = str(track["gt_format"] or "").strip().lower()
+        manifest_gt = (
+            manifest.get("ground_truth")
+            if isinstance(manifest.get("ground_truth"), Mapping)
+            else {}
+        )
+        if not gt_relative_db or not gt_sha_db:
+            hard_issues.append(
+                "Rejestr nie zawiera kompletnego GT."
+            )
+        else:
+            gt_path = self.workspace / gt_relative_db
+            try:
+                gt_track_relative = gt_path.resolve().relative_to(
+                    track_root.resolve()
+                ).as_posix()
+            except Exception:
+                hard_issues.append(
+                    "Ścieżka GT wychodzi poza tor."
+                )
+                gt_track_relative = ""
+
+            if gt_track_relative:
+                expected_content[gt_track_relative] = gt_sha_db
+                if seal_by_path.get(gt_track_relative) != gt_sha_db:
+                    hard_issues.append(
+                        "seal.json nie zgadza się z rejestrem "
+                        "dla Ground Truth."
+                    )
+                if not gt_path.exists():
+                    hard_issues.append(
+                        "Brak pliku Ground Truth."
+                    )
+                elif self._sha256(gt_path) != gt_sha_db:
+                    hard_issues.append(
+                        "Zmieniła się zawartość Ground Truth."
+                    )
+
+                if (
+                    str(
+                        manifest_gt.get("relative_path") or ""
+                    ).replace("\\", "/")
+                    != gt_track_relative
+                ):
+                    hard_issues.append(
+                        "Ścieżka GT manifestu nie zgadza się z rejestrem."
+                    )
+            if (
+                str(manifest_gt.get("sha256") or "").lower()
+                != gt_sha_db
+            ):
+                hard_issues.append(
+                    "SHA-256 GT manifestu nie zgadza się z rejestrem."
+                )
+            if (
+                str(manifest_gt.get("format") or "").lower()
+                != gt_format_db
+            ):
+                hard_issues.append(
+                    "Format GT manifestu nie zgadza się z rejestrem."
+                )
+
+        if set(seal_by_path) != set(expected_content):
+            missing_from_seal = sorted(
+                set(expected_content) - set(seal_by_path)
+            )
+            extra_in_seal = sorted(
+                set(seal_by_path) - set(expected_content)
+            )
+            if missing_from_seal:
+                hard_issues.append(
+                    "seal.json nie obejmuje plików: "
+                    + ", ".join(missing_from_seal[:10])
+                )
+            if extra_in_seal:
+                hard_issues.append(
+                    "seal.json obejmuje nieznane pliki: "
+                    + ", ".join(extra_in_seal[:10])
+                )
+
+        actual_content: set[str] = set()
+        for candidate in track_root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(
+                track_root
+            ).as_posix()
+            if relative in {
+                "track_manifest.json",
+                "seal.json",
+            }:
+                continue
+            actual_content.add(relative)
+
+        extra_files = sorted(
+            actual_content - set(expected_content)
+        )
+        missing_files = sorted(
+            set(expected_content) - actual_content
+        )
+        if extra_files:
+            hard_issues.append(
+                "Zapieczętowany tor zawiera plik nieujęty "
+                "w pieczęci: "
+                + ", ".join(extra_files[:10])
+            )
+        if missing_files:
+            hard_issues.append(
+                "Zapieczętowany tor utracił plik: "
+                + ", ".join(missing_files[:10])
+            )
+
+        if hard_issues:
+            result_status = INTEGRITY_FAIL
+            issues = tuple(hard_issues + unknown_issues)
+        elif unknown_issues:
+            result_status = INTEGRITY_UNKNOWN
+            issues = tuple(unknown_issues)
+        else:
+            result_status = INTEGRITY_PASS
+            issues = ()
 
         return TrackIntegrityResult(
-            status=INTEGRITY_FAIL if issues else INTEGRITY_PASS,
+            status=result_status,
             track_id=track_id,
-            issues=tuple(issues),
+            issues=issues,
             manifest_sha256=manifest_sha,
         )
 
@@ -455,6 +865,78 @@ class EvaluationTrackService:
                 gt_format=str(parent["gt_format"] or "cvat_xml"),
             )
         return new_id
+
+    def build_controlled_reference(
+        self,
+        track_id: str,
+        *,
+        required_target: str | None = None,
+        require_pose_corners: bool = False,
+    ) -> ControlledTrackReference:
+        """Zbuduj zamrożony uchwyt tylko dla poprawnego toru SEALED."""
+
+        track = self._require_status(track_id, STATUS_SEALED)
+        integrity = self.verify_integrity(track_id)
+        if not integrity.ok:
+            raise EvaluationTrackError(
+                "Tor nie może być użyty w eksperymencie kontrolowanym: "
+                + "; ".join(integrity.issues or (integrity.status,))
+            )
+
+        if required_target:
+            normalized = self._normalize_target(required_target)
+            if not normalized:
+                raise EvaluationTrackError(
+                    f"Nieobsługiwany wymagany target: {required_target!r}."
+                )
+            if str(track["target"]) != normalized:
+                raise EvaluationTrackError(
+                    f"Tor ma target {track['target']}, wymagany jest {normalized}."
+                )
+
+        manifest = self._read_json(
+            self._track_root(track) / "track_manifest.json"
+        )
+        verification = manifest.get("verification")
+        if not isinstance(verification, Mapping):
+            verification = {}
+        pose_corner_ready = bool(verification.get("pose_corner_ready"))
+        if require_pose_corners and not pose_corner_ready:
+            raise EvaluationTrackError(
+                "Tor nie ma zweryfikowanego GT z dokładnie czterema "
+                "narożnikami dla każdego polygonu."
+            )
+
+        members = self.repository.list_evaluation_track_members(track_id)
+        source_ids = tuple(str(row["source_image_id"] or "") for row in members)
+        member_sha = tuple(str(row["sha256"] or "").lower() for row in members)
+        if (
+            not members
+            or len(members) != int(track["member_count"] or 0)
+            or any(not value for value in source_ids)
+            or any(not value for value in member_sha)
+        ):
+            raise EvaluationTrackError(
+                "Rejestr członków toru jest niekompletny."
+            )
+
+        return ControlledTrackReference(
+            schema=CONTROLLED_REFERENCE_SCHEMA,
+            track_id=track_id,
+            version=int(track["version"]),
+            target=str(track["target"]),
+            purpose=str(track["purpose"]),
+            scope=str(track["scope"]),
+            manifest_sha256=str(track["manifest_sha256"] or "").lower(),
+            seal_sha256=str(track["seal_sha256"] or "").lower(),
+            gt_format=str(track["gt_format"] or ""),
+            gt_sha256=str(track["gt_sha256"] or "").lower(),
+            member_count=len(members),
+            object_count=int(track["object_count"] or 0),
+            source_image_ids=source_ids,
+            member_sha256=member_sha,
+            pose_corner_ready=pose_corner_ready,
+        )
 
     def get_track(self, track_id: str) -> dict[str, Any]:
         row = self._require_track(track_id)
@@ -648,6 +1130,20 @@ class EvaluationTrackService:
         }
         self._atomic_json(manifest_path, payload)
         return manifest_path
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise EvaluationTrackError(
+                f"Nie można odczytać {path.name}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise EvaluationTrackError(
+                f"{path.name} nie zawiera obiektu JSON."
+            )
+        return payload
 
     def _require_track(self, track_id: str):
         row = self.repository.get_evaluation_track(str(track_id or "").strip())
