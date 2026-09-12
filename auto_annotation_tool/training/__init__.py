@@ -71,7 +71,9 @@ from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .model_provenance import (
     PROVENANCE_VERSION,
     TOTAL_EPOCHS_SCOPE,
+    DatasetFileInventoryEntry,
     build_checkpoint_training_snapshot,
+    build_dataset_file_inventory,
     build_dataset_training_provenance,
     build_model_training_provenance,
     build_output_checkpoint_training_snapshot,
@@ -146,6 +148,8 @@ __all__ = [
     'TrainingStatus',
     'PROVENANCE_VERSION',
     'TOTAL_EPOCHS_SCOPE',
+    'DatasetFileInventoryEntry',
+    'build_dataset_file_inventory',
     'build_checkpoint_training_snapshot',
     'build_dataset_training_provenance',
     'build_model_training_provenance',
