@@ -1216,6 +1216,133 @@ class RegistryRepository:
             )
 
 
+
+    def get_model(self, model_id: str) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM models
+                WHERE model_id = ?
+                """,
+                (str(model_id or "").strip(),),
+            ).fetchone()
+
+    def get_model_by_sha256(self, sha256: str) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM models
+                WHERE sha256 = ?
+                """,
+                (str(sha256 or "").strip().lower(),),
+            ).fetchone()
+
+    def get_training_run(self, run_id: str) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM training_runs
+                WHERE run_id = ?
+                """,
+                (str(run_id or "").strip(),),
+            ).fetchone()
+
+    def get_dataset(self, dataset_id: str) -> sqlite3.Row | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return connection.execute(
+                """
+                SELECT *
+                FROM datasets
+                WHERE dataset_id = ?
+                """,
+                (str(dataset_id or "").strip(),),
+            ).fetchone()
+
+    def list_dataset_member_lineage(
+        self,
+        dataset_id: str,
+        *,
+        splits: tuple[str, ...] = ("train", "val"),
+    ) -> list[sqlite3.Row]:
+        normalized_splits = tuple(
+            str(value or "").strip()
+            for value in splits
+            if str(value or "").strip()
+        )
+        if not normalized_splits:
+            return []
+
+        placeholders = ", ".join("?" for _ in normalized_splits)
+        params: tuple[Any, ...] = (
+            str(dataset_id or "").strip(),
+            *normalized_splits,
+        )
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        member.dataset_id,
+                        member.artifact_id,
+                        member.source_image_id,
+                        member.split,
+                        member.relative_path,
+                        member.file_sha256,
+                        source.origin_status,
+                        source.canonical_sha256
+                    FROM dataset_members AS member
+                    JOIN source_images AS source
+                      ON source.source_image_id = member.source_image_id
+                    WHERE member.dataset_id = ?
+                      AND member.split IN ({placeholders})
+                    ORDER BY
+                        member.split,
+                        member.relative_path,
+                        member.artifact_id
+                    """,
+                    params,
+                ).fetchall()
+            )
+
+    def list_evaluation_track_member_lineage(
+        self,
+        track_id: str,
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        member.track_id,
+                        member.member_index,
+                        member.source_image_id,
+                        member.source_artifact_id,
+                        member.track_artifact_id,
+                        member.original_name,
+                        member.track_relative_path,
+                        member.sha256,
+                        source.origin_status,
+                        source.canonical_sha256
+                    FROM evaluation_track_members AS member
+                    JOIN source_images AS source
+                      ON source.source_image_id = member.source_image_id
+                    WHERE member.track_id = ?
+                    ORDER BY member.member_index
+                    """,
+                    (str(track_id or "").strip(),),
+                ).fetchall()
+            )
+
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",

@@ -16,6 +16,14 @@ from .dataset_inventory import (
     source_image_id_from_sha256,
 )
 from .registry_rows import DatasetRegistryRows, build_dataset_registry_rows
+from .independence_service import (
+    IndependenceOverlap,
+    ModelTrackIndependenceAudit,
+    ModelTrackIndependenceService,
+    INDEPENDENCE_PASS,
+    INDEPENDENCE_FAIL,
+    INDEPENDENCE_UNKNOWN,
+)
 from .repository import DatasetBundleWriteSummary, RegistryRepository
 from .reservation_service import (
     ReservationOverlap,
@@ -35,6 +43,12 @@ __all__ = [
     "RegistryDatabase",
     "RegistryRepository",
     "DatasetBundleWriteSummary",
+    "ModelTrackIndependenceService",
+    "ModelTrackIndependenceAudit",
+    "IndependenceOverlap",
+    "INDEPENDENCE_PASS",
+    "INDEPENDENCE_FAIL",
+    "INDEPENDENCE_UNKNOWN",
     "TrainingReservationService",
     "TrainingReservationCheck",
     "ReservationOverlap",
