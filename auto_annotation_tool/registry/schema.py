@@ -6,7 +6,8 @@ pochodzenie, relacje, sumy kontrolne i stan eksperymentów.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
     """
@@ -357,5 +358,31 @@ SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
             REFERENCES experiment_participants(experiment_id, model_id)
             ON UPDATE CASCADE ON DELETE CASCADE
     )
+    """,
+)
+
+
+SCHEMA_V2_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS dataset_locations (
+        dataset_id TEXT NOT NULL,
+        location_key TEXT NOT NULL,
+        project_id TEXT,
+        relative_path TEXT,
+        external_path TEXT,
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        discovered_at TEXT,
+        PRIMARY KEY(dataset_id, location_key),
+        FOREIGN KEY(dataset_id)
+            REFERENCES datasets(dataset_id)
+            ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(project_id)
+            REFERENCES projects(project_id)
+            ON UPDATE CASCADE ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_dataset_locations_project
+    ON dataset_locations(project_id, dataset_id)
     """,
 )
