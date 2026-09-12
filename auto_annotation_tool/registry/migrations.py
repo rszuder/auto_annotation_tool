@@ -5,7 +5,12 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 
-from .schema import SCHEMA_V1_STATEMENTS, SCHEMA_V2_STATEMENTS, SCHEMA_VERSION
+from .schema import (
+    SCHEMA_V1_STATEMENTS,
+    SCHEMA_V2_STATEMENTS,
+    SCHEMA_V3_STATEMENTS,
+    SCHEMA_VERSION,
+)
 
 
 class RegistryMigrationError(RuntimeError):
@@ -27,9 +32,15 @@ def _migrate_to_v2(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _migrate_to_v3(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_V3_STATEMENTS:
+        connection.execute(statement)
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
+    3: _migrate_to_v3,
 }
 
 

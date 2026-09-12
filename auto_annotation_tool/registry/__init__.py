@@ -18,12 +18,22 @@ from .dataset_inventory import (
 from .registry_rows import DatasetRegistryRows, build_dataset_registry_rows
 from .repository import DatasetBundleWriteSummary, RegistryRepository
 from .schema import SCHEMA_VERSION
+from .track_service import (
+    ControlledTrackReference,
+    EvaluationTrackError,
+    EvaluationTrackService,
+    TrackIntegrityResult,
+)
 
 __all__ = [
     "RegistryDatabase",
     "RegistryRepository",
     "DatasetBundleWriteSummary",
     "SCHEMA_VERSION",
+    "EvaluationTrackService",
+    "EvaluationTrackError",
+    "TrackIntegrityResult",
+    "ControlledTrackReference",
     "LINEAGE_KNOWN",
     "LINEAGE_EXACT_HASH_ONLY",
     "LINEAGE_LEGACY_PARTIAL",

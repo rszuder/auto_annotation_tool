@@ -578,6 +578,13 @@ class RegistryRepository:
         source_image_id: str | None = None,
         origin_status: str = "exact_hash_only",
     ) -> str:
+        """Rozwiąż logiczną tożsamość źródła dla jednego artefaktu obrazu.
+
+        Gdy ``source_image_id`` już istnieje, jego ``canonical_sha256`` może być
+        inny od SHA bieżącego artefaktu. To normalne dla resize/rekompresji/
+        augmentacji należących do tego samego logicznego źródła.
+        """
+
         sha = str(sha256 or "").strip().lower()
         requested_id = str(source_image_id or "").strip()
         if not sha:
@@ -588,19 +595,20 @@ class RegistryRepository:
             if requested_id:
                 existing_id = connection.execute(
                     """
-                    SELECT source_image_id, canonical_sha256
+                    SELECT source_image_id
                     FROM source_images
                     WHERE source_image_id = ?
                     """,
                     (requested_id,),
                 ).fetchone()
                 if existing_id is not None:
-                    canonical = str(existing_id["canonical_sha256"] or "").strip().lower()
-                    if canonical and canonical != sha:
-                        raise ValueError(
-                            "source_image_id istnieje, ale ma inny canonical_sha256."
-                        )
                     return requested_id
+
+                raise ValueError(
+                    "Podany source_image_id nie istnieje w rejestrze. "
+                    "Dla nowego pliku pomiń source_image_id; zostanie użyta "
+                    "konserwatywna tożsamość exact_hash_only."
+                )
 
             existing_sha = connection.execute(
                 """
@@ -611,14 +619,9 @@ class RegistryRepository:
                 (sha,),
             ).fetchone()
             if existing_sha is not None:
-                existing_source_id = str(existing_sha["source_image_id"])
-                if requested_id and existing_source_id != requested_id:
-                    raise ValueError(
-                        "Podany source_image_id koliduje z istniejącą tożsamością SHA-256."
-                    )
-                return existing_source_id
+                return str(existing_sha["source_image_id"])
 
-            resolved_id = requested_id or f"SRC-SHA256-{sha.upper()}"
+            resolved_id = f"SRC-SHA256-{sha.upper()}"
             connection.execute(
                 """
                 INSERT INTO source_images (
@@ -742,8 +745,68 @@ class RegistryRepository:
         artifact_relative_path: str,
         artifact_size_bytes: int | None,
     ) -> None:
+        """Dodaj członka toru wraz z kopią-artefaktem i zachowaniem lineage."""
+
+        member_sha = str(sha256 or "").strip().lower()
+        if not member_sha:
+            raise ValueError("Członek toru musi mieć SHA-256.")
+
         self.initialize()
         with self.database.transaction() as connection:
+            track = connection.execute(
+                """
+                SELECT status
+                FROM evaluation_tracks
+                WHERE track_id = ?
+                """,
+                (track_id,),
+            ).fetchone()
+            if track is None:
+                raise ValueError(f"Nie znaleziono toru: {track_id}")
+            if str(track["status"] or "") != "DRAFT":
+                raise ValueError(
+                    "Członków można dodawać wyłącznie do toru DRAFT."
+                )
+
+            duplicate = connection.execute(
+                """
+                SELECT member_index
+                FROM evaluation_track_members
+                WHERE track_id = ? AND source_image_id = ?
+                """,
+                (track_id, source_image_id),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(
+                    "To logiczne źródło obrazu jest już członkiem toru."
+                )
+
+            if source_artifact_id:
+                source_artifact = connection.execute(
+                    """
+                    SELECT source_image_id, sha256
+                    FROM image_artifacts
+                    WHERE artifact_id = ?
+                    """,
+                    (source_artifact_id,),
+                ).fetchone()
+                if source_artifact is None:
+                    raise ValueError(
+                        f"Nie znaleziono source_artifact_id: {source_artifact_id}"
+                    )
+                if str(source_artifact["source_image_id"] or "") != source_image_id:
+                    raise ValueError(
+                        "source_artifact_id należy do innego source_image_id."
+                    )
+                if (
+                    str(source_artifact["sha256"] or "").strip().lower()
+                    != member_sha
+                ):
+                    raise ValueError(
+                        "SHA source_artifact_id nie odpowiada plikowi dodawanemu "
+                        "do toru."
+                    )
+
             connection.execute(
                 """
                 INSERT INTO image_artifacts (
@@ -758,14 +821,18 @@ class RegistryRepository:
                     width,
                     height,
                     created_at
-                ) VALUES (?, ?, ?, NULL, ?, ?, 'evaluation_track_image', NULL, NULL, NULL, NULL)
+                ) VALUES (
+                    ?, ?, ?, NULL, ?, ?, 'evaluation_track_image',
+                    ?, NULL, NULL, NULL
+                )
                 """,
                 (
                     track_artifact_id,
                     source_image_id,
                     artifact_relative_path,
-                    sha256,
+                    member_sha,
                     artifact_size_bytes,
+                    source_artifact_id,
                 ),
             )
             connection.execute(
@@ -789,7 +856,7 @@ class RegistryRepository:
                     track_artifact_id,
                     original_name,
                     track_relative_path,
-                    sha256,
+                    member_sha,
                 ),
             )
             connection.execute(
@@ -816,6 +883,7 @@ class RegistryRepository:
             "gt_relative_path",
             "gt_sha256",
             "manifest_sha256",
+            "seal_sha256",
             "member_count",
             "object_count",
             "reservation_policy",
