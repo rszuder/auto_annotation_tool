@@ -999,6 +999,63 @@ class EvaluationTrackService:
             manifest_sha256=manifest_sha,
         )
 
+
+    def delete_draft(self, track_id: str) -> None:
+        """Usuń roboczy DRAFT bez naruszania zapieczętowanej historii."""
+
+        track = self._require_status(
+            track_id,
+            STATUS_DRAFT,
+        )
+        track_root = self._track_root(track)
+
+        tombstone: Path | None = None
+        if track_root.exists():
+            if not track_root.is_dir():
+                raise EvaluationTrackError(
+                    "Ścieżka DRAFT nie jest katalogiem."
+                )
+            tombstone = track_root.with_name(
+                ".deleting__"
+                + track_root.name
+                + "__"
+                + uuid.uuid4().hex[:8]
+            )
+            try:
+                track_root.rename(tombstone)
+            except OSError as exc:
+                raise EvaluationTrackError(
+                    "Nie udało się przygotować katalogu DRAFT "
+                    "do bezpiecznego usunięcia."
+                ) from exc
+
+        try:
+            self.repository.delete_draft_evaluation_track(
+                track_id
+            )
+        except Exception as exc:
+            if (
+                tombstone is not None
+                and tombstone.exists()
+                and not track_root.exists()
+            ):
+                try:
+                    tombstone.rename(track_root)
+                except OSError:
+                    pass
+            raise EvaluationTrackError(
+                f"Nie udało się usunąć DRAFT: {exc}"
+            ) from exc
+
+        if tombstone is not None and tombstone.exists():
+            try:
+                shutil.rmtree(tombstone)
+            except OSError as exc:
+                raise EvaluationTrackError(
+                    "DRAFT usunięto z rejestru, ale pozostał "
+                    f"katalog roboczy: {tombstone}"
+                ) from exc
+
     def retire(self, track_id: str) -> None:
         self._require_status(track_id, STATUS_SEALED)
         integrity = self.verify_integrity(track_id)
