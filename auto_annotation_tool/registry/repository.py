@@ -1624,6 +1624,75 @@ class RegistryRepository:
                 ).fetchall()
             )
 
+
+    def list_model_comparison_rows(
+        self,
+        *,
+        target: str,
+        project_id: str | None = None,
+    ) -> list[sqlite3.Row]:
+        """Zwróć modele z ich lokalizacjami dla wspólnego katalogu porównań."""
+
+        normalized_target = str(target or "").strip().lower()
+        if not normalized_target:
+            return []
+
+        conditions = ["LOWER(COALESCE(model.target, '')) = ?"]
+        params: list[Any] = [normalized_target]
+        if project_id:
+            conditions.append(
+                "(model.project_id = ? OR location.project_id = ?)"
+            )
+            params.extend([project_id, project_id])
+
+        where = " AND ".join(conditions)
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        model.model_id,
+                        model.sha256,
+                        model.project_id AS owner_project_id,
+                        owner_project.display_name AS owner_project_name,
+                        model.run_id,
+                        model.target,
+                        model.task_type,
+                        model.yolo_family,
+                        model.yolo_scale,
+                        model.checkpoint_kind,
+                        model.provenance_status,
+                        model.created_at AS model_created_at,
+                        location.location_key,
+                        location.project_id AS location_project_id,
+                        location_project.display_name AS location_project_name,
+                        location.relative_path,
+                        location.external_path,
+                        location.is_primary,
+                        location.created_at AS location_created_at
+                    FROM models AS model
+                    JOIN model_locations AS location
+                      ON location.model_id = model.model_id
+                    LEFT JOIN projects AS owner_project
+                      ON owner_project.project_id = model.project_id
+                    LEFT JOIN projects AS location_project
+                      ON location_project.project_id = location.project_id
+                    WHERE {where}
+                    ORDER BY
+                        model.model_id,
+                        CASE
+                            WHEN location.project_id IS NULL THEN 0
+                            ELSE 1
+                        END,
+                        location.is_primary DESC,
+                        location.location_key
+                    """,
+                    tuple(params),
+                ).fetchall()
+            )
+
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",

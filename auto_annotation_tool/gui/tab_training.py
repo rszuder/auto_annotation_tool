@@ -2052,20 +2052,17 @@ class TrainingTab:
             target = self._get_ranking_task_target()
             scope = self._get_ranking_scope()
             try:
-                models_dir = Path(models_dir_raw) if models_dir_raw else Path(".")
-                models_source_ready = scope != "Globalne" or (models_dir.exists() and models_dir.is_dir())
-                participants = (
-                    list(self._collect_ranking_participant_candidates(models_dir, target, scope))
-                    if models_source_ready
-                    else []
+                models_dir = Path(models_dir_raw) if models_dir_raw else None
+                if models_dir is not None and (not models_dir.exists() or not models_dir.is_dir()):
+                    models_dir = None
+                participants = list(
+                    self._collect_ranking_participant_candidates(
+                        models_dir, target, scope
+                    )
                 )
                 enabled_participants = self._filter_enabled_ranking_participants(participants)
                 models_found = bool(enabled_participants)
-                ready = (
-                    models_source_ready
-                    and models_found
-                    and reference_info["ok"]
-                )
+                ready = bool(models_found and reference_info["ok"])
             except Exception:
                 ready = False
 
@@ -2136,11 +2133,18 @@ class TrainingTab:
         scope = self._get_ranking_scope()
         try:
             models_dir_raw = str(getattr(self, "rank_models_dir", tk.StringVar()).get() or "").strip()
-            models_dir = Path(models_dir_raw) if models_dir_raw else Path(".")
-            if scope != "Globalne" or (models_dir.exists() and models_dir.is_dir()):
-                participants = list(self._collect_ranking_participant_candidates(models_dir, target, scope))
-                model_count = len(participants)
-                enabled_model_count = len(self._filter_enabled_ranking_participants(participants))
+            models_dir = Path(models_dir_raw) if models_dir_raw else None
+            if models_dir is not None and (not models_dir.exists() or not models_dir.is_dir()):
+                models_dir = None
+            participants = list(
+                self._collect_ranking_participant_candidates(
+                    models_dir, target, scope
+                )
+            )
+            model_count = len(participants)
+            enabled_model_count = len(
+                self._filter_enabled_ranking_participants(participants)
+            )
         except Exception:
             model_count = 0
             enabled_model_count = 0
