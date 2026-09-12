@@ -51,9 +51,15 @@ def update_step4_notebook_mode(host: "TrainingTab"):
     campaign_active = bool(CAMPAIGN.get_active_project_name())
     dataset_label = "[PZ1] Wariant splitu"
     train_label = "[PZ2] Trening na wariancie"
+    tracks_label = "[PZ3] Tory testowe"
 
     try:
         host.main_nb.tab(host.tab_train, text=train_label)
+    except Exception:
+        pass
+
+    try:
+        host.main_nb.tab(host.tab_tracks, text=tracks_label)
     except Exception:
         pass
 
@@ -77,7 +83,10 @@ def update_step4_notebook_mode(host: "TrainingTab"):
 
     try:
         current_tab = str(host.main_nb.select() or "").strip()
-        if current_tab not in {str(host.tab_dataset), str(host.tab_train)}:
+        allowed_tabs = {str(host.tab_dataset), str(host.tab_train)}
+        if getattr(host, "tab_tracks", None) is not None:
+            allowed_tabs.add(str(host.tab_tracks))
+        if current_tab not in allowed_tabs:
             host.main_nb.select(host.tab_dataset)
     except Exception:
         pass

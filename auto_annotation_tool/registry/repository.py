@@ -571,6 +571,52 @@ class RegistryRepository:
         return actual_model_id
 
 
+
+    def find_unique_image_artifact_by_sha256(
+        self,
+        sha256: str,
+    ) -> sqlite3.Row | None:
+        """Znajdź jednoznaczną tożsamość znanego artefaktu po dokładnym SHA-256.
+
+        Jeśli ten sam bajtowy artefakt występuje pod więcej niż jednym
+        ``source_image_id``, wynik jest niejednoznaczny i metoda zwraca ``None``.
+        """
+
+        sha = str(sha256 or "").strip().lower()
+        if not sha:
+            return None
+        self.initialize()
+        with self.database.read_connection() as connection:
+            rows = list(
+                connection.execute(
+                    """
+                    SELECT artifact_id, source_image_id, kind, relative_path
+                    FROM image_artifacts
+                    WHERE sha256 = ?
+                    ORDER BY
+                        CASE kind
+                            WHEN 'dataset_image' THEN 0
+                            WHEN 'raw' THEN 1
+                            WHEN 'derived_image' THEN 2
+                            WHEN 'evaluation_track_image' THEN 9
+                            ELSE 5
+                        END,
+                        artifact_id
+                    """,
+                    (sha,),
+                ).fetchall()
+            )
+        if not rows:
+            return None
+        source_ids = {
+            str(row["source_image_id"] or "").strip()
+            for row in rows
+            if str(row["source_image_id"] or "").strip()
+        }
+        if len(source_ids) != 1:
+            return None
+        return rows[0]
+
     def resolve_or_create_source_image(
         self,
         *,
@@ -699,6 +745,55 @@ class RegistryRepository:
                 """,
                 (track_id,),
             ).fetchone()
+
+
+    def list_evaluation_tracks(
+        self,
+        *,
+        target: str | None = None,
+        purpose: str | None = None,
+        status: str | None = None,
+        include_retired: bool = False,
+    ) -> list[sqlite3.Row]:
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if target:
+            conditions.append("target = ?")
+            params.append(str(target))
+        if purpose:
+            conditions.append("purpose = ?")
+            params.append(str(purpose))
+        if status:
+            conditions.append("status = ?")
+            params.append(str(status))
+        elif not include_retired:
+            conditions.append("status <> 'RETIRED'")
+
+        where = (
+            " WHERE " + " AND ".join(conditions)
+            if conditions
+            else ""
+        )
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM evaluation_tracks
+                    """
+                    + where
+                    + """
+                    ORDER BY
+                        target,
+                        name COLLATE NOCASE,
+                        version DESC,
+                        created_at DESC
+                    """,
+                    tuple(params),
+                ).fetchall()
+            )
 
     def list_evaluation_track_members(
         self,
