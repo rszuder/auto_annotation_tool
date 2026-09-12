@@ -107,6 +107,47 @@ def manual_gt_attestation_prompt(
     )
 
 
+def requires_independent_acquisition_attestation(
+    purpose: str | None,
+) -> bool:
+    return str(purpose or "").strip().lower() in {
+        "final_test",
+        "ranking",
+    }
+
+
+def independent_acquisition_attested(
+    verification: Mapping[str, Any] | None,
+) -> bool:
+    data = verification if isinstance(verification, Mapping) else {}
+    return bool(
+        data.get("independent_acquisition")
+        and data.get("not_derived_from_training_data")
+        and str(
+            data.get("acquisition_source_pool") or ""
+        ).strip()
+        and str(
+            data.get("independent_acquisition_attested_at")
+            or ""
+        ).strip()
+    )
+
+
+def independent_acquisition_attestation_prompt() -> str:
+    return (
+        "Potwierdź TAK wyłącznie wtedy, gdy wszystkie obrazy "
+        "tego toru pochodzą z nowej, niezależnie pozyskanej "
+        "puli, która nie była użyta w train ani val ocenianych "
+        "modeli.\n\n"
+        "Żaden obraz toru nie może być przeróbką, ponownym "
+        "eksportem, cropem, zmianą rozmiaru ani inną pochodną "
+        "obrazu treningowego lub walidacyjnego.\n\n"
+        "Oświadczenie zostanie zapisane w manifeście przed "
+        "zapieczętowaniem i stanie się częścią niezmiennego "
+        "odniesienia toru używanego przez eksperyment."
+    )
+
+
 def status_label(status: str | None) -> str:
     normalized = str(status or "").strip().upper()
     return {
@@ -626,6 +667,21 @@ class EvaluationTracksPanel:
             f"GT: {track.get('gt_format') or '-'}",
             f"Kompletność GT (ręczna): {'TAK' if bool(verification.get('manual_gt_complete')) else 'NIE'}",
             f"Potwierdzenie GT: {verification.get('manual_gt_attested_at') or '-'}",
+            (
+                "Niezależne pozyskanie: "
+                + (
+                    "TAK"
+                    if independent_acquisition_attested(
+                        verification
+                    )
+                    else "NIE"
+                )
+            ),
+            f"Pula niezależna: {verification.get('acquisition_source_pool') or '-'}",
+            (
+                "Potwierdzenie niezależności: "
+                f"{verification.get('independent_acquisition_attested_at') or '-'}"
+            ),
             f"Manifest: {_short_hash(track.get('manifest_sha256'))}",
             f"Seal: {_short_hash(track.get('seal_sha256'))}",
             f"Rezerwacja: {track.get('reservation_policy') or 'none'}",
@@ -828,11 +884,68 @@ class EvaluationTracksPanel:
                 )
                 return
 
+        needs_independent_attestation = (
+            requires_independent_acquisition_attestation(
+                track.get("purpose")
+            )
+        )
+        has_independent_attestation = (
+            independent_acquisition_attested(
+                verification
+            )
+        )
+
+        if (
+            needs_independent_attestation
+            and not has_independent_attestation
+        ):
+            if messagebox.askyesno(
+                "Niezależne pozyskanie obrazów",
+                independent_acquisition_attestation_prompt(),
+                parent=self.parent,
+            ):
+                try:
+                    verification = (
+                        self.service.attest_independent_acquisition(
+                            track_id,
+                            source_pool=(
+                                "new_independent_acquisition"
+                            ),
+                        )
+                    )
+                    has_independent_attestation = (
+                        independent_acquisition_attested(
+                            verification
+                        )
+                    )
+                except Exception as exc:
+                    self._show_error(
+                        "Nie udało się zapisać potwierdzenia "
+                        "niezależnego pozyskania",
+                        exc,
+                    )
+                    return
+
+        seal_warning = ""
+        if (
+            needs_independent_attestation
+            and not has_independent_attestation
+        ):
+            seal_warning = (
+                "\n\nUWAGA: tor zostanie zapieczętowany bez "
+                "potwierdzenia niezależnego pozyskania. "
+                "Dla modeli, których historyczny train/val ma "
+                "rodowód exact_hash_only, audyt niezależności "
+                "pozostanie UNKNOWN i tryb controlled będzie "
+                "zablokowany."
+            )
+
         if not messagebox.askyesno(
             "Zapieczętować tor?",
             "Po zapieczętowaniu zawartości toru nie będzie "
             "można edytować. Zmiany wymagają utworzenia "
-            "nowej wersji.",
+            "nowej wersji."
+            + seal_warning,
             parent=self.parent,
         ):
             return
@@ -850,6 +963,8 @@ class EvaluationTracksPanel:
         self._set_status(
             "Tor zapieczętowany z ręcznym "
             "potwierdzeniem kompletności GT. "
+            "Niezależne pozyskanie: "
+            f"{'TAK' if has_independent_attestation else 'NIE'}. "
             f"Integralność: {result.status}."
         )
 
