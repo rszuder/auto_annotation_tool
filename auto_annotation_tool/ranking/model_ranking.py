@@ -122,6 +122,15 @@ class ModelRankingEntry:
     independence_status: str = ""
     comparison_scope: str = ""
     comparison_project_id: str = ""
+    corner_metric_status: str = ""
+    corner_error_count: int = 0
+    corner_error_mean: float = 0.0
+    corner_error_p50: float = 0.0
+    corner_error_p90: float = 0.0
+    corner_error_p95: float = 0.0
+    corner_error_max: float = 0.0
+    corner_matched_pairs: int = 0
+    corner_skipped_pairs: int = 0
     
     @property
     def f1_score(self) -> float:
@@ -287,6 +296,15 @@ class ModelRanking:
             independence_status=str(experiment_payload.get("independence_status") or "").strip().upper(),
             comparison_scope=str(experiment_payload.get("comparison_scope") or "").strip(),
             comparison_project_id=str(experiment_payload.get("comparison_project_id") or "").strip(),
+            corner_metric_status=str(comparison_stats.get("corner_metric_status", "") or "").strip(),
+            corner_error_count=int(comparison_stats.get("corner_error_count", 0) or 0),
+            corner_error_mean=float(comparison_stats.get("corner_error_mean", 0.0) or 0.0),
+            corner_error_p50=float(comparison_stats.get("corner_error_p50", 0.0) or 0.0),
+            corner_error_p90=float(comparison_stats.get("corner_error_p90", 0.0) or 0.0),
+            corner_error_p95=float(comparison_stats.get("corner_error_p95", 0.0) or 0.0),
+            corner_error_max=float(comparison_stats.get("corner_error_max", 0.0) or 0.0),
+            corner_matched_pairs=int(comparison_stats.get("corner_matched_pairs", 0) or 0),
+            corner_skipped_pairs=int(comparison_stats.get("corner_skipped_pairs", 0) or 0),
         )
         
         new_identity = self._entry_identity(entry)

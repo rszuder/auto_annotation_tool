@@ -54,6 +54,7 @@ from ..ranking import (
     RankingExperimentBridge,
     active_project_id_from_root,
     comparison_scope_label,
+    evaluate_pose_corner_metrics,
     format_ranking_model_label,
     is_plate_pose_model_path,
 )
@@ -1348,6 +1349,15 @@ def _ranking_report_percent_text(value) -> str:
     return f"{numeric:.2f}%"
 
 
+def _ranking_corner_metric_text(value, status: str = "") -> str:
+    if str(status or "").strip().upper() != "OK":
+        return "-"
+    try:
+        return f"{float(value or 0.0) * 100.0:.3f}% d_GT"
+    except Exception:
+        return "-"
+
+
 def _ranking_report_datetime_text(value) -> str:
     raw = str(value or "").strip()
     if not raw:
@@ -1484,6 +1494,15 @@ def _collect_current_ranking_report_context(self) -> dict:
                 "plates_major_fix": int(getattr(entry, "plates_major_fix", 0) or 0),
                 "plates_added": int(getattr(entry, "plates_added", 0) or 0),
                 "plates_removed": int(getattr(entry, "plates_removed", 0) or 0),
+                "corner_metric_status": str(getattr(entry, "corner_metric_status", "") or ""),
+                "corner_error_count": int(getattr(entry, "corner_error_count", 0) or 0),
+                "corner_error_mean": float(getattr(entry, "corner_error_mean", 0.0) or 0.0),
+                "corner_error_p50": float(getattr(entry, "corner_error_p50", 0.0) or 0.0),
+                "corner_error_p90": float(getattr(entry, "corner_error_p90", 0.0) or 0.0),
+                "corner_error_p95": float(getattr(entry, "corner_error_p95", 0.0) or 0.0),
+                "corner_error_max": float(getattr(entry, "corner_error_max", 0.0) or 0.0),
+                "corner_matched_pairs": int(getattr(entry, "corner_matched_pairs", 0) or 0),
+                "corner_skipped_pairs": int(getattr(entry, "corner_skipped_pairs", 0) or 0),
                 "reference": str(getattr(entry, "reference_name", "") or selected_reference.get("reference_name") or "-"),
                 "split": str(getattr(entry, "split_name", "") or selected_split or "-"),
                 "metrics_source": str(getattr(entry, "metrics_source", "") or ("YOLO val" if target == "char" else "CVAT IoU")),
@@ -1697,6 +1716,8 @@ def _ranking_report_markdown(context: dict) -> str:
                 "",
                 "Dla modelu tablic raport zapisuje dodatkowy rozkład pracy korekcyjnej: ramki bez zmian, ramki wymagające małej poprawki, ramki wymagające dużej poprawki, brakujące tablice oraz wykrycia nadmiarowe. Ten rozkład jest ważny, bo dwa modele mogą mieć podobną ocenę końcową, ale generować zupełnie inny koszt ręcznej korekty.",
                 "",
+                "Dla kontrolowanego eksperymentu MT raportuje się również błąd narożników `E_corner = (1/4) * sum_i(||pred_i - gt_i||_2 / d_GT)`. Punkty mają stałą kolejność `TL, TR, BR, BL` i nie są permutowane. `d_GT` jest przekątną prostokątnej obwiedni polygonu Ground Truth. Niższa wartość oznacza lepszą lokalizację narożników.",
+                "",
             ]
         )
     lines.extend(
@@ -1721,13 +1742,13 @@ def _ranking_report_markdown(context: dict) -> str:
             "",
             "## Tabela wyników",
             "",
-            "| # | Model | Zakres | Ocena | Precyzja | Czułość | F1 | mAP50 | mAP50-95 | Próbka | Oceniono |",
-            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| # | Model | Zakres | Ocena | Precyzja | Czułość | F1 | mAP50 | mAP50-95 | E_corner mean | E_corner p95 | Próbka | Oceniono |",
+            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for row in rows:
         lines.append(
-            "| {rank} | {label} | {scope} | {score} | {precision} | {recall} | {f1} | {map50} | {map50_95} | {sample} | {evaluated_at} |".format(
+            "| {rank} | {label} | {scope} | {score} | {precision} | {recall} | {f1} | {map50} | {map50_95} | {corner_mean} | {corner_p95} | {sample} | {evaluated_at} |".format(
                 rank=int(row.get("rank", 0) or 0),
                 label=str(row.get("label") or "-").replace("|", "\\|"),
                 scope=str(row.get("scope") or "-"),
@@ -1737,6 +1758,14 @@ def _ranking_report_markdown(context: dict) -> str:
                 f1=_ranking_report_percent_text(row.get("f1")),
                 map50=_ranking_report_percent_text(row.get("map50")),
                 map50_95=_ranking_report_percent_text(row.get("map50_95")),
+                corner_mean=_ranking_corner_metric_text(
+                    row.get("corner_error_mean"),
+                    row.get("corner_metric_status"),
+                ),
+                corner_p95=_ranking_corner_metric_text(
+                    row.get("corner_error_p95"),
+                    row.get("corner_metric_status"),
+                ),
                 sample=int(row.get("sample", 0) or 0),
                 evaluated_at=str(row.get("evaluated_at") or "-"),
             )
@@ -2247,6 +2276,15 @@ def _export_ranking_analysis_report(self):
                     "duze_poprawki",
                     "dodane_w_odniesieniu",
                     "usuniete_z_modelu",
+                    "corner_status",
+                    "corner_count",
+                    "corner_mean_norm",
+                    "corner_p50_norm",
+                    "corner_p90_norm",
+                    "corner_p95_norm",
+                    "corner_max_norm",
+                    "corner_matched_pairs",
+                    "corner_skipped_pairs",
                     "tor",
                     "split",
                     "zrodlo_metryk",
@@ -2276,6 +2314,15 @@ def _export_ranking_analysis_report(self):
                         row.get("plates_major_fix", 0),
                         row.get("plates_added", 0),
                         row.get("plates_removed", 0),
+                        row.get("corner_metric_status", ""),
+                        row.get("corner_error_count", 0),
+                        f"{float(row.get('corner_error_mean', 0.0) or 0.0):.8f}",
+                        f"{float(row.get('corner_error_p50', 0.0) or 0.0):.8f}",
+                        f"{float(row.get('corner_error_p90', 0.0) or 0.0):.8f}",
+                        f"{float(row.get('corner_error_p95', 0.0) or 0.0):.8f}",
+                        f"{float(row.get('corner_error_max', 0.0) or 0.0):.8f}",
+                        row.get("corner_matched_pairs", 0),
+                        row.get("corner_skipped_pairs", 0),
                         row.get("reference", ""),
                         row.get("split", ""),
                         row.get("metrics_source", ""),
@@ -4770,13 +4817,31 @@ def _run_ranking_v2(self):
                 exporter.export(auto_annotations, temp_xml_path, include_confidence=True)
 
                 stats = comparator.compare(auto_xml_path=temp_xml_path, corrected_xml_path=gt_xml)
+                if ranking_experiment is not None:
+                    corner_stats = evaluate_pose_corner_metrics(
+                        temp_xml_path,
+                        gt_xml,
+                        match_iou_threshold=0.5,
+                        require_prediction_pose_marker=True,
+                    )
+                    if corner_stats.get("corner_metric_status") != "OK":
+                        raise RuntimeError(
+                            "Kontrolowany eksperyment MT nie ma żadnej "
+                            "poprawnej pary narożników do oceny. "
+                            f"matched={corner_stats.get('corner_matched_pairs', 0)}, "
+                            f"skipped={corner_stats.get('corner_skipped_pairs', 0)}."
+                        )
+                    stats.update(corner_stats)
                 persist_ranking_result(model_path, stats)
                 precision = float(stats.get("precision", 0) or 0)
                 recall = float(stats.get("recall", 0) or 0)
                 f1_score = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
                 self._append_ranking_log(
                     f"Zakończono {model_display} | Precision={precision:.1f}% | "
-                    f"Recall={recall:.1f}% | F1={f1_score:.1f}% | czas: {time.perf_counter() - model_started_at:.1f}s"
+                    f"Recall={recall:.1f}% | F1={f1_score:.1f}% | "
+                    f"E_corner mean={float(stats.get('corner_error_mean', 0.0) or 0.0) * 100.0:.3f}% d_GT | "
+                    f"p95={float(stats.get('corner_error_p95', 0.0) or 0.0) * 100.0:.3f}% d_GT | "
+                    f"czas: {time.perf_counter() - model_started_at:.1f}s"
                 )
 
                 if temp_xml_path.exists():

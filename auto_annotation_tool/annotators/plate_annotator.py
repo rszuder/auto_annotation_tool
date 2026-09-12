@@ -10,6 +10,10 @@ import numpy as np
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, get_yolo_class, CV2_AVAILABLE, cv2
 from ..data_models import Detection, ImageAnnotation, AnnotationStatus
+from ..pose_corners import (
+    CORNER_ORDER_TL_TR_BR_BL,
+    canonicalize_quad_tl_tr_br_bl,
+)
 from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..utils import get_image_size, cleanup_gpu_memory
 from ..rectification import PlateRectifier
@@ -265,6 +269,7 @@ class PlateAnnotator(BaseAnnotator):
                 ocr_text = None
                 ocr_conf = 0.0
                 ocr_attrs = {}
+                corner_source = "bbox_fallback"
                 
                 # Zbuduj poligon z keypointów, jeśli model je zwraca.
                 if keypoints is not None and i < len(keypoints):
@@ -279,6 +284,7 @@ class PlateAnnotator(BaseAnnotator):
                         
                         if valid:
                             polygon = self._sort_corners_clockwise(corners)
+                            corner_source = "pose"
                 
                 # W razie braku keypointów użyj prostokąta z bboxa.
                 if polygon is None:
@@ -296,6 +302,8 @@ class PlateAnnotator(BaseAnnotator):
                         if ocr_text:
                             logger.debug(f"OCR: {ocr_text} (conf: {ocr_conf:.2f})")
                 
+                ocr_attrs["corner_source"] = corner_source
+                ocr_attrs["corner_order"] = CORNER_ORDER_TL_TR_BR_BL
                 detection = Detection(
                     label="plate",
                     confidence=float(conf),
@@ -354,21 +362,4 @@ class PlateAnnotator(BaseAnnotator):
     
     def _sort_corners_clockwise(self, corners: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
         """Sortuje 4 rogi: TL, TR, BR, BL."""
-        if len(corners) != 4:
-            return corners
-        
-        cx = sum(p[0] for p in corners) / 4
-        cy = sum(p[1] for p in corners) / 4
-        
-        top = [p for p in corners if p[1] < cy]
-        bottom = [p for p in corners if p[1] >= cy]
-        
-        if len(top) != 2 or len(bottom) != 2:
-            sorted_by_y = sorted(corners, key=lambda p: p[1])
-            top = sorted(sorted_by_y[:2], key=lambda p: p[0])
-            bottom = sorted(sorted_by_y[2:], key=lambda p: p[0], reverse=True)
-        else:
-            top = sorted(top, key=lambda p: p[0])
-            bottom = sorted(bottom, key=lambda p: p[0], reverse=True)
-        
-        return [top[0], top[1], bottom[0], bottom[1]]
+        return canonicalize_quad_tl_tr_br_bl(corners)

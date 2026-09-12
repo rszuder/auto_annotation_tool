@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..config import CONFIG
+from .corner_metrics import corner_metric_protocol_descriptor
 from ..registry.experiment_service import (
     ExperimentGuardError,
     ExperimentService,
@@ -105,6 +106,18 @@ class RankingExperimentBridge:
         if track is None:
             return None
 
+        resolved_protocol_options = dict(
+            protocol_options or {}
+        )
+        if (
+            _normalize_target(target) == "plate"
+            and str(mode or "").strip().lower() == MODE_CONTROLLED
+        ):
+            resolved_protocol_options["require_pose_corners"] = True
+            resolved_protocol_options["corner_metric"] = (
+                corner_metric_protocol_descriptor()
+            )
+
         participants = tuple(
             self._resolve_participant(path, target=target)
             for path in model_paths
@@ -122,7 +135,7 @@ class RankingExperimentBridge:
             owner_project_id=track.get("owner_project_id"),
             protocol_options={
                 "adapter_schema": BRIDGE_SCHEMA,
-                **dict(protocol_options or {}),
+                **resolved_protocol_options,
             },
         )
         try:

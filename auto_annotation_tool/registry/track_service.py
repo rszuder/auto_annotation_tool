@@ -13,6 +13,12 @@ import xml.etree.ElementTree as ET
 from typing import Any, Mapping
 
 from ..config import CONFIG
+from ..pose_corners import (
+    CORNER_ORDER_TL_TR_BR_BL,
+    is_canonical_quad_tl_tr_br_bl,
+    parse_quad_points,
+    quad_is_non_degenerate,
+)
 from .repository import RegistryRepository
 
 TRACK_SCHEMA = "alpr.evaluation_track.v1"
@@ -66,6 +72,7 @@ class ControlledTrackReference:
     source_image_ids: tuple[str, ...]
     member_sha256: tuple[str, ...]
     pose_corner_ready: bool
+    pose_corner_order: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -84,6 +91,7 @@ class ControlledTrackReference:
             "source_image_ids": list(self.source_image_ids),
             "member_sha256": list(self.member_sha256),
             "pose_corner_ready": self.pose_corner_ready,
+            "pose_corner_order": self.pose_corner_order,
         }
 
     @property
@@ -906,10 +914,16 @@ class EvaluationTrackService:
         if not isinstance(verification, Mapping):
             verification = {}
         pose_corner_ready = bool(verification.get("pose_corner_ready"))
-        if require_pose_corners and not pose_corner_ready:
+        pose_corner_order = str(
+            verification.get("pose_corner_order") or ""
+        ).strip().lower()
+        if require_pose_corners and (
+            not pose_corner_ready
+            or pose_corner_order != CORNER_ORDER_TL_TR_BR_BL
+        ):
             raise EvaluationTrackError(
                 "Tor nie ma zweryfikowanego GT z dokładnie czterema "
-                "narożnikami dla każdego polygonu."
+                "narożnikami zapisanymi w kolejności TL, TR, BR, BL."
             )
 
         members = self.repository.list_evaluation_track_members(track_id)
@@ -941,6 +955,7 @@ class EvaluationTrackService:
             source_image_ids=source_ids,
             member_sha256=member_sha,
             pose_corner_ready=pose_corner_ready,
+            pose_corner_order=pose_corner_order,
         )
 
 
@@ -986,29 +1001,51 @@ class EvaluationTrackService:
         try:
             root = ET.parse(gt_path).getroot()
         except (OSError, ET.ParseError) as exc:
-            raise EvaluationTrackError(f"Nie można odczytać CVAT XML: {exc}") from exc
+            raise EvaluationTrackError(
+                f"Nie można odczytać CVAT XML: {exc}"
+            ) from exc
 
         image_nodes = root.findall(".//image")
-        xml_names = [Path(str(node.get("name") or "")).name for node in image_nodes]
+        xml_names = [
+            Path(str(node.get("name") or "")).name
+            for node in image_nodes
+        ]
         if len(xml_names) != len(set(xml_names)):
-            raise EvaluationTrackError("CVAT XML zawiera zduplikowane nazwy obrazów.")
+            raise EvaluationTrackError(
+                "CVAT XML zawiera zduplikowane nazwy obrazów."
+            )
 
-        member_names = [str(row["original_name"] or "") for row in members]
+        member_names = [
+            str(row["original_name"] or "")
+            for row in members
+        ]
         missing = sorted(set(member_names) - set(xml_names))
         extra = sorted(set(xml_names) - set(member_names))
         if missing or extra:
             details = []
             if missing:
-                details.append("brak w GT: " + ", ".join(missing[:10]))
+                details.append(
+                    "brak w GT: " + ", ".join(missing[:10])
+                )
             if extra:
-                details.append("nadmiarowe w GT: " + ", ".join(extra[:10]))
-            raise EvaluationTrackError("Zestaw obrazów GT nie odpowiada torowi (" + "; ".join(details) + ").")
+                details.append(
+                    "nadmiarowe w GT: " + ", ".join(extra[:10])
+                )
+            raise EvaluationTrackError(
+                "Zestaw obrazów GT nie odpowiada torowi ("
+                + "; ".join(details)
+                + ")."
+            )
 
         object_count = 0
         box_count = 0
         polygon_count = 0
         quad_polygon_count = 0
+        ordered_quad_polygon_count = 0
         invalid_polygon_count = 0
+        invalid_coordinate_polygon_count = 0
+        degenerate_polygon_count = 0
+        unordered_quad_polygon_count = 0
         images_without_objects = 0
 
         for node in image_nodes:
@@ -1020,20 +1057,61 @@ class EvaluationTrackService:
             object_count += shapes
             if shapes == 0:
                 images_without_objects += 1
+
             for polygon in polygons:
-                points = str(polygon.get("points") or "").split(";")
-                points = [point for point in points if point.strip()]
-                if len(points) == 4:
-                    quad_polygon_count += 1
-                else:
+                raw_points = [
+                    point
+                    for point in str(
+                        polygon.get("points") or ""
+                    ).split(";")
+                    if point.strip()
+                ]
+                if len(raw_points) != 4:
                     invalid_polygon_count += 1
+                    continue
+
+                quad_polygon_count += 1
+                points = parse_quad_points(
+                    str(polygon.get("points") or "")
+                )
+                if points is None:
+                    invalid_coordinate_polygon_count += 1
+                    continue
+                if not quad_is_non_degenerate(points):
+                    degenerate_polygon_count += 1
+                    continue
+                if is_canonical_quad_tl_tr_br_bl(points):
+                    ordered_quad_polygon_count += 1
+                else:
+                    unordered_quad_polygon_count += 1
 
         if object_count <= 0:
-            raise EvaluationTrackError("GT nie zawiera żadnego obiektu.")
+            raise EvaluationTrackError(
+                "GT nie zawiera żadnego obiektu."
+            )
         if invalid_polygon_count:
             raise EvaluationTrackError(
-                "GT zawiera polygon(y) o liczbie narożników innej niż 4."
+                "GT zawiera polygon(y) o liczbie narożników "
+                "innej niż 4."
             )
+        if invalid_coordinate_polygon_count:
+            raise EvaluationTrackError(
+                "GT zawiera polygon(y) z niepoprawnymi lub "
+                "nieskończonymi współrzędnymi."
+            )
+        if degenerate_polygon_count:
+            raise EvaluationTrackError(
+                "GT zawiera zdegenerowany polygon tablicy."
+            )
+
+        pose_corner_ready = bool(
+            str(track["target"]) == "plate"
+            and polygon_count > 0
+            and box_count == 0
+            and polygon_count == quad_polygon_count
+            and polygon_count == ordered_quad_polygon_count
+            and unordered_quad_polygon_count == 0
+        )
 
         return {
             "format": "cvat_xml",
@@ -1042,12 +1120,24 @@ class EvaluationTrackService:
             "box_count": box_count,
             "polygon_count": polygon_count,
             "quad_polygon_count": quad_polygon_count,
+            "ordered_quad_polygon_count": (
+                ordered_quad_polygon_count
+            ),
+            "unordered_quad_polygon_count": (
+                unordered_quad_polygon_count
+            ),
+            "invalid_coordinate_polygon_count": (
+                invalid_coordinate_polygon_count
+            ),
+            "degenerate_polygon_count": (
+                degenerate_polygon_count
+            ),
             "images_without_objects": images_without_objects,
-            "pose_corner_ready": bool(
-                str(track["target"]) == "plate"
-                and polygon_count > 0
-                and box_count == 0
-                and polygon_count == quad_polygon_count
+            "pose_corner_ready": pose_corner_ready,
+            "pose_corner_order": (
+                CORNER_ORDER_TL_TR_BR_BL
+                if pose_corner_ready
+                else ""
             ),
         }
 
