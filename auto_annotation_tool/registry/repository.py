@@ -1006,6 +1006,216 @@ class RegistryRepository:
                 params,
             )
 
+
+    def seal_evaluation_track_with_reservations(
+        self,
+        track_id: str,
+        *,
+        sealed_at: str,
+        manifest_sha256: str,
+        seal_sha256: str,
+        reservation_type: str = "exclude_train_val",
+    ) -> int:
+        """Atomowo zapieczętuj tor i aktywuj jego rezerwacje train/val."""
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            track = connection.execute(
+                """
+                SELECT status, reservation_policy
+                FROM evaluation_tracks
+                WHERE track_id = ?
+                """,
+                (track_id,),
+            ).fetchone()
+            if track is None:
+                raise ValueError(f"Nie znaleziono toru: {track_id}")
+            if str(track["status"] or "") != "VERIFIED":
+                raise ValueError(
+                    "Zapieczętowanie wymaga statusu VERIFIED."
+                )
+
+            connection.execute(
+                """
+                UPDATE evaluation_tracks
+                SET status = 'SEALED',
+                    sealed_at = ?,
+                    manifest_sha256 = ?,
+                    seal_sha256 = ?
+                WHERE track_id = ?
+                """,
+                (
+                    sealed_at,
+                    manifest_sha256,
+                    seal_sha256,
+                    track_id,
+                ),
+            )
+
+            if str(track["reservation_policy"] or "") == "reserve_from_training":
+                connection.execute(
+                    """
+                    INSERT INTO reservations (
+                        source_image_id,
+                        track_id,
+                        reservation_type,
+                        active,
+                        created_at
+                    )
+                    SELECT
+                        member.source_image_id,
+                        member.track_id,
+                        ?,
+                        1,
+                        ?
+                    FROM evaluation_track_members AS member
+                    WHERE member.track_id = ?
+                    ON CONFLICT(
+                        source_image_id,
+                        track_id,
+                        reservation_type
+                    ) DO UPDATE SET
+                        active = 1,
+                        created_at = COALESCE(
+                            reservations.created_at,
+                            excluded.created_at
+                        )
+                    """,
+                    (
+                        reservation_type,
+                        sealed_at,
+                        track_id,
+                    ),
+                )
+
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM reservations
+                WHERE track_id = ?
+                  AND reservation_type = ?
+                  AND active = 1
+                """,
+                (track_id, reservation_type),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def sync_all_training_reservations(
+        self,
+        *,
+        reservation_type: str = "exclude_train_val",
+    ) -> int:
+        """Uzupełnij aktywne rezerwacje ze wszystkich SEALED/RETIRED torów."""
+
+        self.initialize()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO reservations (
+                    source_image_id,
+                    track_id,
+                    reservation_type,
+                    active,
+                    created_at
+                )
+                SELECT
+                    member.source_image_id,
+                    member.track_id,
+                    ?,
+                    1,
+                    COALESCE(track.sealed_at, track.created_at)
+                FROM evaluation_track_members AS member
+                JOIN evaluation_tracks AS track
+                  ON track.track_id = member.track_id
+                WHERE track.status IN ('SEALED', 'RETIRED')
+                  AND track.reservation_policy = 'reserve_from_training'
+                ON CONFLICT(
+                    source_image_id,
+                    track_id,
+                    reservation_type
+                ) DO UPDATE SET active = 1
+                """,
+                (reservation_type,),
+            )
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM reservations
+                WHERE reservation_type = ?
+                  AND active = 1
+                """,
+                (reservation_type,),
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def list_active_training_reservations(
+        self,
+        *,
+        reservation_type: str = "exclude_train_val",
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        reservation.source_image_id,
+                        reservation.track_id,
+                        track.name AS track_name,
+                        track.target,
+                        track.purpose,
+                        track.status
+                    FROM reservations AS reservation
+                    JOIN evaluation_tracks AS track
+                      ON track.track_id = reservation.track_id
+                    WHERE reservation.reservation_type = ?
+                      AND reservation.active = 1
+                      AND track.status IN ('SEALED', 'RETIRED')
+                    ORDER BY
+                        reservation.source_image_id,
+                        reservation.track_id
+                    """,
+                    (reservation_type,),
+                ).fetchall()
+            )
+
+    def list_active_reserved_artifacts(
+        self,
+        *,
+        reservation_type: str = "exclude_train_val",
+    ) -> list[sqlite3.Row]:
+        """Zwróć znane fizyczne SHA należące do aktywnie zarezerwowanych źródeł."""
+
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        artifact.sha256,
+                        artifact.source_image_id,
+                        GROUP_CONCAT(
+                            DISTINCT reservation.track_id
+                        ) AS track_ids
+                    FROM image_artifacts AS artifact
+                    JOIN reservations AS reservation
+                      ON reservation.source_image_id = artifact.source_image_id
+                    JOIN evaluation_tracks AS track
+                      ON track.track_id = reservation.track_id
+                    WHERE reservation.reservation_type = ?
+                      AND reservation.active = 1
+                      AND track.status IN ('SEALED', 'RETIRED')
+                      AND COALESCE(artifact.sha256, '') <> ''
+                    GROUP BY
+                        artifact.sha256,
+                        artifact.source_image_id
+                    ORDER BY artifact.sha256
+                    """,
+                    (reservation_type,),
+                ).fetchall()
+            )
+
+
     def table_count(self, table_name: str) -> int:
         allowed = {
             "projects",
@@ -1019,6 +1229,7 @@ class RegistryRepository:
             "model_locations",
             "evaluation_track_members",
             "evaluation_tracks",
+            "reservations",
         }
         if table_name not in allowed:
             raise ValueError(f"Niedozwolona tabela: {table_name}")

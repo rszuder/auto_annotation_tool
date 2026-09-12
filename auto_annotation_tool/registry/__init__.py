@@ -17,6 +17,12 @@ from .dataset_inventory import (
 )
 from .registry_rows import DatasetRegistryRows, build_dataset_registry_rows
 from .repository import DatasetBundleWriteSummary, RegistryRepository
+from .reservation_service import (
+    ReservationOverlap,
+    TrainingReservationCheck,
+    TrainingReservationService,
+    check_training_dataset_reservations,
+)
 from .schema import SCHEMA_VERSION
 from .track_service import (
     ControlledTrackReference,
@@ -29,6 +35,10 @@ __all__ = [
     "RegistryDatabase",
     "RegistryRepository",
     "DatasetBundleWriteSummary",
+    "TrainingReservationService",
+    "TrainingReservationCheck",
+    "ReservationOverlap",
+    "check_training_dataset_reservations",
     "SCHEMA_VERSION",
     "EvaluationTrackService",
     "EvaluationTrackError",
