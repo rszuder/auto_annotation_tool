@@ -173,7 +173,9 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     self.manual_route_card_title = None
     self.manual_route_card_desc = None
 
-    if not initial_campaign_context:
+    # Karty free mode tworzymy zawsze. Widocznością steruje później layout,
+    # więc Z2 zbudowane początkowo w projekcie może bez przebudowy wejść w free mode.
+    def _build_free_mode_route_choice_widgets():
         self.workflow_entry_title_lbl = SectionHeaderLabel(
             self.workflow_entry_section,
             self.app,
@@ -287,6 +289,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         self._bind_workflow_card(self.auto_route_card, "auto")
         self._bind_workflow_card(self.manual_route_card, "manual")
         self._refresh_workflow_route_cards(refresh_content=True)
+    _build_free_mode_route_choice_widgets()
     _log_build_phase("workflow_cards")
     self.workflow_entry_separator = self._build_left_section_separator(settings_col, pady=(16, 20))
     _log_build_phase("workflow_entry")
