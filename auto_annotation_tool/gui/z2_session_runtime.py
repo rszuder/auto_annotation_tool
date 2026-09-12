@@ -328,23 +328,26 @@ def _is_free_mode_session_context(self) -> bool:
     except Exception:
         active_project = ""
 
-    # Aktywny projekt ma pierwszeństwo przed flagą trybu swobodnego.
-    # W przeciwnym razie stary stan app.campaign_free_mode potrafi wpuścić
-    # buildery (F) do ekranów kampanii (C).
-    campaign_context_project = str(getattr(self, "_campaign_context_project_name", "") or "").strip()
-    try:
-        app_free_mode = bool(getattr(self.app, "campaign_free_mode", False))
-    except Exception:
-        app_free_mode = False
-    if active_project or (campaign_context_project and not app_free_mode):
+    # CAMPAIGN jest źródłem prawdy. Gdy nie ma aktywnego projektu,
+    # stare pola runtime Z2 nie mogą utrzymywać zakładki w kampanii.
+    if not active_project:
         try:
-            if bool(getattr(self.app, "campaign_free_mode", False)):
-                self.app.campaign_free_mode = False
+            self._campaign_context_project_name = ""
         except Exception:
             pass
-        return False
+        try:
+            self._campaign_graph_entry_context = {}
+        except Exception:
+            pass
+        return True
 
-    return True
+    # Aktywny projekt ma pierwszeństwo przed przejściową flagą free mode.
+    try:
+        if bool(getattr(self.app, "campaign_free_mode", False)):
+            self.app.campaign_free_mode = False
+    except Exception:
+        pass
+    return False
 
 
 def _is_campaign_step2_context(self) -> bool:

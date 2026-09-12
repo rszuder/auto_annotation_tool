@@ -307,6 +307,12 @@ def clear_campaign_context(self, *, restore_free_mode_preview: bool = True):
         pass
 
     try:
+        self._campaign_context_project_name = ""
+        self._campaign_graph_entry_context = {}
+    except Exception:
+        pass
+
+    try:
         snapshot = getattr(self, "_pre_campaign_free_mode_snapshot", None)
         self._pre_campaign_free_mode_snapshot = None
         self._apply_free_mode_session_snapshot(
