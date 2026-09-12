@@ -673,7 +673,12 @@ def _run_provenance_status(
     dataset_id = str(dataset.get("dataset_id") or "").strip()
     dataset_split = str(dataset.get("split_sha256") or "").strip()
     dataset_manifest = str(dataset.get("manifest_sha256") or "").strip()
-    dataset_ok = bool(dataset_id and dataset_split and dataset_manifest)
+    dataset_yaml = str(dataset.get("data_yaml_sha256") or "").strip()
+    dataset_ok = bool(
+        dataset_id
+        and dataset_split
+        and (dataset_manifest or dataset_yaml)
+    )
 
     input_ok = bool(_checkpoint_sha(input_snapshot))
     output_ok = bool(_checkpoint_sha(output_snapshot, role="best"))
