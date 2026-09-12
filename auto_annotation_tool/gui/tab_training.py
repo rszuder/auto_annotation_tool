@@ -1638,8 +1638,15 @@ class TrainingTab:
             pass
 
     def _resolve_ranking_reference_source(self, raw_value: str | None = None) -> dict:
+        rank_data_var = getattr(self, "rank_data_dir", None)
         selected_raw = str(
-            raw_value if raw_value is not None else getattr(self, "rank_data_dir", tk.StringVar()).get()
+            raw_value
+            if raw_value is not None
+            else (
+                rank_data_var.get()
+                if rank_data_var is not None
+                else ""
+            )
         ).strip()
         if self._get_ranking_task_target() == "char":
             split_name = self._get_ranking_split_name()
@@ -1794,6 +1801,110 @@ class TrainingTab:
         if not selected_path.exists():
             result["message"] = f"Nie znaleziono wskazanego folderu runu: {selected_path}"
             return result
+
+
+        # Tor utworzony w PZ3 ma własny manifest, katalog images/ i GT
+        # w ground_truth/. Rozpoznajemy go przed ścieżką legacy Z2/PZ2.
+        if selected_path.is_dir():
+            track_manifest_path = selected_path / "track_manifest.json"
+            if track_manifest_path.is_file():
+                try:
+                    track_manifest = json.loads(
+                        track_manifest_path.read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                except Exception:
+                    track_manifest = {}
+
+                track_id = str(
+                    track_manifest.get("track_id") or ""
+                ).strip()
+                if not track_id:
+                    result["message"] = (
+                        "Manifest toru PZ3 nie zawiera track_id."
+                    )
+                    return result
+
+                try:
+                    from ..registry import EvaluationTrackService
+
+                    track_service = EvaluationTrackService(
+                        CONFIG.WORKSPACE_DIR
+                    )
+                    track_row = track_service.get_track(track_id)
+                    integrity = track_service.verify_integrity(
+                        track_id
+                    )
+                except Exception as exc:
+                    result["message"] = (
+                        "Nie udało się zweryfikować toru PZ3: "
+                        f"{exc}"
+                    )
+                    return result
+
+                if str(track_row.get("status") or "") != "SEALED":
+                    result["message"] = (
+                        "Kontrolowany ranking wymaga toru PZ3 "
+                        "ze statusem SEALED."
+                    )
+                    return result
+                if not integrity.ok:
+                    result["message"] = (
+                        "Tor PZ3 nie przeszedł kontroli integralności: "
+                        + "; ".join(integrity.issues)
+                    )
+                    return result
+
+                gt_info = (
+                    track_manifest.get("ground_truth")
+                    if isinstance(
+                        track_manifest.get("ground_truth"),
+                        dict,
+                    )
+                    else {}
+                )
+                gt_relative = str(
+                    gt_info.get("relative_path")
+                    or "ground_truth/annotations.xml"
+                ).strip()
+                gt_path = selected_path / gt_relative
+                images_dir = selected_path / "images"
+                try:
+                    image_paths = get_image_files(images_dir)
+                except Exception:
+                    image_paths = []
+
+                if not gt_path.is_file() or not image_paths:
+                    result["message"] = (
+                        "Tor PZ3 nie zawiera kompletnego GT i obrazów."
+                    )
+                    return result
+
+                result.update(
+                    {
+                        "ok": True,
+                        "reference_dir": str(
+                            selected_path.resolve()
+                        ),
+                        "reference_name": (
+                            f"{track_row.get('name') or track_id} "
+                            f"v{int(track_row.get('version') or 1)}"
+                        ),
+                        "xml_path": str(gt_path.resolve()),
+                        "images_dir": str(images_dir.resolve()),
+                        "image_paths": image_paths,
+                        "image_count": len(image_paths),
+                        "track_id": track_id,
+                        "message": (
+                            "Gotowy zapieczętowany tor PZ3: "
+                            f"{track_row.get('name') or track_id} | "
+                            f"{len(image_paths)} obrazów | integralność PASS."
+                        ),
+                    }
+                )
+                return result
+
 
         xml_path: Path | None = None
         reference_dir: Path | None = None

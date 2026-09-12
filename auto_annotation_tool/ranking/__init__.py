@@ -5,6 +5,11 @@ Moduł rankingu.
 """
 
 from .annotation_comparator import AnnotationComparator, AnnotationDiff
+from .experiment_bridge import (
+    RankingExperimentBridge,
+    RankingExperimentContext,
+    RankingExperimentParticipant,
+)
 from .model_ranking import (
     ModelRanking,
     ModelRankingEntry,
@@ -49,6 +54,9 @@ __all__ = [
     'AnnotationDiff',
     'ModelRanking',
     'ModelRankingEntry',
+    'RankingExperimentBridge',
+    'RankingExperimentContext',
+    'RankingExperimentParticipant',
     'DatasetRef',
     'ExperimentSessionRecord',
     'ExperimentModelRef',

@@ -48,7 +48,12 @@ from ..validators import (
 )
 from ..training import YOLOPoseTrainer, TrainingHistory, TrainingStatus, DatasetCreator, DatasetSplitter
 from ..training.training_report import TrainingReportGenerator
-from ..ranking import ModelRanking, format_ranking_model_label, is_plate_pose_model_path
+from ..ranking import (
+    ModelRanking,
+    RankingExperimentBridge,
+    format_ranking_model_label,
+    is_plate_pose_model_path,
+)
 from ..utils import cleanup_gpu_memory, safe_load_yaml, get_image_files
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
@@ -2406,6 +2411,41 @@ def _collect_ranking_track_candidates(self) -> list[dict]:
             }
         )
 
+
+    if target == "plate":
+        try:
+            from ..registry import EvaluationTrackService
+
+            track_service = EvaluationTrackService(
+                CONFIG.WORKSPACE_DIR
+            )
+            for track in track_service.list_tracks(
+                target="plate",
+                status="SEALED",
+                include_retired=False,
+            ):
+                track_id = str(track.get("track_id") or "").strip()
+                relative = str(
+                    track.get("relative_path") or ""
+                ).strip()
+                if not track_id or not relative:
+                    continue
+                integrity = track_service.verify_integrity(
+                    track_id
+                )
+                if not integrity.ok:
+                    continue
+                add_candidate(
+                    Path(CONFIG.WORKSPACE_DIR) / relative,
+                    source="Rejestr SEALED",
+                )
+        except Exception as exc:
+            logger.debug(
+                "Nie udało się odczytać zapieczętowanych torów "
+                f"z rejestru: {exc}"
+            )
+
+
     current_value = str(getattr(getattr(self, "rank_data_dir", None), "get", lambda: "")() or "").strip()
     add_candidate(current_value, source="Aktualny")
 
@@ -4230,6 +4270,8 @@ def _run_ranking_v2(self):
     self._start_ranking_watchdog("start przygotowania rankingu")
 
     def worker():
+        ranking_experiment_bridge = None
+        ranking_experiment = None
         try:
             ranking_started_at = time.perf_counter()
             cancelled = False
@@ -4311,6 +4353,127 @@ def _run_ranking_v2(self):
                 )
             else:
                 effective_device_desc = "CPU"
+
+            ranking_experiment_bridge = RankingExperimentBridge(
+                workspace_dir=CONFIG.WORKSPACE_DIR,
+                ranking_dir=getattr(
+                    self.ranking_engine,
+                    "ranking_dir",
+                    CONFIG.get_ranking_dir(target),
+                ),
+            )
+            try:
+                ranking_experiment = ranking_experiment_bridge.prepare(
+                    name=(
+                        f"Ranking {target_task} "
+                        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    ),
+                    target=target,
+                    reference_path=(
+                        reference_raw
+                        or str(reference_info.get("reference_dir") or "")
+                    ),
+                    model_paths=models_to_test,
+                    protocol_options={
+                        "ranking_scope": selected_scope,
+                        "ranking_task": target_task,
+                        "reference_name": str(
+                            reference_info.get("reference_name") or ""
+                        ),
+                        "reference_path": str(
+                            reference_info.get("reference_dir") or ""
+                        ),
+                        "split_name": str(
+                            reference_info.get("split_name") or ""
+                        ),
+                        "device_choice": selected_device_display,
+                        "effective_device": effective_device_desc,
+                        "ultralytics_device": str(device),
+                        "confidence": (
+                            float(CONFIG.DEFAULT_CONFIDENCE)
+                            if target == "plate"
+                            else None
+                        ),
+                        "metrics_source": (
+                            "YOLO val"
+                            if target == "char"
+                            else "CVAT comparator"
+                        ),
+                    },
+                )
+            except Exception as experiment_error:
+                self._append_ranking_log(
+                    "Kontrolowany ranking zablokowany: "
+                    f"{experiment_error}"
+                )
+                self._ui(
+                    lambda err=str(experiment_error): messagebox.showerror(
+                        "Kontrolowany ranking",
+                        "Nie można uruchomić kontrolowanego rankingu.\n\n"
+                        + err,
+                    )
+                )
+                return
+
+            if ranking_experiment is not None:
+                self._append_ranking_log(
+                    "Kontrolowany eksperyment: "
+                    f"{ranking_experiment.experiment_id} | "
+                    f"tor={ranking_experiment.track_id} | "
+                    "niezależność=PASS."
+                )
+            else:
+                self._append_ranking_log(
+                    "Wybrany materiał nie jest torem z rejestru PZ3. "
+                    "Ranking działa w trybie legacy i nie jest oznaczany "
+                    "jako kontrolowany eksperyment."
+                )
+
+            def persist_ranking_result(model_path: Path, stats: dict):
+                metadata = (
+                    ranking_experiment_bridge.entry_metadata(
+                        ranking_experiment,
+                        model_path,
+                    )
+                    if ranking_experiment is not None
+                    else None
+                )
+                entry = self.ranking_engine.add_entry(
+                    model_name=model_path.name,
+                    model_path=str(model_path),
+                    comparison_stats=stats,
+                    task_type=target_task,
+                    reference_name=str(
+                        reference_info.get("reference_name") or ""
+                    ),
+                    reference_path=str(
+                        reference_info.get("reference_dir") or ""
+                    ),
+                    save=False,
+                    experiment_context=metadata,
+                )
+                if ranking_experiment is not None:
+                    ranking_experiment_bridge.record_result(
+                        ranking_experiment,
+                        model_path,
+                        entry,
+                    )
+                return entry
+
+            def finalize_ranking_experiment(
+                was_cancelled: bool,
+            ) -> None:
+                if ranking_experiment is None:
+                    return
+                if was_cancelled:
+                    ranking_experiment_bridge.cancel(
+                        ranking_experiment
+                    )
+                    return
+                ranking_experiment_bridge.finish(
+                    ranking_experiment
+                )
+
 
             if target == "char":
                 if not YOLO_AVAILABLE:
@@ -4396,15 +4559,7 @@ def _run_ranking_v2(self):
                         except Exception:
                             pass
 
-                    self.ranking_engine.add_entry(
-                        model_name=model_path.name,
-                        model_path=str(model_path),
-                        comparison_stats=stats,
-                        task_type=target_task,
-                        reference_name=str(reference_info.get("reference_name") or ""),
-                        reference_path=str(reference_info.get("reference_dir") or ""),
-                        save=False,
-                    )
+                    persist_ranking_result(model_path, stats)
                     self._ui(lambda p=((idx + 1) / max(1, total_models)) * 100: self.rank_progress_var.set(p))
                     self._append_ranking_log(
                         f"Zakończono {model_display} | mAP50-95={float(stats.get('map50_95', 0) or 0):.1f}% | "
@@ -4419,6 +4574,28 @@ def _run_ranking_v2(self):
                     self.ranking_engine.flush()
                 except Exception as save_error:
                     self._append_ranking_log(f"Ostrzeżenie: nie udało się zapisać rankingu: {save_error}")
+                try:
+                    finalize_ranking_experiment(
+                        bool(cancelled or self.rank_cancel_requested)
+                    )
+                    ranking_experiment = None
+                except Exception as experiment_finish_error:
+                    self._append_ranking_log(
+                        "Eksperyment rankingu nie został poprawnie domknięty: "
+                        f"{experiment_finish_error}"
+                    )
+                    self._ui(
+                        lambda err=str(experiment_finish_error): messagebox.showerror(
+                            "Kontrolowany ranking",
+                            "Ranking nie ma kompletnego wyniku kontrolowanego.\n\n" + err,
+                        )
+                    )
+                    self._set_ranking_ui_state(
+                        status="Eksperyment rankingu FAILED",
+                        status_color="red",
+                    )
+                    return
+
                 if cancelled or self.rank_cancel_requested:
                     self._append_ranking_log("Ranking anulowany przez użytkownika.")
                     self._ui(lambda: self._load_ranking())
@@ -4449,7 +4626,9 @@ def _run_ranking_v2(self):
             comparator = AnnotationComparator()
             conf_thresh = float(CONFIG.DEFAULT_CONFIDENCE)
             total_models = len(models_to_test)
-            temp_xml_path = Path(str(reference_info.get("reference_dir") or models_dir)) / "temp_ranking_auto.xml"
+            temp_xml_path = ranking_experiment_bridge.working_temp_xml_path(
+                ranking_experiment
+            )
             self._append_ranking_log(
                 f"Przygotowanie zakończone. Modele pose: {total_models} | obrazy do porównania: {len(images)}"
             )
@@ -4534,15 +4713,7 @@ def _run_ranking_v2(self):
                 exporter.export(auto_annotations, temp_xml_path, include_confidence=True)
 
                 stats = comparator.compare(auto_xml_path=temp_xml_path, corrected_xml_path=gt_xml)
-                self.ranking_engine.add_entry(
-                    model_name=model_path.name,
-                    model_path=str(model_path),
-                    comparison_stats=stats,
-                    task_type=target_task,
-                    reference_name=str(reference_info.get("reference_name") or ""),
-                    reference_path=str(reference_info.get("reference_dir") or ""),
-                    save=False,
-                )
+                persist_ranking_result(model_path, stats)
                 precision = float(stats.get("precision", 0) or 0)
                 recall = float(stats.get("recall", 0) or 0)
                 f1_score = (2.0 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
@@ -4559,6 +4730,28 @@ def _run_ranking_v2(self):
                 self.ranking_engine.flush()
             except Exception as save_error:
                 self._append_ranking_log(f"Ostrzeżenie: nie udało się zapisać rankingu: {save_error}")
+            try:
+                finalize_ranking_experiment(
+                    bool(cancelled or self.rank_cancel_requested)
+                )
+                ranking_experiment = None
+            except Exception as experiment_finish_error:
+                self._append_ranking_log(
+                    "Eksperyment rankingu nie został poprawnie domknięty: "
+                    f"{experiment_finish_error}"
+                )
+                self._ui(
+                    lambda err=str(experiment_finish_error): messagebox.showerror(
+                        "Kontrolowany ranking",
+                        "Ranking nie ma kompletnego wyniku kontrolowanego.\n\n" + err,
+                    )
+                )
+                self._set_ranking_ui_state(
+                    status="Eksperyment rankingu FAILED",
+                    status_color="red",
+                )
+                return
+
             if cancelled or self.rank_cancel_requested:
                 self._append_ranking_log("Ranking anulowany przez użytkownika.")
                 self._ui(lambda: self._load_ranking())
@@ -4570,10 +4763,21 @@ def _run_ranking_v2(self):
                 self._set_ranking_ui_state(status="Ranking zakończony.", status_color="green")
 
         except Exception as e:
+            if ranking_experiment is not None and ranking_experiment_bridge is not None:
+                try:
+                    ranking_experiment_bridge.fail(ranking_experiment)
+                    ranking_experiment = None
+                except Exception:
+                    pass
             self._append_ranking_log(f"Błąd rankingu: {e}")
             self._ui(lambda err=e: messagebox.showerror("Błąd", f"Błąd w trakcie rankingu:\n{err}"))
             self._set_ranking_ui_state(status="Błąd rankingu", status_color="red")
         finally:
+            if ranking_experiment is not None and ranking_experiment_bridge is not None:
+                try:
+                    ranking_experiment_bridge.fail(ranking_experiment)
+                except Exception:
+                    pass
             self._stop_ranking_watchdog()
             self.rank_is_running = False
             self.rank_cancel_requested = False
