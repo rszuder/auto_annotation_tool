@@ -100,6 +100,7 @@ def preflight_deduplicate_candidates(
     existing_members: Sequence | None = None,
     *,
     source_ids_for_sha: Callable[[str], Iterable[str]] | None = None,
+    sha256_by_path: Mapping[Path, str] | None = None,
 ) -> CandidatePreflightResult:
     existing_members = list(existing_members or [])
     existing_sha: dict[str, str] = {}
@@ -123,11 +124,16 @@ def preflight_deduplicate_candidates(
     collisions: list[CandidateSkip] = []
     hash_errors: list[CandidateSkip] = []
     seen: dict[str, Path] = {}
+    seen_names: dict[str, str] = {}
+    seen_sources: set[str] = set()
 
     for raw in paths:
         path = Path(raw)
         try:
-            sha = _sha256(path)
+            sha = (_sha256(path) if sha256_by_path is None
+                   else str(sha256_by_path.get(path) or "").lower())
+            if not sha:
+                raise ValueError("brak fingerprintu pliku")
         except Exception as exc:
             hash_errors.append(
                 CandidateSkip(path, f"nie można policzyć SHA-256: {exc}")
@@ -144,7 +150,8 @@ def preflight_deduplicate_candidates(
             )
             continue
 
-        if source_ids_for_sha is not None and existing_source_ids:
+        known_ids = set()
+        if source_ids_for_sha is not None:
             try:
                 known_ids = {
                     str(item or "").strip()
@@ -164,6 +171,10 @@ def preflight_deduplicate_candidates(
                 )
                 continue
 
+        if known_ids & seen_sources:
+            batch.append(CandidateSkip(path, "to samo logiczne źródło w bieżącym wyborze"))
+            continue
+
         if sha in seen:
             batch.append(
                 CandidateSkip(
@@ -175,17 +186,19 @@ def preflight_deduplicate_candidates(
             continue
 
         key = path.name.casefold()
-        if key in existing_names:
+        if key in existing_names or key in seen_names:
             collisions.append(
                 CandidateSkip(
                     path,
-                    "tor zawiera już tę nazwę, ale z inną zawartością",
-                    existing_names[key],
+                    "nazwa jest już używana, ale z inną zawartością",
+                    existing_names.get(key) or seen_names[key],
                 )
             )
             continue
 
         seen[sha] = path
+        seen_names[key] = path.name
+        seen_sources.update(known_ids)
         candidates.append(path)
 
     return CandidatePreflightResult(

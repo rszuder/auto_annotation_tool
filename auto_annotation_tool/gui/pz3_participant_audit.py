@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import gc
+from queue import Empty, SimpleQueue
 import tkinter as tk
 from tkinter import messagebox, ttk
 
@@ -821,6 +824,7 @@ class ParticipantAuditMatrixDialog:
 
 class BatchProgressDialog:
     def __init__(self, parent, title="Dodawanie puli obrazów"):
+        self._previous_grab = parent.grab_current()
         self.window = tk.Toplevel(parent)
         self.window.title(title)
         self.window.geometry("560x180")
@@ -836,6 +840,39 @@ class BatchProgressDialog:
         self.bar.pack(fill=tk.X)
         ttk.Label(root, textvariable=self.count).pack(anchor="e", pady=(3, 0))
         self.window.update_idletasks()
+        self.window.grab_set()
+
+    def run(self, operation):
+        """Run IO/CPU work off Tk's thread, delivering progress on the UI thread."""
+        # Dispose cycles from closed Tk dialogs on their owning thread.
+        gc.collect()
+        updates = SimpleQueue()
+        done = tk.BooleanVar(master=self.window, value=False)
+
+        def progress(stage, current, total):
+            updates.put((stage, current, total))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(operation, progress)
+
+            def poll():
+                latest = None
+                while True:
+                    try:
+                        latest = updates.get_nowait()
+                    except Empty:
+                        break
+                if latest is not None:
+                    self.update(*latest)
+                if future.done():
+                    done.set(True)
+                else:
+                    self.window.after(40, poll)
+
+            self.window.after(0, poll)
+            self.window.wait_variable(done)
+            poll = None  # Break the recursive callback cycle while still on Tk.
+            return future.result()
 
     def update(self, stage, current, total):
         self.stage.set(stage)
@@ -845,6 +882,9 @@ class BatchProgressDialog:
 
     def close(self):
         try:
+            self.window.grab_release()
             self.window.destroy()
-        except Exception:
+            if self._previous_grab is not None and self._previous_grab.winfo_exists():
+                self._previous_grab.grab_set()
+        except tk.TclError:
             pass

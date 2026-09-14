@@ -1603,7 +1603,7 @@ class RegistryRepository:
                     )
                     SELECT ancestry.model_id, ancestry.model_sha256,
                            ancestry.depth AS ancestor_depth,
-                           run.run_id, run.dataset_id,
+                           run.run_id, run.dataset_id, run.parent_run_id,
                            run.provenance_status AS run_provenance_status,
                            dataset.provenance_status AS dataset_provenance_status,
                            dataset.relative_path AS dataset_relative_path,
@@ -1615,18 +1615,40 @@ class RegistryRepository:
                            artifact.external_path AS artifact_external_path,
                            artifact.sha256 AS artifact_sha256
                     FROM ancestry
-                    JOIN training_runs AS run ON run.run_id = ancestry.run_id
-                    JOIN datasets AS dataset ON dataset.dataset_id = run.dataset_id
-                    JOIN dataset_members AS member ON member.dataset_id = run.dataset_id
-                    JOIN source_images AS source ON source.source_image_id = member.source_image_id
+                    LEFT JOIN training_runs AS run ON run.run_id = ancestry.run_id
+                    LEFT JOIN datasets AS dataset ON dataset.dataset_id = run.dataset_id
+                    LEFT JOIN dataset_members AS member
+                        ON member.dataset_id = run.dataset_id AND member.split IN ({sp})
+                    LEFT JOIN source_images AS source ON source.source_image_id = member.source_image_id
                     LEFT JOIN image_artifacts AS artifact ON artifact.artifact_id = member.artifact_id
-                    WHERE member.split IN ({sp})
                     ORDER BY ancestry.model_id, ancestry.depth, run.run_id,
                              member.split, member.relative_path
                     """,
                     (*clean_models, *clean_splits),
                 ).fetchall()
             )
+
+    def find_source_ids_by_sha256_batch(self, sha256_values) -> dict[str, set[str]]:
+        """Read known source identities without creating registry records."""
+        shas = tuple(dict.fromkeys(str(value).strip().lower()
+                                   for value in sha256_values if value))
+        result: dict[str, set[str]] = {}
+        self.initialize()
+        with self.database.read_connection() as connection:
+            for offset in range(0, len(shas), 400):
+                chunk = shas[offset:offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""SELECT sha256, source_image_id FROM image_artifacts
+                        WHERE sha256 IN ({placeholders})
+                        UNION
+                        SELECT canonical_sha256, source_image_id FROM source_images
+                        WHERE canonical_sha256 IN ({placeholders})""",
+                    (*chunk, *chunk),
+                ).fetchall()
+                for row in rows:
+                    result.setdefault(str(row[0]).lower(), set()).add(str(row[1]))
+        return result
 
     def resolve_track_member_sources_batch(
         self,
