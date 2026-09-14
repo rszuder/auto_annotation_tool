@@ -16,6 +16,29 @@ from typing import Any, Mapping
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from .pz3_participant_audit import (
+    BatchProgressDialog,
+    ParticipantAuditMatrixDialog,
+    ParticipantSelectionDialog,
+)
+from ..registry.participant_pool_audit import (
+    ParticipantPoolAuditService,
+    STATUS_CLEAN,
+    STATUS_DEPENDENT,
+    STATUS_SUSPECT,
+    STATUS_UNKNOWN,
+)
+
+from .experiment_gt_workflow import (
+    save_pending_experiment_gt_entry,
+    show_experiment_gt_entry,
+)
+
+from .pz3_audit_results_dialog import (
+    compact_source_pool_audit_followup_text,
+    show_source_pool_audit_results,
+)
+
 from .pz3_source_ingest_ui import (
     choose_pz3_source_candidates,
     collect_folder_candidates,
@@ -63,6 +86,8 @@ from ..registry.source_pool_audit import (
 @dataclass(frozen=True)
 class TrackActionState:
     can_add_images: bool
+    can_select_participants: bool
+    can_audit_pool: bool
     can_remove_images: bool
     can_set_ground_truth: bool
     can_verify: bool
@@ -77,6 +102,8 @@ def action_state_for_status(status: str | None) -> TrackActionState:
     normalized = str(status or "").strip().upper()
     return TrackActionState(
         can_add_images=normalized == STATUS_DRAFT,
+        can_select_participants=normalized == STATUS_DRAFT,
+        can_audit_pool=normalized == STATUS_DRAFT,
         can_remove_images=normalized == STATUS_DRAFT,
         can_set_ground_truth=normalized == STATUS_DRAFT,
         can_verify=normalized == STATUS_DRAFT,
@@ -225,6 +252,10 @@ class EvaluationTracksPanel:
         self.workspace = Path(CONFIG.WORKSPACE_DIR)
         self.service = EvaluationTrackService(self.workspace)
         self.repository: RegistryRepository = self.service.repository
+        self.participant_audit = ParticipantPoolAuditService(
+            self.workspace,
+            repository=self.repository,
+        )
 
         self.current_track_id = ""
         self._track_rows: dict[str, dict[str, Any]] = {}
@@ -248,328 +279,9 @@ class EvaluationTracksPanel:
         self.refresh_tracks()
 
     def _build(self) -> None:
-        root = ttk.Frame(self.parent, padding=10)
-        root.pack(fill=tk.BOTH, expand=True)
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
+        from .z4_evaluation_tracks_layout import EvaluationTracksLayout
 
-        header = ttk.Frame(root)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        header.columnconfigure(0, weight=1)
-        ttk.Label(
-            header,
-            text="Eksperymenty i tory referencyjne",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Label(
-            header,
-            text=(
-                "ranking = wspólny materiał do porównania modeli; "
-                "final_test = materiał używany dopiero po zakończeniu wyboru. "
-                "DRAFT → źródła i GT → VERIFIED → SEALED → RETIRED."
-            ),
-            style="PanelMuted.TLabel",
-            justify=tk.LEFT,
-        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
-        ttk.Button(
-            header,
-            text="Odśwież",
-            command=self.refresh_tracks,
-        ).grid(row=0, column=1, rowspan=2, sticky="e")
-
-        form = ttk.LabelFrame(root, text="Nowy eksperyment / tor", padding=10)
-        form.grid(row=1, column=0, sticky="ew", pady=(0, 10))
-        for column in range(8):
-            form.columnconfigure(column, weight=0)
-        form.columnconfigure(1, weight=2)
-
-        ttk.Label(form, text="Nazwa").grid(
-            row=0, column=0, sticky="w", padx=(0, 6)
-        )
-        ttk.Entry(form, textvariable=self.name_var).grid(
-            row=0, column=1, sticky="ew", padx=(0, 12)
-        )
-
-        ttk.Label(form, text="Target").grid(
-            row=0, column=2, sticky="w", padx=(0, 6)
-        )
-        self.target_combo = ttk.Combobox(
-            form,
-            textvariable=self.target_var,
-            values=self.TARGETS,
-            state="readonly",
-            width=11,
-        )
-        self.target_combo.grid(row=0, column=3, sticky="w", padx=(0, 12))
-
-        ttk.Label(form, text="Cel").grid(
-            row=0, column=4, sticky="w", padx=(0, 6)
-        )
-        self.purpose_combo = ttk.Combobox(
-            form,
-            textvariable=self.purpose_var,
-            values=self.PURPOSES,
-            state="readonly",
-            width=14,
-        )
-        self.purpose_combo.grid(row=0, column=5, sticky="w", padx=(0, 12))
-        self.purpose_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda _event: self._sync_reservation_policy(),
-            add="+",
-        )
-
-        ttk.Label(form, text="Zakres").grid(
-            row=0, column=6, sticky="w", padx=(0, 6)
-        )
-        self.scope_combo = ttk.Combobox(
-            form,
-            textvariable=self.scope_var,
-            values=("global",),
-            state="readonly",
-            width=11,
-        )
-        self.scope_combo.grid(row=0, column=7, sticky="w")
-
-        ttk.Label(
-            form,
-            textvariable=self.project_hint_var,
-            style="PanelMuted.TLabel",
-            justify=tk.LEFT,
-        ).grid(
-            row=1, column=0, columnspan=4, sticky="w", pady=(8, 0)
-        )
-        ttk.Label(
-            form,
-            textvariable=self.reservation_var,
-            style="PanelMuted.TLabel",
-            justify=tk.LEFT,
-        ).grid(
-            row=1, column=4, columnspan=2, sticky="w", pady=(8, 0)
-        )
-        ttk.Button(
-            form,
-            text="Utwórz DRAFT",
-            command=self.create_draft,
-        ).grid(
-            row=1,
-            column=6,
-            columnspan=2,
-            sticky="e",
-            pady=(8, 0),
-        )
-
-        body = ttk.Frame(root)
-        body.grid(row=2, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=2)
-        body.columnconfigure(1, weight=3)
-        body.rowconfigure(0, weight=1)
-
-        left = ttk.LabelFrame(body, text="Tory", padding=6)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        left.columnconfigure(0, weight=1)
-        left.rowconfigure(0, weight=1)
-
-        columns = ("name", "ver", "target", "purpose", "status", "members")
-        self.tree = ttk.Treeview(
-            left,
-            columns=columns,
-            show="headings",
-            selectmode="browse",
-            height=15,
-        )
-        headings = {
-            "name": "Nazwa",
-            "ver": "Wersja",
-            "target": "Target",
-            "purpose": "Cel",
-            "status": "Status",
-            "members": "Obrazy",
-        }
-        widths = {
-            "name": 180,
-            "ver": 58,
-            "target": 90,
-            "purpose": 110,
-            "status": 90,
-            "members": 62,
-        }
-        for key in columns:
-            self.tree.heading(key, text=headings[key])
-            self.tree.column(
-                key,
-                width=widths[key],
-                minwidth=45,
-                stretch=(key == "name"),
-                anchor=tk.W if key == "name" else tk.CENTER,
-            )
-        yscroll = ttk.Scrollbar(
-            left,
-            orient=tk.VERTICAL,
-            command=self.tree.yview,
-        )
-        self.tree.configure(yscrollcommand=yscroll.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        yscroll.grid(row=0, column=1, sticky="ns")
-        self.tree.bind(
-            "<<TreeviewSelect>>",
-            self._on_track_selected,
-            add="+",
-        )
-
-        right = ttk.LabelFrame(body, text="Wybrany tor", padding=8)
-        right.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(1, weight=1)
-        right.rowconfigure(3, weight=1)
-
-        self.detail_text = tk.Text(
-            right,
-            height=9,
-            wrap=tk.WORD,
-            state=tk.DISABLED,
-            bd=1,
-            relief=tk.SOLID,
-        )
-        self.detail_text.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-
-        member_frame = ttk.Frame(right)
-        member_frame.grid(row=1, column=0, sticky="nsew")
-        member_frame.columnconfigure(0, weight=1)
-        member_frame.rowconfigure(0, weight=1)
-        member_columns = ("idx", "name", "source", "sha")
-        self.member_tree = ttk.Treeview(
-            member_frame,
-            columns=member_columns,
-            show="headings",
-            selectmode="extended",
-            height=8,
-        )
-        member_headings = {
-            "idx": "#",
-            "name": "Plik",
-            "source": "source_image_id",
-            "sha": "SHA-256",
-        }
-        member_widths = {
-            "idx": 42,
-            "name": 180,
-            "source": 190,
-            "sha": 110,
-        }
-        for key in member_columns:
-            self.member_tree.heading(key, text=member_headings[key])
-            self.member_tree.column(
-                key,
-                width=member_widths[key],
-                minwidth=40,
-                stretch=(key in {"name", "source"}),
-                anchor=tk.W if key != "idx" else tk.CENTER,
-            )
-        member_scroll = ttk.Scrollbar(
-            member_frame,
-            orient=tk.VERTICAL,
-            command=self.member_tree.yview,
-        )
-        self.member_tree.configure(yscrollcommand=member_scroll.set)
-        self.member_tree.grid(row=0, column=0, sticky="nsew")
-        member_scroll.grid(row=0, column=1, sticky="ns")
-        self.member_tree.bind(
-            "<<TreeviewSelect>>",
-            lambda _event: self._refresh_remove_images_button_state(),
-            add="+",
-        )
-
-        actions = ttk.Frame(right)
-        actions.grid(row=2, column=0, sticky="ew", pady=(8, 8))
-        self.btn_add_images = ttk.Button(
-            actions,
-            text="Dodaj obrazy…",
-            command=self.add_images,
-        )
-        self.btn_remove_images = ttk.Button(
-            actions,
-            text="Usuń zaznaczone",
-            command=self.remove_selected_images,
-        )
-        self.btn_set_gt = ttk.Button(
-            actions,
-            text="Wybierz GT (CVAT XML)",
-            command=self.set_ground_truth,
-        )
-        self.btn_verify = ttk.Button(
-            actions,
-            text="Zweryfikuj",
-            command=self.verify_track,
-        )
-        self.btn_seal = ttk.Button(
-            actions,
-            text="Zapieczętuj",
-            command=self.seal_track,
-        )
-        self.btn_integrity = ttk.Button(
-            actions,
-            text="Sprawdź integralność",
-            command=self.check_integrity,
-        )
-        self.btn_clone = ttk.Button(
-            actions,
-            text="Nowa wersja",
-            command=self.clone_track,
-        )
-        self.btn_retire = ttk.Button(
-            actions,
-            text="Wycofaj",
-            command=self.retire_track,
-        )
-        self.btn_delete_draft = ttk.Button(
-            actions,
-            text="Usuń DRAFT",
-            command=self.delete_draft,
-        )
-        self.btn_open_experiment_sources = ttk.Button(
-            actions,
-            text="Pokaż katalog źródeł",
-            command=self.open_experiment_sources,
-        )
-        self.btn_prepare_z2 = ttk.Button(
-            actions,
-            text="Przygotuj GT w Z2",
-            command=self.prepare_ground_truth_in_z2,
-        )
-        for index, button in enumerate(
-            (
-                self.btn_add_images,
-                self.btn_remove_images,
-                self.btn_set_gt,
-                self.btn_verify,
-                self.btn_seal,
-                self.btn_integrity,
-                self.btn_clone,
-                self.btn_retire,
-                self.btn_delete_draft,
-                self.btn_open_experiment_sources,
-                self.btn_prepare_z2,
-            )
-        ):
-            button.grid(
-                row=index // 4,
-                column=index % 4,
-                sticky="ew",
-                padx=(0 if index % 4 == 0 else 4, 0),
-                pady=(0 if index < 4 else 4, 0),
-            )
-            actions.columnconfigure(index % 4, weight=1)
-
-        ttk.Label(
-            right,
-            textvariable=self.status_var,
-            style="PanelMuted.TLabel",
-            justify=tk.LEFT,
-            wraplength=640,
-        ).grid(row=3, column=0, sticky="new")
-
-        self._apply_action_state(None)
+        self._layout = EvaluationTracksLayout(self)
 
     def _sync_scope_options(self) -> None:
         try:
@@ -650,14 +362,10 @@ class EvaluationTracksPanel:
             return
 
         self.name_var.set("")
+        if getattr(self, "_layout", None) is not None:
+            self._layout.show_form(False)
         self.current_track_id = track_id
         self.refresh_tracks(select_track_id=track_id)
-        self._set_status(
-            "Utworzono DRAFT i przestrzeń eksperymentu. "
-            "1) Otwórz źródła i dodaj niezależne obrazy, "
-            "2) przygotuj GT w Z2, 3) dodaj obrazy i GT do toru, "
-            "4) zweryfikuj i zapieczętuj."
-        )
 
     def refresh_tracks(self, *, select_track_id: str | None = None) -> None:
         self._sync_scope_options()
@@ -707,6 +415,8 @@ class EvaluationTracksPanel:
         else:
             self.current_track_id = ""
             self._clear_selected_details()
+        if not rows and getattr(self, "_layout", None) is not None:
+            self._layout.show_form(True)
 
     def _on_track_selected(self, _event=None) -> None:
         selected = self.tree.selection()
@@ -753,6 +463,14 @@ class EvaluationTracksPanel:
             f"Status: {status_label(track.get('status'))}",
             f"Integralność: {integrity}",
             f"Obrazy: {int(track.get('member_count') or 0)}",
+            (
+                "Modele uczestniczące: "
+                + ", ".join(
+                    item.model_id
+                    for item in self.participant_audit.load_participants(track_id)
+                )
+                or "Modele uczestniczące: -"
+            ),
             f"Obiekty GT: {int(track.get('object_count') or 0)}",
             f"GT: {track.get('gt_format') or '-'}",
             f"Kompletność GT (ręczna): {'TAK' if bool(verification.get('manual_gt_complete')) else 'NIE'}",
@@ -783,6 +501,8 @@ class EvaluationTracksPanel:
             lines.append(f"Poprzednia wersja: {track.get('parent_track_id')}")
 
         self._set_detail_text("\n".join(lines))
+        if getattr(self, "_layout", None) is not None:
+            self._layout.set_track(track, member_count=len(members))
         for iid in self.member_tree.get_children():
             self.member_tree.delete(iid)
         for row in members:
@@ -806,6 +526,9 @@ class EvaluationTracksPanel:
         )
 
     def _clear_selected_details(self) -> None:
+        if getattr(self, "_layout", None) is not None:
+            self._layout.set_track()
+        self.status_var.set("Wybierz istniejący tor albo utwórz nowy DRAFT.")
         self._set_detail_text(
             "Wybierz tor z listy. Operacje edycyjne są dostępne wyłącznie "
             "dla DRAFT."
@@ -848,6 +571,39 @@ class EvaluationTracksPanel:
         )
 
     def prepare_ground_truth_in_z2(self) -> None:
+        _gt_track_id = self._require_current_track()
+        if not _gt_track_id:
+            return
+        try:
+            _gt_track = self.service.get_track(_gt_track_id)
+            _gt_members = self.service.list_members(_gt_track_id)
+            _gt_decision = show_experiment_gt_entry(
+                self.parent,
+                workspace=self.workspace,
+                track=_gt_track,
+                member_count=len(_gt_members),
+            )
+        except Exception as exc:
+            self._show_error(
+                "Nie udało się przygotować wejścia do Ground Truth",
+                exc,
+            )
+            return
+        if _gt_decision is None:
+            return
+        try:
+            save_pending_experiment_gt_entry(
+                self.workspace,
+                _gt_track_id,
+                _gt_decision,
+            )
+        except Exception as exc:
+            self._show_error(
+                "Nie udało się zapisać kontekstu Ground Truth",
+                exc,
+            )
+            return
+
         track_id = self._require_current_track()
         if not track_id:
             return
@@ -911,340 +667,278 @@ class EvaluationTracksPanel:
         except Exception:
             pass
 
+
+    def select_participant_models(self) -> bool:
+        track_id = self._require_current_track()
+        if not track_id:
+            return False
+        try:
+            track = self.service.get_track(track_id)
+            models = self.participant_audit.list_eligible_models(str(track.get("target") or ""))
+            current = {item.model_id for item in self.participant_audit.load_participants(track_id)}
+        except Exception as exc:
+            self._show_error("Nie udało się odczytać modeli uczestniczących", exc)
+            return False
+        result = ParticipantSelectionDialog(
+            self.parent,
+            models=models,
+            selected_ids=current,
+            track_name=str(track.get("name") or track_id),
+        ).show()
+        if result is None:
+            return False
+        if not result:
+            messagebox.showwarning("Modele uczestniczące", "Wybierz co najmniej jeden model.", parent=self.parent)
+            return False
+        try:
+            participants = self.participant_audit.save_participants(track_id, result)
+        except Exception as exc:
+            self._show_error("Nie udało się zapisać modeli uczestniczących", exc)
+            return False
+        self._refresh_selected_details()
+        self._set_status(
+            "Zapisano modele uczestniczące: "
+            + ", ".join(item.model_id for item in participants)
+            + ". Audyt puli wymaga ponownego sprawdzenia."
+        )
+        return True
+
+    def _track_member_paths(self, track: Mapping[str, Any]) -> list[Path]:
+        track_root = self.workspace / str(track.get("relative_path") or "")
+        result = []
+        for row in self.service.list_members(str(track.get("track_id") or "")):
+            rel = str(row.get("track_relative_path") or "").strip()
+            path = track_root / rel
+            if rel and path.exists() and path.is_file():
+                result.append(path)
+        return result
+
+    def _run_participant_pool_audit(self, track_id: str, paths: list[Path]):
+        progress = BatchProgressDialog(self.parent, title="Audyt puli względem modeli")
+        try:
+            report = self.participant_audit.audit_paths(
+                track_id, paths, progress=progress.update
+            )
+        finally:
+            progress.close()
+        ParticipantAuditMatrixDialog(self.parent, report).show()
+        return report
+
+    def audit_current_pool(self) -> None:
+        track_id = self._require_current_track()
+        if not track_id:
+            return
+        track = self.service.get_track(track_id)
+        if not self.participant_audit.load_participants(track_id):
+            messagebox.showwarning(
+                "Modele uczestniczące",
+                (
+                    "Najpierw użyj „Modele uczestniczące…”, "
+                    "a następnie uruchom audyt puli."
+                ),
+                parent=self.parent,
+            )
+            return
+        paths = self._track_member_paths(track)
+        if not paths:
+            messagebox.showinfo("Audyt puli", "Tor nie zawiera jeszcze obrazów.", parent=self.parent)
+            return
+        try:
+            report = self._run_participant_pool_audit(track_id, paths)
+        except Exception as exc:
+            self._show_error("Audyt puli nie powiódł się", exc)
+            return
+        if report.dependent_count or report.unknown_count:
+            self.participant_audit.invalidate_track_audit(track_id, reason="dependent_or_unknown")
+            messagebox.showwarning(
+                "Audyt puli",
+                f"Zależne: {report.dependent_count}, nieustalone: {report.unknown_count}.\n\n"
+                "Usuń problematyczne obrazy albo zmień uczestników.",
+                parent=self.parent,
+            )
+            return
+        if report.suspect_count and messagebox.askyesno(
+            "Podejrzane pochodne",
+            f"Wykryto {report.suspect_count} podejrzanych pochodnych.\n\n"
+            "Oznaczyć audyt jako NIEGOTOWY i wymagać ich usunięcia? (Zalecane: TAK)",
+            parent=self.parent,
+        ):
+            self.participant_audit.invalidate_track_audit(track_id, reason="suspect_derivatives")
+            return
+        self.participant_audit.record_ingested_report(track_id, report, paths)
+        self._set_status("Audyt puli jest aktualny względem wybranych uczestników.")
+
     def add_images(self) -> None:
         track_id = self._require_current_track()
         if not track_id:
             return
-
-        try:
-            track = self.service.get_track(track_id)
-        except Exception as exc:
-            self._show_error(
-                "Nie udało się odczytać DRAFT-u",
-                exc,
+        track = self.service.get_track(track_id)
+        purpose = str(track.get("purpose") or "").lower()
+        participants = self.participant_audit.load_participants(track_id)
+        if purpose in {"ranking", "final_test"} and not participants:
+            messagebox.showwarning(
+                "Modele uczestniczące",
+                (
+                    "Najpierw wybierz modele uczestniczące w eksperymencie. "
+                    "Użyj przycisku „Modele uczestniczące…”. "
+                    "Niezależność puli obrazów będzie oceniana względem "
+                    "train/val właśnie tych modeli."
+                ),
+                parent=self.parent,
+            )
+            self._set_status(
+                "Najpierw wybierz modele uczestniczące. "
+                "Dopiero potem można dodać pulę obrazów."
             )
             return
 
         selection = choose_pz3_source_candidates(self.parent)
         if selection is None:
             return
-
         if selection.mode == "folder":
             if not review_source_image_directory(
-                self.parent,
-                selection.source_dir,
-                recursive=False,
+                self.parent, selection.source_dir, recursive=False,
                 title="Podgląd i korekta nazw — PZ3",
             ):
                 return
-            selected_paths = collect_folder_candidates(selection.source_dir)
+            selected_paths = list(collect_folder_candidates(selection.source_dir))
         else:
-            review_result = review_source_image_paths(
-                self.parent,
-                selection.paths,
+            review = review_source_image_paths(
+                self.parent, selection.paths,
                 title="Podgląd i korekta nazw — PZ3",
             )
-            if not review_result.ok:
+            if not review.ok:
                 return
-            selected_paths = tuple(review_result.accepted_paths)
-
+            selected_paths = list(review.accepted_paths)
         if not selected_paths:
+            return
+
+        progress = BatchProgressDialog(self.parent, title="Przygotowanie puli obrazów")
+        try:
+            fingerprints = self.participant_audit.fingerprint_paths(
+                selected_paths, progress=progress.update
+            )
+        finally:
+            progress.close()
+
+        existing = self.service.list_members(track_id)
+        existing_shas = {str(row.get("sha256") or "").lower() for row in existing}
+        existing_names = {str(row.get("original_name") or "").casefold() for row in existing}
+        unique, seen_sha, seen_name = [], set(), set()
+        skipped_track, skipped_batch, skipped_name = [], [], []
+        for path in selected_paths:
+            path = Path(path)
+            sha = fingerprints.get(path, "")
+            key = path.name.casefold()
+            if sha in existing_shas:
+                skipped_track.append(path.name)
+                continue
+            if sha in seen_sha:
+                skipped_batch.append(path.name)
+                continue
+            if key in existing_names or key in seen_name:
+                skipped_name.append(path.name)
+                continue
+            seen_sha.add(sha)
+            seen_name.add(key)
+            unique.append(path)
+        if not unique:
             messagebox.showinfo(
                 "Dodaj obrazy",
-                "Po korekcie/odrzuceniu nie pozostały żadne obrazy do dodania.",
+                f"Brak nowych kandydatów.\n\nJuż w torze: {len(skipped_track)}\n"
+                f"Duplikaty wyboru: {len(skipped_batch)}\nKolizje nazw: {len(skipped_name)}",
                 parent=self.parent,
             )
             return
 
-        try:
-            existing_members = self.service.list_members(track_id)
-        except Exception:
-            existing_members = []
-
-        resolver = getattr(
-            self.repository,
-            "list_source_image_ids_by_sha256",
-            None,
-        )
-        duplicate_preflight = preflight_deduplicate_candidates(
-            selected_paths,
-            existing_members,
-            source_ids_for_sha=(resolver if callable(resolver) else None),
-        )
-        duplicate_summary = format_candidate_preflight_summary(
-            duplicate_preflight
-        )
-        selected = tuple(str(path) for path in duplicate_preflight.candidates)
-
-        if not selected:
-            messagebox.showinfo(
-                "Brak nowych kandydatów",
-                duplicate_summary,
-                parent=self.parent,
-            )
-            self._refresh_selected_details()
-            return
-
-        track_target = str(
-            track.get("target") or ""
-        ).strip().lower()
-        if track_target == "char":
-            crop_parents = {
-                str(Path(raw).parent.resolve())
-                for raw in selected
-            }
-            if len(crop_parents) != 1:
-                messagebox.showerror(
-                    "Nieprawidłowy zasób cropów",
-                    (
-                        "Cropy MZ muszą pochodzić z jednego katalogu "
-                        "images powiązanego z jednym metadata.json."
-                    ),
+        report = None
+        accepted = list(unique)
+        if participants:
+            existing_paths = self._track_member_paths(track)
+            report = self._run_participant_pool_audit(track_id, existing_paths + unique)
+            by_path = {str(Path(item.path).resolve()).casefold(): item for item in report.candidates}
+            bad_existing = []
+            suspect_existing = []
+            for path in existing_paths:
+                item = by_path.get(str(path.resolve()).casefold())
+                if item and item.common_status in {STATUS_DEPENDENT, STATUS_UNKNOWN}:
+                    bad_existing.append(item.filename)
+                elif item and item.common_status == STATUS_SUSPECT:
+                    suspect_existing.append(item.filename)
+            if bad_existing:
+                self.participant_audit.invalidate_track_audit(
+                    track_id, reason="existing_pool_invalid_for_participants"
+                )
+                messagebox.showwarning(
+                    "Istniejąca pula nie pasuje do rankingu",
+                    "Usuń problematyczne obrazy z DRAFT przed dodaniem kolejnych.\n\n"
+                    + "\n".join(bad_existing[:12]),
                     parent=self.parent,
                 )
                 return
-            filename_report = validate_plate_crop_directory(
-                Path(next(iter(crop_parents)))
-            )
-        else:
-            filename_report = validate_source_image_paths(selected)
-
-        if not filename_report.valid:
-            messagebox.showerror(
-                "Nieprawidłowe nazwy obrazów",
-                (
-                    "Audyt niezależności nie został uruchomiony, "
-                    "bo wybrana pula nie spełnia kontraktu nazw.\n\n"
-                    + format_filename_contract_report(
-                        filename_report
+            reject_suspects = False
+            if report.suspect_count:
+                reject_suspects = messagebox.askyesno(
+                    "Podejrzane pochodne",
+                    f"Wykryto {report.suspect_count} podejrzanych pochodnych.\n\n"
+                    "Odrzucić podejrzane NOWE obrazy? (Zalecane: TAK)",
+                    parent=self.parent,
+                )
+                if suspect_existing and reject_suspects:
+                    self.participant_audit.invalidate_track_audit(
+                        track_id, reason="existing_suspect_derivatives"
                     )
-                ),
-                parent=self.parent,
-            )
-            self._set_status(
-                "Nie dodano obrazów: najpierw popraw nazwy plików."
-            )
-            return
+                    messagebox.showwarning(
+                        "Podejrzane obrazy już są w DRAFT",
+                        "Usuń je ręcznie albo ponów audyt i świadomie je zaakceptuj.\n\n"
+                        + "\n".join(suspect_existing[:12]),
+                        parent=self.parent,
+                    )
+                    return
+            accepted = []
+            for path in unique:
+                item = by_path.get(str(path.resolve()).casefold())
+                if not item:
+                    continue
+                if item.common_status == STATUS_CLEAN:
+                    accepted.append(path)
+                elif item.common_status == STATUS_SUSPECT and not reject_suspects:
+                    accepted.append(path)
 
-        self._set_status(
-            "Audytuję wybraną pulę względem całej zarejestrowanej "
-            "historii train/val tego targetu..."
-        )
-        try:
-            self.parent.configure(cursor="watch")
-            self.parent.update_idletasks()
-        except Exception:
-            pass
-
-        try:
-            auditor = SourcePoolIndependenceAuditService(
-                self.workspace,
-                repository=self.repository,
-            )
-            report = auditor.audit(
-                selected,
-                target=str(track.get("target") or ""),
-                purpose=str(track.get("purpose") or ""),
-                track_id=track_id,
-            )
-            experiment_paths = self.service.get_experiment_workspace(
-                track_id
-            )
-            report_dir = Path(
-                experiment_paths["experiment_results"]
-            )
-        except Exception as exc:
-            self._show_error(
-                "Audyt puli obrazów nie powiódł się",
-                exc,
-            )
-            return
-        finally:
-            try:
-                self.parent.configure(cursor="")
-            except Exception:
-                pass
-
-        summary = prepend_candidate_preflight_summary(duplicate_summary, format_source_pool_audit_summary(report))
-        purpose = str(track.get("purpose") or "").strip().lower()
-
-        if (
-            report.reference_count <= 0
-            and purpose in {"ranking", "final_test"}
-        ):
-            report_path = auditor.save_report(
-                report,
-                report_dir,
-                decision={
-                    "status": "blocked_no_training_reference",
-                    "accepted_count": 0,
-                },
-            )
-            messagebox.showerror(
-                "Audyt niezależności puli",
-                (
-                    summary
-                    + "\n\nDla rankingu/testu końcowego brak "
-                    "zarejestrowanego train/val uniemożliwia "
-                    "kontrolowany preflight.\n\nRaport:\n"
-                    + str(report_path)
-                ),
-                parent=self.parent,
-            )
-            self._set_status(
-                "Nie dodano obrazów: brak podstawy do audytu train/val."
-            )
-            return
-
-        clean_items = list(
-            report.items_with_status(SOURCE_AUDIT_CLEAN)
-        )
-        suspect_items = list(
-            report.items_with_status(SOURCE_AUDIT_SUSPECT)
-        )
-        dependent_items = list(
-            report.items_with_status(SOURCE_AUDIT_DEPENDENT)
-        )
-        unknown_items = list(
-            report.items_with_status(SOURCE_AUDIT_UNKNOWN)
-        )
-
-        include_suspects = False
-        cancelled = False
-
-        if suspect_items:
-            choice = messagebox.askyesnocancel(
-                "Audyt niezależności puli",
-                (
-                    summary
-                    + "\n\nZALEŻNE i nierozstrzygnięte pliki "
-                    "zostaną odrzucone automatycznie.\n\n"
-                    "TAK — odrzuć również PODEJRZANE POCHODNE "
-                    "(zalecane dla ranking/final_test).\n"
-                    "NIE — dodaj podejrzane razem z plikami bez "
-                    "wykrytej zależności.\n"
-                    "ANULUJ — nie dodawaj nic."
-                ),
-                parent=self.parent,
-            )
-            if choice is None:
-                cancelled = True
-            elif choice is False:
-                include_suspects = True
-        else:
-            proceed = messagebox.askyesno(
-                "Audyt niezależności puli",
-                (
-                    summary
-                    + "\n\nZALEŻNE i nierozstrzygnięte pliki "
-                    "zostaną odrzucone automatycznie.\n\n"
-                    f"Dodać {len(clean_items)} obrazów bez "
-                    "wykrytej zależności?"
-                ),
-                parent=self.parent,
-            )
-            cancelled = not proceed
-
-        if cancelled:
-            report_path = auditor.save_report(
-                report,
-                report_dir,
-                decision={
-                    "status": "cancelled",
-                    "accepted_count": 0,
-                    "dependent_rejected": len(dependent_items),
-                    "suspect_count": len(suspect_items),
-                    "unknown_rejected": len(unknown_items),
-                },
-            )
-            self._set_status(
-                "Audyt zakończony; użytkownik anulował ingest. "
-                f"Raport: {report_path}"
-            )
-            return
-
-        accepted_items = list(clean_items)
-        if include_suspects:
-            accepted_items.extend(suspect_items)
-
-        added = 0
-        errors: list[str] = []
-        ingested_names: list[str] = []
-        for item in accepted_items:
-            path = Path(item.source_path)
-            try:
-                self.service.ingest_member_source(
-                    track_id,
-                    path,
-                    original_name=item.original_name,
-                )
-                added += 1
-                ingested_names.append(item.original_name)
-            except Exception as exc:
-                errors.append(
-                    f"{item.original_name}: {exc}"
-                )
-
-        decision = {
-            "status": "accepted",
-            "suspects_included": bool(include_suspects),
-            "accepted_for_ingest_count": len(accepted_items),
-            "ingested_count": added,
-            "ingested_names": ingested_names,
-            "dependent_rejected": len(dependent_items),
-            "suspect_rejected": (
-                0 if include_suspects else len(suspect_items)
-            ),
-            "unknown_rejected": len(unknown_items),
-            "ingest_errors": errors,
-        }
-        report_path = auditor.save_report(
-            report,
-            report_dir,
-            decision=decision,
-        )
-
-        self.refresh_tracks(
-            select_track_id=track_id
-        )
-
-        if errors:
-            messagebox.showwarning(
-                "Eksperymenty — ingest po audycie",
-                (
-                    f"Dodano {added} obrazów po audycie.\n"
-                    f"Pominięto dodatkowo {len(errors)} z powodu "
-                    "błędów ingestu.\n\n"
-                    + "\n".join(errors[:12])
-                    + "\n\nRaport:\n"
-                    + str(report_path)
-                ),
-                parent=self.parent,
-            )
-        else:
+        if not accepted:
             messagebox.showinfo(
-                "Audyt i ingest zakończone",
-                (
-                    summary
-                    + "\n\n"
-                    f"Do DRAFT-u dodano: {added}.\n"
-                    f"Twardo zależne odrzucono: "
-                    f"{len(dependent_items)}.\n"
-                    f"Podejrzane odrzucono: "
-                    f"{0 if include_suspects else len(suspect_items)}.\n"
-                    f"Nierozstrzygnięte odrzucono: "
-                    f"{len(unknown_items)}.\n\n"
-                    f"Raport:\n{report_path}"
-                ),
+                "Dodaj obrazy",
+                "Po audycie nie pozostały żadne nowe obrazy do dodania.",
                 parent=self.parent,
             )
-            self._set_status(
-                f"Audyt zakończony. Dodano {added} obrazów; "
-                f"zależne={len(dependent_items)}, "
-                f"podejrzane={len(suspect_items)}, "
-                f"nierozstrzygnięte={len(unknown_items)}. "
-                "Możesz teraz przygotować Ground Truth w Z2."
-            )
+            return
+
+        sha_map = {str(path): fingerprints.get(path, "") for path in accepted}
+        if report is not None:
+            for item in report.candidates:
+                for path in accepted:
+                    if Path(item.path).resolve() == path.resolve():
+                        sha_map[str(path)] = item.sha256
+
+        try:
+            self.service.add_members_batch(track_id, accepted, sha256_by_path=sha_map)
+        except Exception as exc:
+            self._show_error("Nie udało się dodać puli obrazów", exc)
+            return
+
+        if report is not None:
+            try:
+                self.participant_audit.record_ingested_report(track_id, report, accepted)
+            except Exception:
+                self.participant_audit.invalidate_track_audit(
+                    track_id, reason="audit_state_write_failed"
+                )
+
+        self.refresh_tracks(select_track_id=track_id)
+        self._set_status(
+            f"Dodano: {len(accepted)} | już w torze: {len(skipped_track)} | "
+            f"duplikaty wyboru: {len(skipped_batch)} | kolizje nazw: {len(skipped_name)}"
+        )
 
     def remove_selected_images(self) -> None:
         track_id = self._require_current_track()
@@ -1341,6 +1035,13 @@ class EvaluationTracksPanel:
         except Exception as exc:
             self._show_error("Nie udało się usunąć obrazów", exc)
             return
+
+        try:
+            self.participant_audit.invalidate_track_audit(
+                track_id, reason="members_removed"
+            )
+        except Exception:
+            pass
 
         removed_count = int(summary.get("removed_count") or 0)
         self.refresh_tracks(select_track_id=track_id)
@@ -1444,6 +1145,37 @@ class EvaluationTracksPanel:
             f"{bool(result.get('pose_corner_ready'))}."
         )
 
+    def _participant_audit_seal_issue(
+        self,
+        track_id: str,
+        track: Mapping[str, Any],
+    ) -> str:
+        # Zwróć tekst blokady seal albo pusty string.
+        purpose = str(track.get("purpose") or "").strip().lower()
+        if purpose not in {"ranking", "final_test"}:
+            return ""
+
+        participant_audit = getattr(self, "participant_audit", None)
+        if participant_audit is None:
+            # Izolowane testy GUI konstruują panel przez object.__new__
+            # i podstawiają FakeTrackService, bez Workspace/SQLite.
+            has_runtime_context = (
+                hasattr(self, "workspace")
+                and hasattr(self, "repository")
+            )
+            if has_runtime_context:
+                return (
+                    "Nie zainicjalizowano usługi audytu puli względem modeli. "
+                    "Odśwież PZ3 lub uruchom aplikację ponownie."
+                )
+            return ""
+
+        try:
+            participant_audit.assert_track_audit_ready(track_id)
+        except Exception as exc:
+            return str(exc)
+        return ""
+
     def seal_track(self) -> None:
         track_id = self._require_current_track()
         if not track_id:
@@ -1458,6 +1190,18 @@ class EvaluationTracksPanel:
             self._show_error(
                 "Nie udało się odczytać toru",
                 exc,
+            )
+            return
+
+        audit_issue = self._participant_audit_seal_issue(
+            track_id,
+            track,
+        )
+        if audit_issue:
+            messagebox.showwarning(
+                "Audyt puli względem modeli",
+                audit_issue,
+                parent=self.parent,
             )
             return
 
@@ -1728,6 +1472,38 @@ class EvaluationTracksPanel:
         except Exception:
             pass
 
+    def _participant_entry_ready(
+        self,
+        track: Mapping[str, Any] | None,
+    ) -> bool:
+        if not isinstance(track, Mapping):
+            return False
+
+        status = str(track.get("status") or "").strip().upper()
+        if status != STATUS_DRAFT:
+            return True
+
+        purpose = str(track.get("purpose") or "").strip().lower()
+        if purpose not in {"ranking", "final_test"}:
+            return True
+
+        participant_audit = getattr(self, "participant_audit", None)
+        if participant_audit is None:
+            return False
+
+        track_id = str(
+            track.get("track_id")
+            or getattr(self, "current_track_id", "")
+            or ""
+        ).strip()
+        if not track_id:
+            return False
+
+        try:
+            return bool(participant_audit.load_participants(track_id))
+        except Exception:
+            return False
+
     def _apply_action_state(
         self,
         track: Mapping[str, Any] | None,
@@ -1737,8 +1513,17 @@ class EvaluationTracksPanel:
         state = action_state_for_status(
             track.get("status") if isinstance(track, Mapping) else ""
         )
+        participant_entry_ready = self._participant_entry_ready(track)
         mapping = (
-            (self.btn_add_images, state.can_add_images),
+            (
+                self.btn_add_images,
+                state.can_add_images and participant_entry_ready,
+            ),
+            (self.btn_participants, state.can_select_participants),
+            (
+                self.btn_audit_pool,
+                state.can_audit_pool and participant_entry_ready,
+            ),
             (self.btn_remove_images, state.can_remove_images),
             (self.btn_set_gt, state.can_set_ground_truth),
             (self.btn_verify, state.can_verify),
@@ -1771,6 +1556,17 @@ class EvaluationTracksPanel:
         integrity: str,
     ) -> str:
         status = str(track.get("status") or "").upper()
+        if (
+            status == STATUS_DRAFT
+            and str(track.get("purpose") or "").strip().lower()
+            in {"ranking", "final_test"}
+            and not self._participant_entry_ready(track)
+        ):
+            return (
+                "DRAFT: najpierw wybierz modele uczestniczące. "
+                "Dopiero potem dodaj obrazy; ich zależność zostanie "
+                "sprawdzona względem train/val wybranych modeli."
+            )
         if status == STATUS_DRAFT:
             try:
                 member_count = len(
@@ -1784,22 +1580,22 @@ class EvaluationTracksPanel:
                 )
             if member_count <= 0:
                 return (
-                    "DRAFT — krok 1/4: użyj „Dodaj obrazy”. "
+                    "Pula obrazów: użyj „Dodaj obrazy”. "
                     "Program utworzy kontrolowaną pulę źródłową eksperymentu."
                 )
             if not str(track.get("gt_relative_path") or "").strip():
                 return (
-                    f"DRAFT — krok 2/4: pula zawiera {member_count} obrazów. "
+                    f"Ground Truth: pula zawiera {member_count} obrazów. "
                     "Użyj „Przygotuj GT w Z2”, a po zakończeniu wskaż "
                     "gotowy annotations.xml jako Ground Truth."
                 )
             return (
-                "DRAFT — krok 3/4: obrazy i Ground Truth są podłączone. "
+                "Zatwierdzenie: obrazy i Ground Truth są podłączone. "
                 "Uruchom weryfikację; po niej pozostanie zapieczętowanie toru."
             )
         if status == STATUS_VERIFIED:
             return (
-                "VERIFIED — krok 4/4: dane przeszły walidację. "
+                "VERIFIED: dane przeszły walidację. "
                 "Zapieczętuj tor, aby stał się kontrolowanym odniesieniem."
             )
         if status == STATUS_SEALED:
