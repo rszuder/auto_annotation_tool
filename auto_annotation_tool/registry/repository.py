@@ -813,6 +813,116 @@ class RegistryRepository:
                 ).fetchall()
             )
 
+
+    def remove_evaluation_track_members(
+        self,
+        track_id: str,
+        member_indices: list[int] | tuple[int, ...] | set[int],
+        *,
+        invalidate_ground_truth: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Atomowo usuń członków toru z rejestru."""
+        clean_id = str(track_id or "").strip()
+        indices = sorted({int(value) for value in member_indices})
+        if not clean_id:
+            raise ValueError("track_id nie może być pusty.")
+        if not indices:
+            return []
+
+        self.initialize()
+        placeholders = ",".join("?" for _ in indices)
+        params = [clean_id, *indices]
+
+        with self.database.transaction() as connection:
+            rows = list(
+                connection.execute(
+                    f"""
+                    SELECT *
+                    FROM evaluation_track_members
+                    WHERE track_id = ?
+                      AND member_index IN ({placeholders})
+                    ORDER BY member_index
+                    """,
+                    params,
+                ).fetchall()
+            )
+            found = {int(row["member_index"]) for row in rows}
+            missing = [value for value in indices if value not in found]
+            if missing:
+                raise ValueError(
+                    "Nie znaleziono członków toru o indeksach: "
+                    + ", ".join(str(value) for value in missing)
+                )
+
+            snapshots = [dict(row) for row in rows]
+            artifact_ids = tuple(
+                str(row["track_artifact_id"] or "").strip()
+                for row in rows
+                if str(row["track_artifact_id"] or "").strip()
+            )
+
+            connection.execute(
+                f"""
+                DELETE FROM evaluation_track_members
+                WHERE track_id = ?
+                  AND member_index IN ({placeholders})
+                """,
+                params,
+            )
+
+            for artifact_id in artifact_ids:
+                connection.execute(
+                    """
+                    DELETE FROM image_artifacts
+                    WHERE artifact_id = ?
+                      AND kind = 'evaluation_track_image'
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM evaluation_track_members AS member
+                          WHERE member.source_artifact_id =
+                                image_artifacts.artifact_id
+                             OR member.track_artifact_id =
+                                image_artifacts.artifact_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM dataset_members AS dataset_member
+                          WHERE dataset_member.artifact_id =
+                                image_artifacts.artifact_id
+                      )
+                    """,
+                    (artifact_id,),
+                )
+
+            connection.execute(
+                """
+                UPDATE evaluation_tracks
+                SET member_count = (
+                    SELECT COUNT(*)
+                    FROM evaluation_track_members
+                    WHERE track_id = ?
+                )
+                WHERE track_id = ?
+                """,
+                (clean_id, clean_id),
+            )
+
+            if invalidate_ground_truth:
+                connection.execute(
+                    """
+                    UPDATE evaluation_tracks
+                    SET gt_format = NULL,
+                        gt_relative_path = NULL,
+                        gt_sha256 = NULL,
+                        object_count = 0,
+                        verified_at = NULL
+                    WHERE track_id = ?
+                    """,
+                    (clean_id,),
+                )
+
+        return snapshots
+
     def next_evaluation_track_member_index(self, track_id: str) -> int:
         self.initialize()
         with self.database.read_connection() as connection:
@@ -1394,6 +1504,148 @@ class RegistryRepository:
                 """,
                 (str(dataset_id or "").strip(),),
             ).fetchone()
+
+    def list_source_image_ids_by_sha256(
+        self,
+        sha256: str,
+    ) -> list[str]:
+        sha = str(sha256 or "").strip().lower()
+        if not sha:
+            return []
+        self.initialize()
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_image_id
+                FROM source_images
+                WHERE LOWER(COALESCE(canonical_sha256, '')) = ?
+                UNION
+                SELECT source_image_id
+                FROM image_artifacts
+                WHERE LOWER(COALESCE(sha256, '')) = ?
+                ORDER BY source_image_id
+                """,
+                (sha, sha),
+            ).fetchall()
+        return [
+            str(row["source_image_id"] or "").strip()
+            for row in rows
+            if str(row["source_image_id"] or "").strip()
+        ]
+
+    def list_training_reference_members(
+        self,
+        target: str,
+        *,
+        splits: tuple[str, ...] = ("train", "val"),
+    ) -> list[sqlite3.Row]:
+        raw_target = str(target or "").strip().lower()
+        normalized_target = {
+            "plates": "plate",
+            "pose": "plate",
+            "mt": "plate",
+            "chars": "char",
+            "character": "char",
+            "characters": "char",
+            "ocr": "char",
+            "mz": "char",
+            "vehicles": "vehicle",
+            "mp": "vehicle",
+        }.get(raw_target, raw_target)
+
+        normalized_splits = tuple(
+            str(value or "").strip().lower()
+            for value in splits
+            if str(value or "").strip()
+        )
+        if not normalized_target or not normalized_splits:
+            return []
+
+        placeholders = ", ".join("?" for _ in normalized_splits)
+        params: tuple[Any, ...] = (
+            normalized_target,
+            *normalized_splits,
+        )
+
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    SELECT
+                        member.dataset_id,
+                        member.artifact_id,
+                        member.source_image_id,
+                        member.split,
+                        member.relative_path AS dataset_relative_path,
+                        member.file_sha256,
+                        source.origin_status,
+                        source.canonical_sha256,
+                        dataset.target AS dataset_target,
+                        dataset.purpose AS dataset_purpose,
+                        dataset.provenance_status AS dataset_provenance_status,
+                        dataset.relative_path AS dataset_root_relative_path,
+                        artifact.relative_path AS artifact_relative_path,
+                        artifact.external_path AS artifact_external_path,
+                        (
+                            SELECT location.relative_path
+                            FROM dataset_locations AS location
+                            WHERE location.dataset_id = member.dataset_id
+                            ORDER BY
+                                location.is_primary DESC,
+                                COALESCE(location.discovered_at, '') DESC,
+                                location.location_key
+                            LIMIT 1
+                        ) AS dataset_location_relative_path,
+                        (
+                            SELECT location.external_path
+                            FROM dataset_locations AS location
+                            WHERE location.dataset_id = member.dataset_id
+                            ORDER BY
+                                location.is_primary DESC,
+                                COALESCE(location.discovered_at, '') DESC,
+                                location.location_key
+                            LIMIT 1
+                        ) AS dataset_location_external_path,
+                        (
+                            SELECT GROUP_CONCAT(DISTINCT run.run_id)
+                            FROM training_runs AS run
+                            WHERE run.dataset_id = member.dataset_id
+                        ) AS training_run_ids,
+                        (
+                            SELECT GROUP_CONCAT(DISTINCT model.model_id)
+                            FROM models AS model
+                            JOIN training_runs AS model_run
+                              ON model_run.run_id = model.run_id
+                            WHERE model_run.dataset_id = member.dataset_id
+                        ) AS model_ids
+                    FROM dataset_members AS member
+                    JOIN datasets AS dataset
+                      ON dataset.dataset_id = member.dataset_id
+                    JOIN source_images AS source
+                      ON source.source_image_id = member.source_image_id
+                    LEFT JOIN image_artifacts AS artifact
+                      ON artifact.artifact_id = member.artifact_id
+                    WHERE LOWER(COALESCE(dataset.target, '')) = ?
+                      AND LOWER(COALESCE(member.split, '')) IN ({placeholders})
+                      AND (
+                          LOWER(COALESCE(dataset.purpose, 'training')) = 'training'
+                          OR EXISTS (
+                              SELECT 1
+                              FROM training_runs AS used_run
+                              WHERE used_run.dataset_id = member.dataset_id
+                          )
+                      )
+                    ORDER BY
+                        member.dataset_id,
+                        member.split,
+                        member.relative_path,
+                        member.artifact_id
+                    """,
+                    params,
+                ).fetchall()
+            )
+
 
     def list_dataset_member_lineage(
         self,

@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 from ..config import SESSION
 from ..project_cache import PROJECT_CACHE
+from ..config import CONFIG
+from ..registry.experiment_workspace import load_active_z2_experiment_context
 from .z2_flow_models import (
     Z2CopyPayload,
     Z2CtaState,
@@ -167,11 +169,34 @@ def prepare_free_mode_workflow_runtime(host: "AnnotationTab") -> Z2FreeModeRunti
     free_mode_screen = host._coerce_free_mode_screen()
     if host.free_mode_screen_var.get() != free_mode_screen:
         host.free_mode_screen_var.set(free_mode_screen)
+
+    experiment_context = {}
+    try:
+        if host._is_free_mode_session_context():
+            experiment_context = load_active_z2_experiment_context(
+                CONFIG.WORKSPACE_DIR
+            )
+    except Exception:
+        experiment_context = {}
+
+    if experiment_context:
+        try:
+            host.input_dir_var.set(
+                str(experiment_context["source_dir"])
+            )
+        except Exception:
+            pass
+        try:
+            host.output_dir_var.set(
+                str(experiment_context["annotation_dir"])
+            )
+        except Exception:
+            pass
+
     return Z2FreeModeRuntimeState(
         free_mode_screen=free_mode_screen,
         available_primary_action_ids=[],
     )
-
 
 def jump_to_export_section(host: "AnnotationTab") -> None:
     campaign_context = not host._is_free_mode_session_context()

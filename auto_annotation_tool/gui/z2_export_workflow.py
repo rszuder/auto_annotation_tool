@@ -134,6 +134,27 @@ def _start_plate_dataset_export(self):
         xml_path = run_dir / "annotations.xml"
 
     if export_source_kind == "z2_run_export":
+        run_manifest = self._load_annotation_run_manifest(run_dir)
+        experiment_bound = bool(
+            run_manifest.get("experiment_bound")
+            or str(
+                run_manifest.get("evaluation_track_id") or ""
+            ).strip()
+            or run_manifest.get(
+                "training_dataset_export_allowed"
+            ) is False
+        )
+        if experiment_bound:
+            return messagebox.showerror(
+                "Eksperyment — eksport treningowy zablokowany",
+                (
+                    "Ten run Z2 należy do niezależnego materiału "
+                    "eksperymentalnego. Nie może zasilić "
+                    "4_training_datasets ani train/val.\n\n"
+                    "Użyj annotations.xml jako Ground Truth toru w PZ3."
+                ),
+            )
+
         approval_state = self._get_run_plate_strict_approved_state(run_dir)
         min_dataset_plates = int(getattr(CONFIG, "CAMPAIGN_MIN_PLATE_ANNOTATIONS", 10) or 10)
         approved_dataset_plates = int(approval_state.get("approved_plates", 0) or 0)

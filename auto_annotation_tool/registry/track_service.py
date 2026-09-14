@@ -20,6 +20,12 @@ from ..pose_corners import (
     quad_is_non_degenerate,
 )
 from .repository import RegistryRepository
+from .experiment_workspace import (
+    activate_z2_experiment_context,
+    clear_active_z2_experiment_context,
+    ensure_experiment_workspace,
+    experiment_workspace_for_track,
+)
 
 TRACK_SCHEMA = "alpr.evaluation_track.v1"
 SEAL_SCHEMA = "alpr.evaluation_track_seal.v1"
@@ -148,7 +154,9 @@ class EvaluationTrackService:
         repository: RegistryRepository | None = None,
     ) -> None:
         self.workspace = Path(workspace_dir or CONFIG.WORKSPACE_DIR)
-        self.root = self.workspace / "10_evaluation_tracks"
+        self.experiments_root = self.workspace / "10_experiments"
+        self.root = self.experiments_root / "tracks"
+        self.legacy_root = self.workspace / "10_evaluation_tracks"
         self.repository = repository or RegistryRepository.for_workspace(self.workspace)
         self.repository.initialize()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -210,8 +218,42 @@ class EvaluationTrackService:
                 created_at=created_at,
             )
             self._write_manifest(track_id)
+            created = self.repository.get_evaluation_track(track_id)
+            if created is None:
+                raise EvaluationTrackError(
+                    "Nie udało się odczytać nowo utworzonego toru."
+                )
+            ensure_experiment_workspace(
+                experiment_workspace_for_track(
+                    self.workspace,
+                    dict(created),
+                )
+            )
         except Exception:
+            try:
+                if self.repository.get_evaluation_track(track_id) is not None:
+                    self.repository.delete_draft_evaluation_track(track_id)
+            except Exception:
+                pass
             shutil.rmtree(track_root, ignore_errors=True)
+            try:
+                staging = experiment_workspace_for_track(
+                    self.workspace,
+                    {
+                        "track_id": track_id,
+                        "target": clean_target,
+                        "relative_path": relative_path,
+                    },
+                )
+                for candidate in (
+                    staging.source_images.parent,
+                    staging.annotation_runs,
+                    staging.experiment_runs,
+                    staging.experiment_results,
+                ):
+                    shutil.rmtree(candidate, ignore_errors=True)
+            except Exception:
+                pass
             raise
         return track_id
 
@@ -295,6 +337,200 @@ class EvaluationTrackService:
             destination.unlink(missing_ok=True)
             raise
         return member_index
+
+
+    def remove_members(
+        self,
+        track_id: str,
+        member_indices: list[int] | tuple[int, ...] | set[int],
+    ) -> dict[str, Any]:
+        """Usuń zaznaczone obrazy wyłącznie z toru DRAFT."""
+        track = self._require_status(track_id, STATUS_DRAFT)
+        requested = sorted({int(value) for value in member_indices})
+        if not requested:
+            raise EvaluationTrackError("Nie wybrano obrazów do usunięcia.")
+
+        members = self.repository.list_evaluation_track_members(track_id)
+        by_index = {int(row["member_index"]): row for row in members}
+        missing = [value for value in requested if value not in by_index]
+        if missing:
+            raise EvaluationTrackError(
+                "Nie znaleziono obrazów o indeksach: "
+                + ", ".join(str(value) for value in missing)
+            )
+
+        selected = [by_index[value] for value in requested]
+        track_root = self._track_root(track)
+        transaction_root = (
+            track_root / ".member_remove_staging" / uuid.uuid4().hex
+        )
+        staged_members: list[tuple[Path, Path]] = []
+        gt_staged: tuple[Path, Path] | None = None
+
+        gt_relative = str(track["gt_relative_path"] or "").strip()
+        gt_invalidated = bool(gt_relative)
+
+        try:
+            for row in selected:
+                relative = str(row["track_relative_path"] or "").strip()
+                if not relative:
+                    continue
+                source = track_root / relative
+                if not source.exists() or not source.is_file():
+                    continue
+                destination = (
+                    transaction_root
+                    / "members"
+                    / str(int(row["member_index"]))
+                    / source.name
+                )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(destination))
+                staged_members.append((source, destination))
+
+            if gt_invalidated:
+                gt_path = self.workspace / gt_relative
+                if gt_path.exists() and gt_path.is_file():
+                    staged_gt_path = (
+                        transaction_root / "ground_truth" / gt_path.name
+                    )
+                    staged_gt_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(gt_path), str(staged_gt_path))
+                    gt_staged = (gt_path, staged_gt_path)
+
+            removed_rows = self.repository.remove_evaluation_track_members(
+                track_id,
+                requested,
+                invalidate_ground_truth=gt_invalidated,
+            )
+        except Exception:
+            for original, staged in reversed(staged_members):
+                try:
+                    if staged.exists():
+                        original.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(staged), str(original))
+                except Exception:
+                    pass
+            if gt_staged is not None:
+                original, staged = gt_staged
+                try:
+                    if staged.exists():
+                        original.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(staged), str(original))
+                except Exception:
+                    pass
+            shutil.rmtree(transaction_root, ignore_errors=True)
+            raise
+
+        invalidated_gt_path = ""
+        if gt_staged is not None:
+            _old, staged = gt_staged
+            archive = (
+                track_root
+                / "ground_truth"
+                / "_invalidated_member_change"
+                / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+                / staged.name
+            )
+            try:
+                archive.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(staged), str(archive))
+                invalidated_gt_path = str(archive)
+            except Exception:
+                invalidated_gt_path = str(staged)
+
+        shutil.rmtree(transaction_root, ignore_errors=True)
+
+        quarantined_sources: list[str] = []
+        try:
+            configured = getattr(CONFIG, "DIR_10_EXPERIMENT_SOURCES", None)
+            source_root = (
+                Path(configured)
+                if configured
+                else self.workspace / "10_experiments" / "sources"
+            )
+            target = self._normalize_target(str(track["target"] or ""))
+            target_root = source_root / target
+            if target_root.exists():
+                track_dirs = [
+                    path
+                    for path in target_root.iterdir()
+                    if path.is_dir()
+                    and (
+                        path.name == str(track_id)
+                        or str(track_id).casefold() in path.name.casefold()
+                    )
+                ]
+                for track_dir in track_dirs:
+                    images_dir = track_dir / "images"
+                    if not images_dir.exists():
+                        continue
+                    for row in removed_rows:
+                        name = str(row.get("original_name") or "").strip()
+                        expected_sha = str(row.get("sha256") or "").strip().lower()
+                        if not name:
+                            continue
+                        candidate = images_dir / name
+                        if not candidate.exists() or not candidate.is_file():
+                            continue
+                        if expected_sha and self._sha256(candidate) != expected_sha:
+                            continue
+                        quarantine = (
+                            track_dir
+                            / "_removed_members"
+                            / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+                            / name
+                        )
+                        quarantine.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(candidate), str(quarantine))
+                        quarantined_sources.append(str(quarantine))
+        except Exception:
+            pass
+
+        context_invalidated = False
+        try:
+            configured_state = getattr(CONFIG, "DIR_10_EXPERIMENT_STATE", None)
+            state_root = (
+                Path(configured_state)
+                if configured_state
+                else self.workspace / "10_experiments" / "_state"
+            )
+            active_context = state_root / "active_z2_context.json"
+            if active_context.exists():
+                payload = json.loads(active_context.read_text(encoding="utf-8"))
+                if str(payload.get("track_id") or "").strip() == str(track_id):
+                    archive = (
+                        state_root
+                        / "invalidated_contexts"
+                        / (
+                            datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+                            + "_"
+                            + str(track_id)
+                            + ".json"
+                        )
+                    )
+                    archive.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(active_context), str(archive))
+                    context_invalidated = True
+        except Exception:
+            pass
+
+        self._write_manifest(track_id)
+
+        return {
+            "track_id": str(track_id),
+            "removed_count": len(removed_rows),
+            "removed_member_indices": [
+                int(row["member_index"]) for row in removed_rows
+            ],
+            "removed_names": [
+                str(row.get("original_name") or "") for row in removed_rows
+            ],
+            "ground_truth_invalidated": gt_invalidated,
+            "invalidated_gt_path": invalidated_gt_path,
+            "experiment_sources_quarantined": quarantined_sources,
+            "z2_context_invalidated": context_invalidated,
+        }
 
     def set_ground_truth(
         self,
@@ -585,6 +821,10 @@ class EvaluationTrackService:
             sealed_at=sealed_at,
             manifest_sha256=manifest_sha,
             seal_sha256=seal_sha,
+        )
+        clear_active_z2_experiment_context(
+            self.workspace,
+            track_id=track_id,
         )
         return self.verify_integrity(track_id)
 
@@ -1000,61 +1240,274 @@ class EvaluationTrackService:
         )
 
 
-    def delete_draft(self, track_id: str) -> None:
-        """Usuń roboczy DRAFT bez naruszania zapieczętowanej historii."""
+    def get_experiment_workspace(
+        self,
+        track_id: str,
+        *,
+        create: bool = True,
+    ) -> dict[str, str]:
+        track = self._require_track(track_id)
+        paths = experiment_workspace_for_track(
+            self.workspace,
+            dict(track),
+        )
+        if create:
+            ensure_experiment_workspace(paths)
+        return paths.as_dict()
+
+    def ingest_member_source(
+        self,
+        track_id: str,
+        source_path: Path | str,
+        *,
+        original_name: str | None = None,
+    ) -> int:
+        """Wprowadź obraz przez kontrolowany katalog źródeł eksperymentu."""
 
         track = self._require_status(
             track_id,
             STATUS_DRAFT,
         )
-        track_root = self._track_root(track)
-
-        tombstone: Path | None = None
-        if track_root.exists():
-            if not track_root.is_dir():
-                raise EvaluationTrackError(
-                    "Ścieżka DRAFT nie jest katalogiem."
-                )
-            tombstone = track_root.with_name(
-                ".deleting__"
-                + track_root.name
-                + "__"
-                + uuid.uuid4().hex[:8]
+        source = Path(source_path)
+        if not source.exists() or not source.is_file():
+            raise EvaluationTrackError(
+                f"Brak pliku źródłowego: {source}"
             )
-            try:
-                track_root.rename(tombstone)
-            except OSError as exc:
+
+        name = str(original_name or source.name).strip()
+        if not name or Path(name).name != name:
+            raise EvaluationTrackError(
+                "Nazwa obrazu musi być samą nazwą pliku."
+            )
+
+        source_sha = self._sha256(source)
+        if not source_sha:
+            raise EvaluationTrackError(
+                f"Nie udało się policzyć SHA-256: {source}"
+            )
+
+        paths = ensure_experiment_workspace(
+            experiment_workspace_for_track(
+                self.workspace,
+                dict(track),
+            )
+        )
+        destination = paths.source_images / name
+        created_staging_copy = False
+
+        if destination.exists():
+            destination_sha = self._sha256(destination)
+            if destination_sha != source_sha:
                 raise EvaluationTrackError(
-                    "Nie udało się przygotować katalogu DRAFT "
-                    "do bezpiecznego usunięcia."
-                ) from exc
+                    "Katalog źródeł eksperymentu zawiera już "
+                    f"inny plik o nazwie: {name}"
+                )
+        else:
+            shutil.copy2(source, destination)
+            created_staging_copy = True
+            if self._sha256(destination) != source_sha:
+                destination.unlink(missing_ok=True)
+                raise EvaluationTrackError(
+                    "Kopia źródłowa eksperymentu nie zgadza się "
+                    "z wybranym plikiem."
+                )
 
         try:
-            self.repository.delete_draft_evaluation_track(
-                track_id
+            return self.add_member(
+                track_id,
+                destination,
+                original_name=name,
             )
-        except Exception as exc:
+        except Exception:
+            if created_staging_copy:
+                destination.unlink(missing_ok=True)
+            raise
+
+    def _sync_experiment_sources_from_members(
+        self,
+        track_id: str,
+    ) -> int:
+        """Uzupełnij staging źródeł dla DRAFT utworzonego starszą ścieżką."""
+
+        track = self._require_status(
+            track_id,
+            STATUS_DRAFT,
+        )
+        members = self.repository.list_evaluation_track_members(
+            track_id
+        )
+        if not members:
+            return 0
+
+        paths = ensure_experiment_workspace(
+            experiment_workspace_for_track(
+                self.workspace,
+                dict(track),
+            )
+        )
+        track_root = self._track_root(track)
+        synced = 0
+
+        for member in members:
+            name = str(member["original_name"] or "").strip()
+            expected_sha = str(
+                member["sha256"] or ""
+            ).strip().lower()
+            relative = str(
+                member["track_relative_path"] or ""
+            ).strip()
+            if not name or not relative or not expected_sha:
+                raise EvaluationTrackError(
+                    "Członek DRAFT-u ma niekompletne metadane."
+                )
+
+            source = track_root / relative
             if (
-                tombstone is not None
-                and tombstone.exists()
-                and not track_root.exists()
+                not source.is_file()
+                or self._sha256(source) != expected_sha
             ):
-                try:
-                    tombstone.rename(track_root)
-                except OSError:
-                    pass
+                raise EvaluationTrackError(
+                    "Nie można odtworzyć źródła eksperymentu: "
+                    f"{name}"
+                )
+
+            destination = paths.source_images / name
+            if destination.exists():
+                if self._sha256(destination) != expected_sha:
+                    raise EvaluationTrackError(
+                        "Źródło eksperymentu ma inną zawartość "
+                        f"niż członek toru: {name}"
+                    )
+                continue
+
+            shutil.copy2(source, destination)
+            if self._sha256(destination) != expected_sha:
+                destination.unlink(missing_ok=True)
+                raise EvaluationTrackError(
+                    "Nie udało się zsynchronizować źródła "
+                    f"eksperymentu: {name}"
+                )
+            synced += 1
+
+        return synced
+
+    def activate_z2_context(
+        self,
+        track_id: str,
+    ) -> dict[str, Any]:
+        track = self._require_status(
+            track_id,
+            STATUS_DRAFT,
+        )
+        if str(track["target"] or "").strip().lower() != "plate":
+            raise EvaluationTrackError(
+                "Integracja eksperymentalna Z2 jest obecnie dostępna "
+                "dla targetu plate/MT."
+            )
+
+        members = self.repository.list_evaluation_track_members(
+            track_id
+        )
+        if not members:
+            raise EvaluationTrackError(
+                "Najpierw użyj „Dodaj obrazy”. "
+                "Z2 może zostać uruchomione dopiero dla ustalonej "
+                "puli obrazów eksperymentu."
+            )
+
+        self._sync_experiment_sources_from_members(track_id)
+        return activate_z2_experiment_context(
+            self.workspace,
+            dict(track),
+        )
+
+    def deactivate_z2_context(
+        self,
+        *,
+        track_id: str | None = None,
+    ) -> bool:
+        return clear_active_z2_experiment_context(
+            self.workspace,
+            track_id=track_id,
+        )
+
+    def delete_draft(self, track_id: str) -> None:
+        # Usuń roboczy DRAFT wraz ze stagingiem eksperymentalnym.
+        track = self._require_status(track_id, STATUS_DRAFT)
+        track_root = self._track_root(track)
+        staging = experiment_workspace_for_track(
+            self.workspace,
+            dict(track),
+        )
+        managed_paths = [
+            track_root,
+            staging.source_images.parent,
+            staging.annotation_runs,
+            staging.experiment_runs,
+            staging.experiment_results,
+        ]
+        renamed: list[tuple[Path, Path]] = []
+
+        try:
+            for candidate in managed_paths:
+                if not candidate.exists():
+                    continue
+                if not candidate.is_dir():
+                    raise EvaluationTrackError(
+                        f"Ścieżka robocza nie jest katalogiem: {candidate}"
+                    )
+                tombstone = candidate.with_name(
+                    ".deleting__"
+                    + candidate.name
+                    + "__"
+                    + uuid.uuid4().hex[:8]
+                )
+                candidate.rename(tombstone)
+                renamed.append((candidate, tombstone))
+        except Exception as exc:
+            for original, tombstone in reversed(renamed):
+                if tombstone.exists() and not original.exists():
+                    try:
+                        tombstone.rename(original)
+                    except OSError:
+                        pass
+            if isinstance(exc, EvaluationTrackError):
+                raise
+            raise EvaluationTrackError(
+                "Nie udało się przygotować DRAFT do bezpiecznego usunięcia."
+            ) from exc
+
+        try:
+            self.repository.delete_draft_evaluation_track(track_id)
+        except Exception as exc:
+            for original, tombstone in reversed(renamed):
+                if tombstone.exists() and not original.exists():
+                    try:
+                        tombstone.rename(original)
+                    except OSError:
+                        pass
             raise EvaluationTrackError(
                 f"Nie udało się usunąć DRAFT: {exc}"
             ) from exc
 
-        if tombstone is not None and tombstone.exists():
+        clear_active_z2_experiment_context(
+            self.workspace,
+            track_id=track_id,
+        )
+
+        leftovers = []
+        for _original, tombstone in renamed:
+            if not tombstone.exists():
+                continue
             try:
                 shutil.rmtree(tombstone)
-            except OSError as exc:
-                raise EvaluationTrackError(
-                    "DRAFT usunięto z rejestru, ale pozostał "
-                    f"katalog roboczy: {tombstone}"
-                ) from exc
+            except OSError:
+                leftovers.append(str(tombstone))
+        if leftovers:
+            raise EvaluationTrackError(
+                "DRAFT usunięto z rejestru, ale pozostały katalogi robocze: "
+                + "; ".join(leftovers)
+            )
 
     def retire(self, track_id: str) -> None:
         self._require_status(track_id, STATUS_SEALED)
@@ -1650,9 +2103,14 @@ class EvaluationTrackService:
     def _track_root(self, track: Mapping[str, Any]) -> Path:
         relative = str(track["relative_path"] or "").strip()
         path = self.workspace / relative
-        if not self._is_within(path, self.root):
-            raise EvaluationTrackError("Ścieżka toru wychodzi poza 10_evaluation_tracks.")
-        return path
+        if self._is_within(path, self.root):
+            return path
+        if self._is_within(path, self.legacy_root):
+            return path
+        raise EvaluationTrackError(
+            "Ścieżka toru wychodzi poza 10_experiments/tracks "
+            "oraz legacy 10_evaluation_tracks."
+        )
 
     def _workspace_relative(self, path: Path) -> str:
         try:

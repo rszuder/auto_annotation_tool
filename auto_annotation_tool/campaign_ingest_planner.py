@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .config import CONFIG, logger
+from .source_filename_contract import extract_plate_tokens_from_source_filename
 
 
 CHAR_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -75,8 +76,7 @@ class CampaignIngestPlanner:
     # =========================================================
 
     def extract_true_texts_from_filename(self, filename: str) -> list[str]:
-        stem = Path(str(filename or "")).stem.upper()
-        return GROUND_TRUTH_PATTERN.findall(stem)
+        return extract_plate_tokens_from_source_filename(filename)
 
     def build_char_histogram(self, texts: Iterable[str]) -> dict[str, int]:
         counter: Counter[str] = Counter()

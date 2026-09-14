@@ -11,6 +11,10 @@ from tkinter import ttk, filedialog, messagebox
 
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
+from ..source_filename_contract import (
+    format_filename_contract_report,
+    validate_source_image_directory,
+)
 from ..character_recognition import PlateGenerator
 from ..data_models import Detection, ImageAnnotation
 from ..project_cache import PROJECT_CACHE
@@ -18,6 +22,7 @@ from .help_manager import HELP
 from .lazy_notebook_tab import _LazyNotebookTab
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .source_filename_review_dialog import review_source_image_directory
 
 
 def _is_live_widget(widget) -> bool:
@@ -1381,6 +1386,22 @@ def pick_images_dir(host) -> None:
         title="Wybierz katalog obrazów powiązany z annotations.xml"
     )
     if path:
+        filename_report = validate_source_image_directory(
+            path,
+            recursive=True,
+        )
+        if not filename_report.valid:
+            messagebox.showerror(
+                "Nieprawidłowy zasób O",
+                (
+                    "Katalog nie został przyjęty.\n\n"
+                    + format_filename_contract_report(
+                        filename_report
+                    )
+                ),
+                parent=getattr(host, "frame", None),
+            )
+            return
         host.images_dir_var.set(path)
 
 

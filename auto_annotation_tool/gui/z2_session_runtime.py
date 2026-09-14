@@ -117,6 +117,7 @@ from .z2_shared_ui import (
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SESSION
+from ..registry.experiment_workspace import load_active_z2_experiment_context
 from ..annotators.runtime_factory import validate_pt_model_path_for_runtime
 from ..icons import IconManager
 from ..exporters import CVATExporter, ReportGenerator
@@ -133,9 +134,11 @@ from .canvas_progress_overlay import CanvasProgressOverlay
 NAV_BUTTON_WIDTH = 18
 
 def _annotation_session_defaults(self) -> dict:
-    return {
+    defaults = {
         "input_dir": str(Path(CONFIG.DIR_1_RAW).absolute()),
-        "output_dir": str(Path(CONFIG.get_auto_annotations_dir("plate")).absolute()),
+        "output_dir": str(
+            Path(CONFIG.get_auto_annotations_dir("plate")).absolute()
+        ),
         "mode": "C: Pojazdy + tablice",
         "vehicle_model": "",
         "vehicle_custom": "",
@@ -169,6 +172,28 @@ def _annotation_session_defaults(self) -> dict:
         "plate_model_scope": "",
     }
 
+    try:
+        from ..campaign_manager import CAMPAIGN
+        active_project = str(
+            CAMPAIGN.get_active_project_name() or ""
+        ).strip()
+    except Exception:
+        active_project = ""
+
+    experiment_context = (
+        load_active_z2_experiment_context(CONFIG.WORKSPACE_DIR)
+        if not active_project
+        else {}
+    )
+    if experiment_context:
+        defaults["input_dir"] = str(
+            experiment_context["source_dir"]
+        )
+        defaults["output_dir"] = str(
+            experiment_context["annotation_dir"]
+        )
+
+    return defaults
 
 def _annotation_auto_modal_defaults(self) -> dict:
     defaults = self._annotation_session_defaults()
@@ -608,6 +633,16 @@ def _path_is_within_any(self, candidate, roots) -> bool:
 
 
 def _get_annotation_output_base_dir(self) -> Path:
+    if self._is_free_mode_session_context():
+        experiment_context = load_active_z2_experiment_context(
+            CONFIG.WORKSPACE_DIR
+        )
+        if experiment_context:
+            output_dir = Path(
+                str(experiment_context["annotation_dir"])
+            )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            return output_dir
     if not self._is_free_mode_session_context():
         try:
             from ..campaign_manager import CAMPAIGN
