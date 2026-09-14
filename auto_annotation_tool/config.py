@@ -207,7 +207,18 @@ class Config:
     DIR_6_MODELS: Path      = WORKSPACE_DIR / "6_models"
     DIR_9_PROJECTS: Path    = WORKSPACE_DIR / "9_projects"
 
-    DIR_10_EVALUATION_TRACKS: Path = WORKSPACE_DIR / "10_evaluation_tracks"
+    # Stała przestrzeń badań niezależna od pętli treningowej.
+    DIR_10_EXPERIMENTS: Path = WORKSPACE_DIR / "10_experiments"
+    DIR_10_EXPERIMENT_SOURCES: Path = DIR_10_EXPERIMENTS / "sources"
+    DIR_10_EXPERIMENT_ANNOTATIONS: Path = DIR_10_EXPERIMENTS / "annotations"
+    DIR_10_EXPERIMENT_TRACKS: Path = DIR_10_EXPERIMENTS / "tracks"
+    DIR_10_EXPERIMENT_RUNS: Path = DIR_10_EXPERIMENTS / "runs"
+    DIR_10_EXPERIMENT_RESULTS: Path = DIR_10_EXPERIMENTS / "results"
+    DIR_10_EXPERIMENT_STATE: Path = DIR_10_EXPERIMENTS / "_state"
+    DIR_10_LEGACY_EVALUATION_TRACKS: Path = WORKSPACE_DIR / "10_evaluation_tracks"
+
+    # Alias zachowuje dotychczasową nazwę API.
+    DIR_10_EVALUATION_TRACKS: Path = DIR_10_EXPERIMENT_TRACKS
     # Lokalny rejestr SQLite pochodzenia danych, modeli i eksperymentów.
     DIR_REGISTRY: Path = WORKSPACE_DIR / "_registry"
     DIR_REGISTRY_BACKUPS: Path = DIR_REGISTRY / "backups"

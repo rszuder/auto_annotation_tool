@@ -122,6 +122,7 @@ from .z2_shared_ui import (
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SESSION
+from ..registry.experiment_workspace import load_active_z2_experiment_context
 from ..annotators.runtime_factory import validate_pt_model_path_for_runtime
 from ..icons import IconManager
 from ..exporters import CVATExporter, ReportGenerator
@@ -180,6 +181,26 @@ def _get_annotation_run_storage_display_path(self) -> str:
 
 
 def _get_annotation_run_definition_text(self) -> str:
+    try:
+        experiment_context = (
+            load_active_z2_experiment_context(CONFIG.WORKSPACE_DIR)
+            if self._is_free_mode_session_context()
+            else {}
+        )
+    except Exception:
+        experiment_context = {}
+    if experiment_context:
+        name = str(
+            experiment_context.get("name")
+            or experiment_context.get("track_id")
+            or "eksperyment"
+        )
+        return (
+            f"Aktywny eksperyment: {name}. Z2 przygotowuje materiał "
+            "referencyjny w 10_experiments/annotations. "
+            "Ten run nie może zostać wyeksportowany do datasetu "
+            "treningowego; blokada jest zapisana w run_manifest.json."
+        )
     return (
         "Run autoanotacji Z2 to katalog z plikiem annotations.xml i zgodnymi obrazami "
         "(najczesciej w folderze images/ albo obok XML). Taki run moze tez zawierac "
@@ -303,10 +324,38 @@ def _write_annotation_run_manifest(self, run_dir: Path, input_dir: Path):
     source_input_dir = getattr(self, "_annotation_source_input_dir", None)
     if not source_input_dir:
         source_input_dir = input_dir
+    try:
+        experiment_context = (
+            load_active_z2_experiment_context(CONFIG.WORKSPACE_DIR)
+            if self._is_free_mode_session_context()
+            else {}
+        )
+    except Exception:
+        experiment_context = {}
+
     payload = {
         "input_dir": str(Path(input_dir).resolve()),
         "source_input_dir": str(Path(source_input_dir).resolve()),
         "run_dir": str(Path(run_dir).resolve()),
+        "experiment_bound": bool(experiment_context),
+        "experiment_context_schema": str(
+            experiment_context.get("schema") or ""
+        ),
+        "evaluation_track_id": str(
+            experiment_context.get("track_id") or ""
+        ),
+        "experiment_name": str(
+            experiment_context.get("name") or ""
+        ),
+        "experiment_purpose": str(
+            experiment_context.get("purpose") or ""
+        ),
+        "experiment_target": str(
+            experiment_context.get("target") or ""
+        ),
+        "training_dataset_export_allowed": (
+            False if experiment_context else True
+        ),
         "mode": str(self.mode_var.get() or "").strip(),
         "device": str(self.device_var.get() or "").strip(),
         "annotation_run_type": (

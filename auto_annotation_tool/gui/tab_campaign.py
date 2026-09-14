@@ -18,6 +18,10 @@ import shutil
 import threading
 
 from ..config import CONFIG, logger, PIL_AVAILABLE, Image, ImageTk, ImageDraw, ImageFont
+from ..source_filename_contract import (
+    format_filename_contract_report,
+    validate_source_image_directory,
+)
 from ..campaign_manager import CAMPAIGN
 from ..campaign_transition_graph import TRAINING_STAGE_CHARS, TRAINING_STAGE_PLATES
 from ..campaign_ingest_planner import CHAR_ALPHABET, CampaignIngestPlanner
@@ -43,6 +47,7 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z3_view_models import Step3ViewModel
 from .campaign_models import WizardStageStatus
+from .source_filename_review_dialog import review_source_image_directory
 
 
 class CampaignTab:
@@ -749,6 +754,17 @@ class CampaignTab:
         )
         if not selected:
             return False
+        if not review_source_image_directory(
+            self.frame,
+            selected,
+            recursive=True,
+            title="Podgląd i korekta zasobu O — kampania E1",
+        ):
+            try:
+                campaign_step1_ingest._hide_ingest_plan_progress_dialog(self)
+            except Exception:
+                pass
+            return
 
         campaign_step1_ingest._show_ingest_plan_progress_dialog(self, selected, parent=parent)
         campaign_step1_ingest._update_ingest_plan_progress_dialog(
@@ -757,6 +773,32 @@ class CampaignTab:
             "Weryfikuję wybrany katalog obrazów.",
             "Sprawdzam, czy wskazany folder zawiera obrazy i czy nie jest zbyt szeroki.",
         )
+        if selected:
+            filename_report = validate_source_image_directory(
+                selected,
+                recursive=True,
+            )
+            if not filename_report.valid:
+                campaign_step1_ingest._hide_ingest_plan_progress_dialog(self)
+                details = format_filename_contract_report(filename_report)
+                try:
+                    self.app.themed_error(
+                        "Nieprawidłowy zasób O",
+                        (
+                            "Katalog nie został przyjęty. "
+                            "Wszystkie obrazy zasobu O muszą mieć "
+                            "nazwy zgodne z kontraktem.\n\n"
+                            + details
+                        ),
+                    )
+                except Exception:
+                    messagebox.showerror(
+                        "Nieprawidłowy zasób O",
+                        details,
+                        parent=self.frame,
+                    )
+                return
+
         if not CAMPAIGN.set_master_pool_dir(selected):
             campaign_step1_ingest._hide_ingest_plan_progress_dialog(self)
             self.app.themed_info(

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
+from ..source_filename_contract import extract_plate_tokens_from_source_filename
 from ..project_cache import PROJECT_CACHE
 
 
@@ -492,56 +493,7 @@ def get_extract_preview_ready_count(host: "CharacterAnnotationTab", preview_dir=
 
 
 def extract_source_plate_tokens_from_filename(filename: str) -> list[str]:
-    stem = Path(str(filename or "")).stem.upper()
-    if not stem:
-        return []
-
-    ignore_tokens = {
-        "PLATE",
-        "PLATES",
-        "TABLICA",
-        "TABLICE",
-        "IMG",
-        "IMAGE",
-        "PHOTO",
-        "RAW",
-        "SOURCE",
-        "RUN",
-        "SAMPLE",
-        "SAMPLES",
-        "FRAME",
-        "CAPTURE",
-        "PREVIEW",
-        "FILE",
-        "PLIK",
-        "CROP",
-    }
-    parts = [
-        str(match.group(0) or "").strip().upper()
-        for match in re.finditer(r"[A-Z0-9]+", stem)
-        if str(match.group(0) or "").strip()
-    ]
-    parts = [part for part in parts if part not in ignore_tokens]
-    if len(parts) > 1 and parts[-1].isdigit():
-        previous_plate_like = any(
-            3 <= len(part) <= 12
-            and (any(ch.isalpha() for ch in part) or part.isdigit())
-            for part in parts[:-1]
-        )
-        if previous_plate_like:
-            parts = parts[:-1]
-
-    tokens: list[str] = []
-    seen: set[str] = set()
-    for part in parts:
-        if part in seen or len(part) < 3 or len(part) > 12:
-            continue
-        if not any(ch.isalpha() for ch in part) and not part.isdigit():
-            continue
-        seen.add(part)
-        tokens.append(part)
-    return tokens
-
+    return extract_plate_tokens_from_source_filename(filename)
 
 def plate_cut_reading_order_key(index_and_detection):
     original_index, detection = index_and_detection

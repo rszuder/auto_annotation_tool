@@ -30,64 +30,12 @@ from .web_slim_scrollbar import WebSlimScrollbar
 from ..campaign_manager import CAMPAIGN
 from ..character_recognition import CharacterDetector, DetectionMethod
 from ..config import CONFIG
+from ..source_filename_contract import extract_plate_tokens_from_source_filename
 from ..ocr import PlateOCR
 
 
 def get_true_texts_from_filename(filename: str) -> list:
-    stem = Path(str(filename or "")).stem.upper()
-    if not stem:
-        return []
-    ignore_tokens = {
-        "PLATE",
-        "PLATES",
-        "TABLICA",
-        "TABLICE",
-        "IMG",
-        "IMAGE",
-        "PHOTO",
-        "RAW",
-        "SOURCE",
-        "RUN",
-        "SAMPLE",
-        "SAMPLES",
-        "FRAME",
-        "CAPTURE",
-        "PREVIEW",
-        "FILE",
-        "PLIK",
-        "CROP",
-    }
-    parts = [
-        str(raw_part or "").strip().upper()
-        for raw_part in re.findall(r"[A-Z0-9]+", stem)
-        if str(raw_part or "").strip()
-    ]
-    filtered_parts = [part for part in parts if part not in ignore_tokens]
-    if len(filtered_parts) > 1 and filtered_parts[-1].isdigit():
-        previous_plate_like = any(
-            3 <= len(part) <= 12
-            and (any(ch.isalpha() for ch in part) or part.isdigit())
-            for part in filtered_parts[:-1]
-        )
-        if previous_plate_like:
-            filtered_parts = filtered_parts[:-1]
-
-    candidates = []
-    seen = set()
-    for part in filtered_parts:
-        if not part or part in seen:
-            continue
-        if len(part) < 3 or len(part) > 12:
-            continue
-        has_letter = any(ch.isalpha() for ch in part)
-        has_digit = any(ch.isdigit() for ch in part)
-        if not (has_letter or has_digit):
-            continue
-        seen.add(part)
-        candidates.append(part)
-
-    return candidates
-
+    return extract_plate_tokens_from_source_filename(filename)
 
 def get_current_prep_params(host) -> dict:
     return {

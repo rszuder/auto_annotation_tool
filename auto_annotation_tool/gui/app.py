@@ -3079,6 +3079,39 @@ class AutoAnnotationApp:
                 # Last requested tab wins. FIFO would replay stale clicks after a slow lazy-load.
                 self._lazy_tab_deferred_select_key = requested_key
 
+    def _schedule_z2_main_tab_entry_refresh(self, selected_key: str) -> bool:
+        """Odśwież układ Z2 po rzeczywistym wejściu na główną kartę.
+
+        Z2 może zostać zbudowane wcześniej w kontekście kampanii, gdzie część
+        sekcji jest celowo ukryta. Samo późniejsze wejście w trybie swobodnym
+        musi ponownie zastosować layout workflow; nie może czekać na przypadkową
+        zmianę kontrolki wewnątrz Z2.
+        """
+        if str(selected_key or "").strip() != "annotation":
+            return False
+
+        annotation_tab = getattr(self, "tabs", {}).get("annotation")
+        if annotation_tab is None or isinstance(annotation_tab, _LazyNotebookTab):
+            return False
+
+        refresh = getattr(annotation_tab, "_refresh_free_mode_workflow_ui", None)
+        if not callable(refresh):
+            return False
+
+        def _refresh():
+            try:
+                refresh()
+            except Exception:
+                logger.exception(
+                    "Nie udało się odświeżyć workflow Z2 po wejściu na kartę."
+                )
+
+        try:
+            self.root.after_idle(_refresh)
+        except Exception:
+            _refresh()
+        return True
+
     def _on_main_notebook_tab_changed(self, event=None):
         if bool(getattr(self, "_notebook_placeholder_dispose_in_progress", False)):
             return
@@ -3106,6 +3139,7 @@ class AutoAnnotationApp:
                 return
         self._guard_campaign_navigation(event)
         selected_key = self._get_selected_tab_key()
+        self._schedule_z2_main_tab_entry_refresh(selected_key)
         pending_lazy_key = str(getattr(self, "_lazy_tab_pending_select_key", "") or "").strip()
         if pending_lazy_key and selected_key != pending_lazy_key:
             pending_tab = getattr(self, "tabs", {}).get(pending_lazy_key)

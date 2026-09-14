@@ -125,6 +125,10 @@ from .z2_shared_ui import (
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 
 from ..config import CONFIG, logger, YOLO_AVAILABLE, AVAILABLE_DETECT_MODELS, SESSION
+from ..source_filename_contract import (
+    format_filename_contract_report,
+    validate_source_image_directory,
+)
 from ..annotators.runtime_factory import validate_pt_model_path_for_runtime
 from ..icons import IconManager
 from ..exporters import CVATExporter, ReportGenerator
@@ -136,6 +140,7 @@ from ..data_models import Detection, AnnotationStatus, ImageAnnotation, Annotati
 from ..rectification.polygon_validator import PolygonValidator
 from .help_manager import HELP
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .source_filename_review_dialog import review_source_image_directory
 from .canvas_progress_overlay import CanvasProgressOverlay
 from .z3_slim_progress_bar import SlimProgressBar as _SharedSlimProgressBar
 
@@ -952,6 +957,29 @@ class AnnotationTab:
             return
         p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()))
         if p:
+            if not review_source_image_directory(
+                self.frame,
+                p,
+                recursive=False,
+                title="Podgląd i korekta zasobu O — tryb swobodny Z2",
+            ):
+                return
+            filename_report = validate_source_image_directory(
+                p,
+                recursive=True,
+            )
+            if not filename_report.valid:
+                messagebox.showerror(
+                    "Nieprawidłowy zasób O",
+                    (
+                        "Katalog nie został przyjęty.\n\n"
+                        + format_filename_contract_report(
+                            filename_report
+                        )
+                    ),
+                    parent=self.frame,
+                )
+                return
             self._switch_annotation_input_dir(Path(p), show_hint=False)
 
     def _set_input_dir_path_only(self, input_dir: Path, *, resolved_input_dir: Path | None = None) -> None:
