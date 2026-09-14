@@ -572,6 +572,98 @@ class RegistryRepository:
 
 
 
+    def list_model_locations(
+        self,
+        model_id: str,
+    ) -> list[sqlite3.Row]:
+        clean_id = str(model_id or "").strip()
+        if not clean_id:
+            return []
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM model_locations
+                    WHERE model_id = ?
+                    ORDER BY is_primary DESC, location_key
+                    """,
+                    (clean_id,),
+                ).fetchall()
+            )
+
+    def list_model_experiment_references(
+        self,
+        model_id: str,
+    ) -> list[sqlite3.Row]:
+        clean_id = str(model_id or "").strip()
+        if not clean_id:
+            return []
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT
+                        participant.experiment_id,
+                        experiment.name,
+                        experiment.status,
+                        experiment.track_id
+                    FROM experiment_participants AS participant
+                    JOIN experiments AS experiment
+                      ON experiment.experiment_id = participant.experiment_id
+                    WHERE participant.model_id = ?
+                    ORDER BY experiment.created_at, participant.experiment_id
+                    """,
+                    (clean_id,),
+                ).fetchall()
+            )
+
+    def unregister_model(
+        self,
+        model_id: str,
+    ) -> dict[str, Any] | None:
+        """Usuń logiczny model z rejestru, nigdy plik checkpointu."""
+        clean_id = str(model_id or "").strip()
+        if not clean_id:
+            return None
+        self.initialize()
+        with self.database.transaction() as connection:
+            existing = connection.execute(
+                """
+                SELECT *
+                FROM models
+                WHERE model_id = ?
+                """,
+                (clean_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+
+            reference = connection.execute(
+                """
+                SELECT experiment_id
+                FROM experiment_participants
+                WHERE model_id = ?
+                LIMIT 1
+                """,
+                (clean_id,),
+            ).fetchone()
+            if reference is not None:
+                raise ValueError(
+                    "Model jest używany przez zapisany eksperyment "
+                    f"{reference['experiment_id']} i nie może zostać "
+                    "wyrejestrowany."
+                )
+
+            snapshot = dict(existing)
+            connection.execute(
+                "DELETE FROM models WHERE model_id = ?",
+                (clean_id,),
+            )
+            return snapshot
+
     def find_unique_image_artifact_by_sha256(
         self,
         sha256: str,
@@ -1716,6 +1808,26 @@ class RegistryRepository:
                 """,
                 (str(sha256 or "").strip().lower(),),
             ).fetchone()
+
+    def list_training_runs_for_target(
+        self,
+        target: str,
+    ) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT *
+                    FROM training_runs
+                    WHERE LOWER(COALESCE(target, '')) = LOWER(?)
+                    ORDER BY
+                        COALESCE(finished_at, started_at, '') DESC,
+                        run_id DESC
+                    """,
+                    (str(target or "").strip(),),
+                ).fetchall()
+            )
 
     def get_training_run(self, run_id: str) -> sqlite3.Row | None:
         self.initialize()

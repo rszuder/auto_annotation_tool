@@ -20,6 +20,7 @@ from .pz3_participant_audit import (
     BatchProgressDialog,
     ParticipantAuditMatrixDialog,
     ParticipantSelectionDialog,
+    TrainingRunSelectionDialog,
 )
 from ..registry.participant_pool_audit import (
     ParticipantPoolAuditService,
@@ -27,6 +28,11 @@ from ..registry.participant_pool_audit import (
     STATUS_DEPENDENT,
     STATUS_SUSPECT,
     STATUS_UNKNOWN,
+)
+from ..registry.participant_model_registry import (
+    eligible_training_runs,
+    register_existing_participant_model,
+    unregister_manual_participant_model,
 )
 
 from .experiment_gt_workflow import (
@@ -668,6 +674,124 @@ class EvaluationTracksPanel:
             pass
 
 
+    def _refresh_participant_model_registry(
+        self,
+        target: str,
+    ):
+        """Lekko przeładuj modele już obecne w centralnym rejestrze.
+
+        Pełny bootstrap Workspace jest celowo wyłączony z tego CTA: skanuje
+        również datasety treningowe i może liczyć ich fingerprinty, co jest
+        nieproporcjonalnie ciężkie dla zwykłego odświeżenia listy uczestników.
+        Nowe modele z treningów aplikacji są synchronizowane do rejestru przez
+        runtime_service, a obce checkpointy dodajemy jawnie przez
+        „Zarejestruj istniejący model…”.
+        """
+        models = self.participant_audit.list_eligible_models(
+            str(target or "").strip().lower()
+        )
+        return (
+            models,
+            f"Odświeżono listę modeli z rejestru: {len(models)}.",
+        )
+
+    def _register_existing_participant_model(
+        self,
+        track: Mapping[str, Any],
+    ):
+        target = str(track.get("target") or "").strip().lower()
+        path = filedialog.askopenfilename(
+            title="Wybierz istniejący checkpoint modelu",
+            filetypes=[
+                ("PyTorch checkpoint", "*.pt"),
+                ("Wszystkie pliki", "*.*"),
+            ],
+            parent=self.parent,
+        )
+        if not path:
+            return (
+                self.participant_audit.list_eligible_models(target),
+                "",
+                "Rejestracja anulowana.",
+            )
+
+        runs = eligible_training_runs(self.repository, target)
+        if not runs:
+            messagebox.showwarning(
+                "Rejestracja modelu",
+                (
+                    "Brak runów z provenance complete/known i dataset_id "
+                    f"dla targetu {target}. Najpierw odśwież rejestr "
+                    "albo zarejestruj historię treningu."
+                ),
+                parent=self.parent,
+            )
+            return (
+                self.participant_audit.list_eligible_models(target),
+                "",
+                "Brak odpowiedniego runu.",
+            )
+
+        run_id = TrainingRunSelectionDialog(
+            self.parent,
+            runs=runs,
+            model_name=Path(path).name,
+            target=target,
+        ).show()
+        if not run_id:
+            return (
+                self.participant_audit.list_eligible_models(target),
+                "",
+                "Rejestracja anulowana.",
+            )
+
+        if not messagebox.askyesno(
+            "Potwierdzenie pochodzenia modelu",
+            (
+                "Potwierdź tylko wtedy, gdy wskazany checkpoint rzeczywiście "
+                "powstał w wybranym runie.\n\n"
+                "To powiązanie określa, względem jakiego train/val będzie "
+                "sprawdzana niezależność puli eksperymentalnej. "
+                "Oświadczenie zostanie zapisane w rejestrze."
+            ),
+            parent=self.parent,
+        ):
+            return (
+                self.participant_audit.list_eligible_models(target),
+                "",
+                "Rejestracja anulowana.",
+            )
+
+        registration = register_existing_participant_model(
+            self.workspace,
+            path,
+            run_id=run_id,
+            target=target,
+            repository=self.repository,
+        )
+        models = self.participant_audit.list_eligible_models(target)
+        return (
+            models,
+            registration.model_id,
+            f"Zarejestrowano {registration.model_id} · historia treningu: potwierdzona ręcznie.",
+        )
+
+    def _unregister_participant_model(
+        self,
+        model_id: str,
+        target: str,
+    ):
+        result = unregister_manual_participant_model(
+            self.workspace,
+            model_id,
+            repository=self.repository,
+        )
+        models = self.participant_audit.list_eligible_models(target)
+        return (
+            models,
+            f"Wyrejestrowano {result.model_id}. Plik .pt pozostawiono bez zmian.",
+        )
+
     def select_participant_models(self) -> bool:
         track_id = self._require_current_track()
         if not track_id:
@@ -684,6 +808,16 @@ class EvaluationTracksPanel:
             models=models,
             selected_ids=current,
             track_name=str(track.get("name") or track_id),
+            on_refresh=lambda: self._refresh_participant_model_registry(
+                str(track.get("target") or "")
+            ),
+            on_register=lambda: self._register_existing_participant_model(
+                track
+            ),
+            on_unregister=lambda model_id: self._unregister_participant_model(
+                model_id,
+                str(track.get("target") or ""),
+            ),
         ).show()
         if result is None:
             return False

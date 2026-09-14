@@ -196,6 +196,53 @@ def build_source_review_rows(
     return tuple(rows)
 
 
+def _natural_review_key(value) -> tuple:
+    import re
+
+    text = str(value or "").strip().casefold()
+    parts = re.split(r"(\d+)", text)
+    return tuple(
+        int(part) if part.isdigit() else part
+        for part in parts
+        if part != ""
+    )
+
+
+def source_review_sort_key(
+    row: SourceReviewRow,
+    column: str,
+    *,
+    display_name: str | None = None,
+) -> tuple:
+    """Klucz sortowania tabeli podglądu/korekty nazw."""
+    key = str(column or "").strip().lower()
+    if key in {"#0", "file", "name"}:
+        return _natural_review_key(display_name or row.display_name)
+    if key == "problem":
+        return (
+            0 if row.unresolved else 1,
+            _natural_review_key(row.problem),
+            _natural_review_key(display_name or row.display_name),
+        )
+    if key == "action":
+        action = str(row.action or "")
+        upper = action.upper()
+        if "DO DECYZJI" in upper:
+            rank = 0
+        elif action.startswith("→"):
+            rank = 1
+        elif "ODRZUĆ" in upper:
+            rank = 2
+        else:
+            rank = 3
+        return (
+            rank,
+            _natural_review_key(action),
+            _natural_review_key(display_name or row.display_name),
+        )
+    return _natural_review_key(display_name or row.display_name)
+
+
 class _SourceFilenameReviewDialog:
     def __init__(
         self,
@@ -219,6 +266,11 @@ class _SourceFilenameReviewDialog:
             else None
         )
         self._preview_photo = None
+        self._sort_column = "#0"
+        self._sort_reverse = False
+        self._edit_entry = None
+        self._edit_iid = ""
+        self._review_rows_by_iid = {}
 
         self.window = tk.Toplevel(parent)
         self.window.title(title)
@@ -267,47 +319,81 @@ class _SourceFilenameReviewDialog:
             show="tree headings",
             selectmode="browse",
         )
-        self.tree.heading("#0", text="Plik")
-        self.tree.heading("problem", text="Walidacja")
-        self.tree.heading("action", text="Decyzja")
-        self.tree.column("#0", width=250)
+        self._heading_titles = {
+            "#0": "Plik",
+            "problem": "Walidacja",
+            "action": "Decyzja",
+        }
+        for column, title in self._heading_titles.items():
+            self.tree.heading(
+                column,
+                text=title,
+                command=lambda col=column: self._sort_by_column(col),
+            )
+        self.tree.column("#0", width=280)
         self.tree.column("problem", width=340)
         self.tree.column("action", width=180)
         self.tree.grid(row=0, column=0, sticky="nsew")
+
         scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.bind("<<TreeviewSelect>>", self._on_select)
+
+        self.tree.bind("<<TreeviewSelect>>", self._on_select, add="+")
+        self.tree.bind("<Return>", self._begin_inline_edit, add="+")
+        self.tree.bind("<F2>", self._begin_inline_edit, add="+")
+        self.tree.bind("<Up>", lambda _e: self._move_selection(-1), add="+")
+        self.tree.bind("<Down>", lambda _e: self._move_selection(1), add="+")
+        self.tree.bind("<Double-1>", self._on_tree_double_click, add="+")
 
         right = ttk.Frame(outer)
         right.grid(row=2, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
 
-        self.preview = ttk.Label(right, text="Wybierz plik z listy.", anchor="center")
+        self.preview = ttk.Label(
+            right,
+            text="Wybierz plik z listy.",
+            anchor="center",
+        )
         self.preview.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        ttk.Label(right, text="Nowa nazwa (bez rozszerzenia):").grid(row=1, column=0, sticky="w")
-        self.rename_var = tk.StringVar()
-        ttk.Entry(right, textvariable=self.rename_var).grid(row=2, column=0, sticky="ew", pady=(4, 8))
 
-        row = ttk.Frame(right)
-        row.grid(row=3, column=0, sticky="ew")
-        ttk.Button(row, text="Zmień nazwę", command=self._plan_rename).pack(side=tk.LEFT)
-        ttk.Button(row, text="Odrzuć z zasobu", command=self._reject_selected).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Separator(right).grid(row=4, column=0, sticky="ew", pady=12)
+        ttk.Label(
+            right,
+            text=(
+                "Edycja nazwy odbywa się bezpośrednio na liście.\n"
+                "Enter / F2 — edycja nazwy\n"
+                "Enter — zatwierdź zmianę\n"
+                "Esc — anuluj edycję\n"
+                "↑ / ↓ — poprzedni / następny plik"
+            ),
+            justify=tk.LEFT,
+            wraplength=360,
+        ).grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        ttk.Button(
+            right,
+            text="Odrzuć z zasobu",
+            command=self._reject_selected,
+        ).grid(row=2, column=0, sticky="w")
+
+        ttk.Separator(right).grid(row=3, column=0, sticky="ew", pady=12)
+
         ttk.Button(
             right,
             text="Odrzuć wszystkie błędne",
             command=self._reject_all,
-        ).grid(row=5, column=0, sticky="w")
+        ).grid(row=4, column=0, sticky="w")
+
         ttk.Label(
             right,
             text=(
-                "„Odrzuć” nie usuwa pliku. Zaplanowana poprawna zmiana nazwy "
-                "pozostaje widoczna na liście aż do końcowego „Zastosuj”."
+                "„Odrzuć” nie usuwa pliku. Zaplanowana poprawna zmiana "
+                "nazwy pozostaje widoczna na liście aż do końcowego "
+                "„Zastosuj”. Kliknij nagłówek kolumny, aby posortować listę."
             ),
             wraplength=360,
             justify=tk.LEFT,
-        ).grid(row=6, column=0, sticky="ew", pady=(10, 0))
+        ).grid(row=5, column=0, sticky="ew", pady=(10, 0))
 
         footer = ttk.Frame(outer)
         footer.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
@@ -319,8 +405,12 @@ class _SourceFilenameReviewDialog:
             wraplength=680,
             justify=tk.LEFT,
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(footer, text="Anuluj", command=self._cancel).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(footer, text="Zastosuj", command=self._apply).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(footer, text="Anuluj", command=self._cancel).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+        ttk.Button(footer, text="Zastosuj", command=self._apply).grid(
+            row=0, column=2, padx=(8, 0)
+        )
 
     def _iter_current_images(self) -> list[Path]:
         allowed = {str(ext).lower() for ext in CONFIG.IMAGE_EXTENSIONS}
@@ -344,35 +434,349 @@ class _SourceFilenameReviewDialog:
         except Exception:
             return []
 
-    def _reload(self) -> None:
+    def _reload(self, *, select_key: str | None = None) -> None:
+        previous = str(select_key or "")
+        if not previous:
+            selected = self.tree.selection()
+            previous = str(selected[0]) if selected else ""
+
+        self._cancel_inline_edit(refocus=False)
+
         paths = self._iter_current_images()
-        rows = build_source_review_rows(
-            paths,
-            rename_stems=self.rename_stems,
-            rejected_paths=self.rejected_paths,
-            root=self.root,
+        rows = list(
+            build_source_review_rows(
+                paths,
+                rename_stems=self.rename_stems,
+                rejected_paths=self.rejected_paths,
+                root=self.root,
+            )
         )
+        rows = self._sorted_review_rows(rows)
+        self._review_rows_by_iid = {str(row.path): row for row in rows}
+
         for iid in self.tree.get_children():
             self.tree.delete(iid)
+
         for row in rows:
             self.tree.insert(
                 "",
                 tk.END,
                 iid=str(row.path),
-                text=row.display_name,
+                text=self._display_name_for_row(row),
                 values=(row.problem, row.action),
             )
+
         unresolved = sum(1 for row in rows if row.unresolved)
         self.summary_var.set(
             f"Źródło: {self.root}\n"
-            f"Obrazów w zakresie: {len(paths)} | wymagających decyzji: {unresolved} | "
-            f"zmiany nazw: {len(self.rename_stems)} | odrzucenia: {len(self.rejected_paths)}"
+            f"Obrazów w zakresie: {len(paths)} | "
+            f"wymagających decyzji: {unresolved} | "
+            f"zmiany nazw: {len(self.rename_stems)} | "
+            f"odrzucenia: {len(self.rejected_paths)}"
         )
         self.status_var.set(
             "Każdy błędny plik musi zostać poprawiony albo odrzucony."
             if unresolved
             else "Wszystkie problematyczne pliki mają decyzję. Kliknij „Zastosuj”."
         )
+        self._refresh_sort_headings()
+
+        target = ""
+        if previous and self.tree.exists(previous):
+            target = previous
+        elif rows:
+            target = str(rows[0].path)
+
+        if target:
+            self.tree.selection_set(target)
+            self.tree.focus(target)
+            self.tree.see(target)
+            self._on_select()
+        else:
+            self._preview_photo = None
+            self.preview.configure(
+                image="",
+                text="Brak plików wymagających decyzji.",
+            )
+
+    def _display_name_for_row(self, row: SourceReviewRow) -> str:
+        key = str(row.path)
+        stem = str(self.rename_stems.get(key) or "").strip()
+        if not stem:
+            return row.display_name
+
+        candidate = stem + row.path.suffix
+        try:
+            shown = Path(row.display_name)
+            return str(shown.with_name(candidate))
+        except Exception:
+            return candidate
+
+    def _sorted_review_rows(
+        self,
+        rows: Iterable[SourceReviewRow],
+    ) -> list[SourceReviewRow]:
+        return sorted(
+            list(rows),
+            key=lambda row: source_review_sort_key(
+                row,
+                self._sort_column,
+                display_name=self._display_name_for_row(row),
+            ),
+            reverse=bool(self._sort_reverse),
+        )
+
+    def _refresh_sort_headings(self) -> None:
+        for column, title in self._heading_titles.items():
+            suffix = ""
+            if column == self._sort_column:
+                suffix = " ▼" if self._sort_reverse else " ▲"
+            self.tree.heading(
+                column,
+                text=title + suffix,
+                command=lambda col=column: self._sort_by_column(col),
+            )
+
+    def _sort_by_column(self, column: str) -> None:
+        selected = self.tree.selection()
+        selected_key = str(selected[0]) if selected else ""
+        self._cancel_inline_edit(refocus=False)
+
+        if self._sort_column == column:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_column = column
+            self._sort_reverse = False
+
+        self._reload(select_key=selected_key)
+
+    def _move_selection(self, delta: int):
+        if getattr(self, "_edit_entry", None) is not None:
+            return None
+
+        items = list(self.tree.get_children(""))
+        if not items:
+            return "break"
+
+        selected = self.tree.selection()
+        current = str(selected[0]) if selected else ""
+        try:
+            index = items.index(current)
+        except ValueError:
+            index = 0 if delta >= 0 else len(items) - 1
+
+        target_index = max(0, min(len(items) - 1, index + int(delta)))
+        target = str(items[target_index])
+
+        self.tree.selection_set(target)
+        self.tree.focus(target)
+        self.tree.see(target)
+        self._on_select()
+        return "break"
+
+    def _on_tree_double_click(self, event):
+        row = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        region = self.tree.identify_region(event.x, event.y)
+        if not row or column != "#0" or region not in {"tree", "cell"}:
+            return None
+
+        self.tree.selection_set(row)
+        self.tree.focus(row)
+        self.tree.see(row)
+        self._on_select()
+        return self._begin_inline_edit()
+
+    def _begin_inline_edit(self, _event=None):
+        path = self._selected_path()
+        if path is None:
+            return "break"
+
+        self._cancel_inline_edit(refocus=False)
+        iid = str(path)
+
+        try:
+            bbox = self.tree.bbox(iid, "#0")
+        except Exception:
+            bbox = ()
+
+        if not bbox:
+            self.tree.see(iid)
+            self.tree.update_idletasks()
+            try:
+                bbox = self.tree.bbox(iid, "#0")
+            except Exception:
+                bbox = ()
+
+        if not bbox:
+            return "break"
+
+        x, y, width, height = bbox
+        planned = str(self.rename_stems.get(iid) or "").strip()
+        value = planned + path.suffix if planned else path.name
+
+        entry = ttk.Entry(self.tree)
+        entry.insert(0, value)
+        entry.place(
+            x=x,
+            y=y,
+            width=max(80, width),
+            height=max(20, height),
+        )
+        self._edit_entry = entry
+        self._edit_iid = iid
+
+        suffix = str(path.suffix or "")
+        stem_end = (
+            max(0, len(value) - len(suffix))
+            if suffix and value.casefold().endswith(suffix.casefold())
+            else len(value)
+        )
+        entry.selection_range(0, stem_end)
+        entry.icursor(stem_end)
+        entry.focus_set()
+
+        entry.bind("<Return>", self._commit_inline_edit, add="+")
+        entry.bind("<Escape>", self._cancel_inline_edit, add="+")
+        return "break"
+
+    def _normalize_inline_candidate(
+        self,
+        path: Path,
+        raw_value: str,
+    ) -> tuple[str, str]:
+        raw = str(raw_value or "").strip()
+        if not raw:
+            raise ValueError("Nowa nazwa nie może być pusta.")
+
+        if Path(raw).name != raw:
+            raise ValueError(
+                "W polu nazwy nie podawaj ścieżki ani katalogu."
+            )
+
+        suffix = str(path.suffix or "")
+        candidate = raw
+        if suffix and not candidate.casefold().endswith(suffix.casefold()):
+            candidate += suffix
+
+        candidate_path = Path(candidate)
+        if candidate_path.suffix.casefold() != suffix.casefold():
+            raise ValueError(
+                f"Rozszerzenie pliku musi pozostać {suffix}."
+            )
+
+        parsed = parse_source_image_filename(candidate)
+        if not parsed.valid:
+            raise ValueError(
+                "; ".join(parsed.errors)
+                or "Nowa nazwa nie spełnia kontraktu."
+            )
+
+        return candidate_path.stem, candidate
+
+    def _planned_name_collision(
+        self,
+        path: Path,
+        candidate: str,
+    ) -> Path | None:
+        candidate_key = str(
+            path.with_name(candidate).absolute()
+        ).casefold()
+
+        for raw, stem in self.rename_stems.items():
+            other = Path(raw)
+            if str(other) == str(path):
+                continue
+            other_target = other.with_name(
+                str(stem).strip() + other.suffix
+            )
+            if str(other_target.absolute()).casefold() == candidate_key:
+                return other
+
+        target = path.with_name(candidate)
+        if target.exists():
+            try:
+                same = target.resolve() == path.resolve()
+            except Exception:
+                same = target == path
+            if not same:
+                return target
+
+        return None
+
+    def _commit_inline_edit(self, _event=None):
+        entry = getattr(self, "_edit_entry", None)
+        iid = str(getattr(self, "_edit_iid", "") or "")
+        if entry is None or not iid:
+            return "break"
+
+        path = Path(iid)
+        try:
+            stem, candidate = self._normalize_inline_candidate(
+                path,
+                entry.get(),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Nazwa nadal nie spełnia kontraktu",
+                str(exc),
+                parent=self.window,
+            )
+            try:
+                entry.focus_set()
+                entry.selection_range(0, tk.END)
+            except Exception:
+                pass
+            return "break"
+
+        collision = self._planned_name_collision(path, candidate)
+        if collision is not None:
+            messagebox.showerror(
+                "Kolizja nazwy",
+                (
+                    "Taka nazwa jest już używana albo zaplanowana:\n"
+                    f"{candidate}"
+                ),
+                parent=self.window,
+            )
+            try:
+                entry.focus_set()
+                entry.selection_range(0, tk.END)
+            except Exception:
+                pass
+            return "break"
+
+        key = str(path)
+        self.rejected_paths.discard(key)
+        self.rename_stems[key] = stem
+        self._cancel_inline_edit(refocus=False)
+        self._reload(select_key=key)
+        try:
+            self.tree.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _cancel_inline_edit(
+        self,
+        _event=None,
+        *,
+        refocus: bool = True,
+    ):
+        entry = getattr(self, "_edit_entry", None)
+        self._edit_entry = None
+        self._edit_iid = ""
+        if entry is not None:
+            try:
+                entry.destroy()
+            except Exception:
+                pass
+        if refocus:
+            try:
+                self.tree.focus_set()
+            except Exception:
+                pass
+        return "break"
 
     def _selected_path(self) -> Path | None:
         selected = self.tree.selection()
@@ -382,7 +786,14 @@ class _SourceFilenameReviewDialog:
         path = self._selected_path()
         if path is None:
             return
-        self.rename_var.set(self.rename_stems.get(str(path), path.stem))
+
+        if (
+            getattr(self, "_edit_entry", None) is not None
+            and getattr(self, "_edit_iid", "")
+            and self._edit_iid != str(path)
+        ):
+            self._cancel_inline_edit(refocus=False)
+
         self._show_preview(path)
 
     def _show_preview(self, path: Path) -> None:
@@ -401,48 +812,25 @@ class _SourceFilenameReviewDialog:
             self.preview.configure(image="", text=f"{path.name}\nNie można wyświetlić podglądu: {exc}")
 
     def _plan_rename(self) -> None:
-        path = self._selected_path()
-        if path is None:
-            messagebox.showinfo("Zmiana nazwy", "Najpierw wybierz plik.", parent=self.window)
-            return
-        stem = str(self.rename_var.get() or "").strip()
-        candidate = stem + path.suffix
-        parsed = parse_source_image_filename(candidate)
-        if not stem or not parsed.valid:
-            messagebox.showerror(
-                "Nazwa nadal nie spełnia kontraktu",
-                "; ".join(parsed.errors) if stem else "Nowa nazwa nie może być pusta.",
-                parent=self.window,
-            )
-            return
-        target = path.with_name(candidate)
-        if target.exists() and target != path:
-            messagebox.showerror("Kolizja nazwy", f"Plik już istnieje:\n{target}", parent=self.window)
-            return
-        key = str(path)
-        self.rejected_paths.discard(key)
-        self.rename_stems[key] = stem
-        self._reload()
-        if self.tree.exists(key):
-            self.tree.selection_set(key)
-            self.tree.focus(key)
-            self.tree.see(key)
+        """Kompatybilność: edycja nazwy odbywa się teraz inline."""
+        self._begin_inline_edit()
 
     def _reject_selected(self) -> None:
+        self._cancel_inline_edit(refocus=False)
         path = self._selected_path()
         if path is None:
             return
         key = str(path)
         self.rename_stems.pop(key, None)
         self.rejected_paths.add(key)
-        self._reload()
-        if self.tree.exists(key):
-            self.tree.selection_set(key)
-            self.tree.focus(key)
-            self.tree.see(key)
+        self._reload(select_key=key)
 
     def _reject_all(self) -> None:
-        for row in build_source_review_rows(self._iter_current_images(), root=self.root):
+        self._cancel_inline_edit(refocus=False)
+        for row in build_source_review_rows(
+            self._iter_current_images(),
+            root=self.root,
+        ):
             key = str(row.path)
             self.rename_stems.pop(key, None)
             self.rejected_paths.add(key)
