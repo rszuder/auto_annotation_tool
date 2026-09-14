@@ -24,6 +24,10 @@ import tkinter.font as tkfont
 import xml.etree.ElementTree as ET
 from collections import deque
 from pathlib import Path
+from .experiment_gt_workflow import (
+    apply_pending_experiment_gt_entry,
+    capture_experiment_gt_preannotation_snapshot,
+)
 from tkinter import filedialog, messagebox, ttk
 
 import cv2
@@ -145,6 +149,11 @@ YOLO = None
 
 
 def _refresh_free_mode_workflow_ui(self):
+    try:
+        apply_pending_experiment_gt_entry(self)
+    except Exception:
+        pass
+
     if getattr(self, "_free_mode_session_restore_in_progress", False) and self._is_free_mode_session_context():
         return
     if bool(getattr(self, "_campaign_step2_transition_in_progress", False)):
@@ -1514,6 +1523,14 @@ def _merge_pre_run_visible_state_after_auto(self, run_dir: Path) -> int:
 
 
 def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_template: bool = False) -> None:
+    try:
+        capture_experiment_gt_preannotation_snapshot(
+            self,
+            run_dir,
+        )
+    except Exception:
+        pass
+
     try:
         pending_summary_snapshot = dict(getattr(self, "_campaign_pending_batch_summary", {}) or {})
         reuse_filenames_snapshot = set(getattr(self, "_campaign_reuse_manual_filenames", set()) or set())

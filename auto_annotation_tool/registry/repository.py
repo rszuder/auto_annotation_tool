@@ -1457,6 +1457,242 @@ class RegistryRepository:
 
 
 
+
+    def list_models_for_target(self, target: str) -> list[sqlite3.Row]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    """
+                    SELECT model_id, project_id, run_id, target, task_type,
+                           yolo_family, yolo_scale, checkpoint_kind, sha256,
+                           provenance_status, created_at
+                    FROM models
+                    WHERE LOWER(COALESCE(target, '')) = LOWER(?)
+                    ORDER BY yolo_family, yolo_scale, created_at DESC, model_id
+                    """,
+                    (str(target or "").strip(),),
+                ).fetchall()
+            )
+
+    def list_participant_training_members(
+        self,
+        model_ids: list[str] | tuple[str, ...],
+        *,
+        splits: tuple[str, ...] = ("train", "val"),
+    ) -> list[sqlite3.Row]:
+        clean_models = tuple(dict.fromkeys(
+            str(value or "").strip() for value in model_ids if str(value or "").strip()
+        ))
+        clean_splits = tuple(
+            str(value or "").strip() for value in splits if str(value or "").strip()
+        )
+        if not clean_models or not clean_splits:
+            return []
+        mp = ",".join("?" for _ in clean_models)
+        sp = ",".join("?" for _ in clean_splits)
+        self.initialize()
+        with self.database.read_connection() as connection:
+            return list(
+                connection.execute(
+                    f"""
+                    WITH RECURSIVE ancestry(model_id, model_sha256, run_id, depth) AS (
+                        SELECT model_id, sha256, run_id, 0
+                        FROM models
+                        WHERE model_id IN ({mp})
+                          AND COALESCE(run_id, '') <> ''
+                        UNION ALL
+                        SELECT ancestry.model_id, ancestry.model_sha256,
+                               run.parent_run_id, ancestry.depth + 1
+                        FROM ancestry
+                        JOIN training_runs AS run ON run.run_id = ancestry.run_id
+                        WHERE COALESCE(run.parent_run_id, '') <> ''
+                          AND ancestry.depth < 128
+                    )
+                    SELECT ancestry.model_id, ancestry.model_sha256,
+                           ancestry.depth AS ancestor_depth,
+                           run.run_id, run.dataset_id,
+                           run.provenance_status AS run_provenance_status,
+                           dataset.provenance_status AS dataset_provenance_status,
+                           dataset.relative_path AS dataset_relative_path,
+                           member.split, member.source_image_id,
+                           member.file_sha256,
+                           member.relative_path AS member_relative_path,
+                           source.origin_status,
+                           artifact.relative_path AS artifact_relative_path,
+                           artifact.external_path AS artifact_external_path,
+                           artifact.sha256 AS artifact_sha256
+                    FROM ancestry
+                    JOIN training_runs AS run ON run.run_id = ancestry.run_id
+                    JOIN datasets AS dataset ON dataset.dataset_id = run.dataset_id
+                    JOIN dataset_members AS member ON member.dataset_id = run.dataset_id
+                    JOIN source_images AS source ON source.source_image_id = member.source_image_id
+                    LEFT JOIN image_artifacts AS artifact ON artifact.artifact_id = member.artifact_id
+                    WHERE member.split IN ({sp})
+                    ORDER BY ancestry.model_id, ancestry.depth, run.run_id,
+                             member.split, member.relative_path
+                    """,
+                    (*clean_models, *clean_splits),
+                ).fetchall()
+            )
+
+    def resolve_track_member_sources_batch(
+        self,
+        sha256_values: list[str] | tuple[str, ...],
+    ) -> dict[str, dict[str, str | None]]:
+        shas = tuple(dict.fromkeys(
+            str(value or "").strip().lower()
+            for value in sha256_values if str(value or "").strip()
+        ))
+        if not shas:
+            return {}
+        result = {}
+        self.initialize()
+        with self.database.transaction() as connection:
+            for offset in range(0, len(shas), 800):
+                chunk = shas[offset: offset + 800]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = connection.execute(
+                    f"""
+                    SELECT sha256, artifact_id, source_image_id, kind
+                    FROM image_artifacts
+                    WHERE sha256 IN ({placeholders})
+                    ORDER BY artifact_id
+                    """,
+                    chunk,
+                ).fetchall()
+                grouped = {}
+                for row in rows:
+                    sha = str(row["sha256"] or "").lower()
+                    grouped.setdefault(sha, []).append(row)
+                for sha, candidates in grouped.items():
+                    source_ids = {
+                        str(row["source_image_id"] or "").strip()
+                        for row in candidates if str(row["source_image_id"] or "").strip()
+                    }
+                    if len(source_ids) == 1:
+                        result[sha] = {
+                            "source_image_id": next(iter(source_ids)),
+                            "source_artifact_id": str(candidates[0]["artifact_id"] or "") or None,
+                        }
+                source_rows = connection.execute(
+                    f"""
+                    SELECT source_image_id, canonical_sha256
+                    FROM source_images
+                    WHERE canonical_sha256 IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                for row in source_rows:
+                    sha = str(row["canonical_sha256"] or "").lower()
+                    result.setdefault(
+                        sha,
+                        {
+                            "source_image_id": str(row["source_image_id"] or ""),
+                            "source_artifact_id": None,
+                        },
+                    )
+            for sha in shas:
+                if sha in result:
+                    continue
+                source_id = f"SRC-SHA256-{sha.upper()}"
+                connection.execute(
+                    """
+                    INSERT INTO source_images (
+                        source_image_id, canonical_sha256, origin_status, created_at
+                    ) VALUES (?, ?, 'exact_hash_only', NULL)
+                    ON CONFLICT(source_image_id) DO NOTHING
+                    """,
+                    (source_id, sha),
+                )
+                result[sha] = {
+                    "source_image_id": source_id,
+                    "source_artifact_id": None,
+                }
+        return result
+
+    def add_evaluation_track_members_batch(
+        self,
+        track_id: str,
+        rows: list[Mapping[str, Any]],
+    ) -> None:
+        if not rows:
+            return
+        self.initialize()
+        with self.database.transaction() as connection:
+            track = connection.execute(
+                "SELECT status FROM evaluation_tracks WHERE track_id = ?",
+                (track_id,),
+            ).fetchone()
+            if track is None or str(track["status"] or "") != "DRAFT":
+                raise ValueError("Członków można dodawać wyłącznie do toru DRAFT.")
+            existing = connection.execute(
+                """
+                SELECT original_name, source_image_id, sha256
+                FROM evaluation_track_members
+                WHERE track_id = ?
+                """,
+                (track_id,),
+            ).fetchall()
+            names = {str(row["original_name"] or "") for row in existing}
+            sources = {str(row["source_image_id"] or "") for row in existing}
+            shas = {str(row["sha256"] or "").lower() for row in existing}
+            batch_names, batch_sources, batch_shas = set(), set(), set()
+            for item in rows:
+                name = str(item["original_name"])
+                source_id = str(item["source_image_id"])
+                sha = str(item["sha256"]).lower()
+                if name in names or name in batch_names:
+                    raise ValueError(f"Tor zawiera już obraz o nazwie: {name}")
+                if (
+                    source_id in sources or source_id in batch_sources
+                    or sha in shas or sha in batch_shas
+                ):
+                    raise ValueError("Tor zawiera już to samo logiczne źródło obrazu.")
+                batch_names.add(name)
+                batch_sources.add(source_id)
+                batch_shas.add(sha)
+            for item in rows:
+                connection.execute(
+                    """
+                    INSERT INTO image_artifacts (
+                        artifact_id, source_image_id, relative_path, external_path,
+                        sha256, size_bytes, kind, derived_from_artifact_id,
+                        width, height, created_at
+                    ) VALUES (?, ?, ?, NULL, ?, ?, 'evaluation_track_image',
+                              ?, NULL, NULL, NULL)
+                    """,
+                    (
+                        item["track_artifact_id"], item["source_image_id"],
+                        item["artifact_relative_path"], str(item["sha256"]).lower(),
+                        item.get("artifact_size_bytes"), item.get("source_artifact_id"),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO evaluation_track_members (
+                        track_id, member_index, source_image_id, source_artifact_id,
+                        track_artifact_id, original_name, track_relative_path, sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        track_id, int(item["member_index"]), item["source_image_id"],
+                        item.get("source_artifact_id"), item["track_artifact_id"],
+                        item["original_name"], item["track_relative_path"],
+                        str(item["sha256"]).lower(),
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE evaluation_tracks
+                SET member_count = (
+                    SELECT COUNT(*) FROM evaluation_track_members WHERE track_id = ?
+                )
+                WHERE track_id = ?
+                """,
+                (track_id, track_id),
+            )
+
     def get_model(self, model_id: str) -> sqlite3.Row | None:
         self.initialize()
         with self.database.read_connection() as connection:

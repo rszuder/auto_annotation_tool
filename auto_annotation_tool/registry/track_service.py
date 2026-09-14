@@ -532,6 +532,83 @@ class EvaluationTrackService:
             "z2_context_invalidated": context_invalidated,
         }
 
+
+    def add_members_batch(
+        self,
+        track_id: str,
+        source_paths: list[Path | str] | tuple[Path | str, ...],
+        *,
+        sha256_by_path: Mapping[str, str] | None = None,
+    ) -> list[int]:
+        track = self._require_status(track_id, STATUS_DRAFT)
+        paths = [Path(value) for value in source_paths]
+        if not paths:
+            return []
+        existing = self.repository.list_evaluation_track_members(track_id)
+        existing_names = {str(row["original_name"] or "") for row in existing}
+        existing_shas = {str(row["sha256"] or "").lower() for row in existing}
+        supplied = {str(k): str(v or "").lower() for k, v in dict(sha256_by_path or {}).items()}
+        prepared, batch_names, batch_shas = [], set(), set()
+        for path in paths:
+            if not path.exists() or not path.is_file():
+                raise EvaluationTrackError(f"Brak pliku źródłowego: {path}")
+            name = path.name
+            if name in existing_names or name in batch_names:
+                raise EvaluationTrackError(f"Tor zawiera już obraz o nazwie: {name}")
+            sha = supplied.get(str(path)) or supplied.get(str(path.resolve())) or self._sha256(path)
+            if sha in existing_shas or sha in batch_shas:
+                raise EvaluationTrackError("Tor zawiera już ten sam plik (SHA-256).")
+            prepared.append({"path": path, "name": name, "sha": sha, "size": int(path.stat().st_size)})
+            batch_names.add(name)
+            batch_shas.add(sha)
+        identities = self.repository.resolve_track_member_sources_batch(
+            [item["sha"] for item in prepared]
+        )
+        existing_sources = {str(row["source_image_id"] or "") for row in existing}
+        batch_sources = set()
+        for item in prepared:
+            identity = identities[item["sha"]]
+            source_id = str(identity["source_image_id"])
+            if source_id in existing_sources or source_id in batch_sources:
+                raise EvaluationTrackError("Tor zawiera już to samo logiczne źródło obrazu.")
+            batch_sources.add(source_id)
+            item["source_id"] = source_id
+            item["source_artifact_id"] = identity.get("source_artifact_id")
+        track_root = self._track_root(track)
+        start = self.repository.next_evaluation_track_member_index(track_id)
+        copied, rows, indices = [], [], []
+        try:
+            for offset, item in enumerate(prepared):
+                index = start + offset
+                destination = track_root / "images" / item["name"]
+                shutil.copy2(item["path"], destination)
+                if int(destination.stat().st_size) != item["size"]:
+                    raise EvaluationTrackError(f"Kopia ma inny rozmiar: {item['name']}")
+                copied.append(destination)
+                artifact_seed = f"{track_id}|{index}|{item['sha']}|{item['name']}".encode("utf-8")
+                artifact_id = "ART-TRACK-" + hashlib.sha256(artifact_seed).hexdigest().upper()[:32]
+                rows.append(
+                    {
+                        "member_index": index,
+                        "source_image_id": item["source_id"],
+                        "source_artifact_id": item["source_artifact_id"],
+                        "track_artifact_id": artifact_id,
+                        "original_name": item["name"],
+                        "track_relative_path": f"images/{item['name']}",
+                        "sha256": item["sha"],
+                        "artifact_relative_path": self._workspace_relative(destination),
+                        "artifact_size_bytes": int(destination.stat().st_size),
+                    }
+                )
+                indices.append(index)
+            self.repository.add_evaluation_track_members_batch(track_id, rows)
+            self._write_manifest(track_id)
+        except Exception:
+            for path in copied:
+                path.unlink(missing_ok=True)
+            raise
+        return indices
+
     def set_ground_truth(
         self,
         track_id: str,
@@ -569,6 +646,18 @@ class EvaluationTrackService:
             gt_relative_path=self._workspace_relative(destination),
             gt_sha256=gt_sha,
         )
+        try:
+            from .gt_preannotation import (
+                maybe_compute_preannotation_metrics_for_track,
+            )
+            maybe_compute_preannotation_metrics_for_track(
+                track_root,
+                destination,
+            )
+        except Exception:
+            # Metryka dodatkowa nie może unieważnić poprawnego FINAL GT.
+            pass
+
         self._write_manifest(track_id)
         return destination
 
