@@ -201,7 +201,7 @@ class EvaluationTracksLayout:
         self.workflow = ttk.Frame(self.root)
         self.workflow.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         groups = (
-            ("1 · Pula obrazów", (
+            ("1 · Uczestnicy i pula", (
                 ("btn_participants", "Modele uczestniczące…", panel.select_participant_models),
                 ("btn_add_images", "Dodaj obrazy…", panel.add_images),
                 ("btn_audit_pool", "Audytuj pulę", panel.audit_current_pool),
