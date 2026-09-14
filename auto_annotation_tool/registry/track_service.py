@@ -515,6 +515,10 @@ class EvaluationTrackService:
         except Exception:
             pass
 
+        from .participant_pool_audit import ParticipantPoolAuditService
+        ParticipantPoolAuditService(
+            self.workspace, repository=self.repository
+        ).invalidate_track_audit(track_id, reason="members_removed")
         self._write_manifest(track_id)
 
         return {
@@ -539,13 +543,14 @@ class EvaluationTrackService:
         source_paths: list[Path | str] | tuple[Path | str, ...],
         *,
         sha256_by_path: Mapping[str, str] | None = None,
+        progress=None,
     ) -> list[int]:
         track = self._require_status(track_id, STATUS_DRAFT)
         paths = [Path(value) for value in source_paths]
         if not paths:
             return []
         existing = self.repository.list_evaluation_track_members(track_id)
-        existing_names = {str(row["original_name"] or "") for row in existing}
+        existing_names = {str(row["original_name"] or "").casefold() for row in existing}
         existing_shas = {str(row["sha256"] or "").lower() for row in existing}
         supplied = {str(k): str(v or "").lower() for k, v in dict(sha256_by_path or {}).items()}
         prepared, batch_names, batch_shas = [], set(), set()
@@ -553,14 +558,16 @@ class EvaluationTrackService:
             if not path.exists() or not path.is_file():
                 raise EvaluationTrackError(f"Brak pliku źródłowego: {path}")
             name = path.name
-            if name in existing_names or name in batch_names:
+            if name.casefold() in existing_names or name.casefold() in batch_names:
                 raise EvaluationTrackError(f"Tor zawiera już obraz o nazwie: {name}")
             sha = supplied.get(str(path)) or supplied.get(str(path.resolve())) or self._sha256(path)
             if sha in existing_shas or sha in batch_shas:
                 raise EvaluationTrackError("Tor zawiera już ten sam plik (SHA-256).")
             prepared.append({"path": path, "name": name, "sha": sha, "size": int(path.stat().st_size)})
-            batch_names.add(name)
+            batch_names.add(name.casefold())
             batch_shas.add(sha)
+        if progress:
+            progress("Identyfikacja źródeł", 0, len(prepared))
         identities = self.repository.resolve_track_member_sources_batch(
             [item["sha"] for item in prepared]
         )
@@ -577,14 +584,19 @@ class EvaluationTrackService:
         track_root = self._track_root(track)
         start = self.repository.next_evaluation_track_member_index(track_id)
         copied, rows, indices = [], [], []
+        committed = False
         try:
             for offset, item in enumerate(prepared):
                 index = start + offset
                 destination = track_root / "images" / item["name"]
+                if destination.exists():
+                    raise EvaluationTrackError(f"Plik docelowy już istnieje: {destination}")
+                copied.append(destination)
                 shutil.copy2(item["path"], destination)
                 if int(destination.stat().st_size) != item["size"]:
                     raise EvaluationTrackError(f"Kopia ma inny rozmiar: {item['name']}")
-                copied.append(destination)
+                if self._sha256(destination) != item["sha"]:
+                    raise EvaluationTrackError(f"Plik zmienił się po audycie: {item['name']}")
                 artifact_seed = f"{track_id}|{index}|{item['sha']}|{item['name']}".encode("utf-8")
                 artifact_id = "ART-TRACK-" + hashlib.sha256(artifact_seed).hexdigest().upper()[:32]
                 rows.append(
@@ -601,11 +613,26 @@ class EvaluationTrackService:
                     }
                 )
                 indices.append(index)
+                if progress and (offset % 25 == 0 or offset + 1 == len(prepared)):
+                    progress("Kopiowanie obrazów", offset + 1, len(prepared))
+            if progress:
+                progress("Zapis rejestru", 0, 1)
             self.repository.add_evaluation_track_members_batch(track_id, rows)
+            committed = True
+            from .participant_pool_audit import ParticipantPoolAuditService
+            ParticipantPoolAuditService(
+                self.workspace, repository=self.repository
+            ).invalidate_track_audit(track_id, reason="members_added")
+            if progress:
+                progress("Zapis manifestu", 0, 1)
             self._write_manifest(track_id)
+            if progress:
+                progress("Zakończono", len(prepared), len(prepared))
         except Exception:
-            for path in copied:
-                path.unlink(missing_ok=True)
+            # Once rows are committed their image files must remain available.
+            if not committed:
+                for path in copied:
+                    path.unlink(missing_ok=True)
             raise
         return indices
 

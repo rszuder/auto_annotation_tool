@@ -17,6 +17,8 @@ except Exception:  # pragma: no cover
     ImageOps = None
     ImageTk = None
 
+from .zoomable_canvas import ZoomableCanvas
+
 from ..config import CONFIG
 from ..source_filename_contract import (
     parse_source_image_filename,
@@ -243,6 +245,23 @@ def source_review_sort_key(
     return _natural_review_key(display_name or row.display_name)
 
 
+def source_review_rejectable_paths(
+    paths: Iterable[Path | str],
+    *,
+    rename_stems: dict[str, str] | None = None,
+    rejected_paths: set[str] | None = None,
+    root: Path | None = None,
+) -> tuple[Path, ...]:
+    """Zwróć tylko pozycje nadal nierozwiązane po uwzględnieniu planowanych zmian."""
+    rows = build_source_review_rows(
+        paths,
+        rename_stems=rename_stems,
+        rejected_paths=rejected_paths,
+        root=root,
+    )
+    return tuple(row.path for row in rows if row.unresolved)
+
+
 class _SourceFilenameReviewDialog:
     def __init__(
         self,
@@ -266,6 +285,7 @@ class _SourceFilenameReviewDialog:
             else None
         )
         self._preview_photo = None
+        self._preview_zoom_job = None
         self._sort_column = "#0"
         self._sort_reverse = False
         self._edit_entry = None
@@ -279,6 +299,7 @@ class _SourceFilenameReviewDialog:
         self.window.minsize(820, 560)
         self.window.resizable(True, True)
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.window.bind("<Destroy>", self._on_window_destroy, add="+")
         self._build()
         self._reload()
         try:
@@ -306,7 +327,13 @@ class _SourceFilenameReviewDialog:
             textvariable=self.summary_var,
             wraplength=950,
             justify=tk.LEFT,
-        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 10))
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(6, 10),
+        )
 
         left = ttk.Frame(outer)
         left.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
@@ -324,51 +351,172 @@ class _SourceFilenameReviewDialog:
             "problem": "Walidacja",
             "action": "Decyzja",
         }
-        for column, title in self._heading_titles.items():
-            self.tree.heading(
-                column,
-                text=title,
-                command=lambda col=column: self._sort_by_column(col),
-            )
+        self.tree.heading(
+            "#0",
+            text="Plik",
+            command=lambda: self._sort_by_column("#0"),
+        )
+        self.tree.heading(
+            "problem",
+            text="Walidacja",
+            command=lambda: self._sort_by_column("problem"),
+        )
+        self.tree.heading(
+            "action",
+            text="Decyzja",
+            command=lambda: self._sort_by_column("action"),
+        )
         self.tree.column("#0", width=280)
         self.tree.column("problem", width=340)
         self.tree.column("action", width=180)
         self.tree.grid(row=0, column=0, sticky="nsew")
 
-        scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
+        scroll = ttk.Scrollbar(
+            left,
+            orient=tk.VERTICAL,
+            command=self.tree.yview,
+        )
         scroll.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
+        horizontal = ttk.Scrollbar(left, orient=tk.HORIZONTAL, command=self.tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(xscrollcommand=horizontal.set)
 
-        self.tree.bind("<<TreeviewSelect>>", self._on_select, add="+")
-        self.tree.bind("<Return>", self._begin_inline_edit, add="+")
-        self.tree.bind("<F2>", self._begin_inline_edit, add="+")
-        self.tree.bind("<Up>", lambda _e: self._move_selection(-1), add="+")
-        self.tree.bind("<Down>", lambda _e: self._move_selection(1), add="+")
-        self.tree.bind("<Double-1>", self._on_tree_double_click, add="+")
+        self.tree.bind(
+            "<<TreeviewSelect>>",
+            self._on_select,
+            add="+",
+        )
+        self.tree.bind(
+            "<Return>",
+            self._begin_inline_edit,
+            add="+",
+        )
+        self.tree.bind(
+            "<F2>",
+            self._begin_inline_edit,
+            add="+",
+        )
+        self.tree.bind(
+            "<Up>",
+            lambda _event: self._move_selection(-1),
+            add="+",
+        )
+        self.tree.bind(
+            "<Down>",
+            lambda _event: self._move_selection(1),
+            add="+",
+        )
+        self.tree.bind(
+            "<Double-1>",
+            self._on_tree_double_click,
+            add="+",
+        )
 
         right = ttk.Frame(outer)
         right.grid(row=2, column=1, sticky="nsew")
         right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1)
 
-        self.preview = ttk.Label(
+        preview_box = ttk.LabelFrame(
             right,
-            text="Wybierz plik z listy.",
-            anchor="center",
+            text="Podgląd",
+            padding=6,
         )
-        self.preview.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        preview_box.grid(row=0, column=0, sticky="nsew")
+        preview_box.columnconfigure(0, weight=1)
+        preview_box.rowconfigure(0, weight=1)
+
+        self.preview = ZoomableCanvas(
+            preview_box,
+            highlightthickness=0,
+            height=300,
+        )
+        self.preview.grid(row=0, column=0, sticky="nsew")
+        self.preview.show_info = False
+        self.preview.reset_shortcut_enabled = True
+
+        self.preview_zoom_var = tk.StringVar(
+            master=self.window,
+            value="100%",
+        )
+        preview_controls = ttk.Frame(preview_box)
+        preview_controls.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            pady=(6, 0),
+        )
+        preview_controls.columnconfigure(1, weight=1)
+
+        ttk.Button(
+            preview_controls,
+            text="−",
+            width=3,
+            command=lambda: self._preview_zoom(1 / 1.25),
+        ).grid(row=0, column=0, sticky="w")
+
+        ttk.Label(
+            preview_controls,
+            textvariable=self.preview_zoom_var,
+            anchor="center",
+        ).grid(row=0, column=1, sticky="ew", padx=6)
+
+        ttk.Button(
+            preview_controls,
+            text="+",
+            width=3,
+            command=lambda: self._preview_zoom(1.25),
+        ).grid(row=0, column=2, sticky="e")
+
+        ttk.Button(
+            preview_controls,
+            text="Dopasuj",
+            command=self._preview_fit,
+        ).grid(row=0, column=3, sticky="e", padx=(6, 0))
+
+        self.preview_caption_var = tk.StringVar(
+            master=self.window,
+            value="Wybierz plik z listy.",
+        )
+        ttk.Label(
+            preview_box,
+            textvariable=self.preview_caption_var,
+            wraplength=360,
+            justify=tk.LEFT,
+        ).grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            pady=(6, 0),
+        )
+
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.preview.bind(
+                sequence,
+                self._on_preview_zoom_event,
+                add="+",
+            )
 
         ttk.Label(
             right,
             text=(
-                "Edycja nazwy odbywa się bezpośrednio na liście.\n"
-                "Enter / F2 — edycja nazwy\n"
+                "Rolka myszy / + / − — zoom\n"
+                "LPM + przeciąganie — pan\n"
+                "Dopasuj / Home / R — cały obraz\n\n"
+                "Enter / F2 — edycja nazwy na liście\n"
                 "Enter — zatwierdź zmianę\n"
                 "Esc — anuluj edycję\n"
                 "↑ / ↓ — poprzedni / następny plik"
             ),
             justify=tk.LEFT,
             wraplength=360,
-        ).grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        ).grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            pady=(10, 8),
+        )
 
         ttk.Button(
             right,
@@ -376,28 +524,46 @@ class _SourceFilenameReviewDialog:
             command=self._reject_selected,
         ).grid(row=2, column=0, sticky="w")
 
-        ttk.Separator(right).grid(row=3, column=0, sticky="ew", pady=12)
+        ttk.Separator(right).grid(
+            row=3,
+            column=0,
+            sticky="ew",
+            pady=12,
+        )
 
         ttk.Button(
             right,
-            text="Odrzuć wszystkie błędne",
+            text="Odrzuć pozostałe błędne",
             command=self._reject_all,
         ).grid(row=4, column=0, sticky="w")
 
         ttk.Label(
             right,
             text=(
-                "„Odrzuć” nie usuwa pliku. Zaplanowana poprawna zmiana "
-                "nazwy pozostaje widoczna na liście aż do końcowego "
-                "„Zastosuj”. Kliknij nagłówek kolumny, aby posortować listę."
+                "„Odrzuć” nie usuwa pliku. Poprawne, zaplanowane zmiany nazw "
+                "nie są odrzucane przez „Odrzuć pozostałe błędne”. "
+                "Zmiany na dysku są wykonywane dopiero przez "
+                "„Zapisz i kontynuuj”."
             ),
             wraplength=360,
             justify=tk.LEFT,
-        ).grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        ).grid(
+            row=5,
+            column=0,
+            sticky="ew",
+            pady=(10, 0),
+        )
 
         footer = ttk.Frame(outer)
-        footer.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        footer.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(12, 0),
+        )
         footer.columnconfigure(0, weight=1)
+
         self.status_var = tk.StringVar()
         ttk.Label(
             footer,
@@ -405,11 +571,22 @@ class _SourceFilenameReviewDialog:
             wraplength=680,
             justify=tk.LEFT,
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(footer, text="Anuluj", command=self._cancel).grid(
-            row=0, column=1, padx=(8, 0)
+
+        ttk.Button(
+            footer,
+            text="Anuluj",
+            command=self._cancel,
+        ).grid(row=0, column=1, padx=(8, 0))
+
+        self.apply_button = ttk.Button(
+            footer,
+            text="Zapisz i kontynuuj",
+            command=self._apply,
         )
-        ttk.Button(footer, text="Zastosuj", command=self._apply).grid(
-            row=0, column=2, padx=(8, 0)
+        self.apply_button.grid(
+            row=0,
+            column=2,
+            padx=(8, 0),
         )
 
     def _iter_current_images(self) -> list[Path]:
@@ -452,16 +629,20 @@ class _SourceFilenameReviewDialog:
             )
         )
         rows = self._sorted_review_rows(rows)
-        self._review_rows_by_iid = {str(row.path): row for row in rows}
+        self._review_rows_by_iid = {
+            str(row.path): row
+            for row in rows
+        }
 
         for iid in self.tree.get_children():
             self.tree.delete(iid)
 
         for row in rows:
+            iid = str(row.path)
             self.tree.insert(
                 "",
                 tk.END,
-                iid=str(row.path),
+                iid=iid,
                 text=self._display_name_for_row(row),
                 values=(row.problem, row.action),
             )
@@ -474,11 +655,25 @@ class _SourceFilenameReviewDialog:
             f"zmiany nazw: {len(self.rename_stems)} | "
             f"odrzucenia: {len(self.rejected_paths)}"
         )
-        self.status_var.set(
-            "Każdy błędny plik musi zostać poprawiony albo odrzucony."
-            if unresolved
-            else "Wszystkie problematyczne pliki mają decyzję. Kliknij „Zastosuj”."
-        )
+
+        if unresolved:
+            self.status_var.set(
+                f"Pozostało {unresolved} plików bez decyzji."
+            )
+            try:
+                self.apply_button.configure(state=tk.DISABLED)
+            except Exception:
+                pass
+        else:
+            self.status_var.set(
+                "Wszystkie problematyczne pliki mają decyzję. "
+                "Kliknij „Zapisz i kontynuuj”."
+            )
+            try:
+                self.apply_button.configure(state=tk.NORMAL)
+            except Exception:
+                pass
+
         self._refresh_sort_headings()
 
         target = ""
@@ -493,10 +688,8 @@ class _SourceFilenameReviewDialog:
             self.tree.see(target)
             self._on_select()
         else:
-            self._preview_photo = None
-            self.preview.configure(
-                image="",
-                text="Brak plików wymagających decyzji.",
+            self._preview_clear(
+                "Brak plików wymagających decyzji."
             )
 
     def _display_name_for_row(self, row: SourceReviewRow) -> str:
@@ -796,20 +989,116 @@ class _SourceFilenameReviewDialog:
 
         self._show_preview(path)
 
+    def _preview_clear(self, message: str = "") -> None:
+        try:
+            self.preview.clear_image()
+        except Exception:
+            pass
+        try:
+            self.preview_zoom_var.set("—")
+        except Exception:
+            pass
+        try:
+            self.preview_caption_var.set(str(message or ""))
+        except Exception:
+            pass
+
+    def _update_preview_zoom_label(self) -> None:
+        try:
+            if self.preview.original_image is None:
+                self.preview_zoom_var.set("—")
+                return
+            zoom = float(self.preview.get_zoom_level())
+            self.preview_zoom_var.set(f"{zoom * 100:.0f}%")
+        except Exception:
+            pass
+
+    def _on_window_destroy(self, event):
+        if event.widget == self.window and self._preview_zoom_job is not None:
+            self.window.after_cancel(self._preview_zoom_job)
+            self._preview_zoom_job = None
+
+    def _schedule_preview_zoom_label(self, delay):
+        if self._preview_zoom_job is not None:
+            self.window.after_cancel(self._preview_zoom_job)
+
+        def update():
+            self._preview_zoom_job = None
+            self._update_preview_zoom_label()
+
+        self._preview_zoom_job = self.window.after(delay, update)
+
+    def _on_preview_zoom_event(self, _event=None):
+        try:
+            self._schedule_preview_zoom_label(170)
+        except Exception:
+            pass
+        return None
+
+    def _preview_zoom(self, factor: float) -> None:
+        try:
+            if self.preview.original_image is None:
+                return
+
+            self.preview.update_idletasks()
+            current = float(self.preview.get_zoom_level())
+            target = max(
+                float(self.preview.min_zoom),
+                min(
+                    float(self.preview.max_zoom),
+                    current * float(factor),
+                ),
+            )
+
+            width = max(1.0, float(self.preview.winfo_width()))
+            height = max(1.0, float(self.preview.winfo_height()))
+            animate = getattr(
+                self.preview,
+                "_animate_zoom_to",
+                None,
+            )
+            if callable(animate):
+                animate(
+                    width / 2.0,
+                    height / 2.0,
+                    target,
+                    duration_ms=120,
+                )
+            else:
+                self.preview.set_zoom_level(target)
+
+            self._schedule_preview_zoom_label(140)
+        except Exception:
+            pass
+
+    def _preview_fit(self) -> None:
+        try:
+            if self.preview.original_image is None:
+                return
+            self.preview.fit_to_view()
+            self._schedule_preview_zoom_label(30)
+        except Exception:
+            pass
+
     def _show_preview(self, path: Path) -> None:
-        if Image is None or ImageTk is None or ImageOps is None:
-            self.preview.configure(text=path.name, image="")
+        if Image is None or ImageOps is None:
+            self._preview_clear(
+                f"{path.name}\nPodgląd obrazu jest niedostępny."
+            )
             return
+
         try:
             with Image.open(path) as raw:
-                image = ImageOps.exif_transpose(raw).convert("RGB")
-                resampling = getattr(Image, "Resampling", Image)
-                image.thumbnail((360, 260), resampling.LANCZOS)
-                self._preview_photo = ImageTk.PhotoImage(image)
-            self.preview.configure(image=self._preview_photo, text=path.name, compound=tk.TOP)
+                image = ImageOps.exif_transpose(raw).convert("RGB").copy()
+
+            self.preview.update_idletasks()
+            self.preview.set_image_fit_to_view(image)
+            self.preview_caption_var.set(path.name)
+            self._schedule_preview_zoom_label(40)
         except Exception as exc:
-            self._preview_photo = None
-            self.preview.configure(image="", text=f"{path.name}\nNie można wyświetlić podglądu: {exc}")
+            self._preview_clear(
+                f"{path.name}\nNie można wyświetlić podglądu: {exc}"
+            )
 
     def _plan_rename(self) -> None:
         """Kompatybilność: edycja nazwy odbywa się teraz inline."""
@@ -827,13 +1116,19 @@ class _SourceFilenameReviewDialog:
 
     def _reject_all(self) -> None:
         self._cancel_inline_edit(refocus=False)
-        for row in build_source_review_rows(
+
+        rejectable = source_review_rejectable_paths(
             self._iter_current_images(),
+            rename_stems=self.rename_stems,
+            rejected_paths=self.rejected_paths,
             root=self.root,
-        ):
-            key = str(row.path)
+        )
+
+        for path in rejectable:
+            key = str(path)
             self.rename_stems.pop(key, None)
             self.rejected_paths.add(key)
+
         self._reload()
 
     def _planned_paths(self, originals: Iterable[Path]) -> tuple[Path, ...]:
@@ -847,6 +1142,11 @@ class _SourceFilenameReviewDialog:
         return tuple(accepted)
 
     def _apply(self) -> None:
+        # Clicking the footer must not discard an unfinished inline edit.
+        if self._edit_entry is not None:
+            self._commit_inline_edit()
+            if self._edit_entry is not None:
+                return
         rows = build_source_review_rows(
             self._iter_current_images(),
             rename_stems=self.rename_stems,
@@ -856,7 +1156,7 @@ class _SourceFilenameReviewDialog:
         unresolved = [row for row in rows if row.unresolved]
         if unresolved:
             messagebox.showwarning(
-                "Nieukończona korekta",
+                "Nie można jeszcze kontynuować",
                 f"Pozostało {len(unresolved)} plików bez decyzji.",
                 parent=self.window,
             )

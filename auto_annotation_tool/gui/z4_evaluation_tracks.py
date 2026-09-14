@@ -109,7 +109,7 @@ def action_state_for_status(status: str | None) -> TrackActionState:
     return TrackActionState(
         can_add_images=normalized == STATUS_DRAFT,
         can_select_participants=normalized == STATUS_DRAFT,
-        can_audit_pool=normalized == STATUS_DRAFT,
+        can_audit_pool=normalized in {STATUS_DRAFT, STATUS_VERIFIED},
         can_remove_images=normalized == STATUS_DRAFT,
         can_set_ground_truth=normalized == STATUS_DRAFT,
         can_verify=normalized == STATUS_DRAFT,
@@ -426,7 +426,10 @@ class EvaluationTracksPanel:
 
     def _on_track_selected(self, _event=None) -> None:
         selected = self.tree.selection()
-        self.current_track_id = str(selected[0]) if selected else ""
+        track_id = str(selected[0]) if selected else ""
+        if track_id == self.current_track_id:
+            return  # Programmatic refresh already rebuilt the member table.
+        self.current_track_id = track_id
         self._refresh_selected_details()
 
     def _refresh_selected_details(self) -> None:
@@ -720,9 +723,9 @@ class EvaluationTracksPanel:
             messagebox.showwarning(
                 "Rejestracja modelu",
                 (
-                    "Brak runów z provenance complete/known i dataset_id "
-                    f"dla targetu {target}. Najpierw odśwież rejestr "
-                    "albo zarejestruj historię treningu."
+                    "Brak runów z pełną lub ręcznie potwierdzoną historią "
+                    f"i zapisanym zbiorem treningowym dla typu {target}. "
+                    "Uzupełnij historię treningu w rejestrze."
                 ),
                 parent=self.parent,
             )
@@ -850,8 +853,10 @@ class EvaluationTracksPanel:
     def _run_participant_pool_audit(self, track_id: str, paths: list[Path]):
         progress = BatchProgressDialog(self.parent, title="Audyt puli względem modeli")
         try:
-            report = self.participant_audit.audit_paths(
-                track_id, paths, progress=progress.update
+            report = progress.run(
+                lambda update: self.participant_audit.audit_paths(
+                    track_id, paths, progress=update
+                )
             )
         finally:
             progress.close()
@@ -906,15 +911,20 @@ class EvaluationTracksPanel:
         track_id = self._require_current_track()
         if not track_id:
             return
-        track = self.service.get_track(track_id)
-        purpose = str(track.get("purpose") or "").lower()
+
+        try:
+            track = self.service.get_track(track_id)
+        except Exception as exc:
+            self._show_error("Nie udało się odczytać toru", exc)
+            return
+
+        purpose = str(track.get("purpose") or "").strip().lower()
         participants = self.participant_audit.load_participants(track_id)
         if purpose in {"ranking", "final_test"} and not participants:
             messagebox.showwarning(
                 "Modele uczestniczące",
                 (
                     "Najpierw wybierz modele uczestniczące w eksperymencie. "
-                    "Użyj przycisku „Modele uczestniczące…”. "
                     "Niezależność puli obrazów będzie oceniana względem "
                     "train/val właśnie tych modeli."
                 ),
@@ -929,149 +939,362 @@ class EvaluationTracksPanel:
         selection = choose_pz3_source_candidates(self.parent)
         if selection is None:
             return
+
         if selection.mode == "folder":
             if not review_source_image_directory(
-                self.parent, selection.source_dir, recursive=False,
+                self.parent,
+                selection.source_dir,
+                recursive=False,
                 title="Podgląd i korekta nazw — PZ3",
             ):
                 return
-            selected_paths = list(collect_folder_candidates(selection.source_dir))
+            selected_paths = list(
+                collect_folder_candidates(selection.source_dir)
+            )
         else:
-            review = review_source_image_paths(
-                self.parent, selection.paths,
+            review_result = review_source_image_paths(
+                self.parent,
+                selection.paths,
                 title="Podgląd i korekta nazw — PZ3",
             )
-            if not review.ok:
+            if not review_result.ok:
                 return
-            selected_paths = list(review.accepted_paths)
+            selected_paths = list(review_result.accepted_paths)
+
         if not selected_paths:
-            return
-
-        progress = BatchProgressDialog(self.parent, title="Przygotowanie puli obrazów")
-        try:
-            fingerprints = self.participant_audit.fingerprint_paths(
-                selected_paths, progress=progress.update
-            )
-        finally:
-            progress.close()
-
-        existing = self.service.list_members(track_id)
-        existing_shas = {str(row.get("sha256") or "").lower() for row in existing}
-        existing_names = {str(row.get("original_name") or "").casefold() for row in existing}
-        unique, seen_sha, seen_name = [], set(), set()
-        skipped_track, skipped_batch, skipped_name = [], [], []
-        for path in selected_paths:
-            path = Path(path)
-            sha = fingerprints.get(path, "")
-            key = path.name.casefold()
-            if sha in existing_shas:
-                skipped_track.append(path.name)
-                continue
-            if sha in seen_sha:
-                skipped_batch.append(path.name)
-                continue
-            if key in existing_names or key in seen_name:
-                skipped_name.append(path.name)
-                continue
-            seen_sha.add(sha)
-            seen_name.add(key)
-            unique.append(path)
-        if not unique:
             messagebox.showinfo(
                 "Dodaj obrazy",
-                f"Brak nowych kandydatów.\n\nJuż w torze: {len(skipped_track)}\n"
-                f"Duplikaty wyboru: {len(skipped_batch)}\nKolizje nazw: {len(skipped_name)}",
+                "Po podglądzie nie pozostały żadne obrazy do dodania.",
+                parent=self.parent,
+            )
+            return
+
+        progress = BatchProgressDialog(
+            self.parent,
+            title="Przygotowanie puli obrazów",
+        )
+        try:
+            fingerprints = progress.run(
+                lambda update: self.participant_audit.fingerprint_paths(
+                    selected_paths, progress=update
+                )
+            )
+        except Exception as exc:
+            progress.close()
+            self._show_error(
+                "Nie udało się policzyć fingerprintów obrazów",
+                exc,
+            )
+            return
+        progress.close()
+
+        existing_members = self.service.list_members(track_id)
+        try:
+            known_sources = self.repository.find_source_ids_by_sha256_batch(
+                list(fingerprints.values())
+            )
+            preflight = preflight_deduplicate_candidates(
+                selected_paths, existing_members,
+                sha256_by_path=fingerprints,
+                source_ids_for_sha=lambda sha: known_sources.get(sha, ()),
+            )
+        except Exception as exc:
+            self._show_error("Nie udało się sprawdzić duplikatów", exc)
+            return
+        unique_paths = list(preflight.candidates)
+        skipped_track = preflight.already_in_track
+        skipped_batch = preflight.batch_duplicates
+        skipped_name = preflight.name_collisions
+
+        if not unique_paths:
+            messagebox.showinfo(
+                "Dodaj obrazy",
+                (
+                    "Nie ma nowych kandydatów do dodania.\n\n"
+                    f"Już w torze: {len(skipped_track)}\n"
+                    f"Duplikaty w wyborze: {len(skipped_batch)}\n"
+                    f"Kolizje nazw: {len(skipped_name)}\n"
+                    f"Błędy odczytu: {len(preflight.hash_errors)}"
+                ),
                 parent=self.parent,
             )
             return
 
         report = None
-        accepted = list(unique)
+        accepted_new = list(unique_paths)
+        dependent_new = []
+        unknown_new = []
+        suspect_new = []
+        clean_new = list(unique_paths)
+        include_suspects = False
+
         if participants:
             existing_paths = self._track_member_paths(track)
-            report = self._run_participant_pool_audit(track_id, existing_paths + unique)
-            by_path = {str(Path(item.path).resolve()).casefold(): item for item in report.candidates}
+            all_paths = existing_paths + unique_paths
+            try:
+                report = self._run_participant_pool_audit(
+                    track_id,
+                    all_paths,
+                )
+            except Exception as exc:
+                self._show_error("Audyt puli nie powiódł się", exc)
+                return
+
+            by_path = {
+                os.path.normcase(os.path.abspath(item.path)): item
+                for item in report.candidates
+            }
+
             bad_existing = []
             suspect_existing = []
             for path in existing_paths:
-                item = by_path.get(str(path.resolve()).casefold())
-                if item and item.common_status in {STATUS_DEPENDENT, STATUS_UNKNOWN}:
+                item = by_path.get(os.path.normcase(os.path.abspath(path)))
+                if item is None:
+                    continue
+                if item.common_status in {
+                    STATUS_DEPENDENT,
+                    STATUS_UNKNOWN,
+                }:
                     bad_existing.append(item.filename)
-                elif item and item.common_status == STATUS_SUSPECT:
+                elif item.common_status == STATUS_SUSPECT:
                     suspect_existing.append(item.filename)
+
             if bad_existing:
                 self.participant_audit.invalidate_track_audit(
-                    track_id, reason="existing_pool_invalid_for_participants"
+                    track_id,
+                    reason="existing_pool_invalid_for_participants",
                 )
                 messagebox.showwarning(
-                    "Istniejąca pula nie pasuje do rankingu",
-                    "Usuń problematyczne obrazy z DRAFT przed dodaniem kolejnych.\n\n"
-                    + "\n".join(bad_existing[:12]),
+                    "Bieżąca pula nie pasuje do modeli uczestniczących",
+                    (
+                        "W DRAFT są już obrazy zależne albo o nieustalonej "
+                        "niezależności względem aktualnych modeli.\n\n"
+                        "Najpierw usuń je z toru albo zmień zestaw modeli "
+                        "uczestniczących, a następnie ponów audyt.\n\n"
+                        + "\n".join(bad_existing[:12])
+                    ),
                     parent=self.parent,
                 )
                 return
-            reject_suspects = False
-            if report.suspect_count:
-                reject_suspects = messagebox.askyesno(
-                    "Podejrzane pochodne",
-                    f"Wykryto {report.suspect_count} podejrzanych pochodnych.\n\n"
-                    "Odrzucić podejrzane NOWE obrazy? (Zalecane: TAK)",
+
+            clean_new = []
+            dependent_new = []
+            unknown_new = []
+            suspect_new = []
+            for path in unique_paths:
+                item = by_path.get(os.path.normcase(os.path.abspath(path)))
+                if item is None:
+                    unknown_new.append(path)
+                    continue
+                if item.common_status == STATUS_CLEAN:
+                    clean_new.append(path)
+                elif item.common_status == STATUS_DEPENDENT:
+                    dependent_new.append(path)
+                elif item.common_status == STATUS_UNKNOWN:
+                    unknown_new.append(path)
+                elif item.common_status == STATUS_SUSPECT:
+                    suspect_new.append(path)
+                else:
+                    unknown_new.append(path)
+
+            if suspect_existing:
+                keep_existing = messagebox.askyesno(
+                    "Podejrzane obrazy już są w DRAFT",
+                    (
+                        f"W bieżącym DRAFT jest {len(suspect_existing)} obrazów "
+                        "oznaczonych jako podejrzane pochodne pHash.\n\n"
+                        "TAK — zaakceptuj je jako świadomie zweryfikowane i "
+                        "kontynuuj.\n"
+                        "NIE — przerwij; usuń je z DRAFT i ponów audyt."
+                    ),
                     parent=self.parent,
                 )
-                if suspect_existing and reject_suspects:
+                if not keep_existing:
                     self.participant_audit.invalidate_track_audit(
-                        track_id, reason="existing_suspect_derivatives"
+                        track_id,
+                        reason="existing_suspect_derivatives",
                     )
+                    return
+
+            if suspect_new:
+                suspect_choice = messagebox.askyesnocancel(
+                    "Podejrzane pochodne — wymagana decyzja",
+                    (
+                        f"Wśród nowych obrazów wykryto {len(suspect_new)} "
+                        "podejrzanych pochodnych (pHash).\n\n"
+                        "TAK — dołącz je po świadomej akceptacji.\n"
+                        "NIE — pomiń je i dodaj tylko obrazy niezależne.\n"
+                        "ANULUJ — przerwij całe dodawanie."
+                    ),
+                    parent=self.parent,
+                )
+                if suspect_choice is None:
+                    return
+                include_suspects = bool(suspect_choice)
+
+            accepted_new = list(clean_new)
+            if include_suspects:
+                accepted_new.extend(suspect_new)
+
+            excluded_suspects = 0 if include_suspects else len(suspect_new)
+            excluded_total = (
+                len(dependent_new)
+                + len(unknown_new)
+                + excluded_suspects
+            )
+
+            if excluded_total:
+                summary_lines = [
+                    f"Nowe obrazy po kontroli duplikatów: {len(unique_paths)}",
+                    f"Niezależne: {len(clean_new)}",
+                    f"Zależne: {len(dependent_new)} — NIE zostaną dodane",
+                    f"Nieustalone: {len(unknown_new)} — NIE zostaną dodane",
+                    (
+                        f"Podejrzane pHash: {len(suspect_new)} — "
+                        + (
+                            "zostaną dodane po Twojej akceptacji"
+                            if include_suspects
+                            else "NIE zostaną dodane"
+                        )
+                    ),
+                    "",
+                    f"Do toru zostanie dodanych: {len(accepted_new)}",
+                ]
+                if dependent_new:
+                    summary_lines.extend(
+                        [
+                            "",
+                            "Co zrobić z obrazami zależnymi?",
+                            "• jeśli dany model ma pozostać w rankingu — pomiń te obrazy;",
+                            "• jeśli model nie ma brać udziału — wróć do „Modele uczestniczące…” i usuń go z rankingu, potem ponów dodawanie;",
+                            "• możesz też utworzyć osobny DRAFT z innym zestawem modeli.",
+                        ]
+                    )
+                if unknown_new:
+                    summary_lines.extend(
+                        [
+                            "",
+                            "Nieustalone wymagają kompletnej historii treningu/modelu "
+                            "przed użyciem ich we wspólnym rankingu.",
+                        ]
+                    )
+
+                if not accepted_new:
                     messagebox.showwarning(
-                        "Podejrzane obrazy już są w DRAFT",
-                        "Usuń je ręcznie albo ponów audyt i świadomie je zaakceptuj.\n\n"
-                        + "\n".join(suspect_existing[:12]),
+                        "Brak obrazów możliwych do dodania",
+                        "\n".join(summary_lines),
                         parent=self.parent,
                     )
                     return
-            accepted = []
-            for path in unique:
-                item = by_path.get(str(path.resolve()).casefold())
-                if not item:
-                    continue
-                if item.common_status == STATUS_CLEAN:
-                    accepted.append(path)
-                elif item.common_status == STATUS_SUSPECT and not reject_suspects:
-                    accepted.append(path)
 
-        if not accepted:
-            messagebox.showinfo(
+                proceed = messagebox.askokcancel(
+                    "Wynik audytu — kontynuować?",
+                    "\n".join(summary_lines)
+                    + "\n\nOK — dodaj wskazaną pulę do toru.\n"
+                    "Anuluj — nie zmieniaj DRAFT-u.",
+                    parent=self.parent,
+                )
+                if not proceed:
+                    return
+
+        if not accepted_new:
+            messagebox.showwarning(
                 "Dodaj obrazy",
-                "Po audycie nie pozostały żadne nowe obrazy do dodania.",
+                "Po audycie nie pozostały żadne obrazy możliwe do dodania.",
                 parent=self.parent,
             )
             return
 
-        sha_map = {str(path): fingerprints.get(path, "") for path in accepted}
+        sha_map = {
+            str(path): fingerprints.get(path, "")
+            for path in accepted_new
+        }
         if report is not None:
-            for item in report.candidates:
-                for path in accepted:
-                    if Path(item.path).resolve() == path.resolve():
-                        sha_map[str(path)] = item.sha256
+            report_by_path = {
+                os.path.normcase(os.path.abspath(item.path)): item
+                for item in report.candidates
+            }
+            for path in accepted_new:
+                item = report_by_path.get(os.path.normcase(os.path.abspath(path)))
+                if item is not None and item.sha256:
+                    sha_map[str(path)] = item.sha256
 
+        def ingest(update):
+            indices = self.service.add_members_batch(
+                track_id, accepted_new, sha256_by_path=sha_map, progress=update
+            )
+            audit_error = ""
+            if report is not None:
+                update("Zapis audytu", 0, 1)
+                try:
+                    self.participant_audit.record_ingested_report(
+                        track_id, report, accepted_new
+                    )
+                except Exception as exc:
+                    audit_error = str(exc)
+                    self.participant_audit.invalidate_track_audit(
+                        track_id, reason="audit_state_write_failed"
+                    )
+                    logger.warning("Nie udało się zapisać audytu uczestników: %s", exc)
+                update("Zapis audytu", 1, 1)
+            return indices, audit_error
+
+        progress = BatchProgressDialog(self.parent, title="Dodawanie obrazów do toru")
         try:
-            self.service.add_members_batch(track_id, accepted, sha256_by_path=sha_map)
+            added_indices, audit_write_error = progress.run(ingest)
         except Exception as exc:
+            progress.close()
+            # A late IO failure may follow a successful database commit.
+            self.refresh_tracks(select_track_id=track_id)
             self._show_error("Nie udało się dodać puli obrazów", exc)
             return
+        progress.close()
 
-        if report is not None:
-            try:
-                self.participant_audit.record_ingested_report(track_id, report, accepted)
-            except Exception:
-                self.participant_audit.invalidate_track_audit(
-                    track_id, reason="audit_state_write_failed"
-                )
-
+        # refresh_tracks also synchronously reloads the selected member table.
         self.refresh_tracks(select_track_id=track_id)
-        self._set_status(
-            f"Dodano: {len(accepted)} | już w torze: {len(skipped_track)} | "
-            f"duplikaty wyboru: {len(skipped_batch)} | kolizje nazw: {len(skipped_name)}"
+        if getattr(self, "_layout", None) is not None:
+            self._layout.notebook.select(self._layout.images_page)
+        self.parent.update_idletasks()
+        actual_count = len(self.service.list_members(track_id))
+        if (actual_count - len(existing_members) != len(added_indices)
+                or len(self.member_tree.get_children()) != actual_count):
+            messagebox.showerror(
+                "Nie udało się potwierdzić listy obrazów",
+                "Liczba zapisanych obrazów nie zgadza się z listą. "
+                "Odśwież tor przed ponownym dodawaniem.",
+                parent=self.parent,
+            )
+            return
+
+        final_lines = [
+            f"Dodano do toru: {len(added_indices)}",
+            f"Już w torze: {len(skipped_track)}",
+            f"Duplikaty w wyborze: {len(skipped_batch)}",
+            f"Kolizje nazw: {len(skipped_name)}",
+            f"Błędy odczytu: {len(preflight.hash_errors)}",
+        ]
+        if report is not None:
+            final_lines.extend(
+                [
+                    f"Pominięte zależne: {len(dependent_new)}",
+                    f"Pominięte nieustalone: {len(unknown_new)}",
+                    (
+                        f"Podejrzane pHash: {len(suspect_new)} "
+                        + ("(zaakceptowane)" if include_suspects else "(pominięte)")
+                    ),
+                ]
+            )
+
+        if audit_write_error:
+            final_lines.extend([
+                "", "Obrazy zapisano, ale audyt wymaga ponownego uruchomienia.",
+                audit_write_error,
+            ])
+        self._set_status(" | ".join(final_lines))
+        messagebox.showinfo(
+            "Dodawanie obrazów zakończone",
+            "\n".join(final_lines),
+            parent=self.parent,
         )
 
     def remove_selected_images(self) -> None:

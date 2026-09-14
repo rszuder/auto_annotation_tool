@@ -123,14 +123,14 @@ def common_status(statuses: Iterable[str]) -> str:
         return STATUS_DEPENDENT
     if any(value == STATUS_SUSPECT for value in values):
         return STATUS_SUSPECT
-    if any(value == STATUS_UNKNOWN for value in values):
+    if not values or any(value != STATUS_CLEAN for value in values):
         return STATUS_UNKNOWN
     return STATUS_CLEAN
 
 
 def participant_fingerprint(participants: Sequence[ParticipantModel]) -> str:
     payload = "\n".join(
-        f"{item.model_id}|{item.sha256}|{item.run_id}"
+        f"{item.model_id}|{item.sha256}|{item.run_id}|{item.provenance_status}"
         for item in sorted(participants, key=lambda row: row.model_id)
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest().lower()
@@ -191,7 +191,12 @@ class _PersistentFingerprintCache:
         key = self._key(path)
         with self._lock:
             old = self._data["files"].get(key)
-            row = dict(old) if isinstance(old, Mapping) else {}
+            unchanged = isinstance(old, Mapping) and (
+                int(old.get("size") or -1) == stat.st_size
+                and int(old.get("mtime_ns") or -1) == stat.st_mtime_ns
+                and int(old.get("ctime_ns") or -1) == stat.st_ctime_ns
+            )
+            row = dict(old) if unchanged else {}
             row.update(
                 {
                     "path": str(path),
@@ -316,6 +321,20 @@ class ParticipantPoolAuditService:
                 )
             )
         return tuple(result)
+
+    def _assert_registered_participants(self, track_id, participants):
+        track = self._track_row(track_id)
+        available = {
+            item.model_id: item
+            for item in self.list_eligible_models(str(track["target"] or ""))
+        }
+        current = [available[item.model_id] for item in participants
+                   if item.model_id in available]
+        if participant_fingerprint(current) != participant_fingerprint(participants):
+            raise EvaluationTrackError(
+                "Historia lub checkpoint uczestnika zmieniły się w rejestrze. "
+                "Wybierz ponownie modele uczestniczące i ponów audyt."
+            )
 
     def save_participants(
         self,
@@ -483,6 +502,7 @@ class ParticipantPoolAuditService:
             raise EvaluationTrackError(
                 "Najpierw wybierz modele uczestniczące w rankingu."
             )
+        self._assert_registered_participants(track_id, participants)
         fp = participant_fingerprint(participants)
         candidates = [Path(value) for value in paths if Path(value).is_file()]
         self._progress(progress, "Skan", len(candidates), len(candidates))
@@ -502,9 +522,22 @@ class ParticipantPoolAuditService:
 
         by_model_sha = {item.model_id: {} for item in participants}
         by_model_refs = {item.model_id: [] for item in participants}
+        history_complete = {
+            item.model_id: item.provenance_status in {"complete", "known"}
+            for item in participants
+        }
         for row in refs:
             model_id = str(row.get("model_id") or "")
             if model_id not in by_model_refs:
+                continue
+            if (
+                row.get("run_provenance_status") not in {"complete", "known"}
+                or row.get("dataset_provenance_status") not in {"complete", "known"}
+                or not row.get("source_image_id")
+                or (int(row.get("ancestor_depth") or 0) >= 128 and row.get("parent_run_id"))
+            ):
+                history_complete[model_id] = False
+            if not row.get("source_image_id"):
                 continue
             by_model_refs[model_id].append(row)
             sha = str(row.get("file_sha256") or row.get("artifact_sha256") or "").lower()
@@ -557,8 +590,14 @@ class ParticipantPoolAuditService:
                     pairs.append((int(value, 16), row))
             model_hashes[participant.model_id] = pairs
             total_refs = len(by_model_refs[participant.model_id])
+            # The same train/val file can appear in several ancestor runs.
+            # Count covered rows, not unique paths, to avoid false gaps.
+            covered_refs = sum(
+                self._resolve_reference_path(row) in ref_phash
+                for row in by_model_refs[participant.model_id]
+            )
             coverage[participant.model_id] = (
-                len(pairs) / total_refs if total_refs else 0.0
+                covered_refs / total_refs if total_refs else 0.0
             )
 
         verdicts = []
@@ -640,8 +679,11 @@ class ParticipantPoolAuditService:
                         ModelCandidateVerdict(
                             participant.model_id,
                             participant.sha256,
-                            STATUS_CLEAN,
-                            "brak wykrytej zależności od train/val tego modelu",
+                            (STATUS_CLEAN if cov == 1.0 and history_complete[participant.model_id]
+                             else STATUS_UNKNOWN),
+                            ("brak wykrytej zależności od train/val tego modelu"
+                             if cov == 1.0 and history_complete[participant.model_id]
+                             else "niepełna historia modelu lub pokrycie train/val"),
                             phash_distance=(
                                 int(best_distance)
                                 if best_distance is not None else None
@@ -692,7 +734,38 @@ class ParticipantPoolAuditService:
         return report
 
     def record_ingested_report(self, track_id, report, accepted_paths) -> None:
+        participants = self.load_participants(track_id)
         members = self.repository.list_evaluation_track_members(track_id)
+        by_path = {str(Path(item.path).resolve()).casefold(): item
+                   for item in report.candidates}
+        by_sha = {item.sha256.lower(): item for item in report.candidates}
+        try:
+            self._assert_registered_participants(track_id, participants)
+            if (not participants or report.track_id != track_id
+                    or report.participant_fingerprint != participant_fingerprint(participants)):
+                raise EvaluationTrackError("Raport nie dotyczy aktualnych uczestników tego toru.")
+            for path in accepted_paths:
+                item = by_path.get(str(Path(path).resolve()).casefold())
+                if item is None or item.common_status not in {STATUS_CLEAN, STATUS_SUSPECT}:
+                    raise EvaluationTrackError("Wybrany obraz nie ma dopuszczającego wyniku audytu.")
+            for row in members:
+                item = by_sha.get(str(row["sha256"] or "").lower())
+                if item is None or item.common_status not in {STATUS_CLEAN, STATUS_SUSPECT}:
+                    raise EvaluationTrackError(
+                        "Raport nie potwierdza niezależności wszystkich obrazów toru. Ponów audyt."
+                    )
+        except Exception:
+            self.invalidate_track_audit(track_id, reason="report_does_not_cover_current_pool")
+            raise
+        # Batch ingest verifies copy SHA against the audited SHA before commit.
+        # Seed the cache for those new paths so the next audit can reuse pHash.
+        track_root = self._track_root(track_id)
+        for row in members:
+            item = by_sha[str(row["sha256"]).lower()]
+            member_path = track_root / str(row["track_relative_path"])
+            if member_path.is_file():
+                self.cache.put(member_path, sha256=item.sha256, phash64=item.phash64 or None)
+        self.cache.save()
         payload = {
             "schema": AUDIT_SCHEMA,
             "track_id": str(track_id),
@@ -700,16 +773,23 @@ class ParticipantPoolAuditService:
             "participant_fingerprint": report.participant_fingerprint,
             "audited_at": report.audited_at,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "accepted_suspect_sha256": sorted(
+                str(row["sha256"]).lower() for row in members
+                if by_sha[str(row["sha256"]).lower()].common_status == STATUS_SUSPECT
+            ),
             "audited_member_sha256": sorted(
                 str(row["sha256"] or "").strip().lower()
                 for row in members
                 if str(row["sha256"] or "").strip()
             ),
         }
-        self.audit_state_path(track_id).write_text(
+        path = self.audit_state_path(track_id)
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        temporary.replace(path)
 
     def assert_track_audit_ready(self, track_id: str) -> None:
         track = self._track_row(track_id)
@@ -720,6 +800,7 @@ class ParticipantPoolAuditService:
             raise EvaluationTrackError(
                 "Tor ranking/final_test nie ma wybranych modeli uczestniczących."
             )
+        self._assert_registered_participants(track_id, participants)
         path = self.audit_state_path(track_id)
         if not path.exists():
             raise EvaluationTrackError(
