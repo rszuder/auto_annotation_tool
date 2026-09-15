@@ -2745,7 +2745,7 @@ def _load_ranking(self):
     try:
         if pz3_context:
             candidate_paths = [Path(path) for path in pz3_context["model_paths"]]
-        elif selected_scope in {"Projekt", "Wszystkie"}:
+        elif selected_scope in {"Projekt", "Globalne"}:
             candidate_paths = list(self._collect_ranking_participant_candidates(models_dir, target, selected_scope) or [])
         elif models_dir is not None and models_dir.exists() and models_dir.is_dir():
             candidate_paths = list(self._collect_ranking_participant_candidates(models_dir, target, selected_scope) or [])
@@ -2762,7 +2762,7 @@ def _load_ranking(self):
         if not key:
             continue
         scope = model_path_scope(candidate_path)
-        if selected_scope in {"Projekt", "Globalne"} and scope != selected_scope:
+        if selected_scope == "Projekt" and scope != "Projekt":
             continue
         candidate_by_key.setdefault(key, Path(candidate_path))
 

@@ -636,7 +636,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
 
     project_model_path = (
         None
-        if self._is_free_mode_session_context()
+        if self._is_free_mode_session_context() and not is_experiment_gt
         else self._get_campaign_project_plate_model_path()
     )
     current_plate_path = str(self.plate_custom_var.get() or "").strip()
@@ -646,7 +646,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             runtime_plate_path = str(runtime_plate_meta.get("path") or "").strip()
             if runtime_plate_path and Path(runtime_plate_path).exists():
                 current_plate_path = runtime_plate_path
-                self.plate_custom_var.set(runtime_plate_path)
+                if not is_experiment_gt:
+                    self.plate_custom_var.set(runtime_plate_path)
         except Exception:
             pass
     default_plate_mode = "custom"
@@ -661,7 +662,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         current_plate_path = str(project_model_path)
 
     plate_mode_var = tk.StringVar(
-        value=("project" if (project_model_path is not None and default_plate_mode == "project") else "custom")
+        value=("project" if (not is_experiment_gt and project_model_path is not None and default_plate_mode == "project") else "custom")
     )
     modal_plate_path_var = tk.StringVar(value=current_plate_path)
     modal_plate_adopt_var = tk.BooleanVar(value=False)
@@ -983,7 +984,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         justify=tk.LEFT,
     ).pack(anchor=tk.W, fill=tk.X)
 
-    if project_model_path is not None:
+    if project_model_path is not None and not is_experiment_gt:
         project_identity = self._get_model_identity_caption(project_model_path)
         project_label = f"Model projektu: {project_model_path.name}"
         if project_identity:
@@ -1163,7 +1164,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     plate_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def prompt_model_picker_scope_for_file_dialog(model_label: str) -> str | None:
-        if self._is_free_mode_session_context():
+        if is_experiment_gt or self._is_free_mode_session_context():
             return "free"
         choice: dict[str, str | None] = {"value": None}
         picker_dialog = tk.Toplevel(dialog)
@@ -2058,7 +2059,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                         parent=dialog,
                     )
                     return
-                if not self._is_free_mode_session_context():
+                if not is_experiment_gt and not self._is_free_mode_session_context():
                     adopt_plate_model = bool(modal_plate_adopt_var.get())
                     if _scope_model_already_confirmed_for_start(
                         Path(chosen_plate_path),
@@ -2083,14 +2084,14 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                     self._remember_plate_model_runtime_meta(
                         model_path=chosen_plate_path,
                         identity=format_yolo_model_identity(info),
-                        source="external",
+                        source="project" if _same_model_path(chosen_plate_path, project_model_path) else "external",
                         scope="run",
                     )
 
             self.conf_var.set(float(modal_conf_var.get() or 0.25))
             self._set_auto_vehicle_choice_state(
                 "use" if use_vehicle else "skip",
-                campaign_context=(not self._is_free_mode_session_context()),
+                campaign_context=(not is_experiment_gt and not self._is_free_mode_session_context()),
             )
             self.mode_var.set("C: Pojazdy + tablice" if use_vehicle else "B: Tylko tablice")
             self.vehicle_model_var.set(str(modal_vehicle_model_var.get() or "").strip())
@@ -2430,7 +2431,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             pass
 
         use_project_model = str(plate_mode_var.get() or "").strip().lower() == "project"
-        plate_custom_active = not use_project_model
+        plate_custom_active = is_experiment_gt or not use_project_model
         emergency_visible = bool(plate_emergency_visible_var.get())
         try:
             plate_emergency_btn.configure(
@@ -2461,13 +2462,13 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         )
         self._set_widget_packed(
             plate_adopt_check["row"],
-            bool((not self._is_free_mode_session_context()) and emergency_visible and plate_custom_active),
+            bool((not is_experiment_gt) and (not self._is_free_mode_session_context()) and emergency_visible and plate_custom_active),
             anchor=tk.W,
             pady=(6, 0),
         )
         self._set_widget_packed(
             plate_adopt_hint_lbl,
-            bool((not self._is_free_mode_session_context()) and emergency_visible and plate_custom_active),
+            bool((not is_experiment_gt) and (not self._is_free_mode_session_context()) and emergency_visible and plate_custom_active),
             anchor=tk.W,
             fill=tk.X,
             pady=(3, 0),

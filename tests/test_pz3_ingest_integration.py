@@ -135,7 +135,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(self.ingest([clean]), 2)
         state = self.f.repo.get_evaluation_track_audit_state(self.f.track)
         self.assertEqual(state["status"], "STALE")
-        self.assertIn("NIEAKTUALNY", self.panel._layout.summary_var.get())
+        self.assertEqual("Audyt: nieaktualny", self.panel._layout.audit_var.get())
         self.errors.assert_not_called()
 
     def test_current_audit_rejects_problem_images_in_the_same_flow(self):
@@ -163,8 +163,8 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.f.service.list_members(self.f.track)), 2)
         self.panel.participant_audit.assert_track_audit_ready(self.f.track)
         self.panel.refresh_tracks(select_track_id=self.f.track)
-        self.assertIn("✓ AKTUALNY", self.panel._layout.summary_var.get())
-        self.assertIn("Ręcznie zweryfikowane: 1", self.panel._layout.summary_var.get())
+        self.assertEqual("Audyt: aktualny", self.panel._layout.audit_var.get())
+        self.assertIn("Ręcznie zweryfikowane: 1", self.panel.detail_text.get("1.0", "end"))
         self.errors.assert_not_called()
 
     def test_cancel_current_pool_preserves_members_gt_and_audit(self):

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, font as tkfont
 
 from .app_theme_definitions import get_runtime_palette
 
@@ -16,8 +16,13 @@ class EvaluationTracksLayout:
         self._sash_user_position = None
         self._fit_job = None
         self.title_var = tk.StringVar(panel.parent, "Wybierz tor z listy")
-        self.summary_var = tk.StringVar(panel.parent, "Obrazy, Ground Truth i weryfikacja w jednym miejscu.")
         self.count_var = tk.StringVar(panel.parent, "Obrazy toru")
+        self.lifecycle_var = tk.StringVar(panel.parent, "")
+        self.audit_var = tk.StringVar(panel.parent, "")
+        self.gt_var = tk.StringVar(panel.parent, "")
+        self.verification_var = tk.StringVar(panel.parent, "")
+        self._track_title = self.title_var.get()
+        self._status_tones = ("muted", "muted", "muted", "muted")
 
         # Przewijanie całego obszaru jest rezerwą dla małych okien / dużego DPI.
         # Zwykle przewijają się tylko listy i zakładka szczegółów.
@@ -140,10 +145,7 @@ class EvaluationTracksLayout:
         self.right.columnconfigure(0, weight=1)
         self.right.rowconfigure(2, weight=1)
         self.body.add(self.right, weight=1)
-        self._wrapped_label(self.right, textvariable=self.title_var, style="TLabel", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="ew", pady=(0, 3)
-        )
-        self._wrapped_label(self.right, textvariable=self.summary_var).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        self._build_track_header()
 
         self.notebook = ttk.Notebook(self.right)
         self.notebook.grid(row=2, column=0, sticky="nsew")
@@ -180,6 +182,60 @@ class EvaluationTracksLayout:
         self._build_management()
         self._build_workflow()
         self.notebook.bind("<<NotebookTabChanged>>", self._schedule_fit, add="+")
+
+    def _build_track_header(self):
+        self.track_header = ttk.Frame(self.right)
+        self.track_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.track_header.columnconfigure(0, weight=1)
+        self.title_label = ttk.Label(
+            self.track_header, textvariable=self.title_var, width=1,
+            font=("Segoe UI", 12, "bold"), anchor=tk.W,
+        )
+        self.title_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.title_label.bind("<Configure>", self._fit_track_title, add="+")
+        self.lifecycle_badge = ttk.Label(
+            self.track_header, textvariable=self.lifecycle_var,
+            font=("Segoe UI", 9, "bold"), padding=(8, 3),
+        )
+        self.lifecycle_badge.grid(row=0, column=1, sticky="e")
+        self.status_row = ttk.Frame(self.track_header)
+        self.status_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        self.status_badges = []
+        for column, variable in enumerate((self.audit_var, self.gt_var, self.verification_var)):
+            badge = ttk.Label(
+                self.status_row, textvariable=variable, padding=(8, 3),
+                font=("Segoe UI", 9),
+            )
+            badge.grid(row=0, column=column, padx=(0, 6 if column < 2 else 0))
+            self.status_badges.append(badge)
+        self.lifecycle_badge.grid_remove()
+        self.status_row.grid_remove()
+
+    def _fit_track_title(self, _event=None):
+        # Długa nazwa ma jeden wiersz; pełna nazwa pozostaje w szczegółach toru.
+        available = self.title_label.winfo_width() - 2
+        if available <= 0:
+            return
+        font = tkfont.Font(font=self.title_label.cget("font"))
+        title = self._track_title
+        if font.measure(title) > available:
+            low, high = 0, len(title)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if font.measure(title[:middle] + "…") <= available:
+                    low = middle
+                else:
+                    high = middle - 1
+            title = title[:low].rstrip() + "…"
+        self.title_var.set(title)
+
+    def _paint_status_badges(self):
+        palette = get_runtime_palette(self.panel.app)
+        for badge, tone in zip((self.lifecycle_badge, *self.status_badges), self._status_tones):
+            badge.configure(
+                background=palette["field"],
+                foreground=palette.get(tone, palette["fg"]),
+            )
 
     def _build_management(self):
         panel = self.panel
@@ -255,31 +311,44 @@ class EvaluationTracksLayout:
         self._schedule_fit()
 
     def set_track(self, track=None, *, member_count=0, audit_state=None, readiness=None):
-        from .z4_evaluation_tracks import purpose_label, target_label
-        from .pz3_audit_resolution_dialog import format_audit_state
-
         if track:
-            self.title_var.set(str(track.get("name") or "Bez nazwy"))
-            self.summary_var.set(
-                f"v{int(track.get('version') or 0)}  ·  {track.get('status') or '-'}  ·  "
-                f"{target_label(track.get('target'))}  ·  {purpose_label(track.get('purpose'))}"
-                + "\n" + format_audit_state(audit_state or {}, compact=True)
+            self._track_title = f"{track.get('name') or 'Bez nazwy'} · v{int(track.get('version') or 0)}"
+            status = str(track.get("status") or "-").upper()
+            self.lifecycle_var.set(status)
+            self.lifecycle_badge.grid()
+            audit_status = (audit_state or {}).get("status", "MISSING")
+            audit_label, audit_tone = {
+                "CURRENT": ("aktualny", "success"),
+                "STALE": ("nieaktualny", "warning"),
+            }.get(audit_status, ("brak", "muted"))
+            self.audit_var.set(f"Audyt: {audit_label}")
+            gt_exists = readiness.gt_exists if readiness is not None else None
+            gt_verified = readiness.gt_verified if readiness is not None else None
+            self.gt_var.set("GT: zapisane" if gt_exists else "GT: brak" if gt_exists is False else "GT: —")
+            self.verification_var.set(
+                "Weryfikacja: gotowa" if gt_verified else
+                "Weryfikacja: oczekuje" if gt_exists else "Weryfikacja: —"
             )
-            if readiness is not None:
-                checklist = " \u00b7 ".join(
-                    f"{label} {'\u2713' if ready else '\u25cb'}"
-                    for label, ready in (
-                        ("GT", readiness.gt_exists),
-                        ("Weryfikacja", readiness.gt_verified),
-                        ("SEAL", readiness.sealed),
-                    )
-                )
-                self.summary_var.set(self.summary_var.get() + "\n" + checklist)
+            self._status_tones = (
+                "success" if status in {"VERIFIED", "SEALED"} else "muted",
+                audit_tone,
+                "success" if gt_exists else "muted",
+                "success" if gt_verified else "muted",
+            )
+            self.status_row.grid()
             self.count_var.set(f"Obrazy: {member_count}")
         else:
-            self.title_var.set("Wybierz tor z listy")
-            self.summary_var.set("Utwórz nowy tor lub wybierz istniejący, aby rozpocząć pracę.")
+            self._track_title = "Wybierz tor z listy"
+            self.lifecycle_var.set("")
+            self.audit_var.set("")
+            self.gt_var.set("")
+            self.verification_var.set("")
+            self.lifecycle_badge.grid_remove()
+            self.status_row.grid_remove()
             self.count_var.set("Obrazy toru")
+        self._fit_track_title()
+        self._paint_status_badges()
+        self._schedule_fit()
 
     def _minimum_right_width(self):
         return self.px(420)
@@ -370,6 +439,7 @@ class EvaluationTracksLayout:
     def apply_theme(self):
         palette = get_runtime_palette(self.panel.app)
         self.canvas.configure(background=palette["panel"])
+        self._paint_status_badges()
         self.panel.detail_text.configure(
             background=palette["field"], foreground=palette["fg"],
             selectbackground=palette["selection_bg"], selectforeground=palette["selection_fg"],

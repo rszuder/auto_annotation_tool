@@ -4,12 +4,40 @@ from pathlib import Path
 
 def comparison_context(host):
     context = getattr(host, "_pz3_comparison_context", None)
-    if not isinstance(context, dict):
+    # Aktywny eksperyment nie znika po zmianie pola ścieżki.
+    # Niezgodność jest błędem sprawdzanym przed uruchomieniem.
+    return context if isinstance(context, dict) and context else None
+
+
+def validate_comparison_context(host, *, model_paths=None):
+    """Odrzuć zmianę toru lub uczestników, także po ominięciu selektorów GUI."""
+    from ..registry import EvaluationTrackError
+
+    context = comparison_context(host)
+    if context is None:
         return None
     variable = getattr(host, "rank_data_dir", None)
-    raw = str(variable.get() or "") if variable is not None else ""
-    if raw and Path(raw).resolve() != Path(context["reference_path"]).resolve():
-        return None
+    selected = str(variable.get() or "").strip() if variable is not None else ""
+    reference = str(context.get("reference_path") or "").strip()
+    expected_models = context.get("model_paths")
+    if not context.get("track_id") or not reference or not expected_models:
+        raise EvaluationTrackError("Niekompletny kontekst eksperymentu PZ3. Otwórz porównanie ponownie z toru.")
+    if not selected or Path(selected).resolve() != Path(reference).resolve():
+        raise EvaluationTrackError(
+            "Naruszony kontekst eksperymentu: zmieniono zapieczętowany tor. "
+            f"Porównanie wymaga toru {context['track_id']}: {reference}."
+        )
+    if not isinstance(expected_models, (list, tuple)) or any(
+        not isinstance(path, (str, Path)) or not str(path).strip() for path in expected_models
+    ):
+        raise EvaluationTrackError("Nieprawidłowa lista modeli w kontekście eksperymentu PZ3.")
+    if model_paths is not None:
+        expected = [Path(path).resolve() for path in expected_models]
+        actual = [Path(path).resolve() for path in model_paths]
+        if len(actual) != len(expected) or len(set(actual)) != len(actual) or set(actual) != set(expected):
+            raise EvaluationTrackError(
+                "Naruszony kontekst eksperymentu: lista modeli różni się od zamrożonych uczestników."
+            )
     return context
 
 
