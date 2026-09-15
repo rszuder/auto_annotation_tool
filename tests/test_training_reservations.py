@@ -83,7 +83,7 @@ class TrainingReservationServiceTests(unittest.TestCase):
         *,
         payload: bytes = b"reserved",
         name: str = "reserved.jpg",
-        purpose: str = "final_test",
+        purpose: str = "validation",
         policy: str = "reserve_from_training",
     ) -> str:
         image = Path(self.temp.name) / name
@@ -103,7 +103,7 @@ class TrainingReservationServiceTests(unittest.TestCase):
         self.track_service.seal(track_id)
         return track_id
 
-    def test_sealing_final_track_activates_reservation(self):
+    def test_sealing_reserved_track_activates_reservation(self):
         track_id = self._seal_track()
         rows = self.repo.list_active_training_reservations(
             reservation_type=RESERVATION_TYPE_TRAIN_VAL,

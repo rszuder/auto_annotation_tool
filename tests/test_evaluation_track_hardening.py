@@ -58,7 +58,7 @@ class EvaluationTrackHardeningTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name="E1A",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         self.service.add_member(track_id, self._image())
@@ -120,7 +120,7 @@ class EvaluationTrackHardeningTests(unittest.TestCase):
                 """
             ).fetchone()[0]
 
-        self.assertEqual(SCHEMA_VERSION, 3)
+        self.assertEqual(SCHEMA_VERSION, 4)
         self.assertIn("seal_sha256", columns)
         self.assertEqual(count, 1)
 
@@ -181,7 +181,7 @@ class EvaluationTrackHardeningTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name="E1A",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
         )
         self.service.add_member(track_id, self._image())
         self.service.set_ground_truth(track_id, self._gt())

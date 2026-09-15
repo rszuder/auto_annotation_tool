@@ -123,6 +123,19 @@ class RankingExperimentBridge:
             for path in model_paths
         )
 
+        manifest_path = self.workspace / str(track.get("relative_path") or "") / "track_manifest.json"
+        if manifest_path.is_file():
+            import json
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            contract = manifest.get("experiment_contract")
+            if contract and contract.get("participants"):
+                frozen = {item["model_id"]: item["sha256"] for item in contract.get("participants", [])}
+                selected = {item.model_id: item.model_sha256 for item in participants}
+                if selected != frozen:
+                    raise ExperimentGuardError(
+                        "Porównanie musi używać dokładnie uczestników zapisanych w pieczęci toru."
+                    )
+
         plan = self.experiment_service.create(
             name=name,
             target=target,

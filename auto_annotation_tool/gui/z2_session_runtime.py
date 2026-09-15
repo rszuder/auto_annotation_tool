@@ -347,6 +347,9 @@ def _normalize_free_mode_screen_value(screen: str | None = None) -> str:
 
 
 def _is_free_mode_session_context(self) -> bool:
+    if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
+            and self._experiment_gt_context.get("source") == "pz3"):
+        return True
     try:
         from ..campaign_manager import CAMPAIGN
         active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
@@ -658,6 +661,9 @@ def _get_annotation_output_base_dir(self) -> Path:
 
 
 def _get_annotation_run_roots(self) -> list[Path]:
+    context = getattr(self, "_experiment_gt_context", None)
+    if isinstance(context, dict) and context.get("source") == "pz3":
+        return self._dedupe_paths([context["annotation_dir"]])
     if self._is_free_mode_session_context():
         return self._dedupe_paths([CONFIG.get_auto_annotations_dir("plate")])
 
@@ -2340,6 +2346,9 @@ def _on_free_mode_session_var_changed(self, *_args):
 
 
 def _queue_free_mode_session_save(self, *, include_preview_approved: bool = True, delay_ms: int = 350):
+    if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
+            and self._experiment_gt_context.get("source") == "pz3"):
+        return
     if self._free_mode_session_restore_in_progress or self._campaign_project_restore_in_progress:
         return
 

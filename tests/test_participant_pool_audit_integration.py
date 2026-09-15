@@ -132,7 +132,7 @@ class ParticipantAuditIntegrationTests(unittest.TestCase):
         self.assertEqual(repeated.cache_misses_phash, 0)
 
     def assert_stale(self):
-        state = json.loads(self.f.audit.audit_state_path(self.f.track).read_text(encoding="utf-8"))
+        state = self.f.repo.get_evaluation_track_audit_state(self.f.track)
         self.assertEqual(state["status"], "STALE")
         with self.assertRaises(EvaluationTrackError):
             self.f.audit.assert_track_audit_ready(self.f.track)

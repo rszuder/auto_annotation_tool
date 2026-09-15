@@ -2605,6 +2605,8 @@ def _load_ranking(self):
     selected_reference_raw = str(selected_reference.get("selected_path") or "").strip()
     selected_split = str(selected_reference.get("split_name") or "").strip()
     selected_scope = self._get_ranking_scope()
+    from .pz3_comparison import comparison_context
+    pz3_context = comparison_context(self)
     models_dir_raw = str(getattr(getattr(self, "rank_models_dir", None), "get", lambda: "")() or "").strip()
     try:
         models_dir = Path(models_dir_raw) if models_dir_raw else None
@@ -2703,6 +2705,8 @@ def _load_ranking(self):
             return str(Path(raw)).lower()
 
     def model_path_scope(path_like) -> str:
+        if pz3_context:
+            return "Globalne"
         model_path_raw = str(path_like or "").strip()
         if not model_path_raw:
             return "Globalne"
@@ -2739,7 +2743,9 @@ def _load_ranking(self):
 
     candidate_paths: list[Path] = []
     try:
-        if selected_scope in {"Projekt", "Wszystkie"}:
+        if pz3_context:
+            candidate_paths = [Path(path) for path in pz3_context["model_paths"]]
+        elif selected_scope in {"Projekt", "Wszystkie"}:
             candidate_paths = list(self._collect_ranking_participant_candidates(models_dir, target, selected_scope) or [])
         elif models_dir is not None and models_dir.exists() and models_dir.is_dir():
             candidate_paths = list(self._collect_ranking_participant_candidates(models_dir, target, selected_scope) or [])
@@ -2854,6 +2860,12 @@ def _load_ranking(self):
             except Exception:
                 pass
 
+    if pz3_context:
+        entries = [
+            entry for entry in getattr(self.ranking_engine, "entries", entries)
+            if getattr(entry, "track_id", "") == pz3_context["track_id"]
+            and getattr(entry, "model_id", "") in pz3_context["model_ids"]
+        ]
     filtered_entries = [e for e in entries if getattr(e, 'task_type', '') == target_task]
     if selected_reference_raw and not selected_reference.get("ok"):
         filtered_entries = []

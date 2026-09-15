@@ -61,7 +61,7 @@ class IndependentAcquisitionAttestationTests(unittest.TestCase):
         track_id = self.tracks.create_draft(
             name="E1A independent",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         self.tracks.add_member(track_id, image)

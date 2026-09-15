@@ -2841,6 +2841,12 @@ def _save_preview_edits(self, *args, **kwargs):
 
 
 def _delete_current_preview_image_hard(self, event=None):
+    if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
+            and self._experiment_gt_context.get("source") == "pz3"):
+        self._update_preview_edit_status(
+            "Skład puli zmienisz w PZ3. W edytorze GT poprawiaj anotacje."
+        )
+        return "break" if event is not None else False
     if event is not None and not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):
         return None
     if not self._ensure_preview_is_editable_for_action():

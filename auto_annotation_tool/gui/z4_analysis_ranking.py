@@ -1069,6 +1069,10 @@ def _collect_ranking_participant_candidates(
     target: str | None = None,
     scope: str | None = None,
 ) -> list[Path]:
+    from .pz3_comparison import comparison_context
+    context = comparison_context(self)
+    if context:
+        return [Path(path) for path in context["model_paths"]]
     normalized_target = CONFIG.normalize_task_target(target or self._get_ranking_task_target())
     if normalized_target not in {"plate", "char"}:
         normalized_target = "plate"
@@ -1320,6 +1324,9 @@ def _set_ranking_participant_enabled(self, path_like, enabled: bool) -> None:
 
 
 def _filter_enabled_ranking_participants(self, paths: list[Path]) -> list[Path]:
+    from .pz3_comparison import comparison_context
+    if comparison_context(self):
+        return list(paths)
     return [Path(path) for path in list(paths or []) if _is_ranking_participant_enabled(self, path)]
 
 
@@ -2842,6 +2849,15 @@ def _open_ranking_track_modal(self):
 
 
 def _open_ranking_participants_modal(self):
+    from .pz3_comparison import comparison_context
+    context = comparison_context(self)
+    if context:
+        messagebox.showinfo(
+            "Uczestnicy eksperymentu",
+            "Porównanie używa uczestników zapisanych w pieczęci:\n\n" + "\n".join(context["model_ids"]),
+            parent=self.frame,
+        )
+        return
     existing = getattr(self, "_ranking_participants_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -3876,6 +3892,8 @@ def _build_ranking_panel_v2(self, parent):
     self._refresh_ranking_reference_ui()
 
 def _open_ranking_results_modal(self):
+    from .pz3_comparison import comparison_context
+    pz3_context = comparison_context(self)
     existing = getattr(self, "_ranking_results_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -3889,7 +3907,7 @@ def _open_ranking_results_modal(self):
     palette = getattr(self.app, "palette", {})
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._ranking_results_modal = dialog
-    dialog.title("Porównanie modeli - uczestnicy i wyniki")
+    dialog.title(f"Porównanie · {pz3_context['name']}" if pz3_context else "Porównanie modeli - uczestnicy i wyniki")
     dialog.configure(bg=palette.get("panel", "#252526"))
     dialog.resizable(True, True)
     try:
@@ -3919,6 +3937,7 @@ def _open_ranking_results_modal(self):
             pass
 
     dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+    self._ranking_results_modal_close = close_dialog
 
     shell = ttk.Frame(dialog, padding=12, style="Panel.TFrame")
     shell.pack(fill=tk.BOTH, expand=True)
@@ -3948,7 +3967,11 @@ def _open_ranking_results_modal(self):
     scope_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
     ttk.Label(
         scope_row,
-        text=f"Zakres i startujące modele ustawisz w modalu uczestników. Aktywnie: {_format_ranking_scope_label(self)}.",
+        text=(
+            f"Tor i {len(pz3_context['model_ids'])} uczestników pochodzą z pieczęci eksperymentu."
+            if pz3_context else
+            f"Zakres i startujące modele ustawisz w modalu uczestników. Aktywnie: {_format_ranking_scope_label(self)}."
+        ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
         justify=tk.LEFT,
@@ -4061,11 +4084,15 @@ def _open_ranking_results_modal(self):
     bottom.grid(row=4, column=0, sticky="ew", pady=(10, 0))
     ttk.Label(
         bottom,
-        text="PPM na modelu projektu: wybór jako wynik bramki, dotrenowanie, szczegóły runu.",
+        text="Wyniki wspólnego toru PZ3." if pz3_context else "PPM: operacje na modelu.",
         style="PanelMuted.TLabel",
         anchor=tk.W,
     ).pack(side=tk.LEFT, fill=tk.X, expand=True)
     ttk.Button(bottom, text="Zamknij", command=close_dialog).pack(side=tk.RIGHT)
+    ttk.Button(
+        bottom, text="Uruchom porównanie", command=self._run_ranking_v2,
+        style="Accent.TButton",
+    ).pack(side=tk.RIGHT, padx=(0, 8))
     ttk.Button(
         bottom,
         text="[ PODGLĄD ] Przegląd raportu",

@@ -63,7 +63,7 @@ class ModelTrackIndependenceTests(unittest.TestCase):
         track_id = self.track_service.create_draft(
             name="audit-track",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         self.track_service.add_member(track_id, image)

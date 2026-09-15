@@ -319,6 +319,7 @@ class EvaluationTrackService:
             "ART-TRACK-" + hashlib.sha256(artifact_seed).hexdigest().upper()[:32]
         )
         artifact_relative = self._workspace_relative(destination)
+        committed = False
         try:
             self.repository.add_evaluation_track_member(
                 track_id=track_id,
@@ -332,9 +333,15 @@ class EvaluationTrackService:
                 artifact_relative_path=artifact_relative,
                 artifact_size_bytes=destination.stat().st_size,
             )
+            committed = True
+            from .participant_pool_audit import ParticipantPoolAuditService
+            ParticipantPoolAuditService(
+                self.workspace, repository=self.repository
+            ).invalidate_track_audit(track_id, reason="members_added")
             self._write_manifest(track_id)
         except Exception:
-            destination.unlink(missing_ok=True)
+            if not committed:
+                destination.unlink(missing_ok=True)
             raise
         return member_index
 
@@ -636,6 +643,22 @@ class EvaluationTrackService:
             raise
         return indices
 
+    def get_preparation_state(self, track_id: str):
+        from .participant_pool_audit import ParticipantPoolAuditService
+        from .track_readiness import track_readiness
+
+        track = self.get_track(track_id)
+        audit = ParticipantPoolAuditService(self.workspace, repository=self.repository)
+        participants = audit.load_participants(track_id)
+        raw_gt = str(track.get("gt_relative_path") or "")
+        return track_readiness(
+            track, participant_count=len(participants),
+            member_count=len(self.list_members(track_id)),
+            audit_state=audit.get_track_audit_state(track_id),
+            gt_exists=bool(raw_gt and (self.workspace / raw_gt).is_file()),
+            verification=self.get_verification(track_id),
+        )
+
     def set_ground_truth(
         self,
         track_id: str,
@@ -695,6 +718,10 @@ class EvaluationTrackService:
         manual_gt_complete: bool = False,
     ) -> dict[str, Any]:
         track = self._require_status(track_id, STATUS_DRAFT)
+        from .participant_pool_audit import ParticipantPoolAuditService
+        ParticipantPoolAuditService(
+            self.workspace, repository=self.repository
+        ).assert_track_audit_ready(track_id)
         members = self.repository.list_evaluation_track_members(track_id)
         if not members:
             raise EvaluationTrackError(
@@ -883,12 +910,60 @@ class EvaluationTrackService:
 
     def seal(self, track_id: str) -> TrackIntegrityResult:
         track = self._require_status(track_id, STATUS_VERIFIED)
+        from dataclasses import asdict
+        from .participant_pool_audit import ParticipantPoolAuditService
+        from .gt_preannotation import load_json, session_path
+        audit = ParticipantPoolAuditService(self.workspace, repository=self.repository)
+        audit.assert_track_audit_ready(track_id)
+        verification = self.get_verification(track_id)
+        if str(track["purpose"]) in {"ranking", "final_test"}:
+            if not verification.get("manual_gt_complete"):
+                raise EvaluationTrackError("SEAL wymaga potwierdzenia pełnej ręcznej kontroli GT.")
+            if str(track["target"]) == "plate" and not verification.get("pose_corner_ready"):
+                raise EvaluationTrackError("Eksperyment MT wymaga GT tablic z uporządkowanymi narożnikami.")
+        preparation = load_json(session_path(self._track_root(track)))
+        experiment_contract = {
+            "schema": "alpr.track_experiment_contract.v1",
+            "track_id": track_id,
+            "purpose": str(track["purpose"]),
+            "target": str(track["target"]),
+            "participants": [asdict(item) for item in audit.load_participants(track_id)],
+            "audit": audit.get_track_audit_state(track_id),
+            "gt_verification": verification,
+            "dataset_profile": preparation.get("dataset_profile", "unspecified"),
+            "gt_mode": preparation.get("mode", ""),
+        }
         preflight = self._content_integrity(track_id)
         if not preflight.ok:
             raise EvaluationTrackError(
                 "Nie można zapieczętować toru: " + "; ".join(preflight.issues)
             )
 
+        track_root = self._track_root(track)
+        artifacts = {}
+        for candidate in track_root.rglob("*"):
+            if not candidate.is_file():
+                continue
+            relative = candidate.relative_to(track_root).as_posix()
+            if (relative in {"participants.json", "participant_pool_audit_state.json"}
+                    or relative.startswith("audits/") or relative.startswith("gt_workflow/")
+                    or relative.startswith("ground_truth/_invalidated_member_change/")):
+                if not self._is_within(candidate, track_root):
+                    raise EvaluationTrackError("Artefakt eksperymentu wychodzi poza katalog toru.")
+                artifacts[relative] = self._sha256(candidate)
+        experiment_contract["artifacts"] = artifacts
+        expected_files = {
+            str(row["track_relative_path"]).replace("\\", "/")
+            for row in self.repository.list_evaluation_track_members(track_id)
+        } | set(artifacts) | {"track_manifest.json", "seal.json"}
+        gt_path = self.workspace / str(track["gt_relative_path"])
+        expected_files.add(gt_path.relative_to(track_root).as_posix())
+        unexpected = {
+            path.relative_to(track_root).as_posix() for path in track_root.rglob("*")
+            if path.is_file()
+        } - expected_files
+        if unexpected:
+            raise EvaluationTrackError("Tor zawiera nieznane pliki: " + ", ".join(sorted(unexpected)[:5]))
         sealed_at = self._utc_now()
         # Najpierw zapisujemy finalny manifest i seal, dopiero potem lifecycle w DB.
         # W razie błędu DB tor nadal jest VERIFIED i pieczętowanie można powtórzyć.
@@ -896,6 +971,7 @@ class EvaluationTrackService:
             track_id,
             status_override=STATUS_SEALED,
             sealed_at_override=sealed_at,
+            experiment_contract={**experiment_contract, "sealed_at": sealed_at},
         )
         manifest_sha = self._sha256(manifest_path)
 
@@ -918,6 +994,7 @@ class EvaluationTrackService:
                 }
             )
 
+        files.extend({"path": path, "sha256": sha} for path, sha in artifacts.items())
         seal_payload = {
             "schema": SEAL_SCHEMA,
             "track_id": track_id,
@@ -1287,6 +1364,19 @@ class EvaluationTrackService:
                 hard_issues.append(
                     "Format GT manifestu nie zgadza się z rejestrem."
                 )
+
+        contract = manifest.get("experiment_contract") or {}
+        for relative, expected_sha in (contract.get("artifacts") or {}).items():
+            candidate = track_root / relative
+            if (relative in expected_content or relative in {"track_manifest.json", "seal.json"}
+                    or not self._is_within(candidate, track_root)):
+                hard_issues.append(f"Niepoprawna ścieżka artefaktu eksperymentu: {relative}")
+                continue
+            expected_content[relative] = expected_sha
+            if seal_by_path.get(relative) != expected_sha:
+                hard_issues.append(f"Pieczęć nie zgadza się z artefaktem: {relative}")
+            if not candidate.is_file() or self._sha256(candidate) != expected_sha:
+                hard_issues.append(f"Zmienił się lub zniknął artefakt eksperymentu: {relative}")
 
         if set(seal_by_path) != set(expected_content):
             missing_from_seal = sorted(
@@ -2103,6 +2193,30 @@ class EvaluationTrackService:
             issues=tuple(issues),
         )
 
+    def ensure_audit_manifest(self, track_id: str) -> None:
+        """Recover a stale/missing manifest before publishing an audit as CURRENT."""
+        track = self._require_track(track_id)
+        if str(track["status"]) not in {STATUS_DRAFT, STATUS_VERIFIED}:
+            raise EvaluationTrackError("Wynik audytu można zapisać dla DRAFT lub VERIFIED.")
+        path = self._track_root(track) / "track_manifest.json"
+        try:
+            payload = self._read_json(path)
+        except (OSError, ValueError):
+            payload = {}
+        fields = ("member_index", "source_image_id", "source_artifact_id",
+                  "track_artifact_id", "original_name", "track_relative_path", "sha256")
+
+        def signature(rows):
+            return sorted(tuple(str(row.get(key) or "") for key in fields) for row in rows)
+
+        actual = self.list_members(track_id)
+        recorded = payload.get("members")
+        if (not isinstance(recorded, list)
+                or any(not isinstance(row, Mapping) for row in recorded)
+                or signature(recorded) != signature(actual)
+                or int(payload.get("member_count") or 0) != len(actual)):
+            self._write_manifest(track_id)
+
     def _write_manifest(
         self,
         track_id: str,
@@ -2112,6 +2226,7 @@ class EvaluationTrackService:
         verified_at_override: str | None = None,
         sealed_at_override: str | None = None,
         object_count_override: int | None = None,
+        experiment_contract: Mapping[str, Any] | None = None,
     ) -> Path:
         track = self._require_track(track_id)
         track_root = self._track_root(track)
@@ -2184,6 +2299,12 @@ class EvaluationTrackService:
             "members": members,
             "verification": dict(verification or preserved_verification),
         }
+        if experiment_contract:
+            payload["experiment_contract"] = dict(experiment_contract)
+        elif manifest_path.exists():
+            frozen = self._read_json(manifest_path).get("experiment_contract")
+            if frozen:
+                payload["experiment_contract"] = frozen
         self._atomic_json(manifest_path, payload)
         return manifest_path
 

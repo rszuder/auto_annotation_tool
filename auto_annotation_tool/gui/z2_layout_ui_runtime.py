@@ -236,6 +236,9 @@ def _should_show_free_mode_manual_right_panel(self) -> bool:
 
 
 def _should_show_right_panel(self) -> bool:
+    context = getattr(self, "_experiment_gt_context", None)
+    if isinstance(context, dict) and context.get("source") == "pz3":
+        return False
     if bool(getattr(self, "_preview_fullscreen_active", False)):
         return False
     if self._is_free_mode_session_context():

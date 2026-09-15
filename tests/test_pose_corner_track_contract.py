@@ -34,7 +34,7 @@ class PoseCornerTrackContractTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name="E1A MT",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         self.service.add_member(track_id, image)

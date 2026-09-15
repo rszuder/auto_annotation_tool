@@ -102,7 +102,7 @@ class PoseCornerExperimentProtocolTests(unittest.TestCase):
         track_id = self.tracks.create_draft(
             name="E1A",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
         )
         self.tracks.add_member(track_id, image)
         self.tracks.set_ground_truth(track_id, gt)

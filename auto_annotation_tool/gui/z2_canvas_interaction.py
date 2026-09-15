@@ -808,6 +808,13 @@ def _pane_has_child(pane, child) -> bool:
         return False
 
 def _sync_left_column_pane_layout(self, *, show_preview: bool, compact_layout: bool):
+    context = getattr(self, "_experiment_gt_context", None)
+    if isinstance(context, dict) and context.get("source") == "pz3":
+        self.left_scroll_shell.grid_remove()
+        self.main_left_frame.grid_rowconfigure(0, minsize=0, weight=0)
+        self.main_left_frame.grid_rowconfigure(1, minsize=0, weight=1)
+        self.preview_left_list_shell.grid(row=1, column=0, sticky="nsew", pady=0)
+        return
     left_frame = getattr(self, "main_left_frame", None)
     top_shell = getattr(self, "left_scroll_shell", None)
     bottom_shell = getattr(self, "preview_left_list_shell", None)

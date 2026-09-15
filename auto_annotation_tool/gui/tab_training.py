@@ -1498,6 +1498,10 @@ class TrainingTab:
         return str(CONFIG.get_datasets_dir(self._get_selected_training_target()))
 
     def _get_ranking_task_target(self) -> str:
+        from .pz3_comparison import comparison_context
+        context = comparison_context(self)
+        if context:
+            return context["target"]
         try:
             target = CONFIG.normalize_task_target(self._get_selected_training_target())
         except Exception:

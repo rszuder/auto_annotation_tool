@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
+import json
 from typing import Any, Mapping
 
 from .database import RegistryDatabase
@@ -1627,6 +1628,102 @@ class RegistryRepository:
                     (*clean_models, *clean_splits),
                 ).fetchall()
             )
+
+
+    @staticmethod
+    def _upsert_track_audit_state(connection, track_id, state):
+        connection.execute(
+            """INSERT INTO evaluation_track_audit_state
+               (track_id, status, participant_fingerprint, member_fingerprint, audit_id, state_json)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(track_id) DO UPDATE SET
+                   status=excluded.status, participant_fingerprint=excluded.participant_fingerprint,
+                   member_fingerprint=excluded.member_fingerprint, audit_id=excluded.audit_id,
+                   state_json=excluded.state_json""",
+            (track_id, state["status"], state.get("participant_fingerprint", ""),
+             state.get("member_fingerprint", ""), state.get("audit_id"),
+             json.dumps(state, ensure_ascii=False, sort_keys=True)),
+        )
+
+    def save_evaluation_track_audit_state(self, track_id, state) -> None:
+        self.initialize()
+        with self.database.transaction() as connection:
+            self._upsert_track_audit_state(connection, track_id, state)
+
+    def get_evaluation_track_audit_state(self, track_id) -> dict | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM evaluation_track_audit_state WHERE track_id=?", (track_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        state = json.loads(row["state_json"])
+        state.update({key: row[key] for key in (
+            "track_id", "status", "participant_fingerprint", "member_fingerprint", "audit_id"
+        )})
+        return state
+
+    def record_evaluation_track_audit(
+        self, audit, decisions, *, state=None, expected_member_shas=None
+    ) -> None:
+        """Commit the diagnosis, operator decisions and current state together."""
+        self.initialize()
+        with self.database.transaction() as connection:
+            if expected_member_shas is not None:
+                current = {
+                    str(row[0]).lower() for row in connection.execute(
+                        "SELECT sha256 FROM evaluation_track_members WHERE track_id=?",
+                        (audit["track_id"],),
+                    )
+                }
+                if current != set(expected_member_shas):
+                    raise ValueError("Skład toru zmienił się podczas zapisywania audytu.")
+            connection.execute(
+                """INSERT INTO evaluation_track_audits
+                   (audit_id, track_id, mode, participant_fingerprint, member_fingerprint,
+                    audited_at, applied_at, report_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (audit["audit_id"], audit["track_id"], audit["mode"],
+                 audit["participant_fingerprint"], audit["member_fingerprint"],
+                 audit["audited_at"], audit["applied_at"],
+                 json.dumps(audit["report"], ensure_ascii=False, sort_keys=True)),
+            )
+            connection.executemany(
+                """INSERT INTO evaluation_track_audit_decisions
+                   (audit_id, path, sha256, status, decision) VALUES (?, ?, ?, ?, ?)""",
+                [(audit["audit_id"], row["path"], row["sha256"], row["status"], row["decision"])
+                 for row in decisions],
+            )
+            if state is not None:
+                self._upsert_track_audit_state(connection, audit["track_id"], state)
+
+    def list_evaluation_track_audits(self, track_id) -> list[dict]:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            rows = connection.execute(
+                """SELECT audit_id, track_id, mode, participant_fingerprint, member_fingerprint,
+                          audited_at, applied_at
+                   FROM evaluation_track_audits WHERE track_id=? ORDER BY applied_at DESC""",
+                (track_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_evaluation_track_audit(self, audit_id) -> dict | None:
+        self.initialize()
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM evaluation_track_audits WHERE audit_id=?", (audit_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            decisions = connection.execute(
+                "SELECT path, sha256, status, decision FROM evaluation_track_audit_decisions "
+                "WHERE audit_id=? ORDER BY path", (audit_id,),
+            ).fetchall()
+        result = dict(row)
+        result["report"] = json.loads(result.pop("report_json"))
+        result["decisions"] = [dict(item) for item in decisions]
+        return result
 
     def find_source_ids_by_sha256_batch(self, sha256_values) -> dict[str, set[str]]:
         """Read known source identities without creating registry records."""

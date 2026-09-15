@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import uuid
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import cv2
@@ -57,6 +58,7 @@ class ModelCandidateVerdict:
     reference_path: str = ""
     phash_distance: int | None = None
     phash_reference_coverage: float = 0.0
+    reference_image_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -295,10 +297,14 @@ class ParticipantPoolAuditService:
 
     def load_participants(self, track_id: str) -> tuple[ParticipantModel, ...]:
         path = self.participants_path(track_id)
-        if not path.exists():
-            return ()
+        track = self._track_row(track_id)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            if str(track["status"]) in {"SEALED", "RETIRED"}:
+                manifest = json.loads((self._track_root(track_id) / "track_manifest.json").read_text(encoding="utf-8"))
+                contract = manifest.get("experiment_contract")
+                if isinstance(contract, Mapping):
+                    payload = contract
             rows = payload.get("participants") if isinstance(payload, Mapping) else []
         except Exception:
             return ()
@@ -380,22 +386,161 @@ class ParticipantPoolAuditService:
         return tuple(selected)
 
     def invalidate_track_audit(self, track_id: str, *, reason: str) -> None:
-        path = self.audit_state_path(track_id)
-        path.write_text(
-            json.dumps(
-                {
-                    "schema": AUDIT_SCHEMA,
-                    "track_id": str(track_id),
-                    "status": "STALE",
-                    "reason": str(reason or ""),
-                    "invalidated_at": datetime.now(timezone.utc).isoformat(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        state = self._read_track_audit_state(track_id)
+        state.update(
+            schema=AUDIT_SCHEMA, track_id=str(track_id), status="STALE",
+            reason=str(reason or ""), invalidated_at=datetime.now(timezone.utc).isoformat(),
         )
+        self.repository.save_evaluation_track_audit_state(track_id, state)
+
+
+    def _read_track_audit_state(self, track_id: str) -> dict[str, Any]:
+        state = self.repository.get_evaluation_track_audit_state(track_id)
+        if state is not None:
+            return state
+        # One-way compatibility import. Once present, SQLite is authoritative.
+        path = self.audit_state_path(track_id)
+        if not path.exists():
+            return {}
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                state = {}
+        except (OSError, ValueError):
+            state = {}
+        state.update(track_id=str(track_id), legacy_imported=True)
+        if state.get("status") not in {"CURRENT", "STALE"}:
+            state.update(status="STALE", reason="legacy_audit_unreadable")
+        self.repository.save_evaluation_track_audit_state(track_id, state)
+        return state
+
+    def _assert_audit_state_matches(self, track_id, state):
+        if state.get("status") != "CURRENT":
+            raise EvaluationTrackError("Audyt puli jest nieaktualny.")
+        participants = self.load_participants(track_id)
+        if not participants:
+            raise EvaluationTrackError("Tor nie ma wybranych modeli uczestniczących.")
+        self._assert_registered_participants(track_id, participants)
+        if state.get("participant_fingerprint") != participant_fingerprint(participants):
+            raise EvaluationTrackError("Zestaw modeli zmienił się po audycie puli.")
+        current = {
+            str(row["sha256"] or "").lower()
+            for row in self.repository.list_evaluation_track_members(track_id)
+        }
+        if current != set(state.get("audited_member_sha256") or []):
+            raise EvaluationTrackError("Skład obrazów zmienił się po audycie puli.")
+
+    def get_track_audit_state(self, track_id: str) -> dict[str, Any]:
+        state = self._read_track_audit_state(track_id)
+        if state.get("status") == "CURRENT":
+            try:
+                self._assert_audit_state_matches(track_id, state)
+            except EvaluationTrackError as exc:
+                self.invalidate_track_audit(track_id, reason=str(exc))
+                state = self._read_track_audit_state(track_id)
+        result = dict(state)
+        result.setdefault("status", "MISSING")
+        result["current_member_count"] = len(self.repository.list_evaluation_track_members(track_id))
+        result["current_participant_count"] = len(self.load_participants(track_id))
+        return result
+
+    def validate_resolution_target(self, track_id, resolution, expected_member_shas) -> None:
+        resolution.validate()
+        report = resolution.report
+        participants = self.load_participants(track_id)
+        self._assert_registered_participants(track_id, participants)
+        if (report.track_id != track_id or not participants
+                or report.participant_fingerprint != participant_fingerprint(participants)):
+            raise EvaluationTrackError("Uczestnicy zmienili się podczas audytu. Uruchom go ponownie.")
+        current = {
+            str(row["sha256"] or "").lower()
+            for row in self.repository.list_evaluation_track_members(track_id)
+        }
+        if current != set(expected_member_shas):
+            raise EvaluationTrackError("Skład toru zmienił się podczas audytu. Uruchom go ponownie.")
+
+    def record_resolution(self, track_id, resolution, *, mode, previous_state=None) -> dict:
+        from .audit_resolution import audit_path_key
+        resolution.validate()
+        if mode not in {"ingest", "pool"}:
+            raise ValueError("Nieprawidłowy tryb audytu.")
+        report = resolution.report
+        participants = self.load_participants(track_id)
+        self._assert_registered_participants(track_id, participants)
+        if (report.track_id != track_id or not participants
+                or report.participant_fingerprint != participant_fingerprint(participants)):
+            raise EvaluationTrackError("Raport nie dotyczy aktualnych uczestników toru.")
+
+        members = self.repository.list_evaluation_track_members(track_id)
+        current = {str(row["sha256"]).lower() for row in members}
+        by_path = {audit_path_key(item.path): item for item in report.candidates}
+        accepted = {by_path[audit_path_key(path)].sha256.lower()
+                    for path in resolution.accepted_paths}
+        rejected = {by_path[audit_path_key(path)].sha256.lower()
+                    for path in resolution.rejected_paths}
+        if not accepted.issubset(current) or rejected & current:
+            raise EvaluationTrackError("Skład zapisanej puli nie odpowiada decyzjom audytu.")
+
+        previous = previous_state or {}
+        prior_shas, prior_manual = set(), set()
+        if (mode == "ingest" and previous.get("status") == "CURRENT"
+                and previous.get("participant_fingerprint") == report.participant_fingerprint):
+            prior_shas = set(previous.get("audited_member_sha256") or [])
+            prior_manual = set(previous.get("accepted_suspect_sha256") or [])
+        covered = accepted | prior_shas
+        ready = bool(current) and current == covered
+        manual = (prior_manual | {
+            by_path[audit_path_key(path)].sha256.lower()
+            for path in resolution.accepted_suspects
+        }) & current
+
+        # Verified batch copies reuse their source fingerprints on subsequent audits.
+        by_sha = {item.sha256.lower(): item for item in report.candidates}
+        root = self._track_root(track_id)
+        for member in members:
+            sha = str(member["sha256"]).lower()
+            if sha in accepted:
+                item = by_sha[sha]
+                path = root / str(member["track_relative_path"])
+                if path.is_file():
+                    self.cache.put(path, sha256=sha, phash64=item.phash64 or None)
+        self.cache.save()
+
+        now = datetime.now(timezone.utc).isoformat()
+        audit_id = "AUDIT-" + uuid.uuid4().hex
+        member_fp = hashlib.sha256("\n".join(sorted(current)).encode()).hexdigest()
+        state = {
+            "schema": AUDIT_SCHEMA, "track_id": track_id, "audit_id": audit_id,
+            "status": "CURRENT" if ready else "STALE",
+            "reason": "" if ready else "previous_pool_requires_audit" if current else "empty_pool",
+            "participant_fingerprint": report.participant_fingerprint,
+            "member_fingerprint": member_fp,
+            "audited_member_sha256": sorted(covered),
+            "accepted_suspect_sha256": sorted(manual),
+            "audited_at": report.audited_at, "recorded_at": now,
+            "participant_count": len(participants), "member_count": len(current),
+            "dependent_count": 0, "unknown_count": 0,
+            "manual_verified_count": len(manual),
+            "resolution_counts": {
+                "accepted_clean": len(resolution.accepted_clean),
+                "accepted_suspects": len(resolution.accepted_suspects),
+                "rejected_dependent": len(resolution.rejected_dependent),
+                "rejected_unknown": len(resolution.rejected_unknown),
+                "rejected_suspects": len(resolution.rejected_suspects),
+            },
+        }
+        # A rejected-only preflight does not change the audit of the existing pool.
+        state_to_write = None if mode == "ingest" and not accepted else state
+        self.repository.record_evaluation_track_audit(
+            {
+                "audit_id": audit_id, "track_id": track_id, "mode": mode,
+                "participant_fingerprint": report.participant_fingerprint,
+                "member_fingerprint": member_fp, "audited_at": report.audited_at,
+                "applied_at": now, "report": report.to_dict(),
+            },
+            resolution.decision_rows(), state=state_to_write, expected_member_shas=current,
+        )
+        return state if state_to_write is not None else self.get_track_audit_state(track_id)
 
     @staticmethod
     def _progress(callback, stage: str, current: int, total: int) -> None:
@@ -504,11 +649,19 @@ class ParticipantPoolAuditService:
             )
         self._assert_registered_participants(track_id, participants)
         fp = participant_fingerprint(participants)
-        candidates = [Path(value) for value in paths if Path(value).is_file()]
+        candidates = list(dict.fromkeys(Path(value) for value in paths))
+        missing = {path for path in candidates if not path.is_file()}
         self._progress(progress, "Skan", len(candidates), len(candidates))
         candidate_sha, sha_hits, sha_misses = self._ensure_sha(
-            candidates, progress=progress
+            [path for path in candidates if path not in missing], progress=progress
         )
+        if missing:
+            root = self._track_root(track_id)
+            stored = {
+                root / row["track_relative_path"]: str(row["sha256"])
+                for row in self.repository.list_evaluation_track_members(track_id)
+            }
+            candidate_sha.update({path: stored.get(path, "") for path in missing})
 
         self._progress(progress, "Lineage modeli", 0, 1)
         refs = [
@@ -607,6 +760,12 @@ class ParticipantPoolAuditService:
             phash = candidate_phash.get(path, "")
             per_model = []
             for participant in participants:
+                if path in missing:
+                    per_model.append(ModelCandidateVerdict(
+                        participant.model_id, participant.sha256, STATUS_UNKNOWN,
+                        "Brak pliku obrazu. Nie można sprawdzić jego zawartości.",
+                    ))
+                    continue
                 hit = exact[path].get(participant.model_id)
                 cov = coverage[participant.model_id]
                 if hit is not None:
@@ -622,6 +781,7 @@ class ParticipantPoolAuditService:
                             str(hit.get("member_relative_path") or ""),
                             None,
                             cov,
+                            reference_image_path=str(self._resolve_reference_path(hit) or ""),
                         )
                     )
                     continue
@@ -644,7 +804,8 @@ class ParticipantPoolAuditService:
                             participant.model_id,
                             participant.sha256,
                             STATUS_UNKNOWN,
-                            "brak pokrycia pHash dla chronionego train/val",
+                            ("Nie można odczytać obrazu do porównania wyglądu."
+                             if not phash else "Brak obrazów referencyjnych treningu/walidacji do porównania."),
                             phash_reference_coverage=cov,
                         )
                     )
@@ -672,6 +833,7 @@ class ParticipantPoolAuditService:
                             str(row.get("member_relative_path") or ""),
                             int(best_distance),
                             cov,
+                            reference_image_path=str(self._resolve_reference_path(row) or ""),
                         )
                     )
                 else:
@@ -783,48 +945,10 @@ class ParticipantPoolAuditService:
                 if str(row["sha256"] or "").strip()
             ),
         }
-        path = self.audit_state_path(track_id)
-        temporary = path.with_suffix(".json.tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        self.repository.save_evaluation_track_audit_state(track_id, payload)
 
     def assert_track_audit_ready(self, track_id: str) -> None:
         track = self._track_row(track_id)
         if str(track["purpose"] or "").strip().lower() not in {"ranking", "final_test"}:
             return
-        participants = self.load_participants(track_id)
-        if not participants:
-            raise EvaluationTrackError(
-                "Tor ranking/final_test nie ma wybranych modeli uczestniczących."
-            )
-        self._assert_registered_participants(track_id, participants)
-        path = self.audit_state_path(track_id)
-        if not path.exists():
-            raise EvaluationTrackError(
-                "Pula nie ma aktualnego audytu względem modeli uczestniczących."
-            )
-        try:
-            state = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
-        if str(state.get("status") or "") != "CURRENT":
-            raise EvaluationTrackError("Audyt puli jest nieaktualny.")
-        if str(state.get("participant_fingerprint") or "") != participant_fingerprint(participants):
-            raise EvaluationTrackError(
-                "Zestaw modeli zmienił się po audycie puli."
-            )
-        audited = {
-            str(value or "").strip().lower()
-            for value in state.get("audited_member_sha256") or []
-        }
-        current = {
-            str(row["sha256"] or "").strip().lower()
-            for row in self.repository.list_evaluation_track_members(track_id)
-        }
-        if audited != current:
-            raise EvaluationTrackError(
-                "Skład DRAFT zmienił się po audycie puli."
-            )
+        self._assert_audit_state_matches(track_id, self._read_track_audit_state(track_id))

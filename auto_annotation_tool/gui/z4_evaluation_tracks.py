@@ -22,6 +22,8 @@ from .pz3_participant_audit import (
     ParticipantSelectionDialog,
     TrainingRunSelectionDialog,
 )
+from .pz3_audit_resolution_dialog import format_audit_state
+from ..registry.audit_resolution import audit_path_key
 from ..registry.participant_pool_audit import (
     ParticipantPoolAuditService,
     STATUS_CLEAN,
@@ -509,9 +511,13 @@ class EvaluationTracksPanel:
         if track.get("parent_track_id"):
             lines.append(f"Poprzednia wersja: {track.get('parent_track_id')}")
 
+        audit_state = self.participant_audit.get_track_audit_state(track_id)
+        lines += ["", format_audit_state(audit_state)]
         self._set_detail_text("\n".join(lines))
+        self._current_readiness = self.service.get_preparation_state(track_id)
         if getattr(self, "_layout", None) is not None:
-            self._layout.set_track(track, member_count=len(members))
+            self._layout.set_track(track, member_count=len(members), audit_state=audit_state,
+                                   readiness=self._current_readiness)
         for iid in self.member_tree.get_children():
             self.member_tree.delete(iid)
         for row in members:
@@ -531,7 +537,7 @@ class EvaluationTracksPanel:
             member_count=len(members),
         )
         self._set_status(
-            self._status_hint_for_track(track, integrity)
+            self._current_readiness.next_step
         )
 
     def _clear_selected_details(self) -> None:
@@ -580,102 +586,59 @@ class EvaluationTracksPanel:
         )
 
     def prepare_ground_truth_in_z2(self) -> None:
-        _gt_track_id = self._require_current_track()
-        if not _gt_track_id:
-            return
-        try:
-            _gt_track = self.service.get_track(_gt_track_id)
-            _gt_members = self.service.list_members(_gt_track_id)
-            _gt_decision = show_experiment_gt_entry(
-                self.parent,
-                workspace=self.workspace,
-                track=_gt_track,
-                member_count=len(_gt_members),
-            )
-        except Exception as exc:
-            self._show_error(
-                "Nie udało się przygotować wejścia do Ground Truth",
-                exc,
-            )
-            return
-        if _gt_decision is None:
-            return
-        try:
-            save_pending_experiment_gt_entry(
-                self.workspace,
-                _gt_track_id,
-                _gt_decision,
-            )
-        except Exception as exc:
-            self._show_error(
-                "Nie udało się zapisać kontekstu Ground Truth",
-                exc,
-            )
-            return
+        from .pz3_gt_route import enter_experiment_gt_workspace
+        from .experiment_gt_workflow import ExperimentGtEntryDecision
+        from ..registry.experiment_gt_workspace import prepare_gt_workspace, working_gt_path
+        from ..registry.gt_preannotation import get_gt_preparation_summary
 
         track_id = self._require_current_track()
         if not track_id:
             return
+        progress = None
         try:
+            readiness = self.service.get_preparation_state(track_id)
+            if not readiness.can_prepare_gt or readiness.target != "plate":
+                raise EvaluationTrackError(readiness.next_step)
             track = self.service.get_track(track_id)
-            if str(track.get("status") or "").upper() != STATUS_DRAFT:
-                raise EvaluationTrackError(
-                    "Ground Truth przygotowujemy przed weryfikacją, w DRAFT."
-                )
-            if str(track.get("target") or "").lower() != "plate":
-                raise EvaluationTrackError(
-                    "Automatyczne przekazanie do Z2 jest obecnie dostępne "
-                    "dla MT / tablic. Dla innych targetów użyj właściwego "
-                    "narzędzia anotacyjnego i wskaż gotowy GT."
-                )
-            members = self.service.list_members(track_id)
-            if not members:
-                raise EvaluationTrackError(
-                    "Najpierw użyj „Dodaj obrazy”, aby ustalić "
-                    "niezależną pulę eksperymentu."
-                )
-            context = self.service.activate_z2_context(track_id)
-        except Exception as exc:
-            self._show_error(
-                "Nie udało się przygotować kontekstu Z2",
-                exc,
+            loader = getattr(self.app, "_ensure_tab_loaded", None)
+            annotation_tab = (
+                loader("annotation", select=False) if callable(loader)
+                else getattr(self.app, "tabs", {}).get("annotation")
             )
-            return
-
-        source_dir = Path(context["source_dir"])
-        image_count = sum(
-            1
-            for path in source_dir.iterdir()
-            if path.is_file()
-            and path.suffix.lower() in CONFIG.IMAGE_EXTENSIONS
-        )
-        messagebox.showinfo(
-            "Eksperyment → Z2",
-            (
-                f"Aktywowano eksperyment „{track.get('name') or track_id}”.\n\n"
-                f"Źródła: {context['source_dir']}\n"
-                f"Runy Z2: {context['annotation_dir']}\n\n"
-                "Z2 będzie pracować w trybie swobodnym, ale run otrzyma "
-                "znacznik eksperymentalny. Eksport tego runu do "
-                "4_training_datasets jest twardo zablokowany.\n\n"
-                f"Ustalona pula zawiera {image_count} obrazów. "
-                "Przejdź do Z2 i przygotuj Ground Truth; "
-                "jeżeli używasz autoanotacji, wykonaj pełną ręczną korektę."
-            ),
-            parent=self.parent,
-        )
-        self._set_status(
-            "Aktywny kontekst eksperymentalny Z2: "
-            f"{track.get('name') or track_id}. Eksport treningowy zablokowany."
-        )
-        try:
-            app = self.app
-            annotation_tab = getattr(app, "tabs", {}).get("annotation")
-            if annotation_tab is not None:
-                app.notebook.select(annotation_tab.frame)
-        except Exception:
-            pass
-
+            if annotation_tab is None:
+                raise EvaluationTrackError("Edytor Z2 nie jest dostępny.")
+            if getattr(annotation_tab, "is_processing", False):
+                raise EvaluationTrackError("Poczekaj na zakończenie bieżącej anotacji Z2.")
+            if getattr(annotation_tab, "_preview_dirty_images", None):
+                if not annotation_tab._save_preview_edits(interactive=True):
+                    return
+            existing = working_gt_path(self.service, track_id).is_file() or bool(track.get("gt_relative_path"))
+            if existing:
+                decision = ExperimentGtEntryDecision("manual", "unspecified")
+            else:
+                decision = show_experiment_gt_entry(
+                    self.parent, workspace=self.workspace, track=track,
+                    member_count=len(self.service.list_members(track_id)),
+                )
+                if decision is None:
+                    return
+            progress = BatchProgressDialog(self.parent, title="Przygotowanie Ground Truth")
+            context = progress.run(lambda update: prepare_gt_workspace(
+                self.service, track_id, mode=decision.mode, progress=update,
+            ))
+            progress.close()
+            progress = None
+            if not existing:
+                save_pending_experiment_gt_entry(self.workspace, track_id, decision)
+            self.app.notebook.select(annotation_tab.frame)
+            if not enter_experiment_gt_workspace(annotation_tab, context):
+                return
+            self._set_status("Otwarto roboczy Ground Truth eksperymentu w Z2.")
+        except Exception as exc:
+            self._show_error("Nie udało się otworzyć Ground Truth", exc)
+        finally:
+            if progress is not None:
+                progress.close()
 
     def _refresh_participant_model_registry(
         self,
@@ -846,66 +809,90 @@ class EvaluationTracksPanel:
         for row in self.service.list_members(str(track.get("track_id") or "")):
             rel = str(row.get("track_relative_path") or "").strip()
             path = track_root / rel
-            if rel and path.exists() and path.is_file():
+            if rel:
                 result.append(path)
         return result
 
-    def _run_participant_pool_audit(self, track_id: str, paths: list[Path]):
+
+    def _run_participant_pool_audit(self, track_id: str, paths: list[Path], *, mode="pool", track=None):
         progress = BatchProgressDialog(self.parent, title="Audyt puli względem modeli")
         try:
             report = progress.run(
-                lambda update: self.participant_audit.audit_paths(
-                    track_id, paths, progress=update
-                )
+                lambda update: self.participant_audit.audit_paths(track_id, paths, progress=update)
             )
         finally:
             progress.close()
-        ParticipantAuditMatrixDialog(self.parent, report).show()
-        return report
+        track = track or self.service.get_track(track_id)
+        return ParticipantAuditMatrixDialog(
+            self.parent, report, mode=mode,
+            can_remove=str(track.get("status") or "") == STATUS_DRAFT,
+            has_ground_truth=bool(track.get("gt_relative_path")),
+        ).show()
 
     def audit_current_pool(self) -> None:
         track_id = self._require_current_track()
         if not track_id:
             return
-        track = self.service.get_track(track_id)
-        if not self.participant_audit.load_participants(track_id):
-            messagebox.showwarning(
-                "Modele uczestniczące",
-                (
-                    "Najpierw użyj „Modele uczestniczące…”, "
-                    "a następnie uruchom audyt puli."
-                ),
-                parent=self.parent,
-            )
-            return
-        paths = self._track_member_paths(track)
-        if not paths:
-            messagebox.showinfo("Audyt puli", "Tor nie zawiera jeszcze obrazów.", parent=self.parent)
-            return
         try:
-            report = self._run_participant_pool_audit(track_id, paths)
+            track = self.service.get_track(track_id)
+            members = self.service.list_members(track_id)
+            if not self.participant_audit.load_participants(track_id):
+                messagebox.showwarning(
+                    "Modele uczestniczące", "Najpierw wybierz modele uczestniczące.",
+                    parent=self.parent,
+                )
+                return
+            if not members:
+                messagebox.showinfo("Audyt puli", "Tor nie zawiera jeszcze obrazów.", parent=self.parent)
+                return
+            expected_shas = {str(row["sha256"]).lower() for row in members}
+            resolution = self._run_participant_pool_audit(
+                track_id, self._track_member_paths(track), mode="pool", track=track
+            )
         except Exception as exc:
             self._show_error("Audyt puli nie powiódł się", exc)
             return
-        if report.dependent_count or report.unknown_count:
-            self.participant_audit.invalidate_track_audit(track_id, reason="dependent_or_unknown")
-            messagebox.showwarning(
-                "Audyt puli",
-                f"Zależne: {report.dependent_count}, nieustalone: {report.unknown_count}.\n\n"
-                "Usuń problematyczne obrazy albo zmień uczestników.",
-                parent=self.parent,
-            )
+        if resolution.cancelled:
             return
-        if report.suspect_count and messagebox.askyesno(
-            "Podejrzane pochodne",
-            f"Wykryto {report.suspect_count} podejrzanych pochodnych.\n\n"
-            "Oznaczyć audyt jako NIEGOTOWY i wymagać ich usunięcia? (Zalecane: TAK)",
-            parent=self.parent,
-        ):
-            self.participant_audit.invalidate_track_audit(track_id, reason="suspect_derivatives")
+
+        def apply(update):
+            self.participant_audit.validate_resolution_target(track_id, resolution, expected_shas)
+            rejected = {audit_path_key(path) for path in resolution.rejected_paths}
+            root = self.workspace / str(track["relative_path"])
+            indices = [
+                int(row["member_index"]) for row in members
+                if audit_path_key(root / row["track_relative_path"]) in rejected
+            ]
+            if indices:
+                update("Usuwanie odrzuconych obrazów z toru", 0, len(indices))
+                self.service.remove_members(track_id, indices)
+            update("Zapis decyzji i audytu", 0, 1)
+            try:
+                self.service.ensure_audit_manifest(track_id)
+                state = self.participant_audit.record_resolution(track_id, resolution, mode="pool")
+            except Exception:
+                self.participant_audit.invalidate_track_audit(track_id, reason="resolution_write_failed")
+                raise
+            return len(indices), state
+
+        progress = BatchProgressDialog(self.parent, title="Zapis wyniku audytu")
+        try:
+            removed, state = progress.run(apply)
+        except Exception as exc:
+            progress.close()
+            self.refresh_tracks(select_track_id=track_id)
+            self._show_error("Nie udało się zastosować wyniku audytu", exc)
             return
-        self.participant_audit.record_ingested_report(track_id, report, paths)
-        self._set_status("Audyt puli jest aktualny względem wybranych uczestników.")
+        progress.close()
+        self.refresh_tracks(select_track_id=track_id)
+        text = (
+            f"Pozostało w torze: {len(self.service.list_members(track_id))}\n"
+            f"Usunięto z toru: {removed}\n"
+            f"Ręcznie zaakceptowano: {len(resolution.accepted_suspects)}\n\n"
+            + format_audit_state(state, compact=True)
+        )
+        self._set_status(text.replace("\n", " | "))
+        messagebox.showinfo("Zapisano wynik audytu", text, parent=self.parent)
 
     def add_images(self) -> None:
         track_id = self._require_current_track()
@@ -1020,237 +1007,61 @@ class EvaluationTracksPanel:
             )
             return
 
-        report = None
-        accepted_new = list(unique_paths)
-        dependent_new = []
-        unknown_new = []
-        suspect_new = []
-        clean_new = list(unique_paths)
-        include_suspects = False
 
+        resolution = None
+        accepted_new = list(unique_paths)
+        previous_state = self.participant_audit.get_track_audit_state(track_id)
+        expected_shas = {str(row["sha256"]).lower() for row in existing_members}
         if participants:
-            existing_paths = self._track_member_paths(track)
-            all_paths = existing_paths + unique_paths
             try:
-                report = self._run_participant_pool_audit(
-                    track_id,
-                    all_paths,
+                resolution = self._run_participant_pool_audit(
+                    track_id, unique_paths, mode="ingest", track=track
                 )
             except Exception as exc:
                 self._show_error("Audyt puli nie powiódł się", exc)
                 return
-
-            by_path = {
-                os.path.normcase(os.path.abspath(item.path)): item
-                for item in report.candidates
-            }
-
-            bad_existing = []
-            suspect_existing = []
-            for path in existing_paths:
-                item = by_path.get(os.path.normcase(os.path.abspath(path)))
-                if item is None:
-                    continue
-                if item.common_status in {
-                    STATUS_DEPENDENT,
-                    STATUS_UNKNOWN,
-                }:
-                    bad_existing.append(item.filename)
-                elif item.common_status == STATUS_SUSPECT:
-                    suspect_existing.append(item.filename)
-
-            if bad_existing:
-                self.participant_audit.invalidate_track_audit(
-                    track_id,
-                    reason="existing_pool_invalid_for_participants",
-                )
-                messagebox.showwarning(
-                    "Bieżąca pula nie pasuje do modeli uczestniczących",
-                    (
-                        "W DRAFT są już obrazy zależne albo o nieustalonej "
-                        "niezależności względem aktualnych modeli.\n\n"
-                        "Najpierw usuń je z toru albo zmień zestaw modeli "
-                        "uczestniczących, a następnie ponów audyt.\n\n"
-                        + "\n".join(bad_existing[:12])
-                    ),
-                    parent=self.parent,
-                )
+            if resolution.cancelled:
                 return
+            accepted_new = list(resolution.accepted_paths)
 
-            clean_new = []
-            dependent_new = []
-            unknown_new = []
-            suspect_new = []
-            for path in unique_paths:
-                item = by_path.get(os.path.normcase(os.path.abspath(path)))
-                if item is None:
-                    unknown_new.append(path)
-                    continue
-                if item.common_status == STATUS_CLEAN:
-                    clean_new.append(path)
-                elif item.common_status == STATUS_DEPENDENT:
-                    dependent_new.append(path)
-                elif item.common_status == STATUS_UNKNOWN:
-                    unknown_new.append(path)
-                elif item.common_status == STATUS_SUSPECT:
-                    suspect_new.append(path)
-                else:
-                    unknown_new.append(path)
-
-            if suspect_existing:
-                keep_existing = messagebox.askyesno(
-                    "Podejrzane obrazy już są w DRAFT",
-                    (
-                        f"W bieżącym DRAFT jest {len(suspect_existing)} obrazów "
-                        "oznaczonych jako podejrzane pochodne pHash.\n\n"
-                        "TAK — zaakceptuj je jako świadomie zweryfikowane i "
-                        "kontynuuj.\n"
-                        "NIE — przerwij; usuń je z DRAFT i ponów audyt."
-                    ),
-                    parent=self.parent,
-                )
-                if not keep_existing:
-                    self.participant_audit.invalidate_track_audit(
-                        track_id,
-                        reason="existing_suspect_derivatives",
-                    )
-                    return
-
-            if suspect_new:
-                suspect_choice = messagebox.askyesnocancel(
-                    "Podejrzane pochodne — wymagana decyzja",
-                    (
-                        f"Wśród nowych obrazów wykryto {len(suspect_new)} "
-                        "podejrzanych pochodnych (pHash).\n\n"
-                        "TAK — dołącz je po świadomej akceptacji.\n"
-                        "NIE — pomiń je i dodaj tylko obrazy niezależne.\n"
-                        "ANULUJ — przerwij całe dodawanie."
-                    ),
-                    parent=self.parent,
-                )
-                if suspect_choice is None:
-                    return
-                include_suspects = bool(suspect_choice)
-
-            accepted_new = list(clean_new)
-            if include_suspects:
-                accepted_new.extend(suspect_new)
-
-            excluded_suspects = 0 if include_suspects else len(suspect_new)
-            excluded_total = (
-                len(dependent_new)
-                + len(unknown_new)
-                + excluded_suspects
-            )
-
-            if excluded_total:
-                summary_lines = [
-                    f"Nowe obrazy po kontroli duplikatów: {len(unique_paths)}",
-                    f"Niezależne: {len(clean_new)}",
-                    f"Zależne: {len(dependent_new)} — NIE zostaną dodane",
-                    f"Nieustalone: {len(unknown_new)} — NIE zostaną dodane",
-                    (
-                        f"Podejrzane pHash: {len(suspect_new)} — "
-                        + (
-                            "zostaną dodane po Twojej akceptacji"
-                            if include_suspects
-                            else "NIE zostaną dodane"
-                        )
-                    ),
-                    "",
-                    f"Do toru zostanie dodanych: {len(accepted_new)}",
-                ]
-                if dependent_new:
-                    summary_lines.extend(
-                        [
-                            "",
-                            "Co zrobić z obrazami zależnymi?",
-                            "• jeśli dany model ma pozostać w rankingu — pomiń te obrazy;",
-                            "• jeśli model nie ma brać udziału — wróć do „Modele uczestniczące…” i usuń go z rankingu, potem ponów dodawanie;",
-                            "• możesz też utworzyć osobny DRAFT z innym zestawem modeli.",
-                        ]
-                    )
-                if unknown_new:
-                    summary_lines.extend(
-                        [
-                            "",
-                            "Nieustalone wymagają kompletnej historii treningu/modelu "
-                            "przed użyciem ich we wspólnym rankingu.",
-                        ]
-                    )
-
-                if not accepted_new:
-                    messagebox.showwarning(
-                        "Brak obrazów możliwych do dodania",
-                        "\n".join(summary_lines),
-                        parent=self.parent,
-                    )
-                    return
-
-                proceed = messagebox.askokcancel(
-                    "Wynik audytu — kontynuować?",
-                    "\n".join(summary_lines)
-                    + "\n\nOK — dodaj wskazaną pulę do toru.\n"
-                    "Anuluj — nie zmieniaj DRAFT-u.",
-                    parent=self.parent,
-                )
-                if not proceed:
-                    return
-
-        if not accepted_new:
-            messagebox.showwarning(
-                "Dodaj obrazy",
-                "Po audycie nie pozostały żadne obrazy możliwe do dodania.",
-                parent=self.parent,
-            )
-            return
-
-        sha_map = {
-            str(path): fingerprints.get(path, "")
-            for path in accepted_new
-        }
-        if report is not None:
+        sha_map = {str(path): fingerprints.get(path, "") for path in accepted_new}
+        if resolution is not None:
             report_by_path = {
-                os.path.normcase(os.path.abspath(item.path)): item
-                for item in report.candidates
+                audit_path_key(item.path): item for item in resolution.report.candidates
             }
-            for path in accepted_new:
-                item = report_by_path.get(os.path.normcase(os.path.abspath(path)))
-                if item is not None and item.sha256:
-                    sha_map[str(path)] = item.sha256
+            sha_map.update({
+                str(path): report_by_path[audit_path_key(path)].sha256 for path in accepted_new
+            })
 
         def ingest(update):
-            indices = self.service.add_members_batch(
-                track_id, accepted_new, sha256_by_path=sha_map, progress=update
-            )
-            audit_error = ""
-            if report is not None:
-                update("Zapis audytu", 0, 1)
+            if resolution is not None:
+                self.participant_audit.validate_resolution_target(track_id, resolution, expected_shas)
+            indices = []
+            if accepted_new:
+                indices = self.service.add_members_batch(
+                    track_id, accepted_new, sha256_by_path=sha_map, progress=update
+                )
+            if resolution is not None:
+                update("Zapis decyzji i audytu", 0, 1)
                 try:
-                    self.participant_audit.record_ingested_report(
-                        track_id, report, accepted_new
+                    self.service.ensure_audit_manifest(track_id)
+                    self.participant_audit.record_resolution(
+                        track_id, resolution, mode="ingest", previous_state=previous_state
                     )
-                except Exception as exc:
-                    audit_error = str(exc)
-                    self.participant_audit.invalidate_track_audit(
-                        track_id, reason="audit_state_write_failed"
-                    )
-                    logger.warning("Nie udało się zapisać audytu uczestników: %s", exc)
-                update("Zapis audytu", 1, 1)
-            return indices, audit_error
+                except Exception:
+                    self.participant_audit.invalidate_track_audit(track_id, reason="resolution_write_failed")
+                    raise
+            return indices
 
-        progress = BatchProgressDialog(self.parent, title="Dodawanie obrazów do toru")
+        progress = BatchProgressDialog(self.parent, title="Zastosowanie wyniku audytu")
         try:
-            added_indices, audit_write_error = progress.run(ingest)
+            added_indices = progress.run(ingest)
         except Exception as exc:
             progress.close()
-            # A late IO failure may follow a successful database commit.
             self.refresh_tracks(select_track_id=track_id)
-            self._show_error("Nie udało się dodać puli obrazów", exc)
+            self._show_error("Nie udało się zastosować wyniku dodawania", exc)
             return
         progress.close()
-
-        # refresh_tracks also synchronously reloads the selected member table.
         self.refresh_tracks(select_track_id=track_id)
         if getattr(self, "_layout", None) is not None:
             self._layout.notebook.select(self._layout.images_page)
@@ -1260,12 +1071,10 @@ class EvaluationTracksPanel:
                 or len(self.member_tree.get_children()) != actual_count):
             messagebox.showerror(
                 "Nie udało się potwierdzić listy obrazów",
-                "Liczba zapisanych obrazów nie zgadza się z listą. "
-                "Odśwież tor przed ponownym dodawaniem.",
+                "Liczba zapisanych obrazów nie zgadza się z listą. Odśwież tor.",
                 parent=self.parent,
             )
             return
-
         final_lines = [
             f"Dodano do toru: {len(added_indices)}",
             f"Już w torze: {len(skipped_track)}",
@@ -1273,29 +1082,15 @@ class EvaluationTracksPanel:
             f"Kolizje nazw: {len(skipped_name)}",
             f"Błędy odczytu: {len(preflight.hash_errors)}",
         ]
-        if report is not None:
-            final_lines.extend(
-                [
-                    f"Pominięte zależne: {len(dependent_new)}",
-                    f"Pominięte nieustalone: {len(unknown_new)}",
-                    (
-                        f"Podejrzane pHash: {len(suspect_new)} "
-                        + ("(zaakceptowane)" if include_suspects else "(pominięte)")
-                    ),
-                ]
-            )
-
-        if audit_write_error:
-            final_lines.extend([
-                "", "Obrazy zapisano, ale audyt wymaga ponownego uruchomienia.",
-                audit_write_error,
-            ])
+        if resolution is not None:
+            final_lines += [
+                f"Pominięte zależne: {len(resolution.rejected_dependent)}",
+                f"Pominięte nieustalone: {len(resolution.rejected_unknown)}",
+                f"Pominięte po weryfikacji: {len(resolution.rejected_suspects)}",
+                f"Ręcznie zaakceptowano: {len(resolution.accepted_suspects)}",
+            ]
         self._set_status(" | ".join(final_lines))
-        messagebox.showinfo(
-            "Dodawanie obrazów zakończone",
-            "\n".join(final_lines),
-            parent=self.parent,
-        )
+        messagebox.showinfo("Dodawanie obrazów zakończone", "\n".join(final_lines), parent=self.parent)
 
     def remove_selected_images(self) -> None:
         track_id = self._require_current_track()
@@ -1674,6 +1469,10 @@ class EvaluationTracksPanel:
             f"Integralność: {result.status}."
         )
 
+    def open_comparison(self) -> None:
+        from .pz3_comparison import open_comparison
+        open_comparison(self)
+
     def check_integrity(self) -> None:
         track_id = self._require_current_track()
         if not track_id:
@@ -1870,21 +1669,28 @@ class EvaluationTracksPanel:
         state = action_state_for_status(
             track.get("status") if isinstance(track, Mapping) else ""
         )
+        from ..registry.track_readiness import track_readiness
+        readiness = (
+            self.service.get_preparation_state(str(track["track_id"]))
+            if track and track.get("track_id") else track_readiness(None)
+        )
         participant_entry_ready = self._participant_entry_ready(track)
         mapping = (
             (
                 self.btn_add_images,
-                state.can_add_images and participant_entry_ready,
+                readiness.can_add_images,
             ),
             (self.btn_participants, state.can_select_participants),
             (
                 self.btn_audit_pool,
-                state.can_audit_pool and participant_entry_ready,
+                readiness.can_audit,
             ),
             (self.btn_remove_images, state.can_remove_images),
-            (self.btn_set_gt, state.can_set_ground_truth),
-            (self.btn_verify, state.can_verify),
-            (self.btn_seal, state.can_seal),
+            (self.btn_set_gt, readiness.can_prepare_gt),
+            (self.btn_verify, readiness.can_verify),
+            (self.btn_seal, readiness.can_seal and not self._participant_audit_seal_issue(
+                str((track or {}).get("track_id") or ""), track or {}
+            )),
             (self.btn_integrity, state.can_check_integrity),
             (self.btn_clone, state.can_clone),
             (self.btn_retire, state.can_retire),
@@ -1892,10 +1698,7 @@ class EvaluationTracksPanel:
             (self.btn_open_experiment_sources, state.can_add_images),
             (
                 self.btn_prepare_z2,
-                can_prepare_ground_truth(
-                    track,
-                    member_count=member_count,
-                ),
+                readiness.can_prepare_gt and readiness.target == "plate",
             ),
         )
         for button, enabled in mapping:
@@ -1905,6 +1708,9 @@ class EvaluationTracksPanel:
                 )
             except Exception:
                 pass
+        compare_button = getattr(self, "btn_compare", None)
+        if compare_button is not None:
+            compare_button.configure(state=tk.NORMAL if readiness.sealed else tk.DISABLED)
         self._refresh_remove_images_button_state()
 
     def _status_hint_for_track(

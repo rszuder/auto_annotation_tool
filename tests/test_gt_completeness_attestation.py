@@ -37,7 +37,7 @@ class GroundTruthCompletenessAttestationTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name=f"track-{Path(name).stem}",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         self.service.add_member(track_id, image)

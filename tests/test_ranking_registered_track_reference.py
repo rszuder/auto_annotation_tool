@@ -42,7 +42,7 @@ class RankingRegisteredTrackReferenceTests(unittest.TestCase):
         self.track_id = service.create_draft(
             name="E1A",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         service.add_member(self.track_id, image)
