@@ -4280,6 +4280,12 @@ def _finish(self, success, msg):
         self._last_run_progress_visible = False
         self._set_progress_counters(0, 0, 0)
 
+    if (success and isinstance(getattr(self, "_experiment_gt_context", None), dict)
+            and self._experiment_gt_context.get("source") == "pz3"):
+        self._refresh_free_mode_workflow_ui()
+        self._set_status_label_state("Preanotacja gotowa — wykonaj pełną ręczną korektę GT.", "success")
+        return
+
     if success:
         manual_template_success = bool(getattr(self, "_current_run_manual_template", False))
         manual_template_free_mode_new_run = bool(

@@ -456,6 +456,8 @@ def _refresh_free_mode_workflow_ui(self):
     self._refresh_workflow_button_styles()
     self._refresh_workflow_step_cards()
 
+    from .pz3_gt_route import refresh_experiment_gt_ui
+    refresh_experiment_gt_ui(self)
     self._workflow_ui_refresh_in_progress = False
     if bool(getattr(self, "_workflow_ui_refresh_pending", False)):
         self._workflow_ui_refresh_pending = False
@@ -1523,6 +1525,11 @@ def _merge_pre_run_visible_state_after_auto(self, run_dir: Path) -> int:
 
 
 def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_template: bool = False) -> None:
+    if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
+            and self._experiment_gt_context.get("source") == "pz3"):
+        from .pz3_gt_route import finish_experiment_gt_run
+        finish_experiment_gt_run(self, run_dir)
+        return
     try:
         capture_experiment_gt_preannotation_snapshot(
             self,

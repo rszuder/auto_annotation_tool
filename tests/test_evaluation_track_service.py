@@ -51,7 +51,7 @@ class EvaluationTrackServiceTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name="E1A MT",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             scope="global",
             reservation_policy="reserve_from_training",
         )
@@ -114,7 +114,7 @@ class EvaluationTrackServiceTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name="Track A",
             target="plate",
-            purpose="ranking",
+            purpose="validation",
         )
         self.service.add_member(track_id, self._image())
         self.service.set_ground_truth(
@@ -130,7 +130,7 @@ class EvaluationTrackServiceTests(unittest.TestCase):
         track_id = self.service.create_draft(
             name="Track A",
             target="plate",
-            purpose="ranking",
+            purpose="validation",
         )
         self.service.add_member(track_id, self._image())
         self.service.set_ground_truth(

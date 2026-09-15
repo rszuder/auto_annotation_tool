@@ -132,7 +132,7 @@ class ExperimentServiceTests(unittest.TestCase):
         track_id = self.track_service.create_draft(
             name="experiment-track",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
             reservation_policy="reserve_from_training",
         )
         self.track_service.add_member(track_id, image)
@@ -335,7 +335,7 @@ class ExperimentServiceTests(unittest.TestCase):
         draft = self.track_service.create_draft(
             name="draft",
             target="plate",
-            purpose="final_test",
+            purpose="validation",  # Artifact fixture; PZ3 audit gates have separate integration coverage.
         )
         service = self._service(
             {

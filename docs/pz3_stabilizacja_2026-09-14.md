@@ -1,4 +1,4 @@
-﻿# PZ3 — stabilizacja, 14.09.2026
+# PZ3 — stabilizacja, 14.09.2026
 
 ## Wynik
 
@@ -32,15 +32,15 @@ Fingerprint uczestników obejmuje teraz również status historii treningu. Wcze
 
 Stan bazowy: 526 testów OK.
 
-Końcowy stan: **559 testów OK**, w tym 33 nowe testy regresji. Wykonano także osobno:
+Końcowy stan: **562 testów OK**, w tym 36 nowych testów regresji. Wykonano także osobno:
 
 | Wzorzec | Liczba | Wynik |
 | --- | ---: | --- |
-| test_pz3_*.py | 44 | OK |
+| test_pz3_*.py | 47 | OK |
 | test_evaluation_*.py | 46 | OK |
 | test_participant_*.py | 26 | OK |
 | test_source_filename*.py | 20 | OK |
-| test_*.py | 559 | OK |
+| test_*.py | 562 | OK |
 
 git diff --check: OK.
 
@@ -86,3 +86,22 @@ python -m unittest discover -s tests -p "test_*.py"
 git diff --check
 ~~~
 
+
+## Doprecyzowanie komunikatów audytu
+
+Usunięto niejasne określenie „Podejrzane obrazy już są w DRAFT”.
+Komunikat wskazuje, że audyt objął także obrazy dodane wcześniej, wyjaśnia
+podobieństwo do danych treningowych/walidacyjnych uczestników i podaje pliki
+do sprawdzenia. Podobieństwo wyglądu nie jest przedstawiane jako dowód
+wspólnego pochodzenia.
+
+W audycie i podczas dodawania „Tak” oznacza pozostawienie/dołączenie obrazów
+po sprawdzeniu ich pochodzenia. „Nie” dla obrazów już należących do toru
+otwiera zakładkę „Obrazy toru” i zaznacza wskazane pozycje bez ich usuwania;
+audyt wymaga wtedy ponowienia. Dla nowych kandydatów „Nie” pomija je
+i dopuszcza pozostałą pulę, a „Anuluj” przerywa dodawanie.
+
+Dodano trzy testy decyzji i przejścia do właściwych wierszy. Końcowy suite:
+562 testy OK. Native smoke komunikatu sprawdził wybór „Nie” w rzeczywistym
+oknie systemowym oraz zaznaczenie odpowiedniego obrazu.
+Zrzut: output/pz3_audit_message.png.

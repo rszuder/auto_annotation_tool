@@ -354,6 +354,9 @@ def show_experiment_gt_entry(
 
 
 def apply_pending_experiment_gt_entry(host) -> bool:
+    if (isinstance(getattr(host, "_experiment_gt_context", None), dict)
+            and host._experiment_gt_context.get("source") == "pz3"):
+        return False
     workspace = Path(CONFIG.WORKSPACE_DIR)
     pending = _read_json(pending_path(workspace))
     active = _read_json(active_context_path(workspace))

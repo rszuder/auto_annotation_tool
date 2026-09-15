@@ -6,7 +6,7 @@ pochodzenie, relacje, sumy kontrolne i stan eksperymentów.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -391,5 +391,48 @@ SCHEMA_V3_STATEMENTS: tuple[str, ...] = (
     """
     ALTER TABLE evaluation_tracks
     ADD COLUMN seal_sha256 TEXT
+    """,
+)
+
+
+SCHEMA_V4_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE evaluation_track_audits (
+        audit_id TEXT PRIMARY KEY,
+        track_id TEXT NOT NULL REFERENCES evaluation_tracks(track_id) ON DELETE CASCADE,
+        mode TEXT NOT NULL CHECK(mode IN ('ingest', 'pool')),
+        participant_fingerprint TEXT NOT NULL,
+        member_fingerprint TEXT NOT NULL,
+        audited_at TEXT NOT NULL,
+        applied_at TEXT NOT NULL,
+        report_json TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX idx_evaluation_track_audits_history
+    ON evaluation_track_audits(track_id, applied_at)
+    """,
+    """
+    CREATE TABLE evaluation_track_audit_decisions (
+        audit_id TEXT NOT NULL REFERENCES evaluation_track_audits(audit_id) ON DELETE CASCADE,
+        path TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        status TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK(decision IN (
+            'accept_clean', 'manual_accept_suspect', 'manual_reject_suspect',
+            'reject_dependent', 'reject_unknown'
+        )),
+        PRIMARY KEY(audit_id, path)
+    )
+    """,
+    """
+    CREATE TABLE evaluation_track_audit_state (
+        track_id TEXT PRIMARY KEY REFERENCES evaluation_tracks(track_id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK(status IN ('CURRENT', 'STALE')),
+        participant_fingerprint TEXT NOT NULL DEFAULT '',
+        member_fingerprint TEXT NOT NULL DEFAULT '',
+        audit_id TEXT REFERENCES evaluation_track_audits(audit_id) ON DELETE SET NULL,
+        state_json TEXT NOT NULL
+    )
     """,
 )

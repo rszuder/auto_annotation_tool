@@ -213,6 +213,7 @@ class EvaluationTracksLayout:
             ("3 · Zatwierdzenie", (
                 ("btn_verify", "Zweryfikuj", panel.verify_track),
                 ("btn_seal", "Zapieczętuj", panel.seal_track),
+                ("btn_compare", "Porównaj modele…", panel.open_comparison),
             )),
         )
         for column, (title, buttons) in enumerate(groups):
@@ -253,15 +254,27 @@ class EvaluationTracksLayout:
         self.new_button.configure(text="Zwiń formularz" if visible else "+ Nowy tor")
         self._schedule_fit()
 
-    def set_track(self, track=None, *, member_count=0):
+    def set_track(self, track=None, *, member_count=0, audit_state=None, readiness=None):
         from .z4_evaluation_tracks import purpose_label, target_label
+        from .pz3_audit_resolution_dialog import format_audit_state
 
         if track:
             self.title_var.set(str(track.get("name") or "Bez nazwy"))
             self.summary_var.set(
                 f"v{int(track.get('version') or 0)}  ·  {track.get('status') or '-'}  ·  "
                 f"{target_label(track.get('target'))}  ·  {purpose_label(track.get('purpose'))}"
+                + "\n" + format_audit_state(audit_state or {}, compact=True)
             )
+            if readiness is not None:
+                checklist = " \u00b7 ".join(
+                    f"{label} {'\u2713' if ready else '\u25cb'}"
+                    for label, ready in (
+                        ("GT", readiness.gt_exists),
+                        ("Weryfikacja", readiness.gt_verified),
+                        ("SEAL", readiness.sealed),
+                    )
+                )
+                self.summary_var.set(self.summary_var.get() + "\n" + checklist)
             self.count_var.set(f"Obrazy: {member_count}")
         else:
             self.title_var.set("Wybierz tor z listy")
