@@ -64,6 +64,46 @@ class ProjectScopeIsolationTests(unittest.TestCase):
     def collect(self, scope):
         return ranking._collect_ranking_participant_candidates(self.host, self.global_dir, "plate", scope)
 
+    def set_completed_current_history(self, directory):
+        from auto_annotation_tool.training import TrainingHistory, TrainingStatus
+        directory = Path(directory)
+        checkpoint = directory / "result" / "weights" / "best.pt"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_bytes(b"completed history checkpoint")
+        history = TrainingHistory(history_dir=directory)
+        with patch.object(history, "_sync_registry_run_best_effort"):
+            history.create_run(
+                "Completed history fixture", status=TrainingStatus.COMPLETED.value,
+                training_target="plate", best_weights=str(checkpoint),
+            )
+        self.host.history = history
+        self.host._infer_history_run_target = lambda run: run.training_target
+        self.host._resolve_history_run_best_weights = lambda run: Path(run.best_weights)
+        return checkpoint.resolve()
+
+    def test_project_scope_ignores_global_current_history(self):
+        checkpoint = self.set_completed_current_history(self.workspace / "GlobalRuns")
+        self.assertEqual(self.collect("Projekt"), [self.model_a.resolve()])
+        self.assertNotIn(checkpoint, self.collect("Projekt"))
+
+    def test_project_scope_ignores_other_project_history(self):
+        checkpoint = self.set_completed_current_history(self.project_b / "5_training_runs")
+        self.assertEqual(self.collect("Projekt"), [self.model_a.resolve()])
+        self.assertNotIn(checkpoint, self.collect("Projekt"))
+
+    def test_project_scope_accepts_active_project_history(self):
+        checkpoint = self.set_completed_current_history(self.project_a / "5_training_runs")
+        self.assertEqual(set(self.collect("Projekt")), {self.model_a.resolve(), checkpoint})
+
+    def test_project_scope_accepts_active_project_target_subdirectory(self):
+        checkpoint = self.set_completed_current_history(self.project_a / "5_training_runs" / "plates")
+        self.assertEqual(set(self.collect("Projekt")), {self.model_a.resolve(), checkpoint})
+
+    def test_project_scope_ignores_unknown_history_ownership(self):
+        self.set_completed_current_history(self.workspace / "GlobalRuns")
+        self.host.history.history_dir = None
+        self.assertEqual(self.collect("Projekt"), [self.model_a.resolve()])
+
     def test_project_scope_isolation(self):
         self.assertEqual(self.collect("Projekt"), [self.model_a.resolve()])
 
@@ -106,6 +146,7 @@ class Pz3ComparisonLifecycleTests(unittest.TestCase):
         self.host._ranking_results_modal = None
         self.host._ranking_track_modal = None
         self.host._ranking_participants_modal = None
+        self.host._rank_advanced_modal = None
         self.host._get_ranking_task_target.return_value = "plate"
         self.host._get_ranking_task_label.return_value = "Tablice"
         self.host._resolve_ranking_reference_source.return_value = dict(ok=True)
@@ -143,7 +184,8 @@ class Pz3ComparisonLifecycleTests(unittest.TestCase):
 
     def test_selectors_open_after_explicit_exit(self):
         clear_pz3_comparison_context(self.host)
-        for selector in (ranking._open_ranking_track_modal, ranking._open_ranking_participants_modal):
+        for selector in (ranking._open_ranking_track_modal, ranking._open_ranking_participants_modal,
+                         ranking._open_ranking_advanced_modal):
             with self.subTest(selector=selector.__name__), \
                  patch.object(ranking.tk, "Toplevel", side_effect=RuntimeError("selector opened")) as dialog, \
                  patch.object(ranking.messagebox, "showinfo") as info:
@@ -162,6 +204,44 @@ class Pz3ComparisonLifecycleTests(unittest.TestCase):
         worker.return_value.start.assert_called_once()
         error.assert_not_called()
         self.assertIsNone(comparison_context(self.host))
+
+    def test_advanced_reference_editor_is_blocked_in_pz3(self):
+        for reference in (str(self.reference), str(self.root / "other")):
+            with self.subTest(reference=reference), \
+                 patch.object(ranking.tk, "Toplevel") as dialog, \
+                 patch.object(ranking.messagebox, "showinfo") as info:
+                self.host.rank_data_dir.set(reference)
+                ranking._open_ranking_advanced_modal(self.host)
+                dialog.assert_not_called()
+                self.assertEqual(self.host.rank_data_dir.get(), reference)
+                self.assertIn("pieczęci", info.call_args.args[1])
+                self.assertIs(comparison_context(self.host), self.context)
+
+    def test_cannot_open_another_pz3_while_cancellation_is_finishing(self):
+        context_b = dict(self.context, track_id="TRACK-B", name="Track B",
+                         reference_path=str(self.root / "track_B"))
+        panel = Mock()
+        panel.host = self.host
+        panel._require_current_track.return_value = "TRACK-B"
+        self.host.rank_cancel_requested = True
+        with patch("auto_annotation_tool.gui.pz3_comparison.resolve_comparison",
+                   return_value=context_b) as resolve, \
+             patch.object(ranking, "_open_ranking_results_modal") as show:
+            open_comparison(panel)
+            resolve.assert_not_called()
+            show.assert_not_called()
+            panel._show_error.assert_called_once()
+            self.assertIn("anulowania", str(panel._show_error.call_args.args[1]))
+            self.assertIs(comparison_context(self.host), self.context)
+            self.assertEqual(self.host.rank_data_dir.get(), str(self.reference))
+            panel._show_error.reset_mock()
+            self.host.rank_cancel_requested = False
+            open_comparison(panel)
+            resolve.assert_called_once_with(panel.service, "TRACK-B")
+            show.assert_called_once_with(self.host)
+            panel._show_error.assert_not_called()
+        self.assertEqual(comparison_context(self.host), context_b)
+        self.assertEqual(self.host.rank_data_dir.get(), context_b["reference_path"])
 
     def test_reenter_pz3_after_legacy(self):
         context_b = dict(self.context, track_id="TRACK-B", name="Track B",
