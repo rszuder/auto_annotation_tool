@@ -100,7 +100,8 @@ def check_frozen_comparison(host, fixture):
     from auto_annotation_tool.gui import z4_analysis_ranking as ranking
     from auto_annotation_tool.gui.pz3_comparison import validate_comparison_context, resolve_comparison
     context = validate_comparison_context(host)
-    for action in (ranking._open_ranking_track_modal, ranking._open_ranking_participants_modal):
+    for action in (ranking._open_ranking_track_modal, ranking._open_ranking_participants_modal,
+                   ranking._open_ranking_advanced_modal):
         with patch.object(ranking.messagebox, "showinfo") as info, patch.object(ranking.tk, "Toplevel") as dialog:
             action(host)
             info.assert_called_once()

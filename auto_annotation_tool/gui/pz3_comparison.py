@@ -111,8 +111,11 @@ def open_comparison(panel):
     if not track_id:
         return
     try:
-        if getattr(panel.host, "rank_is_running", False):
-            raise RuntimeError("Poczekaj na zakończenie bieżącego porównania.")
+        if (
+            getattr(panel.host, "rank_is_running", False)
+            or getattr(panel.host, "rank_cancel_requested", False) is True
+        ):
+            raise RuntimeError("Poczekaj na zakończenie bieżącego porównania lub anulowania.")
         context = resolve_comparison(panel.service, track_id)
         host = panel.host
         host._ensure_step4_train_tab_built()

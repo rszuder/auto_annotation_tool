@@ -18,6 +18,16 @@ def _widgets(widget):
         yield from _widgets(child)
 
 
+def _button(dialog, label):
+    return next(widget for widget in _widgets(dialog)
+                if "text" in widget.keys() and str(widget.cget("text")) == label)
+
+
+def _has_advanced(dialog):
+    return any("text" in widget.keys() and str(widget.cget("text")) == "Zaawansowane"
+               and widget.winfo_ismapped() for widget in _widgets(dialog))
+
+
 def _exit_button(dialog):
     return next(widget for widget in _widgets(dialog)
                 if "text" in widget.keys() and str(widget.cget("text")) == "Wróć do zwykłego rankingu")
@@ -46,6 +56,7 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     ranking._open_ranking_results_modal(host)
     settle()
     assert comparison_context(host) == context_a
+    assert not _has_advanced(host._ranking_results_modal)
     capture_window(host._ranking_results_modal, "output/pz3_scope_lifecycle_controlled.png")
 
     host.rank_is_running = True
@@ -68,17 +79,32 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     after_repeat = _result_count(fixture, track_a)
     assert after_repeat == before_repeat + len(context_a["model_ids"])
 
+    host.rank_cancel_requested = True
+    try:
+        with patch.object(panel, "_require_current_track", return_value="TRACK-CANCEL-PROBE"), \
+             patch.object(panel, "_show_error") as refused, \
+             patch("auto_annotation_tool.gui.pz3_comparison.resolve_comparison") as resolve:
+            panel.btn_compare.invoke()
+            refused.assert_called_once()
+            resolve.assert_not_called()
+        assert comparison_context(host) == context_a
+        assert host.rank_data_dir.get() == context_a["reference_path"]
+    finally:
+        host.rank_cancel_requested = False
+
     _exit_button(host._ranking_results_modal).invoke()
     settle()
     assert comparison_context(host) is None
     assert not host.rank_data_dir.get()
     assert "eksperymentalne" not in host._ranking_results_modal.title()
+    assert _has_advanced(host._ranking_results_modal)
     capture_window(host._ranking_results_modal, "output/pz3_scope_lifecycle_regular.png")
 
     # Both ordinary selectors really open again.
     for open_selector, attr in (
         (host._open_ranking_track_modal, "_ranking_track_modal"),
         (host._open_ranking_participants_modal, "_ranking_participants_modal"),
+        (host._open_ranking_advanced_modal, "_rank_advanced_modal"),
     ):
         open_selector()
         settle()
@@ -90,6 +116,10 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     assert fixture.service.verify_integrity(track_a).ok
     assert fixture.audit.load_participants(track_a) == participants_a
     assert _result_count(fixture, track_a) == after_repeat
+
+    host._open_ranking_advanced_modal()
+    stale_advanced = host._rank_advanced_modal
+    settle()
 
     # A different sealed fixture must replace all track-specific context.
     service = fixture.service
@@ -118,6 +148,13 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     assert context_b["reference_path"] != context_a["reference_path"]
     assert host.rank_data_dir.get() == context_b["reference_path"]
     assert "Lifecycle Track B" in host._ranking_results_modal.title()
+    assert not _has_advanced(host._ranking_results_modal)
+    with patch.object(ranking.messagebox, "showinfo") as refused:
+        _button(stale_advanced, "[ TOR ] Zastosuj wybrany tor").invoke()
+        refused.assert_called_once()
+    assert host.rank_data_dir.get() == context_b["reference_path"]
+    stale_advanced.tk.call(stale_advanced.protocol("WM_DELETE_WINDOW"))
+    settle()
     rows = host.rank_tree.get_children()
     assert len(rows) == len(context_b["model_ids"])
     assert all("czeka na test" in host.rank_tree.item(row, "values") for row in rows)
@@ -128,7 +165,9 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     Path("output/pz3_scope_lifecycle_smoke.json").write_text(
         json.dumps(dict(track_a=track_a, track_b=track_b, results_before_repeat=before_repeat,
                         results_after_repeat=after_repeat, exit_preserved_seal=True,
-                        ordinary_selectors_opened=True, reentry_passed=True), indent=2),
+                        ordinary_selectors_opened=True, reentry_passed=True,
+                        advanced_locked_in_pz3=True, stale_advanced_apply_blocked=True,
+                        reentry_blocked_during_cancel=True), indent=2),
         encoding="utf-8",
     )
     print("LIFECYCLE PASS: repeat and close retain PZ3, busy exit refused, explicit exit opens ordinary selectors, Track B replaces Track A", flush=True)

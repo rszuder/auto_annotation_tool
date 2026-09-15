@@ -858,24 +858,29 @@ def _collect_project_ranking_model_candidates(self, target: str | None = None) -
         normalized_target = "plate"
 
     histories: list[TrainingHistory] = []
+    project_runs_dir = None
     try:
         project_root = CAMPAIGN.get_active_project_root_dir()
         if project_root is not None:
-            project_runs_dir = Path(project_root) / "5_training_runs"
+            project_runs_dir = (Path(project_root) / "5_training_runs").resolve()
             if project_runs_dir.exists():
                 histories.append(TrainingHistory(history_dir=project_runs_dir))
     except Exception:
         pass
 
     current_history = getattr(self, "history", None)
-    if current_history is not None:
+    if current_history is not None and project_runs_dir is not None:
         try:
-            current_dir = Path(getattr(current_history, "history_dir", ""))
-            known_dirs = {str(Path(getattr(item, "history_dir", "")).resolve()) for item in histories}
-            if str(current_dir.resolve()) not in known_dirs:
+            raw_dir = getattr(current_history, "history_dir", None)
+            current_dir = Path(raw_dir).resolve() if raw_dir and str(raw_dir).strip() else None
+            belongs_to_project = current_dir is not None and (
+                current_dir == project_runs_dir or project_runs_dir in current_dir.parents
+            )
+            known_dirs = {Path(item.history_dir).resolve() for item in histories}
+            if belongs_to_project and current_dir not in known_dirs:
                 histories.append(current_history)
         except Exception:
-            histories.append(current_history)
+            pass  # Nieustalona przynależność historii nie rozszerza zakresu Projekt.
 
     candidates: list[Path] = []
     seen: set[str] = set()
@@ -3994,11 +3999,12 @@ def _open_ranking_results_modal(self):
         text="[ KONIE ] Uczestnicy",
         command=self._open_ranking_participants_modal,
     ).pack(side=tk.RIGHT, padx=(8, 0))
-    ttk.Button(
-        scope_row,
-        text="Zaawansowane",
-        command=self._open_ranking_advanced_modal,
-    ).pack(side=tk.RIGHT, padx=(8, 0))
+    if not pz3_context:
+        ttk.Button(
+            scope_row,
+            text="Zaawansowane",
+            command=self._open_ranking_advanced_modal,
+        ).pack(side=tk.RIGHT, padx=(8, 0))
 
     leader_bg = blend_hex_colors(
         palette.get("success", "#2ecc71"),
@@ -4141,6 +4147,21 @@ def _open_ranking_results_modal(self):
         pass
 
 def _open_ranking_advanced_modal(self):
+    from .pz3_comparison import comparison_context
+
+    def frozen_reference():
+        if comparison_context(self) is None:
+            return False
+        messagebox.showinfo(
+            "Porównanie eksperymentalne",
+            "Tor pochodzi z pieczęci eksperymentu i nie może być zmieniony. "
+            "Aby wybrać inny materiał, wróć do zwykłego rankingu.",
+            parent=self.frame,
+        )
+        return True
+
+    if frozen_reference():
+        return
     existing = getattr(self, "_rank_advanced_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -4287,6 +4308,8 @@ def _open_ranking_advanced_modal(self):
     self.rank_advanced_status.pack(anchor=tk.W, fill=tk.X)
 
     def apply_manual_sources():
+        if frozen_reference():
+            return
         reference_raw = str(draft_data_dir.get() or "").strip()
         if not reference_raw:
             try:
