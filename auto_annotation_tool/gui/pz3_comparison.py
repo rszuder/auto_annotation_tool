@@ -9,6 +9,25 @@ def comparison_context(host):
     return context if isinstance(context, dict) and context else None
 
 
+def clear_pz3_comparison_context(host) -> None:
+    """Jawny powrót do zwykłego rankingu; pieczęć i wyniki pozostają zapisane."""
+    from ..registry import EvaluationTrackError
+
+    if comparison_context(host) is None:
+        return
+    if getattr(host, "rank_is_running", False) or getattr(host, "rank_cancel_requested", False) is True:
+        raise EvaluationTrackError(
+            "Nie można wyjść podczas porównania. Poczekaj na jego zakończenie "
+            "lub na zakończenie anulowania."
+        )
+    host._pz3_comparison_context = None
+    # Nowy wybór toru zapobiega przypadkowemu ponowieniu starego eksperymentu.
+    host.rank_data_dir.set("")
+    host._refresh_ranking_reference_ui()
+    host._refresh_ranking_start_state()
+    host._load_ranking()
+
+
 def validate_comparison_context(host, *, model_paths=None):
     """Odrzuć zmianę toru lub uczestników, także po ominięciu selektorów GUI."""
     from ..registry import EvaluationTrackError

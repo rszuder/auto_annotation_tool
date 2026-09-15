@@ -73,6 +73,7 @@ class ParticipantAuditMatrixDialog:
         self._selected_index = None
         self.window = tk.Toplevel(parent)
         self.window.title("Audyt niezależności puli")
+        self.window.transient(parent.winfo_toplevel())
         self.window.geometry("1280x860")
         self.window.minsize(980, 680)
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
@@ -404,5 +405,8 @@ class ParticipantAuditMatrixDialog:
             self._previous_grab.grab_set()
 
     def show(self):
+        self.window.deiconify()
+        self.window.lift()
+        self.window.focus_set()
         self.window.wait_window()
         return self.result

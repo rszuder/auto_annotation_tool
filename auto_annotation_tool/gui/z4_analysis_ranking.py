@@ -1154,7 +1154,7 @@ def _collect_ranking_participant_candidates(
             # Wyniki projektu często mają nazwę best.pt; domenę znamy z historii runu.
             add_path(path, require_domain_name=False, force_scope="Projekt")
 
-    if selected_scope in {"Projekt", "Globalne"}:
+    if selected_scope == "Globalne":
         target_dir_name = {
             "plate": "plates",
             "char": "chars",
@@ -3891,7 +3891,7 @@ def _build_ranking_panel_v2(self, parent):
     self._refresh_ranking_reference_ui()
 
 def _open_ranking_results_modal(self):
-    from .pz3_comparison import comparison_context
+    from .pz3_comparison import comparison_context, clear_pz3_comparison_context
     pz3_context = comparison_context(self)
     existing = getattr(self, "_ranking_results_modal", None)
     try:
@@ -3938,6 +3938,15 @@ def _open_ranking_results_modal(self):
     dialog.protocol("WM_DELETE_WINDOW", close_dialog)
     self._ranking_results_modal_close = close_dialog
 
+    def return_to_regular_ranking():
+        try:
+            clear_pz3_comparison_context(self)
+        except Exception as exc:
+            messagebox.showwarning("Porównanie eksperymentalne", str(exc), parent=dialog)
+            return
+        close_dialog()
+        _open_ranking_results_modal(self)
+
     shell = ttk.Frame(dialog, padding=12, style="Panel.TFrame")
     shell.pack(fill=tk.BOTH, expand=True)
     shell.grid_rowconfigure(3, weight=1)
@@ -3948,10 +3957,15 @@ def _open_ranking_results_modal(self):
     header.columnconfigure(0, weight=1)
     ttk.Label(
         header,
-        text="Porównanie modeli",
+        text="Porównanie eksperymentalne PZ3" if pz3_context else "Porównanie modeli",
         style="Panel.TLabel",
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew")
+    if pz3_context:
+        ttk.Button(
+            header, text="Wróć do zwykłego rankingu",
+            command=return_to_regular_ranking,
+        ).grid(row=0, column=1, rowspan=2, padx=(12, 0), sticky="e")
     ttk.Label(
         header,
         text=(

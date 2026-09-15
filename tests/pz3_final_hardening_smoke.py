@@ -368,6 +368,8 @@ def main():
                     )
                     capture_window(training._ranking_results_modal, "output/pz3_final_hardening_results.png")
                     print("RANKING PASS: exact frozen checkpoints, deterministic predictions, two results persisted")
+                from pz3_scope_lifecycle_probe import exercise_scope_lifecycle
+                exercise_scope_lifecycle(training, panel, fixture, settle)
                 assert not errors, errors
                 print("SMOKE PASS: real Z2 editor, fixed XML, saved GT, verified/sealed track, exact frozen participants and comparison window")
             except BaseException as exc:
