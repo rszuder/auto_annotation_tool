@@ -548,7 +548,8 @@ def _advance_campaign_auto_step_after_plate_model_selection(self) -> None:
 
 
 def _get_campaign_project_plate_model_path(self) -> Path | None:
-    if self._is_free_mode_session_context():
+    from .pz3_gt_route import experiment_context
+    if self._is_free_mode_session_context() and experiment_context(self) is None:
         return None
     try:
         from ..campaign_manager import CAMPAIGN

@@ -829,6 +829,27 @@ def _open_selected_run_analysis(self, event=None):
         return
     self._open_run_analysis_window(run)
 
+def _ranking_model_content_key(path: Path, cache: dict[str, str] | None = None) -> str:
+    path = Path(path)
+    try:
+        path_key = str(path.resolve()).lower()
+    except Exception:
+        path_key = str(path).lower()
+    if cache is not None and path_key in cache:
+        return cache[path_key]
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        value = digest.hexdigest()
+    except OSError:
+        value = f"path:{path_key}"
+    if cache is not None:
+        cache[path_key] = value
+    return value
+
+
 def _collect_project_ranking_model_candidates(self, target: str | None = None) -> list[Path]:
     if not CAMPAIGN.get_active_project_name():
         return []
@@ -861,25 +882,6 @@ def _collect_project_ranking_model_candidates(self, target: str | None = None) -
     seen_content: set[str] = set()
     content_hash_cache: dict[str, str] = {}
 
-    def model_content_key(path: Path) -> str:
-        try:
-            path_key = str(path.resolve()).lower()
-        except Exception:
-            path_key = str(path).lower()
-        cached = content_hash_cache.get(path_key)
-        if cached is not None:
-            return cached
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            value = digest.hexdigest()
-        except Exception:
-            value = f"path:{path_key}"
-        content_hash_cache[path_key] = value
-        return value
-
     def add_path(path_like) -> None:
         if not path_like:
             return
@@ -897,7 +899,11 @@ def _collect_project_ranking_model_candidates(self, target: str | None = None) -
             resolved = path
         if key in seen:
             return
+        content_key = _ranking_model_content_key(resolved, content_hash_cache)
+        if content_key in seen_content:
+            return
         seen.add(key)
+        seen_content.add(content_key)
         candidates.append(resolved)
 
     try:
@@ -957,6 +963,8 @@ def _collect_ranking_model_candidates(self, models_dir: Path, target: str | None
         normalized_target = "plate"
     candidates: list[Path] = []
     seen: set[str] = set()
+    seen_content: set[str] = set()
+    content_hash_cache: dict[str, str] = {}
 
     def add_path(path_like, *, require_domain_name: bool = True) -> None:
         if not path_like:
@@ -980,7 +988,7 @@ def _collect_ranking_model_candidates(self, models_dir: Path, target: str | None
             key = str(path).lower()
         if key in seen:
             return
-        content_key = model_content_key(resolved)
+        content_key = _ranking_model_content_key(resolved, content_hash_cache)
         if content_key in seen_content:
             return
         seen.add(key)
@@ -1087,25 +1095,6 @@ def _collect_ranking_participant_candidates(
     seen_content: set[str] = set()
     content_hash_cache: dict[str, str] = {}
 
-    def model_content_key(path: Path) -> str:
-        try:
-            path_key = str(path.resolve()).lower()
-        except Exception:
-            path_key = str(path).lower()
-        cached = content_hash_cache.get(path_key)
-        if cached is not None:
-            return cached
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            value = digest.hexdigest()
-        except Exception:
-            value = f"path:{path_key}"
-        content_hash_cache[path_key] = value
-        return value
-
     def add_path(path_like, *, require_domain_name: bool = True, force_scope: str | None = None) -> None:
         if not path_like:
             return
@@ -1131,7 +1120,7 @@ def _collect_ranking_participant_candidates(
             key = str(path).lower()
         if key in seen:
             return
-        content_key = model_content_key(resolved)
+        content_key = _ranking_model_content_key(resolved, content_hash_cache)
         if content_key in seen_content:
             return
         seen.add(key)
@@ -2616,6 +2605,16 @@ def _collect_ranking_track_candidates(self) -> list[dict]:
 
 
 def _open_ranking_track_modal(self):
+    from .pz3_comparison import comparison_context
+    context = comparison_context(self)
+    if context:
+        messagebox.showinfo(
+            "Tor eksperymentu",
+            "Tor jest częścią pieczęci eksperymentu i nie można go zmienić w tym porównaniu.\n\n"
+            f"{context.get('name') or 'Tor'}\nID: {context.get('track_id') or '-'}",
+            parent=self.frame,
+        )
+        return
     existing = getattr(self, "_ranking_track_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -4354,6 +4353,12 @@ def _run_ranking_v2(self):
     if self.rank_is_running:
         return
 
+    from .pz3_comparison import validate_comparison_context
+    try:
+        pz3_context = validate_comparison_context(self)
+    except Exception as exc:
+        return messagebox.showerror("Naruszony kontekst eksperymentu", str(exc), parent=self.frame)
+
     self._ensure_plate_ranking_engine()
     target = self._get_ranking_task_target()
     target_task = self._get_ranking_task_label(target)
@@ -4449,6 +4454,7 @@ def _run_ranking_v2(self):
             )
             all_models_to_test = self._collect_ranking_participant_candidates(models_dir, target, selected_scope)
             models_to_test = _filter_enabled_ranking_participants(self, all_models_to_test)
+            validate_comparison_context(self, model_paths=models_to_test)
             if not self.rank_is_running:
                 cancelled = True
                 self._append_ranking_log("Przerwano ranking po odczytaniu listy modeli.")
@@ -4534,6 +4540,10 @@ def _run_ranking_v2(self):
                         ),
                     },
                 )
+                if pz3_context and (
+                    ranking_experiment is None or ranking_experiment.track_id != pz3_context["track_id"]
+                ):
+                    raise RuntimeError("Naruszony kontekst eksperymentu: nie utworzono porównania dla zapieczętowanego toru.")
             except Exception as experiment_error:
                 self._append_ranking_log(
                     "Kontrolowany ranking zablokowany: "

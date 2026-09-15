@@ -1,4 +1,4 @@
-﻿"""Exercise the 10-image handoff scenario through the real audit dialog."""
+"""Exercise the 10-image handoff scenario through the real audit dialog."""
 from pathlib import Path
 import sys
 from unittest.mock import patch
@@ -71,8 +71,8 @@ try:
         assert case.ingest(paths) == 6, failures
     assert not failures, failures
     case.root.update()
-    assert "✓ AKTUALNY" in case.panel._layout.summary_var.get()
-    assert "Ręcznie zweryfikowane: 1" in case.panel._layout.summary_var.get()
+    assert case.panel._layout.audit_var.get() == "Audyt: aktualny"
+    assert "Ręcznie zweryfikowane: 1" in case.panel.detail_text.get("1.0", "end")
     capture_window(case.root, "output/pz3_ux_panel_current.png")
     case.errors.assert_not_called()
     for method in ("askyesno", "askyesnocancel", "askokcancel", "showwarning"):
