@@ -242,7 +242,7 @@ class _ExperimentGtEntryDialog:
         ttk.Label(
             auto,
             text=(
-                "Model wybierzesz w standardowym modalu autoanotacji Z2. "
+                "Model wybierzesz w oknie preanotacji GT, przed uruchomieniem. "
                 "Może to być również model, który później będzie ewaluowany — "
                 "zapiszemy jego SHA-256 w provenance."
             ),

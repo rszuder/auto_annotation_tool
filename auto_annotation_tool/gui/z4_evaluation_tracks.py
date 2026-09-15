@@ -219,6 +219,11 @@ def independent_acquisition_attested(
 
 def independent_acquisition_attestation_prompt() -> str:
     return (
+        "Audyt puli sprawdza kolizje z train/val ocenianych modeli. "
+        "Starsze obrazy w puli lub w historii treningu mogą jednak nie mieć "
+        "pełnego rodowodu w rejestrze. Sam brak kolizji SHA nie potwierdza "
+        "wtedy niezależnego pochodzenia.\n\n"
+        "To oświadczenie uzupełnia brakujące informacje o pochodzeniu obrazów. "
         "Potwierdź TAK wyłącznie wtedy, gdy wszystkie obrazy "
         "tego toru pochodzą z nowej, niezależnie pozyskanej "
         "puli, która nie była użyta w train ani val ocenianych "
@@ -1401,7 +1406,7 @@ class EvaluationTracksPanel:
             and not has_independent_attestation
         ):
             if messagebox.askyesno(
-                "Niezależne pozyskanie obrazów",
+                "Uzupełnienie informacji o pochodzeniu obrazów",
                 independent_acquisition_attestation_prompt(),
                 parent=self.parent,
             ):
@@ -1433,12 +1438,10 @@ class EvaluationTracksPanel:
             and not has_independent_attestation
         ):
             seal_warning = (
-                "\n\nUWAGA: tor zostanie zapieczętowany bez "
-                "potwierdzenia niezależnego pozyskania. "
-                "Dla modeli, których historyczny train/val ma "
-                "rodowód exact_hash_only, audyt niezależności "
-                "pozostanie UNKNOWN i tryb controlled będzie "
-                "zablokowany."
+                "\n\nNie zapisano oświadczenia uzupełniającego pochodzenie obrazów. "
+                "Jeśli pula lub historyczny train/val ocenianych modeli nie ma pełnego "
+                "rodowodu, niezależność pozostanie nierozstrzygnięta (UNKNOWN), "
+                "a porównanie kontrolowane będzie zablokowane."
             )
 
         if not messagebox.askyesno(
