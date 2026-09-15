@@ -2708,6 +2708,9 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         pady=4,
     )
     self.preview_image_status_lbl.pack(fill=tk.BOTH, expand=True)
+    from .pz3_sample_route import toggle_sample_badge
+    for widget in (self.preview_image_status_frame, self.preview_image_status_lbl):
+        widget.bind("<Button-1>", lambda event: toggle_sample_badge(self, event), add="+")
     self.preview_image_status_frame.place_forget()
 
     self.preview_campaign_gate_frame = tk.Frame(

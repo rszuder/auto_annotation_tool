@@ -710,7 +710,7 @@ class BatchProgressDialog:
         root.pack(fill=tk.BOTH, expand=True)
         self.stage = tk.StringVar(master=self.window, value="Przygotowanie…")
         self.count = tk.StringVar(master=self.window, value="")
-        ttk.Label(root, text="Kontrola puli obrazów", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(root, text=title, font=("Segoe UI", 12, "bold")).pack(anchor="w")
         ttk.Label(root, textvariable=self.stage).pack(anchor="w", pady=(8, 3))
         self.bar = ttk.Progressbar(root, maximum=100.0)
         self.bar.pack(fill=tk.X)
@@ -754,11 +754,19 @@ class BatchProgressDialog:
     def update(self, stage, current, total):
         self.stage.set(stage)
         self.count.set(f"{current} / {total}" if total else "")
-        self.bar.configure(value=(100.0 * current / total) if total else 0.0)
+        mode = "determinate" if total else "indeterminate"
+        if str(self.bar.cget("mode")) != mode:
+            self.bar.stop()
+            self.bar.configure(mode=mode)
+            if not total:
+                self.bar.start(12)
+        if total:
+            self.bar.configure(value=100.0 * current / total)
         self.window.update_idletasks()
 
     def close(self):
         try:
+            self.bar.stop()
             self.window.grab_release()
             self.window.destroy()
             if self._previous_grab is not None and self._previous_grab.winfo_exists():

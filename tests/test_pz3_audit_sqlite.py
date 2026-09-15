@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from auto_annotation_tool.registry import SCHEMA_VERSION
 from pathlib import Path
 from unittest.mock import patch
 
@@ -107,7 +108,7 @@ class AuditSqliteTests(unittest.TestCase):
         db.commit()
         db.close()
         database = RegistryDatabase(path)
-        self.assertEqual(database.initialize(), 4)
+        self.assertEqual(database.initialize(), SCHEMA_VERSION)
         with database.read_connection() as db:
             self.assertEqual(db.execute("SELECT model_id FROM models").fetchone()[0], "OLD-MODEL")
             tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}

@@ -833,6 +833,10 @@ def render_preview_image_status_overlay(owner, *, force_render: bool = False) ->
     outline = blend_hex_colors(status_fill, panel_fill, 0.08)
     filename = str(getattr(ann, "filename", "") or "").strip()
     label_text = "ZDJĘCIE\nZATWIERDZONE [OK]" if approved else "ZDJĘCIE\nNIEZATWIERDZONE"
+    from .pz3_sample_route import sample_context, sample_badge_text
+    reviewing_sample = bool(sample_context(owner))
+    if reviewing_sample:
+        label_text = sample_badge_text(owner, approved)
 
     render_key = (
         int(bool(getattr(owner, "_preview_fullscreen_active", False))),
@@ -851,7 +855,9 @@ def render_preview_image_status_overlay(owner, *, force_render: bool = False) ->
                 bg=status_fill,
                 fg=status_text,
                 text=label_text,
-                wraplength=126,
+                wraplength=0 if reviewing_sample else 126,
+                font=("Segoe UI Semibold", 9 if reviewing_sample else 7),
+                cursor="hand2" if reviewing_sample else "arrow",
             )
         except Exception:
             pass
@@ -864,6 +870,8 @@ def render_preview_image_status_overlay(owner, *, force_render: bool = False) ->
     except Exception:
         width = 126
         height = 38
+    if reviewing_sample:
+        return int(max(190, width)), int(max(30, height))
     return int(max(96, min(170, width))), int(max(30, min(72, height)))
 
 

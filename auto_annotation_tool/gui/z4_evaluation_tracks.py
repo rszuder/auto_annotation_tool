@@ -590,7 +590,10 @@ class EvaluationTracksPanel:
             "Nie eksportuj ich do datasetu treningowego."
         )
 
-    def prepare_ground_truth_in_z2(self) -> None:
+    def select_experiment_sample_in_z2(self) -> None:
+        self.prepare_ground_truth_in_z2(sample_selection=True)
+
+    def prepare_ground_truth_in_z2(self, *, sample_selection=False) -> None:
         from .pz3_gt_route import enter_experiment_gt_workspace
         from .experiment_gt_workflow import ExperimentGtEntryDecision
         from ..registry.experiment_gt_workspace import prepare_gt_workspace, working_gt_path
@@ -627,8 +630,11 @@ class EvaluationTracksPanel:
                 )
                 if decision is None:
                     return
-            progress = BatchProgressDialog(self.parent, title="Przygotowanie Ground Truth")
-            context = progress.run(lambda update: prepare_gt_workspace(
+            from ..registry.sample_selection import prepare_reviewed_sample
+            prepare = prepare_reviewed_sample if sample_selection else prepare_gt_workspace
+            progress = BatchProgressDialog(
+                self.parent, title="Przygotowanie próby i GT" if sample_selection else "Przygotowanie Ground Truth")
+            context = progress.run(lambda update: prepare(
                 self.service, track_id, mode=decision.mode, progress=update,
             ))
             progress.close()
@@ -638,7 +644,9 @@ class EvaluationTracksPanel:
             self.app.notebook.select(annotation_tab.frame)
             if not enter_experiment_gt_workspace(annotation_tab, context):
                 return
-            self._set_status("Otwarto roboczy Ground Truth eksperymentu w Z2.")
+            self._set_status(
+                "Otwarto dobór próby i GT w Z2. Zatwierdzaj zdjęcia spacją po ręcznej kontroli."
+                if sample_selection else "Otwarto roboczy Ground Truth eksperymentu w Z2.")
         except Exception as exc:
             self._show_error("Nie udało się otworzyć Ground Truth", exc)
         finally:
@@ -1577,14 +1585,19 @@ class EvaluationTracksPanel:
         ):
             return
 
+        progress = BatchProgressDialog(self.parent, title="Usuwanie DRAFT")
         try:
-            self.service.delete_draft(track_id)
+            progress.run(lambda update: self.service.delete_draft(track_id, progress=update))
         except Exception as exc:
+            progress.close()
+            # Cleanup can fail after the registry transaction has committed.
+            self.refresh_tracks(select_track_id=track_id)
             self._show_error(
                 "Nie udało się usunąć DRAFT",
                 exc,
             )
             return
+        progress.close()
 
         self.current_track_id = ""
         self.refresh_tracks()
@@ -1725,6 +1738,12 @@ class EvaluationTracksPanel:
                 )
             except Exception:
                 pass
+        sample_button = getattr(self, "btn_sample_selection", None)
+        if sample_button is not None:
+            sample_button.configure(state=tk.NORMAL if (
+                readiness.can_prepare_gt and readiness.target == "plate"
+                and readiness.participants_ready and readiness.audit_current and not readiness.gt_exists
+            ) else tk.DISABLED)
         compare_button = getattr(self, "btn_compare", None)
         if compare_button is not None:
             compare_button.configure(state=tk.NORMAL if readiness.sealed else tk.DISABLED)

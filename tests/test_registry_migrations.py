@@ -76,5 +76,39 @@ class RegistryMigrationTests(unittest.TestCase):
             self.assertEqual(locations_exists, 1)
 
 
+
+    def test_v4_adds_reverse_reference_indexes_without_changing_rows(self):
+        from auto_annotation_tool.registry.migrations import migrate_database
+        with sqlite3.connect(":memory:") as db:
+            db.execute("PRAGMA foreign_keys = ON")
+            migrate_database(db, target_version=4)
+            db.execute("INSERT INTO source_images(source_image_id) VALUES ('source')")
+            db.execute(
+                """INSERT INTO image_artifacts(artifact_id, source_image_id, sha256)
+                   VALUES ('parent', 'source', 'hash')"""
+            )
+            db.execute(
+                """INSERT INTO image_artifacts(artifact_id, source_image_id, sha256, derived_from_artifact_id)
+                   VALUES ('child', 'source', 'hash', 'parent')"""
+            )
+            before = db.execute("SELECT * FROM image_artifacts ORDER BY artifact_id").fetchall()
+            db.commit()
+            self.assertEqual(migrate_database(db), SCHEMA_VERSION)
+            self.assertEqual(migrate_database(db), SCHEMA_VERSION)
+            self.assertEqual(before, db.execute("SELECT * FROM image_artifacts ORDER BY artifact_id").fetchall())
+            for table, column in (
+                ("image_artifacts", "derived_from_artifact_id"),
+                ("evaluation_track_members", "source_artifact_id"),
+                ("evaluation_track_members", "track_artifact_id"),
+                ("dataset_members", "artifact_id"),
+            ):
+                with self.subTest(table=table, column=column):
+                    plan = db.execute(
+                        f"EXPLAIN QUERY PLAN SELECT 1 FROM {table} WHERE {column} = ?", ("parent",)
+                    ).fetchall()
+                    self.assertTrue(any("SEARCH" in row[3] and "INDEX" in row[3] for row in plan), plan)
+            self.assertFalse(db.execute("PRAGMA foreign_key_check").fetchall())
+
+
 if __name__ == "__main__":
     unittest.main()

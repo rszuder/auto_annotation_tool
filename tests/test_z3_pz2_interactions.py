@@ -165,3 +165,61 @@ def test_assistant_avoids_compass_and_stays_inside_canvas(bounds):
     x, y = typing._resolve_preview_typing_overlay_anchor(host, 180, 70)
     assert x >= bounds[2] or y >= bounds[3]
     assert 0 <= x <= 820 and 0 <= y <= 630
+
+
+@pytest.mark.parametrize("fullscreen,width", [(False, 500), (True, 1000)])
+def test_fullscreen_control_is_visible_and_clickable_above_drawer(root, fullscreen, width):
+    window = tk.Toplevel(root)
+    window.geometry(f"{width}x500+40+40")
+    surface = tk.Frame(window)
+    surface.pack(fill=tk.BOTH, expand=True)
+    canvas = tk.Canvas(surface, highlightthickness=0)
+    canvas.pack(fill=tk.BOTH, expand=True)
+    record_overlay = tk.Frame(surface, width=300, height=26)
+    panel = tk.Frame(surface)
+    host = CharacterAnnotationTab.__new__(CharacterAnnotationTab)
+    host.app = SimpleNamespace(palette=get_theme_palette())
+    host.preview_canvas = canvas
+    host.preview_canvas_host = surface
+    host.preview_record_overlay = record_overlay
+    host.preview_overlay_dock = panel
+    host._preview_render_state = {"image": True}
+    host._preview_fullscreen_active = fullscreen
+    host._listbox_pid_by_index = ["plate"]
+    host._get_current_preview_list_index = lambda: 0
+    host._estimate_preview_source_legend_width = lambda: 0
+    host._estimate_preview_source_legend_height = lambda: 0
+    host._get_preview_legend_theme = lambda: {}
+    host._toggle_preview_fullscreen = Mock()
+    canvas.bind("<ButtonPress-1>", host._on_preview_canvas_press)
+    try:
+        window.update()
+        with patch.object(preview, "_build_preview_canvas_status_badge_specs", return_value={}), \
+             patch.object(preview, "_estimate_preview_canvas_info_badges_bottom", return_value=116), \
+             patch.object(preview, "_sync_preview_canvas_status_pulse"), \
+             patch.object(dock_ui, "render_preview_overlay_dock", return_value=(180, 150)):
+            for _ in range(3):
+                canvas.delete("preview_overlay")
+                canvas.delete("preview_overlay_action")
+                host._draw_preview_canvas_info_overlay(
+                    canvas, canvas.winfo_width(), {"source_image": "plate.jpg"}, [], False)
+                dock_ui.place_preview_overlay_dock(host)
+                window.update()
+            x1, y1, x2, y2 = host._preview_fullscreen_toggle_rect
+            assert 0 < y1 < y2 < host._preview_drawer_slide.button.winfo_y()
+            assert record_overlay.winfo_x() + record_overlay.winfo_width() < x1
+            assert canvas.bbox("preview_action::reset_view")[2] < record_overlay.winfo_x()
+            controls = canvas.find_withtag("preview_action::toggle_fullscreen")
+            assert any(canvas.type(item) == "text" and canvas.itemcget(item, "text") == "Enter"
+                       for item in controls)
+            # Test both the shortcut caption and the icon against real Tk stacking.
+            for x in (x1 + 15, x2 - 12):
+                y = (y1 + y2) / 2
+                assert window.winfo_containing(canvas.winfo_rootx() + int(x),
+                                               canvas.winfo_rooty() + int(y)) is canvas
+                canvas.event_generate("<Motion>", x=int(x), y=int(y))
+                canvas.event_generate("<ButtonPress-1>", x=int(x), y=int(y))
+                canvas.event_generate("<ButtonRelease-1>", x=int(x), y=int(y))
+            assert host._toggle_preview_fullscreen.call_count == 2
+    finally:
+        window.destroy()

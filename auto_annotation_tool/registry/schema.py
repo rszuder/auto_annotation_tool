@@ -6,7 +6,7 @@ pochodzenie, relacje, sumy kontrolne i stan eksperymentów.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -434,5 +434,28 @@ SCHEMA_V4_STATEMENTS: tuple[str, ...] = (
         audit_id TEXT REFERENCES evaluation_track_audits(audit_id) ON DELETE SET NULL,
         state_json TEXT NOT NULL
     )
+    """,
+)
+
+
+# Deleting each track copy checks these reverse references, including SQLite
+# foreign-key actions. Without indexes, a large draft rescans entire tables
+# once per image.
+SCHEMA_V5_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE INDEX idx_image_artifacts_derived_from
+    ON image_artifacts(derived_from_artifact_id)
+    """,
+    """
+    CREATE INDEX idx_track_members_source_artifact
+    ON evaluation_track_members(source_artifact_id)
+    """,
+    """
+    CREATE INDEX idx_track_members_track_artifact
+    ON evaluation_track_members(track_artifact_id)
+    """,
+    """
+    CREATE INDEX idx_dataset_members_artifact
+    ON dataset_members(artifact_id)
     """,
 )

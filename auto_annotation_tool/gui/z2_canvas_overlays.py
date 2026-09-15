@@ -930,7 +930,9 @@ def _place_preview_image_status_overlay(self, *, force_render: bool = False) -> 
             dock_y = None
 
     width, height = self._render_preview_image_status_overlay(force_render=force_render)
-    width = max(96, min(frame_width - 16, int(dock_width or width)))
+    from .pz3_sample_route import sample_context
+    status_width = max(190, width) if sample_context(self) else (dock_width or width)
+    width = max(96, min(frame_width - 16, int(status_width)))
     if dock_x is None:
         x = max(8, frame_width - width - 10)
     else:
@@ -1177,8 +1179,12 @@ def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
         place_drawer(self, frame_width, int(x), int(y), int(dock_width), int(dock_height))
     except Exception:
         pass
+    from .pz3_sample_route import sample_context
     if bool(getattr(self, "_preview_fullscreen_active", False)):
-        self._hide_preview_image_status_overlay()
+        if sample_context(self):
+            self._place_preview_image_status_overlay(force_render=force_render)
+        else:
+            self._hide_preview_image_status_overlay()
         self._hide_preview_campaign_gate_overlay()
     else:
         self._place_preview_image_status_overlay(force_render=force_render)

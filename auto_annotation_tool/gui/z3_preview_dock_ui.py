@@ -510,7 +510,7 @@ def place_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render: 
         try:
             _icon_x1, _icon_y1, icon_x2, icon_y2 = [float(value) for value in toggle_rect]
             x = icon_x2 - float(dock_width)
-            y = icon_y2 + 6.0
+            y = max(icon_y2 + 6.0, float(getattr(host, "_preview_overlay_top_bar_height", 38.0)) + 12.0)
         except Exception:
             x = float(host_width) - float(dock_width) - margin
             y = max(46.0, float(getattr(host, "_preview_overlay_top_bar_height", 38.0) or 38.0) + 12.0)

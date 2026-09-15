@@ -346,6 +346,10 @@ class EvaluationTrackService:
         return member_index
 
 
+    def commit_reviewed_sample(self, track_id: str, **kwargs):
+        from .sample_selection import commit_reviewed_sample
+        return commit_reviewed_sample(self, track_id, **kwargs)
+
     def remove_members(
         self,
         track_id: str,
@@ -945,7 +949,7 @@ class EvaluationTrackService:
             if not candidate.is_file():
                 continue
             relative = candidate.relative_to(track_root).as_posix()
-            if (relative in {"participants.json", "participant_pool_audit_state.json"}
+            if (relative in {"participants.json", "participant_pool_audit_state.json", "sample_selection.json"}
                     or relative.startswith("audits/") or relative.startswith("gt_workflow/")
                     or relative.startswith("ground_truth/_invalidated_member_change/")):
                 if not self._is_within(candidate, track_root):
@@ -1637,8 +1641,10 @@ class EvaluationTrackService:
             track_id=track_id,
         )
 
-    def delete_draft(self, track_id: str) -> None:
+    def delete_draft(self, track_id: str, *, progress=None) -> None:
         # Usuń roboczy DRAFT wraz ze stagingiem eksperymentalnym.
+        if progress:
+            progress("Przygotowanie usunięcia DRAFT", 0, 0)
         track = self._require_status(track_id, STATUS_DRAFT)
         track_root = self._track_root(track)
         staging = experiment_workspace_for_track(
@@ -1652,6 +1658,13 @@ class EvaluationTrackService:
             staging.experiment_runs,
             staging.experiment_results,
         ]
+        workspace_root = self.workspace.resolve()
+        for candidate in managed_paths:
+            resolved = candidate.resolve()
+            if resolved == workspace_root or not resolved.is_relative_to(workspace_root):
+                raise EvaluationTrackError(
+                    f"Ścieżka usuwanego DRAFT wychodzi poza Workspace: {candidate}"
+                )
         renamed: list[tuple[Path, Path]] = []
 
         try:
@@ -1684,6 +1697,8 @@ class EvaluationTrackService:
             ) from exc
 
         try:
+            if progress:
+                progress("Usuwanie wpisów DRAFT z rejestru", 0, 0)
             self.repository.delete_draft_evaluation_track(track_id)
         except Exception as exc:
             for original, tombstone in reversed(renamed):
@@ -1702,7 +1717,9 @@ class EvaluationTrackService:
         )
 
         leftovers = []
-        for _original, tombstone in renamed:
+        for index, (_original, tombstone) in enumerate(renamed):
+            if progress:
+                progress("Usuwanie katalogów roboczych DRAFT", index, len(renamed))
             if not tombstone.exists():
                 continue
             try:
@@ -1714,6 +1731,8 @@ class EvaluationTrackService:
                 "DRAFT usunięto z rejestru, ale pozostały katalogi robocze: "
                 + "; ".join(leftovers)
             )
+        if progress:
+            progress("DRAFT usunięty", len(renamed), len(renamed))
 
     def retire(self, track_id: str) -> None:
         self._require_status(track_id, STATUS_SEALED)
@@ -2299,6 +2318,11 @@ class EvaluationTrackService:
             "members": members,
             "verification": dict(verification or preserved_verification),
         }
+        selection_path = track_root / "sample_selection.json"
+        if selection_path.is_file():
+            payload["sample_selection"] = {
+                "path": selection_path.name, "sha256": self._sha256(selection_path),
+            }
         if experiment_contract:
             payload["experiment_contract"] = dict(experiment_contract)
         elif manifest_path.exists():
