@@ -98,6 +98,9 @@ def finish_experiment_gt_run(host, run_dir):
 
 
 def return_gt_to_pz3(host):
+    from .pz3_sample_route import sample_context, return_sample_to_pz3
+    if sample_context(host):
+        return return_sample_to_pz3(host)
     context = experiment_context(host) or {}
     if not context or getattr(host, "is_processing", False):
         return
@@ -155,7 +158,7 @@ def refresh_experiment_gt_ui(host):
         bar.pack(side="top", fill="x", before=siblings[0] if siblings else None)
     host._experiment_gt_bar_label.configure(text=f"Ground Truth · {context.get('name') or context['track_id']}")
     control_state = "disabled" if getattr(host, "is_processing", False) else "normal"
-    host._experiment_gt_return_button.configure(state=control_state)
+    host._experiment_gt_return_button.configure(state=control_state, text="Zapisz GT i wróć do PZ3")
     host._experiment_gt_auto_button.configure(state=control_state)
     for attr in ("workflow_entry_shell", "manual_entry_section"):
         widget = getattr(host, attr, None)
@@ -165,3 +168,5 @@ def refresh_experiment_gt_ui(host):
         widget = getattr(host, attr, None)
         if widget is not None:
             widget.configure(text="Oznacz wszystkie tablice i narożniki. Zapisz GT w PZ3 po pełnym ręcznym przeglądzie puli.")
+    from .pz3_sample_route import refresh_sample_ui
+    refresh_sample_ui(host)

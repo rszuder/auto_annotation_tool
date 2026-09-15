@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 from pathlib import Path
 import sqlite3
 import json
@@ -913,6 +914,7 @@ class RegistryRepository:
         member_indices: list[int] | tuple[int, ...] | set[int],
         *,
         invalidate_ground_truth: bool = False,
+        _connection=None,
     ) -> list[dict[str, Any]]:
         """Atomowo usuń członków toru z rejestru."""
         clean_id = str(track_id or "").strip()
@@ -922,11 +924,12 @@ class RegistryRepository:
         if not indices:
             return []
 
-        self.initialize()
+        if _connection is None:
+            self.initialize()
         placeholders = ",".join("?" for _ in indices)
         params = [clean_id, *indices]
 
-        with self.database.transaction() as connection:
+        with (nullcontext(_connection) if _connection is not None else self.database.transaction()) as connection:
             rows = list(
                 connection.execute(
                     f"""
@@ -1015,6 +1018,66 @@ class RegistryRepository:
                 )
 
         return snapshots
+
+
+    def commit_reviewed_evaluation_sample(
+        self, track_id, *, keep_sha256, expected_member_sha256,
+        expected_audit_id, gt_relative_path, gt_sha256, prepare_files,
+    ):
+        """Commit exact membership, GT and audit invalidation as one transaction.
+
+        prepare_files stages filesystem replacements; its caller restores them
+        if this transaction (including commit) fails.
+        """
+        self.initialize()
+        connection = self.database.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            track = connection.execute(
+                "SELECT * FROM evaluation_tracks WHERE track_id=?", (track_id,)
+            ).fetchone()
+            if track is None or track["status"] != "DRAFT" or track["target"] != "plate":
+                raise ValueError("Próbę można przekazać tylko do DRAFT dla tablic.")
+            if track["gt_relative_path"]:
+                raise ValueError("Tor ma już zapisane GT. Otwórz je do korekty w PZ3.")
+            rows = [dict(row) for row in connection.execute(
+                "SELECT * FROM evaluation_track_members WHERE track_id=? ORDER BY member_index",
+                (track_id,),
+            )]
+            current = {row["original_name"]: row["sha256"] for row in rows}
+            if current != expected_member_sha256:
+                raise ValueError("Pula zmieniła się podczas przeglądu. Otwórz ją ponownie z PZ3.")
+            keep = set(keep_sha256)
+            if not keep or not keep.issubset(set(current.values())):
+                raise ValueError("Zatwierdź co najmniej jeden obraz należący do tej puli.")
+            audit_row = connection.execute(
+                "SELECT * FROM evaluation_track_audit_state WHERE track_id=?", (track_id,)
+            ).fetchone()
+            if (audit_row is None or audit_row["status"] != "CURRENT"
+                    or audit_row["audit_id"] != expected_audit_id):
+                raise ValueError("Audyt zmienił się podczas przeglądu. Otwórz próbę ponownie.")
+            removed = [row["member_index"] for row in rows if row["sha256"] not in keep]
+            if removed:
+                self.remove_evaluation_track_members(track_id, removed, _connection=connection)
+            retained = [row for row in rows if row["sha256"] in keep]
+            connection.execute(
+                """UPDATE evaluation_tracks SET gt_format='cvat_xml', gt_relative_path=?,
+                       gt_sha256=?, member_count=?, object_count=0, verified_at=NULL
+                   WHERE track_id=?""",
+                (gt_relative_path, gt_sha256, len(retained), track_id),
+            )
+            state = json.loads(audit_row["state_json"])
+            state.update(status="STALE", reason="reviewed_sample_committed")
+            self._upsert_track_audit_state(connection, track_id, state)
+            prepare_files(dict(track), retained, rows)
+            connection.commit()
+            return {"track_id": track_id, "candidate_count": len(rows),
+                    "selected_count": len(retained), "removed_count": len(removed)}
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def next_evaluation_track_member_index(self, track_id: str) -> int:
         self.initialize()

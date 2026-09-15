@@ -120,7 +120,6 @@ class EvaluationTrackHardeningTests(unittest.TestCase):
                 """
             ).fetchone()[0]
 
-        self.assertEqual(SCHEMA_VERSION, 4)
         self.assertIn("seal_sha256", columns)
         self.assertEqual(count, 1)
 

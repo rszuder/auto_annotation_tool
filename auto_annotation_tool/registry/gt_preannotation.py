@@ -351,10 +351,11 @@ def compute_preannotation_metrics(
     *,
     iou_threshold: float = 0.5,
     unchanged_tolerance_px: float = 1.0,
+    image_names: set[str] | None = None,
 ) -> dict[str, Any]:
     pred = _parse_xml(preannotation_xml)
     final = _parse_xml(final_gt_xml)
-    names = sorted(set(pred) | set(final))
+    names = sorted((set(pred) | set(final)) if image_names is None else image_names)
     tp = fp = fn = unchanged = corrected = images_clean = 0
     corner_errors: list[float] = []
     per_image = []
@@ -467,7 +468,10 @@ def maybe_compute_preannotation_metrics_for_track(
     actual = sha256_file(snapshot)
     if expected and expected != actual:
         raise RuntimeError("Snapshot preanotacji zmienił zawartość.")
-    metrics = compute_preannotation_metrics(snapshot, final_gt_xml)
+    # The AUTO snapshot may cover the broad candidate pool. Unselected images
+    # are outside this experiment, not false positives in its final GT.
+    selected_names = set(_parse_xml(final_gt_xml)) if (root / "sample_selection.json").is_file() else None
+    metrics = compute_preannotation_metrics(snapshot, final_gt_xml, image_names=selected_names)
     session = load_json(session_path(root))
     metrics.update({
         "track_id": str(session.get("track_id") or ""),

@@ -928,6 +928,8 @@ def _update_preview_approval_badge_fast(self, approved: bool) -> None:
             self._refresh_preview_canvas_light()
         except Exception:
             pass
+        from .pz3_sample_route import refresh_sample_ui
+        refresh_sample_ui(self)
     except Exception:
         pass
 

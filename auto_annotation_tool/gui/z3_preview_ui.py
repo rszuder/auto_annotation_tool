@@ -2770,8 +2770,11 @@ def draw_preview_canvas_info_overlay(
     toggle_size = 24.0
     toggle_pad = 12.0
     toggle_x2 = max(toggle_pad + toggle_size, float(canvas_width) - toggle_pad)
-    toggle_x1 = toggle_x2 - toggle_size
-    toggle_y1 = bar_height + 8.0
+    # Keep fullscreen in the header: the drawer toggle occupies its right edge
+    # below the info bar, including when fullscreen is inactive.
+    shortcut_width = 42.0
+    toggle_x1 = toggle_x2 - toggle_size - shortcut_width
+    toggle_y1 = 8.0
     toggle_y2 = toggle_y1 + toggle_size
     host._preview_fullscreen_toggle_rect = (
         float(toggle_x1),
@@ -2797,18 +2800,27 @@ def draw_preview_canvas_info_overlay(
         width=1,
         tags=("preview_overlay", "preview_action::toggle_fullscreen"),
     )
+    canvas.create_text(
+        toggle_x1 + 7.0,
+        (toggle_y1 + toggle_y2) / 2.0,
+        text="Enter",
+        anchor=tk.W,
+        font=("Segoe UI", 9, "bold"),
+        fill=toggle_icon,
+        tags=("preview_overlay", "preview_action::toggle_fullscreen"),
+    )
     inner_pad = 5.0
-    inner_x1 = toggle_x1 + inner_pad
+    inner_x1 = toggle_x2 - toggle_size + inner_pad
     inner_y1 = toggle_y1 + inner_pad
     inner_x2 = toggle_x2 - inner_pad
     inner_y2 = toggle_y2 - inner_pad
     corner_len = 5.0
     icon_tags = ("preview_overlay", "preview_action::toggle_fullscreen")
     if bool(getattr(host, "_preview_fullscreen_active", False)):
-        canvas.create_line(inner_x1 + corner_len, inner_y1, inner_x1, inner_y1, inner_x1, inner_y1 + corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x2 - corner_len, inner_y1, inner_x2, inner_y1, inner_x2, inner_y1 + corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x1 + corner_len, inner_y2, inner_x1, inner_y2, inner_x1, inner_y2 - corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x2 - corner_len, inner_y2, inner_x2, inner_y2, inner_x2, inner_y2 - corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
+        canvas.create_line(inner_x1, inner_y1 + corner_len, inner_x1 + corner_len, inner_y1 + corner_len, inner_x1 + corner_len, inner_y1, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
+        canvas.create_line(inner_x2, inner_y1 + corner_len, inner_x2 - corner_len, inner_y1 + corner_len, inner_x2 - corner_len, inner_y1, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
+        canvas.create_line(inner_x1, inner_y2 - corner_len, inner_x1 + corner_len, inner_y2 - corner_len, inner_x1 + corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
+        canvas.create_line(inner_x2, inner_y2 - corner_len, inner_x2 - corner_len, inner_y2 - corner_len, inner_x2 - corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
     else:
         canvas.create_line(inner_x1, inner_y1 + corner_len, inner_x1, inner_y1, inner_x1 + corner_len, inner_y1, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
         canvas.create_line(inner_x2, inner_y1 + corner_len, inner_x2, inner_y1, inner_x2 - corner_len, inner_y1, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
