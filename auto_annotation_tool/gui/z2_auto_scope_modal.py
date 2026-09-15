@@ -10,10 +10,17 @@ from pathlib import Path
 from ..config import AVAILABLE_DETECT_MODELS
 from ..validators import format_yolo_model_identity, validate_model_file
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .pz3_gt_route import experiment_context
 
 
 def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | None = None) -> dict | None:
     self = host
+    gt_context = experiment_context(host)
+    is_experiment_gt = gt_context is not None
+    modal_title = "Preanotacja Ground Truth" if is_experiment_gt else "Zakres autoanotacji"
+    start_label = "Uruchom preanotację" if is_experiment_gt else "Uruchom autoanotację"
+    operation = "preanotację" if is_experiment_gt else "autoanotację"
+    operation_genitive = "preanotacji" if is_experiment_gt else "autoanotacji"
     scope_open_visible_state = {
         "annotations": copy.deepcopy(list(getattr(self, "current_annotations", []) or [])),
         "image_map": dict(getattr(self, "_preview_image_path_map", {}) or {}),
@@ -80,20 +87,20 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     dialog_styler = getattr(self.app, "style_dialog_window", None)
     if callable(dialog_styler):
         try:
-            dialog_styler(dialog, title="Zakres autoanotacji", geometry="760x620", parent=self.frame)
+            dialog_styler(dialog, title=modal_title, geometry="760x620", parent=self.frame)
             try:
                 dialog.grab_release()
             except Exception:
                 pass
         except Exception:
             try:
-                dialog.title("Zakres autoanotacji")
+                dialog.title(modal_title)
                 dialog.resizable(False, False)
             except Exception:
                 pass
     else:
         try:
-            dialog.title("Zakres autoanotacji")
+            dialog.title(modal_title)
             dialog.resizable(False, False)
         except Exception:
             pass
@@ -308,7 +315,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
 
     title_lbl = tk.Label(
         body_content,
-        text="Najpierw wybierz model tablic, potem zakres autoanotacji",
+        text=("Wybierz model do preanotacji GT" if is_experiment_gt else "Najpierw wybierz model tablic, potem zakres autoanotacji"),
         bg=panel_bg,
         fg=fg,
         font=("Segoe UI", 10, "bold"),
@@ -320,6 +327,10 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     tk.Label(
         body_content,
         text=(
+            f"Tor: {gt_context.get('name') or gt_context['track_id']}. "
+            "Preanotacja przygotuje propozycje tablic i narożników. "
+            "Pierwszy wynik AUTO zostanie zachowany; następnie sprawdź ręcznie każdy obraz."
+            if is_experiment_gt else
             "Najważniejsze i wymagane ustawienie tego okna to model tablic (YOLO Pose). "
             "Bez niego autoanotacja nie wystartuje. Dopiero po wyborze modelu ustawisz zakres pracy, "
             "próg pewności, dopasowanie oraz opcjonalne wsparcie pojazdami."
@@ -336,7 +347,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         body_content,
         text=(
             "To okno możesz zostawić otwarte. Jeśli chcesz użyć zaznaczenia z listy, "
-            "zaznacz obrazy po lewej stronie, a przycisk „Uruchom autoanotację” odblokuje się od razu."
+            f"zaznacz obrazy po lewej stronie, a przycisk „{start_label}” odblokuje się od razu."
         ),
         bg=panel_bg,
         fg=muted,
@@ -349,7 +360,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     progress_var = tk.DoubleVar(master=dialog, value=0.0)
     progress_status_var = tk.StringVar(
         master=dialog,
-        value="Gotowe do uruchomienia autoanotacji.",
+        value=f"Gotowe do uruchomienia {operation_genitive}.",
     )
     progress_counts_var = tk.StringVar(master=dialog, value="oczekiwanie na start")
     progress_file_var = tk.StringVar(master=dialog, value="")
@@ -591,7 +602,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     settings_card = build_section_card(
         body_content,
         "1",
-        "Model do autoanotacji",
+        "Model preanotacji" if is_experiment_gt else "Model do autoanotacji",
         "Sprawdź status modeli i wybierz model tablic dla bieżącego uruchomienia.",
         pady=(2, 14),
     )
@@ -609,6 +620,9 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     tk.Label(
         settings_card,
         text=(
+            "Wybierz model tablic (YOLO Pose) do przygotowania GT. "
+            "Możesz użyć również modelu ocenianego później w tym eksperymencie."
+            if is_experiment_gt else
             "Autoanotacja nie ruszy bez aktywnego modelu tablic. Model projektu jest domyślny, "
             "a opcje awaryjne służą do jednorazowego wskazania pliku .pt."
         ),
@@ -760,6 +774,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         tk.Label(
             content,
             text=(
+                "Parametry modelu wybranego do preanotacji Ground Truth."
+                if is_experiment_gt else
                 "Tu porównujesz trwały model projektu z modelem, który zostanie użyty "
                 "w bieżącej autoanotacji Z2."
             ),
@@ -847,14 +863,17 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                 model_path=model_path,
             )
 
-        _add_details_block(
-            "Model projektu (MT)",
-            project_path,
-            "Trwały zasób kampanii. Jeśli jest aktywny, Z2 może użyć go bez ponownego wskazywania pliku.",
-        )
+        if not is_experiment_gt:
+            _add_details_block(
+                "Model projektu (MT)",
+                project_path,
+                "Trwały zasób kampanii. Jeśli jest aktywny, Z2 może użyć go bez ponownego wskazywania pliku.",
+            )
         _add_details_block(
             "Aktywny model autoanotacji",
             active_path,
+            "Model przygotowujący propozycje GT do ręcznej korekty."
+            if is_experiment_gt else
             "Model używany przez bieżące uruchomienie autoanotacji. Może być modelem projektu albo modelem jednorazowym.",
         )
 
@@ -937,6 +956,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         return value_lbl
 
     project_model_status_lbl = _add_model_status_row("Model projektu (MT)", project_model_status_var, tone="muted")
+    if is_experiment_gt:
+        project_model_status_lbl.master.pack_forget()
     active_model_status_lbl = _add_model_status_row("Aktywny model autoanotacji", active_model_status_var, tone="muted")
     model_decision_status_lbl = _add_model_status_row("Co zostanie użyte", model_decision_status_var, tone="muted")
 
@@ -950,7 +971,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     model_status_details_btn.pack(side=tk.LEFT)
 
     plate_model_mode_host = tk.Frame(settings_card, bg=field_bg, bd=0, highlightthickness=0)
-    plate_model_mode_host.pack(fill=tk.X, pady=(0, 8))
+    plate_model_mode_host.pack(fill=tk.X, pady=(0, 8), before=model_status_card if is_experiment_gt else None)
 
     tk.Label(
         plate_model_mode_host,
@@ -981,7 +1002,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         project_plate_toggle["row"].pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
 
     plate_emergency_header = tk.Frame(plate_model_mode_host, bg=field_bg, bd=0, highlightthickness=0)
-    plate_emergency_header.pack(fill=tk.X, pady=(8, 0))
+    if not is_experiment_gt:
+        plate_emergency_header.pack(fill=tk.X, pady=(8, 0))
     plate_emergency_text = tk.Frame(plate_emergency_header, bg=field_bg, bd=0, highlightthickness=0)
     plate_emergency_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
     tk.Label(
@@ -1100,7 +1122,10 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             active_text = f"{active_path.name}"
             if active_identity:
                 active_text += f" | {active_identity}"
-            if _same_model_path(active_path, project_model_path):
+            if is_experiment_gt:
+                decision_text = "Ten model przygotuje propozycje GT do ręcznej korekty."
+                active_tone = "success"
+            elif _same_model_path(active_path, project_model_path):
                 decision_text = "Z2 użyje modelu projektu jako aktywnego modelu autoanotacji."
                 active_tone = "success"
             else:
@@ -1235,7 +1260,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         chosen = filedialog.askopenfilename(
             initialdir=str(initial_dir.absolute()),
             filetypes=[("YOLO Model", "*.pt")],
-            title="Wskaż model tablic dla autoanotacji Z2",
+            title="Wybierz model do preanotacji GT" if is_experiment_gt else "Wskaż model tablic dla autoanotacji Z2",
+            parent=dialog,
         )
         if chosen:
             modal_plate_path_var.set(str(chosen))
@@ -1244,7 +1270,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
 
     ttk.Button(
         plate_path_row,
-        text="Wybierz",
+        text="Wybierz model…" if is_experiment_gt else "Wybierz",
         command=choose_plate_model_for_modal,
     ).pack(side=tk.RIGHT, padx=(5, 0))
 
@@ -1514,7 +1540,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         value="all",
         title="Cały zestaw zdjęć",
         description=(
-            "Uruchom autoanotację na całym zakresie wejścia: "
+            f"{start_label} na całym zakresie wejścia: "
             f"{_format_scope_count(len(all_paths), _count_scope_existing_plates(all_paths))}."
         ),
     )
@@ -1575,7 +1601,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         description=(
             "Licznik poniżej pokazuje faktycznie zaznaczone wiersze listy i liczbę obrazów, które trafią do autoanotacji. Możesz zmienić zaznaczenie bez zamykania tego okna. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny przed nadpisaniem gotowej pracy."
             if selected_row_count > 0
-            else "To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej już teraz, a przycisk „Uruchom autoanotację” odblokuje się automatycznie. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny."
+            else f"To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej już teraz, a przycisk „{start_label}” odblokuje się automatycznie. Zdjęcia ręcznie anotowane i ze statusem [OK] zostaną pominięte mimo zaznaczenia - to mechanizm ochronny."
         ),
     )
     selected_rows_count_var = tk.StringVar(value=str(selected_row_count))
@@ -1676,7 +1702,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
     footer_progress_panel.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
     tk.Label(
         footer_progress_panel,
-        text="4. Start i postęp autoanotacji",
+        text=f"4. Start i postęp {operation_genitive}",
         bg=field_bg,
         fg=fg,
         font=("Segoe UI", 9, "bold"),
@@ -1809,7 +1835,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             elif total:
                 progress_status_var.set("Przetwarzam obrazy...")
             else:
-                progress_status_var.set("Przygotowuję autoanotację...")
+                progress_status_var.set(f"Przygotowuję {operation}...")
         except Exception:
             pass
 
@@ -1831,7 +1857,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         try:
             if bool(getattr(self, "is_processing", False)):
                 self._stop_annotation()
-                progress_status_var.set("Zatrzymuję autoanotację...")
+                progress_status_var.set(f"Zatrzymuję {operation}...")
                 return
         except Exception:
             pass
@@ -1859,11 +1885,11 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
         except Exception:
             pass
         try:
-            next_btn.configure(text="Autoanotacja trwa...", state=tk.DISABLED)
+            next_btn.configure(text="Preanotacja trwa..." if is_experiment_gt else "Autoanotacja trwa...", state=tk.DISABLED)
         except Exception:
             pass
         try:
-            cancel_btn.configure(text="Zatrzymaj autoanotację", command=_request_stop_from_progress)
+            cancel_btn.configure(text="Zatrzymaj preanotację" if is_experiment_gt else "Zatrzymaj autoanotację", command=_request_stop_from_progress)
         except Exception:
             pass
         try:
@@ -1873,7 +1899,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             self._close_plate_auto_scope_progress_modal = _close_scope_progress_modal
         except Exception:
             pass
-        _update_scope_progress_modal(pct=0.0, current=0, total=0, meta_text="Przygotowuję start autoanotacji...")
+        _update_scope_progress_modal(pct=0.0, current=0, total=0, meta_text=f"Przygotowuję start {operation_genitive}...")
         try:
             dialog.update_idletasks()
             dialog.lift()
@@ -1896,7 +1922,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
 
     cancel_btn = ttk.Button(buttons, text="Anuluj", command=choose_cancel)
     cancel_btn.pack(side=tk.RIGHT)
-    next_btn = ttk.Button(buttons, text="Uruchom autoanotację")
+    next_btn = ttk.Button(buttons, text=start_label)
     next_btn.pack(side=tk.RIGHT, padx=(0, 8))
 
     def resolve_bucket_paths() -> list[Path]:
@@ -2116,8 +2142,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             return
         if bool(getattr(self, "_plate_auto_scope_progress_modal_active", False)):
             try:
-                next_btn.configure(text="Autoanotacja trwa...", state=tk.DISABLED)
-                cancel_btn.configure(text="Zatrzymaj autoanotację", command=_request_stop_from_progress)
+                next_btn.configure(text="Preanotacja trwa..." if is_experiment_gt else "Autoanotacja trwa...", state=tk.DISABLED)
+                cancel_btn.configure(text="Zatrzymaj preanotację" if is_experiment_gt else "Zatrzymaj autoanotację", command=_request_stop_from_progress)
             except Exception:
                 pass
             return
@@ -2235,7 +2261,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
 
         try:
             next_btn.configure(
-                text="Uruchom autoanotację",
+                text=start_label,
                 state=(
                     tk.NORMAL
                     if _scope_model_inputs_ready(live_selected_count > 0)
@@ -2254,8 +2280,8 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             return
         if bool(getattr(self, "_plate_auto_scope_progress_modal_active", False)):
             try:
-                next_btn.configure(text="Autoanotacja trwa...", state=tk.DISABLED)
-                cancel_btn.configure(text="Zatrzymaj autoanotację", command=_request_stop_from_progress)
+                next_btn.configure(text="Preanotacja trwa..." if is_experiment_gt else "Autoanotacja trwa...", state=tk.DISABLED)
+                cancel_btn.configure(text="Zatrzymaj preanotację" if is_experiment_gt else "Zatrzymaj autoanotację", command=_request_stop_from_progress)
             except Exception:
                 pass
             return
@@ -2295,7 +2321,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                 )
             )
             all_desc_var.set(
-                "Uruchom autoanotację na całym zakresie wejścia: "
+                f"{start_label} na całym zakresie wejścia: "
                 f"{_format_scope_count(len(live_all_paths), live_all_plate_count)}."
             )
             refresh_selected_counter_visibility()
@@ -2305,7 +2331,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                     if str(selected_mode_var.get() or "").strip().lower() == "selected" and protection_enabled
                     else "Licznik poniżej rozdziela zaznaczone wiersze, zdjęcia kierowane do autoanotacji oraz tablice już zapisane w tych zdjęciach. Ochrona jest wyłączona, więc istniejące ramki mogą zostać nadpisane."
                     if str(selected_mode_var.get() or "").strip().lower() == "selected"
-                    else "To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej, a przycisk „Uruchom autoanotację” odblokuje się automatycznie. Liczniki rozdzielają zdjęcia od istniejących tablic."
+                    else f"To okno możesz zostawić otwarte. Zaznacz obrazy na liście po lewej, a przycisk „{start_label}” odblokuje się automatycznie. Liczniki rozdzielają zdjęcia od istniejących tablic."
                 )
             )
             selected_rows_count_var.set(str(live_selected_row_count))
@@ -2422,14 +2448,14 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             pass
         self._set_widget_packed(
             custom_plate_toggle["row"],
-            emergency_visible,
+            bool(emergency_visible and not is_experiment_gt),
             anchor=tk.W,
             fill=tk.X,
             pady=(4, 0),
         )
         self._set_widget_packed(
             plate_path_row,
-            bool(emergency_visible and plate_custom_active),
+            bool((is_experiment_gt or emergency_visible) and plate_custom_active),
             fill=tk.X,
             pady=(4, 0),
         )
@@ -2466,7 +2492,9 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                 quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(
                     str(modal_plate_path_var.get() or "").strip()
                 )
-                if (not self._is_free_mode_session_context()) and bool(modal_plate_adopt_var.get()):
+                if is_experiment_gt:
+                    hint_text = "Wybrany model zostanie zapisany w metadanych pierwszego wyniku AUTO."
+                elif (not self._is_free_mode_session_context()) and bool(modal_plate_adopt_var.get()):
                     hint_text = (
                         "Po zatwierdzeniu ten plik stanie się modelem projektu (MT) i będzie głównym "
                         "modelem tablic dla kolejnych uruchomień Z2 w tej kampanii."
@@ -2484,7 +2512,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
             else:
                 quality_rows, quality_tone = self._build_auto_annotation_model_quality_rows(None)
                 plate_model_hint_lbl.configure(
-                    text="Najpierw wskaż wymagany model tablic (.pt). Bez tego autoanotacja nie wystartuje i przycisk „Uruchom autoanotację” pozostanie zablokowany.",
+                    text=f"Wskaż model tablic (.pt), aby odblokować przycisk „{start_label}”.",
                     fg=palette.get("warning", "#f39c12"),
                 )
                 render_plate_model_quality_table(quality_rows, quality_tone)
@@ -2533,7 +2561,7 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
 
         try:
             next_btn.configure(
-                text="Uruchom autoanotację",
+                text=start_label,
                 state=(tk.NORMAL if can_continue else tk.DISABLED),
             )
         except Exception:
