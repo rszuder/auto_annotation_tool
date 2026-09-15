@@ -48,6 +48,8 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.audit_choices = {}
         self.audit_cancel = False
         self.audit_reports = []
+        from auto_annotation_tool.gui.pz3_audit_resolution_dialog import ParticipantAuditMatrixDialog
+        self._real_audit_show = ParticipantAuditMatrixDialog.show
         self.enterContext(patch(GUI + "ParticipantAuditMatrixDialog.show",
                                 autospec=True, side_effect=self.resolve_dialog))
         self.panel = EvaluationTracksPanel(self.root, SimpleNamespace(app=None))
@@ -138,6 +140,49 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual("Audyt: nieaktualny", self.panel._layout.audit_var.get())
         self.errors.assert_not_called()
 
+    def test_current_audit_button_rechecks_and_shows_owned_result_dialog(self):
+        from auto_annotation_tool.gui.pz3_audit_resolution_dialog import ParticipantAuditMatrixDialog
+        self.root.geometry("1100x780+20+20")
+        self.root.deiconify()
+        self.root.update()
+        self.ingest([self.f.image("RECHECK_001.png", seed=1900)])
+        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "CURRENT")
+        before = len(self.f.repo.list_evaluation_track_audits(self.f.track))
+        self.messages.reset_mock()
+        self.root.grab_set()
+        failures = []
+        seen = []
+
+        def show_result(dialog):
+            def apply():
+                try:
+                    self.assertEqual(str(dialog.window.transient()), str(self.root))
+                    self.assertTrue(dialog.window.winfo_viewable())
+                    self.assertEqual(self.root.grab_current(), dialog.window)
+                    self.assertIn("Trwa ponowna kontrola", self.panel.status_var.get())
+                    seen.append(True)
+                    dialog.apply_button.invoke()
+                except BaseException as exc:
+                    failures.append(exc)
+                    dialog._cancel()
+            dialog.window.after(80, apply)
+            return self._real_audit_show(dialog)
+
+        with patch.object(ParticipantAuditMatrixDialog, "show", new=show_result), \
+             patch.object(self.panel.participant_audit, "audit_paths",
+                          wraps=self.panel.participant_audit.audit_paths) as audit:
+            self.panel.btn_audit_pool.invoke()
+        self.assertFalse(failures, failures)
+        self.assertEqual(seen, [True])
+        audit.assert_called_once()
+        self.assertEqual(self.root.grab_current(), self.root)
+        self.root.grab_release()
+        self.assertEqual(len(self.f.repo.list_evaluation_track_audits(self.f.track)), before + 1)
+        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "CURRENT")
+        self.assertIn("Pula jest aktualna", self.messages.showinfo.call_args.args[1])
+        self.assertIn("Audyt zakończony", self.panel.status_var.get())
+        self.errors.assert_not_called()
+
     def test_current_audit_rejects_problem_images_in_the_same_flow(self):
         paths = self.f.mixed()[:4]
         self.f.service.add_members_batch(self.f.track, paths)
@@ -178,6 +223,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(self.f.service.list_members(self.f.track), before)
         self.assertEqual(self.f.repo.get_evaluation_track_audit_state(self.f.track), state)
         self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])
+        self.assertIn("Audyt anulowany", self.panel.status_var.get())
 
     def test_cancel_suspect_decision_does_not_change_draft(self):
         before = self.f.repo.get_evaluation_track_audit_state(self.f.track)

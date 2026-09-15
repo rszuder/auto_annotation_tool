@@ -702,6 +702,7 @@ class BatchProgressDialog:
         self._previous_grab = parent.grab_current()
         self.window = tk.Toplevel(parent)
         self.window.title(title)
+        self.window.transient(parent.winfo_toplevel())
         self.window.geometry("560x180")
         self.window.resizable(True, False)
         self.window.protocol("WM_DELETE_WINDOW", lambda: None)
@@ -715,6 +716,7 @@ class BatchProgressDialog:
         self.bar.pack(fill=tk.X)
         ttk.Label(root, textvariable=self.count).pack(anchor="e", pady=(3, 0))
         self.window.update_idletasks()
+        self.window.lift()
         self.window.grab_set()
 
     def run(self, operation):

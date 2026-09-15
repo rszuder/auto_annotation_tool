@@ -850,6 +850,13 @@ class EvaluationTracksPanel:
             if not members:
                 messagebox.showinfo("Audyt puli", "Tor nie zawiera jeszcze obrazów.", parent=self.parent)
                 return
+            audit_state = self.participant_audit.get_track_audit_state(track_id)
+            self._set_status(
+                "Audyt jest aktualny. Trwa ponowna kontrola puli…"
+                if audit_state.get("status") == "CURRENT"
+                else "Trwa audyt puli względem wybranych modeli…"
+            )
+            self.parent.update_idletasks()
             expected_shas = {str(row["sha256"]).lower() for row in members}
             resolution = self._run_participant_pool_audit(
                 track_id, self._track_member_paths(track), mode="pool", track=track
@@ -858,6 +865,7 @@ class EvaluationTracksPanel:
             self._show_error("Audyt puli nie powiódł się", exc)
             return
         if resolution.cancelled:
+            self._set_status("Audyt anulowany. Wynik kontroli nie został zapisany.")
             return
 
         def apply(update):
@@ -890,7 +898,13 @@ class EvaluationTracksPanel:
             return
         progress.close()
         self.refresh_tracks(select_track_id=track_id)
+        outcome = (
+            "Audyt zakończony. Pula jest aktualna."
+            if state.get("status") == "CURRENT"
+            else "Audyt zakończony. Pula wymaga uzupełnienia."
+        )
         text = (
+            outcome + "\n\n"
             f"Pozostało w torze: {len(self.service.list_members(track_id))}\n"
             f"Usunięto z toru: {removed}\n"
             f"Ręcznie zaakceptowano: {len(resolution.accepted_suspects)}\n\n"

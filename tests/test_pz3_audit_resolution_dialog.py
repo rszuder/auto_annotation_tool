@@ -26,6 +26,8 @@ class AuditDecisionDialogTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
     def dialog(self, **options):
+        self.root.deiconify()
+        self.root.update()
         dialog = ParticipantAuditMatrixDialog(self.root, self.report, **options)
         dialog.window.update()
         return dialog
