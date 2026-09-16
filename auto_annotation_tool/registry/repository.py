@@ -1020,11 +1020,11 @@ class RegistryRepository:
         return snapshots
 
 
-    def commit_reviewed_evaluation_sample(
+    def commit_evaluation_sample_selection(
         self, track_id, *, keep_sha256, expected_member_sha256,
-        expected_audit_id, gt_relative_path, gt_sha256, prepare_files,
+        expected_audit_id, prepare_files,
     ):
-        """Commit exact membership, GT and audit invalidation as one transaction.
+        """Commit exact membership and audit invalidation without writing GT.
 
         prepare_files stages filesystem replacements; its caller restores them
         if this transaction (including commit) fails.
@@ -1061,13 +1061,12 @@ class RegistryRepository:
                 self.remove_evaluation_track_members(track_id, removed, _connection=connection)
             retained = [row for row in rows if row["sha256"] in keep]
             connection.execute(
-                """UPDATE evaluation_tracks SET gt_format='cvat_xml', gt_relative_path=?,
-                       gt_sha256=?, member_count=?, object_count=0, verified_at=NULL
+                """UPDATE evaluation_tracks SET member_count=?, object_count=0, verified_at=NULL
                    WHERE track_id=?""",
-                (gt_relative_path, gt_sha256, len(retained), track_id),
+                (len(retained), track_id),
             )
             state = json.loads(audit_row["state_json"])
-            state.update(status="STALE", reason="reviewed_sample_committed")
+            state.update(status="STALE", reason="sample_selection_committed")
             self._upsert_track_audit_state(connection, track_id, state)
             prepare_files(dict(track), retained, rows)
             connection.commit()

@@ -896,7 +896,8 @@ def _place_preview_image_status_overlay(self, *, force_render: bool = False) -> 
     if _preview_fullscreen_overlay_transition_blocked(self):
         self._hide_preview_image_status_overlay()
         return
-    if not bool(getattr(self, "_preview_fullscreen_active", False)):
+    from .pz3_sample_route import sample_context
+    if not bool(getattr(self, "_preview_fullscreen_active", False)) and not sample_context(self):
         self._hide_preview_image_status_overlay()
         return
     if getattr(canvas, "original_image", None) is None or self._get_preview_annotation() is None:
@@ -975,6 +976,10 @@ def _render_preview_campaign_gate_overlay(self, state: dict, *, force_render: bo
     return z2_render_preview_campaign_gate_overlay(self, state, force_render=force_render)
 
 def _place_preview_campaign_gate_overlay(self, *, force_render: bool = False) -> None:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        self._hide_preview_campaign_gate_overlay()
+        return
     frame = getattr(self, "preview_campaign_gate_frame", None)
     canvas_frame = getattr(self, "canvas_frame", None)
     canvas = getattr(self, "preview_canvas", None)
@@ -1134,6 +1139,11 @@ def _render_preview_overlay_dock(self, *, force_render: bool = False) -> tuple[i
     return z2_render_preview_overlay_dock(self, force_render=force_render)
 
 def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        suspend_drawer(self)
+        self._place_preview_image_status_overlay(force_render=force_render)
+        return
     dock = getattr(self, "preview_overlay_dock", None)
     canvas_frame = getattr(self, "canvas_frame", None)
     canvas = getattr(self, "preview_canvas", None)
@@ -1396,6 +1406,11 @@ def _render_preview_metrics_table(self, rows: list[tuple[str, str, str]], colors
     return z2_render_preview_metrics_table(body, rows, colors)
 
 def _update_preview_canvas_metrics_overlay(self, *, force_render: bool = False) -> None:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import _hide
+        _hide(self, "preview_metrics_frame")
+        return
     frame = getattr(self, "preview_metrics_frame", None)
     header = getattr(self, "preview_metrics_header", None)
     icon = getattr(self, "preview_metrics_icon_lbl", None)

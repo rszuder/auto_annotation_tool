@@ -346,9 +346,9 @@ class EvaluationTrackService:
         return member_index
 
 
-    def commit_reviewed_sample(self, track_id: str, **kwargs):
-        from .sample_selection import commit_reviewed_sample
-        return commit_reviewed_sample(self, track_id, **kwargs)
+    def commit_sample_selection(self, track_id: str, **kwargs):
+        from .sample_selection import commit_sample_selection
+        return commit_sample_selection(self, track_id, **kwargs)
 
     def remove_members(
         self,

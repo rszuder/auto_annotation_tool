@@ -251,6 +251,10 @@ def _preview_list_item_text(
     total_count: int | None = None,
     lightweight: bool = False,
 ) -> str:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import sample_list_text
+        return sample_list_text(self, ann, display_index)
     cached_state = self._get_preview_list_render_state(ann)
     status_text = (
         str(cached_state.get("status_text", "") or "")
@@ -304,6 +308,10 @@ def _build_preview_list_render_state_cache(
     self,
     entries: list[tuple[int, ImageAnnotation]] | None = None,
 ) -> None:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        self._preview_list_render_state_cache = {}
+        return
     source_entries = list(entries if entries is not None else enumerate(list(self.current_annotations or [])))
     if not source_entries:
         self._preview_list_render_state_cache = {}
@@ -1291,6 +1299,9 @@ def _merge_annotation_bundle_into_payload(
 
 
 def _preview_list_item_color(self, ann) -> str:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return self.app.palette.get("fg", "#eeeeee")
     return _preview_list_color_for_bucket(self, _preview_list_effective_color_bucket(self, ann))
 
 
@@ -1309,6 +1320,9 @@ def _preview_list_color_for_bucket(self, bucket: str) -> str:
 
 
 def _preview_list_effective_color_bucket(self, ann) -> str:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return "raw"
     cached_state = self._get_preview_list_render_state(ann)
     if isinstance(cached_state, dict):
         if bool(cached_state.get("reused")):
@@ -1323,6 +1337,9 @@ def _preview_list_effective_color_bucket(self, ann) -> str:
 
 
 def _preview_list_color_plan(self, entries: list[tuple[int, ImageAnnotation]]) -> tuple[str, str]:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return "raw", self.app.palette.get("fg", "#eeeeee")
     counts = {"approved": 0, "manual": 0, "auto": 0, "problem": 0, "reused": 0}
     for _actual_idx, ann in entries or []:
         bucket = _preview_list_effective_color_bucket(self, ann)
@@ -1450,6 +1467,10 @@ def _apply_preview_list_frozen_order(
 
 
 def _get_preview_list_entries(self) -> list[tuple[int, ImageAnnotation]]:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import sample_list_entries
+        return sample_list_entries(self)
     sort_mode = self._normalize_preview_list_sort_mode()
     base_entries = self._filter_preview_list_entries(
         self._build_preview_list_sorted_entries(sort_mode)
@@ -3009,8 +3030,10 @@ def _select_preview_index(self, idx: int, *, reset_view: bool = True):
         display_idx = self._get_preview_display_index(safe_idx)
         if display_idx is None:
             display_idx = max(0, min(safe_idx, max(0, self.preview_listbox.size() - 1)))
-        self._clear_listbox_selection_fast(self.preview_listbox)
-        self.preview_listbox.selection_set(display_idx)
+        from .pz3_sample_route import sample_context
+        if not sample_context(self) or len(self.preview_listbox.curselection()) <= 1:
+            self._clear_listbox_selection_fast(self.preview_listbox)
+            self.preview_listbox.selection_set(display_idx)
         self.preview_listbox.activate(display_idx)
         self.preview_listbox.see(display_idx)
     self.current_preview_index = safe_idx

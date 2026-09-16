@@ -157,6 +157,9 @@ def ensure_campaign_context_ready_for_active_project(self, *, force: bool = Fals
 
 
 def ensure_free_mode_session_preview_ready(self, *, force: bool = False) -> bool:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return True
     if not self._is_free_mode_session_context():
         return False
     if getattr(self, "is_processing", False):

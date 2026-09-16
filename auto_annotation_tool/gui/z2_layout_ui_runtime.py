@@ -236,6 +236,9 @@ def _should_show_free_mode_manual_right_panel(self) -> bool:
 
 
 def _should_show_right_panel(self) -> bool:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return False
     context = getattr(self, "_experiment_gt_context", None)
     if isinstance(context, dict) and context.get("source") == "pz3":
         return False

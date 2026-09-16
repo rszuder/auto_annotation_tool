@@ -263,7 +263,7 @@ class EvaluationTracksLayout:
                 ("btn_audit_pool", "Audytuj pulę", panel.audit_current_pool),
             )),
             ("2 · Próba i Ground Truth", (
-                ("btn_sample_selection", "Dobierz próbę i GT w Z2…", panel.select_experiment_sample_in_z2),
+                ("btn_sample_selection", "Wybierz próbę w Z2…", panel.select_experiment_sample_in_z2),
                 ("btn_prepare_z2", "Przygotuj GT w Z2", panel.prepare_ground_truth_in_z2),
                 ("btn_set_gt", "Wczytaj GT (XML)…", panel.set_ground_truth),
             )),
