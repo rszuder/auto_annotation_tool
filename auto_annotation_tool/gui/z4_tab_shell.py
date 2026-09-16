@@ -337,21 +337,21 @@ def get_free_mode_assistant_context(self) -> dict:
                 "uruchamia run i pozwala wyeksportować model mobilny z gotowego checkpointu."
             ),
             "current": (
-                "Model startowy rozpoczyna trening. Wynik bramki to model jawnie wskazany po treningu, rankingu albo analizie historii runów."
+                "Model startowy rozpoczyna trening. Analiza modeli w PZ2 służy pracy roboczej; formalne porównanie rozpoczynasz w PZ3 po SEAL."
             ),
             "workflow": (
                 "Wybierz wariant splitu z listy.",
                 "Wybierz model startowy zgodny z typem datasetu.",
                 "Ustaw parametry startowe: epoki, batch, rozdzielczość, learning rate i urządzenie.",
                 "Uruchom trening i obserwuj postęp oraz terminal procesu.",
-                "Po treningu sprawdź historię runów, wykonaj walidację lub porównaj wyniki w rankingu.",
+                "Po treningu sprawdź historię, wykonaj walidację lub otwórz Analizę modeli. Do porównania kontrolowanego przejdź do Torów testowych PZ3.",
                 "Eksport mobilny uruchamiaj z gotowego best.pt: pojedynczy model jest do diagnostyki, komplet MT+MZ do testu całego ALPR.",
                 "W prawym panelu eksportu formaty oznaczają warianty tego samego checkpointu, a data.yaml jest potrzebny tylko do kalibracji INT8.",
             ),
             "glossary": (
                 "epoka = pełne przejście po danych",
                 "val = walidacja jakości",
-                "ranking = porównanie modeli",
+                "Analiza modeli PZ2 = analiza robocza; Tory testowe PZ3 = eksperyment kontrolowany",
                 "model mobilny = jeden MP, MT albo MZ; pakiet ALPR = MT+MZ lub MP+MT+MZ",
                 "pakiet MT+MZ = komplet modelu tablic i modelu znaków do testu end-to-end",
                 "data.yaml = opis datasetu YOLO; w INT8 jest reprezentatywną próbką do kalibracji",
@@ -373,13 +373,13 @@ def get_free_mode_assistant_context(self) -> dict:
     return {
         "location": "[Z4] Trening i analiza",
         "goal": "Z4 prowadzi prostym przepływem: PZ1 przygotowuje wariant splitu, PZ2 trenuje model na wybranym wariancie.",
-        "current": "Ranking i eksport korzystają z gotowych checkpointów oraz metadanych runów.",
+        "current": "PZ2 udostępnia analizę roboczą i raporty. PZ3 definiuje eksperyment kontrolowany na zapieczętowanym GT.",
         "workflow": (
             "PZ1 buduje wariant treningowy zgodny z typem datasetu.",
             "PZ2 używa wybranego wariantu do treningu, walidacji i porównania modeli.",
             "Jeśli chcesz testować inny split, wróć do PZ1 i utwórz kolejny wariant.",
         ),
-        "glossary": ("PZ1 = wariant treningowy", "PZ2 = trening i wyniki", "ranking = porównanie modeli"),
+        "glossary": ("PZ1 = wariant treningowy", "PZ2 = trening i wyniki", "Analiza modeli PZ2 = analiza robocza; Tory testowe PZ3 = eksperyment kontrolowany"),
         "caution": "PZ2 trenuje na splicie wybranym z listy. Nowe splity przygotowuje PZ1.",
         "references": ("docs/mapa_funkcji_i_kodu.md",),
     }

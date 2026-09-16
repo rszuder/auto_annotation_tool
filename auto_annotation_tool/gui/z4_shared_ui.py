@@ -1841,16 +1841,16 @@ def refresh_step4_analysis_tab_visibility(host: "TrainingTab"):
     if ranking_enabled:
         if not getattr(host, "_step4_ranking_tab_visible", False):
             try:
-                host.right_nb.add(host.ranking_tab, text="Ranking", **notebook_tab_icon(host.right_nb, "ranking"))
+                host.right_nb.add(host.ranking_tab, text="Analiza modeli", **notebook_tab_icon(host.right_nb, "ranking"))
             except Exception:
                 try:
-                    host.right_nb.insert("end", host.ranking_tab, text="Ranking")
+                    host.right_nb.insert("end", host.ranking_tab, text="Analiza modeli")
                 except Exception:
                     pass
             host._step4_ranking_tab_visible = True
         else:
             try:
-                host.right_nb.tab(host.ranking_tab, text="Ranking", state="normal")
+                host.right_nb.tab(host.ranking_tab, text="Analiza modeli", state="normal")
             except Exception:
                 pass
         if host._is_ranking_tab_active():
