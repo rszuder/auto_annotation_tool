@@ -2730,7 +2730,7 @@ class AutoAnnotationApp:
             workflow=(
                 "Z2 przygotowuje i kontroluje tablice.",
                 "Z3 przygotowuje znaki oraz źródłowy dataset znaków.",
-                "Z4 tworzy warianty datasetu, trenuje, rankinguje i eksportuje modele.",
+                "Z4 przygotowuje warianty datasetu; PZ2 trenuje i analizuje roboczo, a PZ3 prowadzi eksperyment kontrolowany.",
                 "Z5 dokumentuje przepływy, architekturę i metodykę badań.",
             ),
             glossary=("Z2 = tablice", "Z3 = znaki", "Z4 = dataset, trening i eksport", "Z5 = instrukcja"),

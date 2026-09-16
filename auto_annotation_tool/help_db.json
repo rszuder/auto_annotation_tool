@@ -276,22 +276,22 @@
     "full_help": "Plik XML CVAT używany do budowy datasetu tablic w torze Pose."
   },
   "tr_rank_btn": {
-    "full_help": "Uruchamia albo anuluje nowe porównanie modeli z głównej karty rankingu. Ustawienia źródeł zmieniasz osobno w Zaawansowanych."
+    "full_help": "W trybie roboczym uruchamia analizę modeli. Formalne porównanie rozpoczynasz z PZ3 → SEALED → Porównaj modele. W tym kontekście źródło i uczestnicy są zamrożeni."
   },
   "tr_rank_cat": {
-    "full_help": "Informacja, jaki typ modeli porównuje ranking. Dla tablic używany jest run z poprawkami jako odniesienie, a dla znaków wspólny dataset YOLO Detect z plikiem data.yaml."
+    "full_help": "Typ modeli analizowanych w PZ2. Analiza robocza korzysta ze wskazanego źródła; formalny eksperyment korzysta z kontraktu przygotowanego w PZ3."
   },
   "tr_rank_conf": {
-    "full_help": "Zaawansowane ustawienia źródeł rankingu. Wskazujesz tu modele i materiał odniesienia, ale samo porównanie uruchamiasz z głównej karty."
+    "full_help": "Źródła analizy roboczej w PZ2. Opcje zaawansowane są zablokowane po wejściu z kontekstu kontrolowanego eksperymentu PZ3."
   },
   "tr_rank_models": {
-    "full_help": "Katalog modeli .pt używany wyłącznie do nowego porównania. Zapisane wyniki można czytać bez ponownego wskazywania katalogu."
+    "full_help": "Modele do analizy roboczej. Zakres pomaga przeglądać modele i historyczne wyniki. Uczestników eksperymentu kontrolowanego ustalasz w PZ3."
   },
   "tr_rank_reference": {
-    "full_help": "Materiał odniesienia dla nowego porównania: zapisany run z obrazami i annotations.xml. Każdy model jest oceniany na tym samym zestawie."
+    "full_help": "Źródło analizy roboczej: zapisane anotacje i obrazy lub dataset YOLO. Sam wybór źródła SEALED nie tworzy eksperymentu kontrolowanego."
   },
   "tr_rank_table": {
-    "full_help": "Tabela wyników i kandydatów. Zakres pozwala oglądać modele projektowe, globalne albo oba zestawy bez ponownego liczenia rankingu."
+    "full_help": "Tabela wyników, metryk i modeli. Analiza robocza w PZ2 nie stanowi formalnego eksperymentu. Wyniki PZ3 zachowują zapisany status dowodu i zamrożony kontekst."
   },
   "tr_route_char": {
     "full_help": "Tor znaków oznacza przygotowanie wariantu i trening modelu YOLO Detect dla pojedynczych znaków tablic. Źródłem powinien być dataset YOLO znaków z images/, labels/ i data.yaml, zwykle z Z3/PZ3."

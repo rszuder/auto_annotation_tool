@@ -266,7 +266,7 @@ class HelpTab:
             widget,
             "W praktyce: Z1 pokazuje mapę i bramki, Z2 kontroluje tablice na zdjęciach, "
             "Z3/PZ2 kontroluje znaki na cropach tablic, Z3/PZ3 buduje dataset znaków, "
-            "Z4 trenuje, rankinguje i eksportuje modele.",
+            "Z4 trenuje i analizuje modele w PZ2, prowadzi eksperymenty kontrolowane w PZ3 oraz eksportuje modele.",
         )
 
         self._section(widget, "Mapa zakładek")
@@ -276,7 +276,7 @@ class HelpTab:
                 "Z1 Kampania: graf, bramki, zasoby, praca bramki, ślad projektu i przejścia między iteracjami.",
                 "Z2 Tablice: kontrola ramek tablic na zdjęciach, import AT do kontroli, zatwierdzanie [OK] do puli projektu.",
                 "Z3 Znaki: PZ2 detekcja/ocr/manualne poprawki znaków, PZ3 eksport datasetu znaków.",
-                "Z4 Dataset i trening: PZ1 warianty datasetów, PZ2 trening, historia runów, ranking, porównania i eksport mobilny.",
+                "Z4: PZ1 przygotowuje warianty datasetów; PZ2 obejmuje trening, historię i analizę roboczą; PZ3 prowadzi eksperyment kontrolowany (SEAL → Porównaj modele). Wyniki i raporty oglądasz w Analizie modeli.",
                 "Z5 Instrukcje: ten przewodnik, mapa kodu i skrócona metodologia eksperymentów.",
             ],
         )
@@ -624,7 +624,7 @@ Workspace/
             widget,
             [
                 "Trening używa train/val i zapisuje metryki modelu.",
-                "Ranking porównuje kandydatów na wspólnym zbiorze rankingowym.",
+                "Formalne porównanie kandydatów rozpoczyna się przez PZ3 → SEALED → Porównaj modele. PZ2 Analiza modeli służy analizie roboczej oraz przeglądaniu wyników i raportów.",
                 "Eksport tworzy warianty mobilne tych samych checkpointów.",
                 "Aplikacja Android mierzy pakiet end-to-end na urządzeniu.",
                 "Finalny test potwierdza wynik dopiero po wyborze kandydatów.",

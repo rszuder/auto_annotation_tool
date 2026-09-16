@@ -26,6 +26,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
 from .notebook_icons import notebook_tab_icon
+from .z4_analysis_role import AnalysisRoleBanner, analysis_role, refresh_analysis_role
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -1406,6 +1407,9 @@ def _collect_current_ranking_report_context(self) -> dict:
     target_task = self._get_ranking_task_label(target)
     selected_scope = _get_ranking_scope(self)
     selected_reference = self._resolve_ranking_reference_source()
+    role = analysis_role(self, selected_reference)
+    from .pz3_comparison import validate_comparison_context
+    pz3_context = validate_comparison_context(self)
     selected_reference_path = str(selected_reference.get("reference_dir") or "").strip()
     selected_reference_raw = str(selected_reference.get("selected_path") or "").strip()
     selected_split = str(selected_reference.get("split_name") or "").strip()
@@ -1441,6 +1445,13 @@ def _collect_current_ranking_report_context(self) -> dict:
 
     get_unique_entries = getattr(self.ranking_engine, "get_unique_entries", None)
     ranking_entries = get_unique_entries() if callable(get_unique_entries) else getattr(self.ranking_engine, "entries", [])
+    if pz3_context:
+        ranking_entries = [
+            entry for entry in getattr(self.ranking_engine, "entries", ranking_entries)
+            if getattr(entry, "track_id", "") == pz3_context["track_id"]
+            and getattr(entry, "model_id", "") in pz3_context["model_ids"]
+            and getattr(entry, "experiment_mode", "") == "controlled"
+        ]
     entries = [
         entry for entry in ranking_entries
         if str(getattr(entry, "task_type", "") or "").strip() == target_task
@@ -1487,6 +1498,10 @@ def _collect_current_ranking_report_context(self) -> dict:
                 "evidence_label": ranking_evidence_label(getattr(entry, "evidence_status", "")),
                 "evidence_note": str(getattr(entry, "evidence_note", "") or ""),
                 "registry_experiment_status": str(getattr(entry, "registry_experiment_status", "") or ""),
+                **{key: str(getattr(entry, key, "") or "") for key in (
+                    "experiment_id", "experiment_mode", "model_id", "model_sha256",
+                    "track_id", "track_manifest_sha256", "protocol_sha256",
+                )},
                 "score": _ranking_report_percent(getattr(entry, "ranking_score", 0)),
                 "precision": precision,
                 "recall": recall,
@@ -1532,6 +1547,10 @@ def _collect_current_ranking_report_context(self) -> dict:
         "pending_count": pending_count,
         "rows": rows,
         "generated_at": datetime.datetime.now(),
+        "analysis_mode": role["mode"],
+        "report_title": role["report_title"],
+        "track_id": role["track_id"],
+        "participant_ids": role["participant_ids"],
     }
 
 
@@ -1684,29 +1703,36 @@ def _ranking_report_markdown(context: dict) -> str:
         if target == "char"
         else "ocena rankingowa oparta o zgodność detekcji z anotacją odniesienia"
     )
+    controlled = context.get("analysis_mode") == "controlled"
+    report_title = "Eksperyment kontrolowany PZ3" if controlled else "Analiza robocza"
+    source_label = "Tor eksperymentu" if controlled else "Źródło analizy roboczej"
     lines = [
-        "# Raport rankingu modeli",
+        f"# {report_title} — raport modeli",
+        "",
+        ("**CONTROLLED / SEALED** — porównanie uruchomione z zamrożonego kontekstu PZ3."
+         if controlled else
+         "**Analiza robocza** — wyniki eksploracyjne lub historyczne. Ten raport nie stanowi nowego kontrolowanego eksperymentu PZ3."),
         "",
         "## Kontekst testu",
         "",
         f"- Data raportu: {generated_text}",
         f"- Tryb modelu: {context.get('target_task') or '-'}",
-        f"- Zakres uczestników: {context.get('scope_label') or context.get('scope') or '-'}",
-        f"- Tor testowy: {context.get('reference_name') or '-'}",
-        f"- Ścieżka toru: `{context.get('reference_path') or reference_info.get('selected_path') or '-'}`",
+        f"- Zakres modeli: {context.get('scope_label') or context.get('scope') or '-'}",
+        f"- {source_label}: {context.get('reference_name') or '-'}",
+        f"- Ścieżka odniesienia: `{context.get('reference_path') or reference_info.get('selected_path') or '-'}`",
         f"- Split: {context.get('split') or '-'}",
         f"- Liczba obrazów w teście: {int(reference_info.get('image_count', 0) or 0)}",
-        f"- Liczba uczestników w zakresie: {int(context.get('participant_count', 0) or 0)}",
+        f"- Liczba modeli w zakresie: {int(context.get('participant_count', 0) or 0)}",
         f"- Liczba modeli z wynikiem: {len(rows)}",
         f"- Liczba modeli czekających na test: {int(context.get('pending_count', 0) or 0)}",
         "",
         "## Metoda wyłaniania zwycięzcy",
         "",
-        "Ranking porównuje modele wyłącznie w obrębie jednego trybu modelu, jednego zakresu uczestników i jednego toru testowego. Każdy kandydat dostaje ten sam zestaw danych odniesienia, dlatego wynik jest porównywalny tylko w tym konkretnym kontekście.",
+        "Porównanie dotyczy jednego typu modeli, wybranego zakresu i wspólnego materiału odniesienia. Wyniki należy interpretować w tym konkretnym kontekście.",
         "",
         f"Modele są sortowane malejąco według pola `Ocena`. W tym raporcie ocena oznacza: {method_score}. Metryki `Precyzja`, `Czułość`, `F1`, `mAP50` i `mAP50-95` są metrykami pomocniczymi, które pozwalają opisać, dlaczego dany model wygrał albo przegrał.",
         "",
-        "Zwycięzca rankingu jest rekomendacją eksperymentalną. Program nie ustawia modelu projektowego automatycznie, ponieważ ostateczny wybór powinien pozostać jawną decyzją użytkownika.",
+        "Najwyższa ocena dotyczy wybranego materiału i metody. Program nie ustawia modelu projektowego automatycznie; ostateczny wybór pozostaje jawną decyzją użytkownika.",
         "",
         "## Definicje metryk",
         "",
@@ -1717,6 +1743,22 @@ def _ranking_report_markdown(context: dict) -> str:
         "- Dla modeli tablic porównanie z zapisanym XML opiera się o dopasowanie ramek przez IoU; szczegółowe liczniki różnic są zapisane w CSV.",
         "",
     ]
+    if controlled:
+        lines.extend([
+            "## Kontrakt PZ3", "",
+            f"- Tor: {context.get('track_id') or '—'}",
+            "- Reference: SEALED",
+            "- Zamrożeni uczestnicy: " + ", ".join(context.get("participant_ids") or []),
+            "",
+        ])
+        for row in rows:
+            lines.extend([
+                f"- Model {row.get('model_id') or row.get('label')}: SHA-256 `{row.get('model_sha256') or '—'}`",
+                f"  Eksperyment: {row.get('experiment_id') or '—'}; "
+                f"manifest toru: `{row.get('track_manifest_sha256') or '—'}`; "
+                f"protokół: `{row.get('protocol_sha256') or '—'}`",
+            ])
+        lines.append("")
     if target == "plate":
         lines.extend(
             [
@@ -1745,7 +1787,7 @@ def _ranking_report_markdown(context: dict) -> str:
             ]
         )
     else:
-        lines.append("- Brak wyników dla wybranego toru i zakresu.")
+        lines.append("- Brak wyników dla wybranego źródła i zakresu.")
     lines.extend(
         [
             "",
@@ -1798,7 +1840,7 @@ def _ranking_report_markdown(context: dict) -> str:
             "",
             "## Ograniczenia interpretacji",
             "",
-            "Porównanie modeli trenowanych na różnych datasetach jest sensowne dopiero wtedy, gdy wszystkie modele zostaną sprawdzone na tym samym torze rankingowym. Zmiana toru, splitu albo zakresu uczestników tworzy nowy eksperyment i wymaga osobnego raportu.",
+            "Wyniki dotyczą wskazanego materiału odniesienia. Zmiana źródła, splitu lub zakresu modeli wymaga osobnej analizy i raportu. Formalny eksperyment rozpoczyna się wyłącznie w PZ3 po SEAL.",
             "Wpis oznaczony jako LEGACY, WORKING, REGISTERED LEGACY, NIEKOMPLETNY, OSIEROCONY albo NIEZGODNY może pozostać w rankingu historycznym, ale nie jest finalnym dowodem eksperymentu controlled. Taki status nie jest automatycznie podnoszony na podstawie podobieństwa ścieżek ani metryk.",
             "",
         ]
@@ -1823,7 +1865,7 @@ def _draw_ranking_score_canvas(canvas: tk.Canvas, rows: list[dict], palette: dic
     canvas.create_text(
         24,
         28,
-        text="Ranking modeli - ocena",
+        text="Porównanie modeli — ocena",
         fill=fg,
         font=("Segoe UI", 18, "bold"),
         anchor=tk.W,
@@ -1997,7 +2039,7 @@ def _open_ranking_report_viewer(self):
     if not rows:
         return messagebox.showinfo(
             "Przegląd raportu",
-            "Brak ocenionych modeli dla aktualnego toru i zakresu. Najpierw uruchom ranking albo zmień tor testowy.",
+            "Brak ocenionych modeli dla bieżącego źródła i zakresu. Uruchom analizę roboczą albo porównanie z kontekstu PZ3.",
         )
 
     existing = getattr(self, "_ranking_report_viewer_modal", None)
@@ -2010,7 +2052,7 @@ def _open_ranking_report_viewer(self):
     palette = getattr(self.app, "palette", {})
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._ranking_report_viewer_modal = dialog
-    dialog.title("Przegląd raportu rankingu")
+    dialog.title(f"Raport · {context['report_title']}")
     dialog.configure(bg=palette.get("panel", "#252526"))
     dialog.resizable(True, True)
     try:
@@ -2077,7 +2119,7 @@ def _open_ranking_report_viewer(self):
     winner = rows[0]
     ttk.Label(
         shell,
-        text="Przegląd raportu rankingu",
+        text=context["report_title"],
         style="Panel.TLabel",
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew")
@@ -2248,13 +2290,13 @@ def _export_ranking_analysis_report(self):
         context = _collect_current_ranking_report_context(self)
     except Exception as exc:
         logger.error(f"Nie udało się przygotować danych raportu rankingu: {exc}")
-        return messagebox.showerror("Raport rankingu", f"Nie udało się przygotować danych raportu:\n{exc}")
+        return messagebox.showerror("Raport analizy modeli", f"Nie udało się przygotować danych raportu:\n{exc}")
 
     rows = list(context.get("rows") or [])
     if not rows:
         return messagebox.showinfo(
-            "Raport rankingu",
-            "Brak ocenionych modeli dla aktualnego toru i zakresu. Najpierw uruchom ranking albo zmień tor testowy.",
+            "Raport analizy modeli",
+            "Brak ocenionych modeli dla bieżącego źródła i zakresu. Uruchom analizę roboczą albo porównanie z kontekstu PZ3.",
         )
 
     try:
@@ -2347,16 +2389,16 @@ def _export_ranking_analysis_report(self):
                 )
 
         (report_dir / "ranking_score.svg").write_text(
-            _ranking_report_bar_svg(rows, title="Ranking modeli - ocena"),
+            _ranking_report_bar_svg(rows, title=f"{context['report_title']} — ocena"),
             encoding="utf-8",
         )
         (report_dir / "ranking_metrics.svg").write_text(
-            _ranking_report_metrics_svg(rows, title="Ranking modeli - metryki pomocnicze"),
+            _ranking_report_metrics_svg(rows, title=f"{context['report_title']} — metryki pomocnicze"),
             encoding="utf-8",
         )
         if str(context.get("target") or "") == "plate":
             (report_dir / "ranking_plate_diffs.svg").write_text(
-                _ranking_report_plate_diffs_svg(rows, title="Ranking modeli tablic - zgodność detekcji"),
+                _ranking_report_plate_diffs_svg(rows, title=f"{context['report_title']} — zgodność detekcji"),
                 encoding="utf-8",
             )
         (report_dir / "ranking_report.md").write_text(
@@ -2365,8 +2407,8 @@ def _export_ranking_analysis_report(self):
         )
         logger.info(f"Zapisano raport rankingu modeli: {report_dir}")
         if messagebox.askyesno(
-            "Raport rankingu",
-            f"Zapisano raport rankingu:\n{report_dir}\n\nOtworzyć folder raportu?",
+            "Raport analizy modeli",
+            f"Zapisano raport: {context['report_title']}\n{report_dir}\n\nOtworzyć folder raportu?",
         ):
             try:
                 self._open_path(report_dir)
@@ -2374,7 +2416,7 @@ def _export_ranking_analysis_report(self):
                 pass
     except Exception as exc:
         logger.error(f"Nie udało się zapisać raportu rankingu: {exc}")
-        return messagebox.showerror("Raport rankingu", f"Nie udało się zapisać raportu:\n{exc}")
+        return messagebox.showerror("Raport analizy modeli", f"Nie udało się zapisać raportu:\n{exc}")
 
 
 def _count_ranking_dataset_splits(yaml_path: Path) -> dict[str, int]:
@@ -2634,7 +2676,7 @@ def _open_ranking_track_modal(self):
     palette = getattr(self.app, "palette", {})
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._ranking_track_modal = dialog
-    dialog.title("Wybór toru testowego rankingu")
+    dialog.title("Źródło analizy roboczej")
     dialog.configure(bg=palette.get("panel", "#252526"))
     dialog.resizable(True, True)
     try:
@@ -2661,15 +2703,15 @@ def _open_ranking_track_modal(self):
 
     ttk.Label(
         shell,
-        text="Tor testowy rankingu",
+        text="Źródło analizy roboczej",
         style="Panel.TLabel",
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew")
     ttk.Label(
         shell,
         text=(
-            "Wybierz jeden wspólny materiał testowy. Wszystkie modele pobiegną po tym samym torze, "
-            "więc wynik będzie porównywalny."
+            "Wybierz materiał odniesienia do analizy roboczej. Sam wybór źródła SEALED "
+            "nie uruchamia eksperymentu kontrolowanego — ten rozpoczynasz w PZ3."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -2681,12 +2723,12 @@ def _open_ranking_track_modal(self):
     toolbar.grid(row=2, column=0, sticky="ew", pady=(0, 8))
     ttk.Label(
         toolbar,
-        text=f"Konie: {self._get_ranking_task_label()}",
+        text=f"Modele: {self._get_ranking_task_label()}",
         style="PanelMuted.TLabel",
     ).pack(side=tk.LEFT, padx=(0, 12))
     split_combo = None
     if self._get_ranking_task_target() == "char":
-        ttk.Label(toolbar, text="Split toru:", style="PanelMuted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(toolbar, text="Split źródła:", style="PanelMuted.TLabel").pack(side=tk.LEFT, padx=(0, 6))
         split_combo = ttk.Combobox(
             toolbar,
             textvariable=self.rank_split_var,
@@ -2798,7 +2840,7 @@ def _open_ranking_track_modal(self):
         row = rows_by_id.get(selected[0]) or {}
         if not row.get("ready"):
             return messagebox.showwarning(
-                "Tor nie jest gotowy",
+                "Źródło nie jest gotowe",
                 "Ten tor nie ma materiału dla wybranego splitu. Wybierz inny tor albo zmień split.",
             )
         path = str(row.get("path") or "").strip()
@@ -2880,7 +2922,7 @@ def _open_ranking_participants_modal(self):
 
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._ranking_participants_modal = dialog
-    dialog.title("Uczestnicy rankingu modeli")
+    dialog.title("Modele do analizy")
     dialog.configure(bg=palette.get("panel", "#252526"))
     dialog.resizable(True, True)
     try:
@@ -2907,15 +2949,15 @@ def _open_ranking_participants_modal(self):
 
     ttk.Label(
         shell,
-        text="Konie rankingu",
+        text="Modele do analizy",
         style="Panel.TLabel",
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew")
     intro = ttk.Label(
         shell,
         text=(
-            "Tu widać dokładnie, które modele wystartują w wyścigu. Zakres zmienia listę uczestników "
-            "i tę samą listę dostaje potem ranking."
+            "Wybierz modele do analizy roboczej. Zakres służy eksploracji modeli i wyników. "
+            "Uczestników formalnego eksperymentu ustalasz w PZ3."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -3052,7 +3094,7 @@ def _open_ranking_participants_modal(self):
             pass
 
     headings = {
-        "participant": "Uczestnik",
+        "participant": "Model",
         "family": "Rodzina",
         "variant": "Rozmiar",
         "size": "MB",
@@ -3102,7 +3144,7 @@ def _open_ranking_participants_modal(self):
 
     status_lbl = ttk.Label(
         shell,
-        text="Ładuję uczestników...",
+        text="Ładuję modele do analizy...",
         style="PanelMuted.TLabel",
         anchor=tk.W,
     )
@@ -3495,21 +3537,12 @@ def _build_ranking_panel_v2(self, parent):
     shell = ttk.Frame(parent, padding=10, style="Panel.TFrame")
     shell.pack(fill=tk.BOTH, expand=True)
 
-    ranking_intro_lbl = ttk.Label(
-        shell,
-        text=(
-            "Ranking działa jak wyścig: konie to modele, tor to jeden wspólny dataset testowy, "
-            "a wynik powstaje dopiero po sprawdzeniu wszystkich modeli na tym samym materiale."
-        ),
-        style="PanelMuted.TLabel",
-        anchor=tk.W,
-        justify=tk.LEFT,
-        wraplength=760,
-    )
-    ranking_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+    self._analysis_role_banner = AnalysisRoleBanner(self, shell)
+    self._analysis_role_banner.frame.pack(fill=tk.X, pady=(0, 6))
 
-    config_box = ttk.LabelFrame(shell, text=" Ranking modeli ", padding=10)
-    config_box.pack(fill=tk.X, pady=(0, 10))
+    config_box = ttk.LabelFrame(shell, text=" Źródło i modele ", padding=10)
+    config_box.pack(fill=tk.X, pady=(0, 4))
+    self._analysis_config_box = config_box
 
     self.rank_models_dir = tk.StringVar(value=str(self._get_ranking_models_default_dir()))
     self.rank_data_dir = tk.StringVar()
@@ -3529,17 +3562,17 @@ def _build_ranking_panel_v2(self, parent):
     rank_config_hint_lbl = ttk.Label(
         config_box,
         text=(
-            "Najpierw wybierz tor testowy, potem uruchom wyścig. Ranking niczego nie zatwierdza automatycznie."
+            "Źródło i modele opisują bieżącą analizę. Wynik nie zmienia automatycznie modelu projektowego."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
         justify=tk.LEFT,
         wraplength=760,
     )
-    rank_config_hint_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
+    # The role banner already explains how these settings are used.
 
     target_text = (
-        f"Konie: {self._get_ranking_task_label()} | czekam na wybór toru testowego."
+        f"Modele: {self._get_ranking_task_label()} | wybierz źródło analizy roboczej."
     )
     self.rank_target_lbl = ttk.Label(
         config_box,
@@ -3552,7 +3585,7 @@ def _build_ranking_panel_v2(self, parent):
 
     self.rank_track_lbl = ttk.Label(
         config_box,
-        text="Tor testowy: nie wybrano",
+        text="Źródło analizy roboczej: nie wybrano",
         style="PanelMuted.TLabel",
         anchor=tk.W,
         justify=tk.LEFT,
@@ -3561,7 +3594,7 @@ def _build_ranking_panel_v2(self, parent):
     self.rank_track_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 8))
 
     dynamic_row = ttk.Frame(config_box, style="Panel.TFrame")
-    dynamic_row.pack(fill=tk.X, pady=(0, 8))
+    # Counts are already shown in the model and source summaries.
 
     def _dynamic_value(parent, title: str, value: str, color: str):
         ttk.Label(parent, text=title, style="PanelMuted.TLabel").pack(side=tk.LEFT, padx=(0, 4))
@@ -3580,13 +3613,13 @@ def _build_ranking_panel_v2(self, parent):
 
     self.rank_count_value_lbl = _dynamic_value(
         dynamic_row,
-        "Konie:",
+        "Modele:",
         "0",
         palette.get("success", "#2ecc71"),
     )
     self.rank_track_count_value_lbl = _dynamic_value(
         dynamic_row,
-        "Tor:",
+        "Źródło:",
         "brak",
         palette.get("warning", "#f0b44c"),
     )
@@ -3597,11 +3630,11 @@ def _build_ranking_panel_v2(self, parent):
 
     self.btn_run_rank = ttk.Button(
         rank_primary,
-        text="[ TOR ] Wybierz tor testowy",
+        text="Wybierz źródło analizy roboczej",
         style="Accent.TButton",
         command=self._run_ranking_v2,
     )
-    self.btn_run_rank.grid(row=0, column=0, sticky="ew", ipady=8)
+    self.btn_run_rank.grid(row=0, column=0, sticky="ew", ipady=4)
 
     rank_secondary = ttk.Frame(config_box, style="Panel.TFrame")
     rank_secondary.pack(fill=tk.X, pady=(0, 10))
@@ -3617,29 +3650,29 @@ def _build_ranking_panel_v2(self, parent):
     )
     self.btn_open_rank_participants = ttk.Button(
         rank_secondary,
-        text="[ KONIE ] Uczestnicy",
+        text=analysis_role(self)["models_label"],
         command=self._open_ranking_participants_modal,
     )
-    self.btn_open_rank_participants.grid(row=0, column=0, sticky="ew", padx=(0, 5), ipady=3)
+    self.btn_open_rank_participants.grid(row=0, column=0, sticky="ew", padx=(0, 5), ipady=1)
     self.btn_open_rank_track = ttk.Button(
         rank_secondary,
-        text="[ TOR ] Zmień tor testowy",
+        text="Źródło analizy roboczej",
         command=self._open_ranking_track_modal,
     )
-    self.btn_open_rank_track.grid(row=0, column=1, sticky="ew", padx=(5, 5), ipady=3)
+    self.btn_open_rank_track.grid(row=0, column=1, sticky="ew", padx=(5, 5), ipady=1)
     self.btn_open_rank_results = ttk.Button(
         rank_secondary,
         text="[ WYNIKI ] Pokaż wyniki",
         command=lambda: _open_ranking_results_modal(self),
     )
-    self.btn_open_rank_results.grid(row=0, column=2, sticky="ew", padx=(5, 5), ipady=3)
+    self.btn_open_rank_results.grid(row=0, column=2, sticky="ew", padx=(5, 5), ipady=1)
     self.btn_open_rank_advanced = ttk.Button(
         rank_secondary,
         text="[ OPCJE ] Zaawansowane",
         command=self._open_ranking_advanced_modal,
     )
-    self.btn_open_rank_advanced.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 5), pady=(6, 0), ipady=3)
-    self.btn_cancel_rank.grid(row=1, column=2, sticky="ew", padx=(5, 0), pady=(6, 0), ipady=3)
+    self.btn_open_rank_advanced.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(0, 5), pady=(6, 0), ipady=1)
+    self.btn_cancel_rank.grid(row=1, column=2, sticky="ew", padx=(5, 0), pady=(6, 0), ipady=1)
 
     self.rank_progress = TrainProgressBar(
         config_box,
@@ -3765,7 +3798,6 @@ def _build_ranking_panel_v2(self, parent):
         except Exception:
             config_width = shell_width
         for widget, width in (
-            (ranking_intro_lbl, shell_width),
             (rank_config_hint_lbl, config_width),
             (getattr(self, "rank_target_lbl", None), config_width),
             (getattr(self, "rank_track_lbl", None), config_width),
@@ -3813,7 +3845,7 @@ def _build_ranking_panel_v2(self, parent):
     self.rank_leader_title.pack(fill=tk.X)
     self.rank_leader_hint = tk.Label(
         self.rank_leader_card,
-        text="Ranking podpowiada kandydata. Model projektowy wybieramy jawnie.",
+        text="Wyniki wspierają analizę. Model projektowy wybieramy jawnie.",
         bg=leader_bg,
         fg=palette.get("muted", "#c7c7c7"),
         font=("Segoe UI", 8),
@@ -3833,7 +3865,7 @@ def _build_ranking_panel_v2(self, parent):
     self.rank_tree = ttk.Treeview(table_frame, columns=cols, show="headings")
     for c in cols:
         self.rank_tree.heading(c, text=c)
-    self.rank_tree.heading("Data", text="Data rankingu")
+    self.rank_tree.heading("Data", text="Data analizy")
     self.rank_tree.column("Pozycja", width=84, anchor=tk.CENTER, stretch=False)
     self.rank_tree.column("Model", width=420, minwidth=280, anchor=tk.W, stretch=True)
     self.rank_tree.column("Zakres", width=76, minwidth=64, anchor=tk.CENTER, stretch=False)
@@ -3913,7 +3945,7 @@ def _open_ranking_results_modal(self):
     palette = getattr(self.app, "palette", {})
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._ranking_results_modal = dialog
-    dialog.title(f"Porównanie · {pz3_context['name']}" if pz3_context else "Porównanie modeli - uczestnicy i wyniki")
+    dialog.title(f"Porównanie · {pz3_context['name']}" if pz3_context else "Analiza robocza modeli — wyniki")
     dialog.configure(bg=palette.get("panel", "#252526"))
     dialog.resizable(True, True)
     try:
@@ -3962,26 +3994,12 @@ def _open_ranking_results_modal(self):
     header = ttk.Frame(shell, style="Panel.TFrame")
     header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
     header.columnconfigure(0, weight=1)
-    ttk.Label(
-        header,
-        text="Porównanie eksperymentalne PZ3" if pz3_context else "Porównanie modeli",
-        style="Panel.TLabel",
-        anchor=tk.W,
-    ).grid(row=0, column=0, sticky="ew")
+    role_banner = AnalysisRoleBanner(self, header)
+    role_banner.frame.grid(row=0, column=0, sticky="ew")
+    role_banner.refresh(self._resolve_ranking_reference_source())
     if pz3_context:
-        ttk.Button(
-            header, text="Wróć do zwykłego rankingu",
-            command=return_to_regular_ranking,
-        ).grid(row=0, column=1, rowspan=2, padx=(12, 0), sticky="e")
-    ttk.Label(
-        header,
-        text=(
-            "Tabela pokazuje uczestników wyścigu także przed testem. Modele bez wyniku mają status `czeka na test`."
-        ),
-        style="PanelMuted.TLabel",
-        anchor=tk.W,
-        justify=tk.LEFT,
-    ).grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        ttk.Button(header, text="Wróć do analizy roboczej", command=return_to_regular_ranking).grid(
+            row=0, column=1, sticky="ne", padx=(12, 0))
 
     scope_row = ttk.Frame(shell, style="Panel.TFrame")
     scope_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
@@ -3990,7 +4008,7 @@ def _open_ranking_results_modal(self):
         text=(
             f"Tor i {len(pz3_context['model_ids'])} uczestników pochodzą z pieczęci eksperymentu."
             if pz3_context else
-            f"Zakres i startujące modele ustawisz w modalu uczestników. Aktywnie: {_format_ranking_scope_label(self)}."
+            f"Modele do analizy i zakres wybierzesz w osobnym oknie. Aktywnie: {_format_ranking_scope_label(self)}."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -3998,7 +4016,7 @@ def _open_ranking_results_modal(self):
     ).pack(side=tk.LEFT, fill=tk.X, expand=True)
     ttk.Button(
         scope_row,
-        text="[ KONIE ] Uczestnicy",
+        text=analysis_role(self)["models_label"],
         command=self._open_ranking_participants_modal,
     ).pack(side=tk.RIGHT, padx=(8, 0))
     if not pz3_context:
@@ -4040,7 +4058,7 @@ def _open_ranking_results_modal(self):
     self.rank_leader_title.pack(fill=tk.X)
     self.rank_leader_hint = tk.Label(
         leader_card,
-        text="Ranking podpowiada kandydata. Model projektowy wybieramy jawnie.",
+        text="Wyniki wspierają analizę. Model projektowy wybieramy jawnie.",
         bg=leader_bg,
         fg=palette.get("muted", "#c7c7c7"),
         font=("Segoe UI", 8),
@@ -4060,7 +4078,7 @@ def _open_ranking_results_modal(self):
     self.rank_tree = ttk.Treeview(table_frame, columns=cols, show="headings")
     for col in cols:
         self.rank_tree.heading(col, text=col)
-    self.rank_tree.heading("Data", text="Data rankingu")
+    self.rank_tree.heading("Data", text="Data analizy")
     self.rank_tree.column("Pozycja", width=92, anchor=tk.CENTER, stretch=False)
     self.rank_tree.column("Model", width=520, minwidth=340, anchor=tk.W, stretch=True)
     self.rank_tree.column("Zakres", width=78, minwidth=64, anchor=tk.CENTER, stretch=False)
@@ -4111,7 +4129,7 @@ def _open_ranking_results_modal(self):
     ).pack(side=tk.LEFT, fill=tk.X, expand=True)
     ttk.Button(bottom, text="Zamknij", command=close_dialog).pack(side=tk.RIGHT)
     ttk.Button(
-        bottom, text="Uruchom porównanie", command=self._run_ranking_v2,
+        bottom, text=analysis_role(self)["start_label"], command=self._run_ranking_v2,
         style="Accent.TButton",
     ).pack(side=tk.RIGHT, padx=(0, 8))
     ttk.Button(
@@ -4121,7 +4139,7 @@ def _open_ranking_results_modal(self):
     ).pack(side=tk.RIGHT, padx=(0, 8))
     ttk.Button(
         bottom,
-        text="[ RAPORT ] Udokumentuj ranking",
+        text="Eksportuj raport",
         command=self._export_ranking_analysis_report,
     ).pack(side=tk.RIGHT, padx=(0, 8))
 
@@ -4157,7 +4175,7 @@ def _open_ranking_advanced_modal(self):
         messagebox.showinfo(
             "Porównanie eksperymentalne",
             "Tor pochodzi z pieczęci eksperymentu i nie może być zmieniony. "
-            "Aby wybrać inny materiał, wróć do zwykłego rankingu.",
+            "Aby wybrać materiał do analizy roboczej, zakończ ten kontekst PZ3.",
             parent=self.frame,
         )
         return True
@@ -4176,7 +4194,7 @@ def _open_ranking_advanced_modal(self):
     palette = getattr(self.app, "palette", {})
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._rank_advanced_modal = dialog
-    dialog.title("Zaawansowane źródła rankingu")
+    dialog.title("Zaawansowane źródła analizy roboczej")
     dialog.configure(bg=palette.get("panel", "#252526"))
     try:
         dialog.transient(self.frame.winfo_toplevel())
@@ -4205,14 +4223,14 @@ def _open_ranking_advanced_modal(self):
 
     ttk.Label(
         shell,
-        text="Ręczny wybór toru testowego",
+        text="Źródło analizy roboczej",
         style="Panel.TLabel",
         anchor=tk.W,
     ).pack(anchor=tk.W, fill=tk.X, pady=(0, 6))
     ttk.Label(
         shell,
         text=(
-            f"Ręcznie wskaż tor testowy dla trybu: {self._get_ranking_task_label()}. "
+            f"Ręcznie wskaż źródło analizy roboczej dla trybu: {self._get_ranking_task_label()}. "
             "Zmiany są robocze, dopóki nie użyjesz przycisku zastosowania na dole okna."
         ),
         style="PanelMuted.TLabel",
@@ -4221,13 +4239,13 @@ def _open_ranking_advanced_modal(self):
         wraplength=520,
     ).pack(anchor=tk.W, fill=tk.X, pady=(0, 12))
 
-    form = ttk.LabelFrame(shell, text=" Ręczny wybór toru ", padding=10)
+    form = ttk.LabelFrame(shell, text=" Ręczny wybór źródła ", padding=10)
     form.pack(fill=tk.X, pady=(0, 10))
 
     reference_label = (
-        "Tor testowy znaków (data.yaml):"
+        "Źródło analizy znaków (data.yaml):"
         if self._get_ranking_task_target() == "char"
-        else "Tor testowy tablic (run z annotations.xml):"
+        else "Źródło analizy tablic (run z annotations.xml):"
     )
     ttk.Label(form, text=reference_label, style="Panel.TLabel").pack(anchor=tk.W)
     row2 = ttk.Frame(form, style="Panel.TFrame")
@@ -4237,7 +4255,7 @@ def _open_ranking_advanced_modal(self):
         def choose_data_yaml():
             initial = self._get_ranking_reference_picker_dir()
             dialog_kwargs = {
-                "title": "Wskaż data.yaml toru testowego",
+                "title": "Wskaż data.yaml źródła analizy",
                 "filetypes": (("YOLO data.yaml", "data.yaml"), ("YAML", "*.yaml *.yml"), ("Wszystkie pliki", "*.*")),
                 "parent": dialog,
             }
@@ -4265,9 +4283,9 @@ def _open_ranking_advanced_modal(self):
     self.rank_reference_hint_lbl = ttk.Label(
         form,
         text=(
-            "Tor znaków to dataset z data.yaml. Po wskazaniu ścieżki zatwierdź ją przyciskiem na dole."
+            "Źródło analizy znaków to dataset z data.yaml. Po wskazaniu ścieżki zatwierdź ją przyciskiem na dole."
             if self._get_ranking_task_target() == "char"
-            else "Tor tablic to zapisany run z obrazami i annotations.xml. Po wskazaniu ścieżki zatwierdź ją przyciskiem na dole."
+            else "Źródło analizy tablic to zapisany run z obrazami i annotations.xml. Po wskazaniu ścieżki zatwierdź ją przyciskiem na dole."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -4279,7 +4297,7 @@ def _open_ranking_advanced_modal(self):
     if self._get_ranking_task_target() == "char":
         split_row = ttk.Frame(form, style="Panel.TFrame")
         split_row.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(split_row, text="Split toru:", style="PanelMuted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(split_row, text="Split źródła:", style="PanelMuted.TLabel").pack(side=tk.LEFT, padx=(0, 8))
         ttk.Combobox(
             split_row,
             textvariable=draft_split_var,
@@ -4334,7 +4352,7 @@ def _open_ranking_advanced_modal(self):
                     self.rank_advanced_status.configure(text=message)
                 except Exception:
                     pass
-                return messagebox.showwarning("Tor nie jest gotowy", message)
+                return messagebox.showwarning("Źródło nie jest gotowe", message)
             try:
                 self._refresh_ranking_reference_ui()
                 self._refresh_ranking_start_state()
@@ -4362,7 +4380,7 @@ def _open_ranking_advanced_modal(self):
     ttk.Button(bottom, text="Zamknij", command=close_dialog).pack(side=tk.RIGHT)
     ttk.Button(
         bottom,
-        text="[ TOR ] Zastosuj wybrany tor",
+        text="Zastosuj źródło analizy",
         style="Accent.TButton",
         command=apply_manual_sources,
     ).pack(side=tk.RIGHT, padx=(0, 8))
@@ -4411,11 +4429,11 @@ def _run_ranking_v2(self):
     reference_info = self._resolve_ranking_reference_source(reference_raw)
     if not reference_info.get("ok"):
         return messagebox.showerror(
-            "[ TOR ] Wybierz tor testowy",
-            str(reference_info.get("message") or "Wybierz gotowy tor testowy przed uruchomieniem rankingu."),
+            analysis_role(self)["source_label"],
+            str(reference_info.get("message") or "Wybierz gotowe źródło przed uruchomieniem analizy."),
         )
 
-    if not self._begin_step4_operation("z4.ranking.run", "Z4: ranking modeli"):
+    if not self._begin_step4_operation("z4.ranking.run", "Z4: analiza modeli"):
         return
     self.rank_is_running = True
     self.rank_cancel_requested = False
@@ -4428,15 +4446,15 @@ def _run_ranking_v2(self):
     except Exception:
         pass
     self._set_ranking_ui_state(
-        status="Przygotowuję ranking...",
+        status="Przygotowuję analizę modeli...",
         status_color="gray",
         button_text="[ START ] Przygotowanie...",
         cancel_enabled=True,
         preparing=True,
         progress_value=0,
     )
-    self._append_ranking_log(f"Start przygotowania rankingu: {target_task}.")
-    self._append_ranking_log(f"Zakres koni: {_format_ranking_scope_label(self, selected_scope, target)}.")
+    self._append_ranking_log(f"{analysis_role(self)['title']}: {target_task}.")
+    self._append_ranking_log(f"Zakres modeli: {_format_ranking_scope_label(self, selected_scope, target)}.")
     self._append_ranking_log(
         f"Dodatkowy katalog modeli: {models_dir if models_dir is not None else '[brak]'}"
     )
@@ -4500,18 +4518,18 @@ def _run_ranking_v2(self):
                 return
 
             if all_models_to_test and not models_to_test:
-                self._append_ranking_log("Nie zaznaczono żadnego uczestnika rankingu.")
+                self._append_ranking_log("Nie zaznaczono modeli do analizy.")
                 self._ui(
                     lambda: messagebox.showinfo(
                         "Info",
-                        "Nie zaznaczono żadnego modelu do rankingu. Otwórz Uczestników rankingu modeli i zostaw co najmniej jeden model ze statusem Startuje.",
+                        "Nie wybrano modeli. Otwórz „Modele do analizy” i zaznacz co najmniej jeden model.",
                     )
                 )
                 return
 
             if not models_to_test:
                 self._append_ranking_log(
-                    f"Nie znaleziono uczestników dla trybu {target_task} i zakresu {_format_ranking_scope_label(self, selected_scope, target)}."
+                    f"Nie znaleziono modeli dla trybu {target_task} i zakresu {_format_ranking_scope_label(self, selected_scope, target)}."
                 )
                 self._ui(
                     lambda: messagebox.showinfo(
@@ -4540,62 +4558,63 @@ def _run_ranking_v2(self):
                     CONFIG.get_ranking_dir(target),
                 ),
             )
-            try:
-                ranking_experiment = ranking_experiment_bridge.prepare(
-                    name=(
-                        f"Ranking {target_task} "
-                        f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                    ),
-                    target=target,
-                    reference_path=(
-                        reference_raw
-                        or str(reference_info.get("reference_dir") or "")
-                    ),
-                    model_paths=models_to_test,
-                    protocol_options={
-                        "ranking_scope": selected_scope,
-                        "ranking_task": target_task,
-                        "reference_name": str(
-                            reference_info.get("reference_name") or ""
+            if pz3_context:
+                try:
+                    ranking_experiment = ranking_experiment_bridge.prepare(
+                        name=(
+                            f"Ranking {target_task} "
+                            f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                         ),
-                        "reference_path": str(
-                            reference_info.get("reference_dir") or ""
+                        target=target,
+                        reference_path=(
+                            reference_raw
+                            or str(reference_info.get("reference_dir") or "")
                         ),
-                        "split_name": str(
-                            reference_info.get("split_name") or ""
-                        ),
-                        "device_choice": selected_device_display,
-                        "effective_device": effective_device_desc,
-                        "ultralytics_device": str(device),
-                        "confidence": (
-                            float(CONFIG.DEFAULT_CONFIDENCE)
-                            if target == "plate"
-                            else None
-                        ),
-                        "metrics_source": (
-                            "YOLO val"
-                            if target == "char"
-                            else "CVAT comparator"
-                        ),
-                    },
-                )
-                if pz3_context and (
-                    ranking_experiment is None or ranking_experiment.track_id != pz3_context["track_id"]
-                ):
-                    raise RuntimeError("Naruszony kontekst eksperymentu: nie utworzono porównania dla zapieczętowanego toru.")
-            except Exception as experiment_error:
-                self._append_ranking_log(
-                    "Kontrolowany ranking zablokowany: "
-                    f"{experiment_error}"
-                )
-                self._ui(
-                    lambda err=str(experiment_error): messagebox.showerror(
-                        "Kontrolowany ranking",
-                        "Nie można uruchomić kontrolowanego rankingu.\n\n"
-                        + err,
+                        model_paths=models_to_test,
+                        protocol_options={
+                            "ranking_scope": selected_scope,
+                            "ranking_task": target_task,
+                            "reference_name": str(
+                                reference_info.get("reference_name") or ""
+                            ),
+                            "reference_path": str(
+                                reference_info.get("reference_dir") or ""
+                            ),
+                            "split_name": str(
+                                reference_info.get("split_name") or ""
+                            ),
+                            "device_choice": selected_device_display,
+                            "effective_device": effective_device_desc,
+                            "ultralytics_device": str(device),
+                            "confidence": (
+                                float(CONFIG.DEFAULT_CONFIDENCE)
+                                if target == "plate"
+                                else None
+                            ),
+                            "metrics_source": (
+                                "YOLO val"
+                                if target == "char"
+                                else "CVAT comparator"
+                            ),
+                        },
                     )
-                )
-                return
+                    if pz3_context and (
+                        ranking_experiment is None or ranking_experiment.track_id != pz3_context["track_id"]
+                    ):
+                        raise RuntimeError("Naruszony kontekst eksperymentu: nie utworzono porównania dla zapieczętowanego toru.")
+                except Exception as experiment_error:
+                    self._append_ranking_log(
+                        "Kontrolowany ranking zablokowany: "
+                        f"{experiment_error}"
+                    )
+                    self._ui(
+                        lambda err=str(experiment_error): messagebox.showerror(
+                            "Kontrolowany ranking",
+                            "Nie można uruchomić kontrolowanego rankingu.\n\n"
+                            + err,
+                        )
+                    )
+                    return
 
             if ranking_experiment is not None:
                 self._append_ranking_log(
@@ -4606,9 +4625,8 @@ def _run_ranking_v2(self):
                 )
             else:
                 self._append_ranking_log(
-                    "Wybrany materiał nie jest torem z rejestru PZ3. "
-                    "Ranking działa w trybie legacy i nie jest oznaczany "
-                    "jako kontrolowany eksperyment."
+                    "Analiza robocza — bez kontraktu eksperymentu PZ3. "
+                    "Wybór zapieczętowanego źródła nie nadaje wynikom statusu controlled."
                 )
 
             def persist_ranking_result(model_path: Path, stats: dict):
@@ -4682,8 +4700,8 @@ def _run_ranking_v2(self):
                 split_name = str(reference_info.get("split_name") or self._get_ranking_split_name()).strip() or "test"
                 sample_count = int(reference_info.get("image_count", 0) or 0)
                 if not data_yaml.exists():
-                    self._append_ranking_log("Tor testowy znaków nie ma pliku data.yaml.")
-                    self._ui(lambda: messagebox.showerror("Błąd", "Tor testowy znaków nie ma pliku data.yaml."))
+                    self._append_ranking_log("Źródło analizy znaków nie ma pliku data.yaml.")
+                    self._ui(lambda: messagebox.showerror("Błąd", "Źródło analizy znaków nie ma pliku data.yaml."))
                     return
 
                 total_models = len(models_to_test)
@@ -4791,12 +4809,12 @@ def _run_ranking_v2(self):
                 if cancelled or self.rank_cancel_requested:
                     self._append_ranking_log("Ranking anulowany przez użytkownika.")
                     self._ui(lambda: self._load_ranking())
-                    self._set_ranking_ui_state(status="Ranking anulowany.", status_color="#d35400")
+                    self._set_ranking_ui_state(status="Analiza anulowana.", status_color="#d35400")
                 else:
-                    self._append_ranking_log("Ranking zakończony.")
+                    self._append_ranking_log("Analiza modeli zakończona.")
                     self._ui(lambda: self.rank_progress_var.set(100))
                     self._ui(lambda: self._load_ranking())
-                    self._set_ranking_ui_state(status="Ranking zakończony.", status_color="green")
+                    self._set_ranking_ui_state(status="Analiza modeli zakończona.", status_color="green")
                 return
 
             from ..ranking.annotation_comparator import AnnotationComparator
@@ -4965,12 +4983,12 @@ def _run_ranking_v2(self):
             if cancelled or self.rank_cancel_requested:
                 self._append_ranking_log("Ranking anulowany przez użytkownika.")
                 self._ui(lambda: self._load_ranking())
-                self._set_ranking_ui_state(status="Ranking anulowany.", status_color="#d35400")
+                self._set_ranking_ui_state(status="Analiza anulowana.", status_color="#d35400")
             else:
-                self._append_ranking_log("Ranking zakończony.")
+                self._append_ranking_log("Analiza modeli zakończona.")
                 self._ui(lambda: self.rank_progress_var.set(100))
                 self._ui(lambda: self._load_ranking())
-                self._set_ranking_ui_state(status="Ranking zakończony.", status_color="green")
+                self._set_ranking_ui_state(status="Analiza modeli zakończona.", status_color="green")
 
         except Exception as e:
             if ranking_experiment is not None and ranking_experiment_bridge is not None:
@@ -4992,7 +5010,7 @@ def _run_ranking_v2(self):
             self.rank_is_running = False
             self.rank_cancel_requested = False
             self._end_step4_operation("z4.ranking.run")
-            self._set_ranking_ui_state(button_text="[ START ] Uruchom wyścig", cancel_enabled=False, preparing=False)
+            self._set_ranking_ui_state(button_text=analysis_role(self)["start_label"], cancel_enabled=False, preparing=False)
             self._ui(lambda: self._refresh_ranking_start_state())
             self._ui(self._refresh_training_start_state)
 

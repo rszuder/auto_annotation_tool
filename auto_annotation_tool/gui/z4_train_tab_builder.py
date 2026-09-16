@@ -1447,7 +1447,7 @@ def _build_train_tab(self):
     self.hist_tab = ttk.Frame(self.right_nb)
     self.ranking_tab = ttk.Frame(self.right_nb)
     self.right_nb.add(self.hist_tab, text="Historia treningów", **notebook_tab_icon(self.right_nb, "history"))
-    self.right_nb.add(self.ranking_tab, text="Ranking", **notebook_tab_icon(self.right_nb, "ranking"))
+    self.right_nb.add(self.ranking_tab, text="Analiza modeli", **notebook_tab_icon(self.right_nb, "ranking"))
     self._step4_ranking_tab_visible = True
     self.right_nb.bind("<<NotebookTabChanged>>", self._sync_step4_analysis_nav_buttons)
 

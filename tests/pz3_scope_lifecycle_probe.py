@@ -30,7 +30,7 @@ def _has_advanced(dialog):
 
 def _exit_button(dialog):
     return next(widget for widget in _widgets(dialog)
-                if "text" in widget.keys() and str(widget.cget("text")) == "Wróć do zwykłego rankingu")
+                if "text" in widget.keys() and str(widget.cget("text")) == "Wróć do analizy roboczej")
 
 
 def _result_count(fixture, track):
@@ -150,7 +150,7 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     assert "Lifecycle Track B" in host._ranking_results_modal.title()
     assert not _has_advanced(host._ranking_results_modal)
     with patch.object(ranking.messagebox, "showinfo") as refused:
-        _button(stale_advanced, "[ TOR ] Zastosuj wybrany tor").invoke()
+        _button(stale_advanced, "Zastosuj źródło analizy").invoke()
         refused.assert_called_once()
     assert host.rank_data_dir.get() == context_b["reference_path"]
     stale_advanced.tk.call(stale_advanced.protocol("WM_DELETE_WINDOW"))

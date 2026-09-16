@@ -2894,7 +2894,7 @@ def _load_ranking(self):
         else:
             set_leader(
                 f"Brak wyników dla zakresu: {selected_scope}",
-                f"Uruchom ranking albo przełącz zakres. Zakres {scope_hint} nie zawiera jeszcze porównanych modeli dla trybu {target_task}.",
+                f"Uruchom analizę roboczą albo przełącz zakres. Zakres {scope_hint} nie zawiera jeszcze wyników dla trybu {target_task}. Porównanie kontrolowane rozpocznij w PZ3.",
                 tone="muted",
             )
         return
@@ -2908,10 +2908,10 @@ def _load_ranking(self):
             )
         else:
             set_leader(
-                "Kandydaci czekają na test rankingowy",
+                "Modele czekają na porównanie",
                 (
                     f"Zakres: {selected_scope}. Tabela pokazuje modele, które wezmą udział w porównaniu. "
-                    "Po uruchomieniu rankingu te wiersze dostaną metryki i kolejność."
+                    "Po uruchomieniu analizy te wiersze otrzymają metryki i kolejność."
                 ),
                 tone="warning",
             )
@@ -2928,7 +2928,7 @@ def _load_ranking(self):
         best_hint = (
             f"Zakres: {best_scope}. Zestaw odniesienia: {best_reference}. "
             f"Tego samego podpisu szukaj w sekcji wyboru wyniku bramki {_step4_finish_gate_display_id()}. "
-            "Ranking nie wybiera modelu automatycznie."
+            "Analiza nie wybiera modelu automatycznie."
         )
     else:
         best_title = f"Wygrywa: {best_result_label} | ocena {best_score:.1f}%"

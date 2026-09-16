@@ -101,6 +101,7 @@ from . import z4_dataset_sources
 from . import z4_training_metrics
 from . import z4_dataset_builder
 from . import z4_analysis_ranking
+from .z4_analysis_role import analysis_role, refresh_analysis_role
 from . import z4_training_runtime
 from . import z4_training_compare
 from . import z4_campaign_state
@@ -1680,7 +1681,7 @@ class TrainingTab:
                 "split_name": split_name,
                 "image_count": 0,
                 "message": (
-                    "Wybierz tor testowy znaków: folder z data.yaml albo sam plik data.yaml. "
+                    "Wybierz źródło analizy znaków: folder z data.yaml albo sam plik data.yaml. "
                     "Wszystkie modele znaków pobiegną po tym samym splicie."
                 ),
             }
@@ -1721,7 +1722,7 @@ class TrainingTab:
             split_value = cfg.get(split_name)
             if not split_value:
                 result["message"] = (
-                    f"Tor testowy nie ma splitu `{split_name}` w data.yaml. "
+                    f"Źródło nie ma splitu `{split_name}` w data.yaml. "
                     "Zmień split w Zaawansowanych albo wskaż inny dataset."
                 )
                 return result
@@ -1788,7 +1789,7 @@ class TrainingTab:
                     "data_yaml_path": yaml_value,
                     "image_count": image_count,
                 "message": (
-                    f"Gotowy tor znaków: {dataset_ref.id} | split `{split_name}` | "
+                    f"Gotowe źródło znaków: {dataset_ref.id} | split `{split_name}` | "
                     f"{image_count} obrazów. Każdy model dostanie ten sam egzamin."
                 ),
                 }
@@ -1805,7 +1806,7 @@ class TrainingTab:
             "image_paths": [],
             "image_count": 0,
             "message": (
-                "Wybierz tor testowy tablic: run Z2/PZ2 z zapisanym annotations.xml oraz zgodnymi obrazami. "
+                "Wybierz źródło analizy tablic: run Z2/PZ2 z zapisanym annotations.xml oraz zgodnymi obrazami. "
                 "To będzie wspólny egzamin dla modeli tablic."
             ),
         }
@@ -2042,7 +2043,7 @@ class TrainingTab:
                 "image_paths": image_paths,
                 "image_count": len(image_paths),
                 "message": (
-                    f"Gotowy tor tablic: {reference_dir.name} | {len(image_paths)} obrazów. "
+                    f"Gotowe źródło tablic: {reference_dir.name} | {len(image_paths)} obrazów. "
                     "System użyje zapisanych zmian z annotations.xml jako punktu odniesienia."
                 ),
             }
@@ -2087,12 +2088,13 @@ class TrainingTab:
                 ready = False
 
         try:
+            role = analysis_role(self, reference_info)
             if not reference_info.get("ok"):
-                button_text = "[ TOR ] Wybierz tor testowy"
+                button_text = "Sprawdź tor PZ3" if role["controlled"] else "Wybierz źródło analizy roboczej"
             elif not models_found:
-                button_text = "[ KONIE ] Brak startujących"
+                button_text = "Brak modeli do porównania"
             else:
-                button_text = "[ START ] Uruchom wyścig"
+                button_text = role["start_label"]
             button.configure(
                 state=(tk.NORMAL if ready else tk.DISABLED),
                 text=button_text,
@@ -2148,6 +2150,7 @@ class TrainingTab:
 
         target_label = getattr(self, "rank_target_lbl", None)
         info = self._resolve_ranking_reference_source()
+        role = refresh_analysis_role(self, info)
         model_count = 0
         enabled_model_count = 0
         scope = self._get_ranking_scope()
@@ -2172,8 +2175,8 @@ class TrainingTab:
             try:
                 target_label.configure(
                     text=(
-                        f"Konie: {self._format_ranking_scope_label(scope, target)} | "
-                        f"startuje {enabled_model_count}/{model_count}."
+                        f"{role['models_label']}: {self._format_ranking_scope_label(scope, target)} | "
+                        f"wybrano {enabled_model_count}/{model_count}."
                     )
                 )
             except Exception:
@@ -2214,12 +2217,13 @@ class TrainingTab:
                 if info.get("ok"):
                     track_label.configure(
                         text=(
-                            f"Tor testowy: {info.get('reference_name') or '-'} | "
-                            f"{int(info.get('image_count', 0) or 0)} próbek | wspólny egzamin dla wszystkich modeli."
+                            f"{role['source_label']}: {info.get('reference_name') or '-'} | "
+                            f"{int(info.get('image_count', 0) or 0)} obrazów."
                         )
                     )
                 else:
-                    track_label.configure(text=f"Tor testowy: nie wybrano | {info.get('message') or ''}")
+                    message = info.get("message") if info.get("selected_path") else "nie wybrano"
+                    track_label.configure(text=f"{role['source_label']}: {message or 'nie wybrano'}")
             except Exception:
                 pass
         track_count_value_label = getattr(self, "rank_track_count_value_lbl", None)
