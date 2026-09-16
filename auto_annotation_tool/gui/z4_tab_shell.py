@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from .notebook_icons import notebook_tab_icon
 from ..campaign_manager import CAMPAIGN
 from ..config import (
     CONFIG,
@@ -131,9 +132,9 @@ def _build_ui(self):
     self.tab_val = None
     self.tab_ranking = None
 
-    self.main_nb.add(self.tab_dataset, text="[PZ1] Wariant treningowy")
-    self.main_nb.add(self.tab_train, text="[PZ2] Trening i wyniki")
-    self.main_nb.add(self.tab_tracks, text="[PZ3] Tory testowe")
+    self.main_nb.add(self.tab_dataset, text="[PZ1] Wariant treningowy", **notebook_tab_icon(self.main_nb, "dataset"))
+    self.main_nb.add(self.tab_train, text="[PZ2] Trening i wyniki", **notebook_tab_icon(self.main_nb, "training"))
+    self.main_nb.add(self.tab_tracks, text="[PZ3] Tory testowe", **notebook_tab_icon(self.main_nb, "experiment"))
     self.main_nb.bind("<<NotebookTabChanged>>", self._on_main_nb_tab_changed, add="+")
     self._step4_dataset_tab_visible = True
 

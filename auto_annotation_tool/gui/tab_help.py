@@ -11,6 +11,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..config import CONFIG
+from .notebook_icons import notebook_tab_icon
 from .inertial_scroll import InertialScrollController
 from .web_slim_scrollbar import WebSlimScrollbar
 
@@ -59,26 +60,30 @@ class HelpTab:
             "[PZ1] Jak pracować",
             palette=palette,
             filler=self._fill_workflow,
+            icon="book",
         )
         self.t2 = self._create_text_page(
             "[PZ2] Kampania",
             palette=palette,
             filler=self._fill_campaign,
+            icon="workflow",
         )
         self.t3 = self._create_text_page(
             "[PZ3] Dane i kod",
             palette=palette,
             filler=self._fill_architecture,
+            icon="code",
         )
         self.t4 = self._create_text_page(
             "[PZ4] Eksport i badania",
             palette=palette,
             filler=self._fill_export_research,
+            icon="export",
         )
 
-    def _create_text_page(self, title, palette, filler):
+    def _create_text_page(self, title, palette, filler, icon):
         page = ttk.Frame(self.notebook)
-        self.notebook.add(page, text=title)
+        self.notebook.add(page, text=title, **notebook_tab_icon(self.notebook, icon))
 
         host = ttk.Frame(page)
         host.pack(fill=tk.BOTH, expand=True)

@@ -8,20 +8,20 @@ from auto_annotation_tool.gui.z4_evaluation_tracks import (
 
 
 class ParticipantModelLightRefreshTests(unittest.TestCase):
-    def test_refresh_reads_registry_only(self):
+    def test_refresh_uses_light_catalog_without_bootstrap(self):
         panel = object.__new__(EvaluationTracksPanel)
         models = [
             SimpleNamespace(model_id="MODEL-A"),
             SimpleNamespace(model_id="MODEL-B"),
         ]
         panel.participant_audit = SimpleNamespace(
-            list_eligible_models=Mock(return_value=models)
+            list_participant_catalog=Mock(return_value=models)
         )
 
         result, message = panel._refresh_participant_model_registry("plate")
 
         self.assertEqual(result, models)
-        panel.participant_audit.list_eligible_models.assert_called_once_with(
+        panel.participant_audit.list_participant_catalog.assert_called_once_with(
             "plate"
         )
         self.assertIn("2", message)

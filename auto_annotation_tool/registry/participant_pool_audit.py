@@ -30,7 +30,7 @@ STATUS_SUSPECT = "SUSPECT_DERIVATIVE"
 STATUS_CLEAN = "NO_DETECTED_DEPENDENCE"
 STATUS_UNKNOWN = "UNKNOWN"
 
-PARTICIPANT_SCHEMA = "alpr.evaluation_track_participants.v1"
+PARTICIPANT_SCHEMA = "alpr.evaluation_track_participants.v2"
 AUDIT_SCHEMA = "alpr.participant_pool_audit.v1"
 CACHE_SCHEMA = "alpr.participant_pool_file_cache.v1"
 
@@ -40,10 +40,27 @@ class ParticipantModel:
     model_id: str
     sha256: str
     run_id: str
+    dataset_id: str
     target: str
     family: str
     scale: str
     provenance_status: str
+    training_finished_at: str = ""
+    best_map50: float | None = None
+    best_map50_95: float | None = None
+    box_map50: float | None = None
+    box_map50_95: float | None = None
+    pose_map50: float | None = None
+    pose_map50_95: float | None = None
+    checkpoint_kind: str = ""
+    task_type: str = ""
+
+    @property
+    def eligible(self) -> bool:
+        return bool(self.model_id and self.sha256) and (
+            self.provenance_status not in {"complete", "known"}
+            or bool(self.run_id and self.dataset_id)
+        )
 
 
 @dataclass(frozen=True)
@@ -131,6 +148,15 @@ def common_status(statuses: Iterable[str]) -> str:
 
 
 def participant_fingerprint(participants: Sequence[ParticipantModel]) -> str:
+    payload = "\n".join(
+        f"{item.model_id}|{item.sha256}|{item.run_id}|{item.dataset_id}|{item.provenance_status}"
+        for item in sorted(participants, key=lambda row: row.model_id)
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest().lower()
+
+
+def _legacy_participant_fingerprint(participants: Sequence[ParticipantModel]) -> str:
+    """Only for reading frozen contracts created before dataset lineage was stored."""
     payload = "\n".join(
         f"{item.model_id}|{item.sha256}|{item.run_id}|{item.provenance_status}"
         for item in sorted(participants, key=lambda row: row.model_id)
@@ -279,32 +305,70 @@ class ParticipantPoolAuditService:
     def audit_state_path(self, track_id: str) -> Path:
         return self._track_root(track_id) / "participant_pool_audit_state.json"
 
-    def list_eligible_models(self, target: str) -> list[ParticipantModel]:
-        return [
-            ParticipantModel(
-                model_id=str(row["model_id"] or ""),
-                sha256=str(row["sha256"] or "").lower(),
-                run_id=str(row["run_id"] or ""),
+    def list_eligible_models(self, target: str, *, include_background=False) -> list[ParticipantModel]:
+        return [item for item in self._list_models(target, include_background=include_background)
+                if item.eligible]
+
+    def list_participant_catalog(self, target: str) -> list[ParticipantModel]:
+        """The picker can inspect inconsistent rows, but cannot enable them."""
+        return self._list_models(target, include_background=True)
+
+    def _list_models(self, target: str, *, include_background=False) -> list[ParticipantModel]:
+        from .participant_background import ParticipantBackgroundReader
+        reader = getattr(self, "_background_reader", None)
+        if include_background and reader is None:
+            reader = self._background_reader = ParticipantBackgroundReader(self.workspace)
+        backgrounds = {}
+        result = []
+        for raw in self.repository.list_models_for_target(str(target or "").strip().lower()):
+            row = dict(raw)
+            background = {}
+            if include_background and row["run_id"]:
+                if row["run_id"] not in backgrounds:
+                    backgrounds[row["run_id"]] = reader.read(row)
+                background = backgrounds[row["run_id"]]
+            item = ParticipantModel(
+                model_id=str(row["model_id"] or "").strip(),
+                sha256=str(row["sha256"] or "").strip().lower(),
+                run_id=str(row["run_id"] or "").strip(),
+                dataset_id=str(row["dataset_id"] or "").strip(),
                 target=str(row["target"] or ""),
                 family=str(row["yolo_family"] or ""),
                 scale=str(row["yolo_scale"] or "unknown"),
-                provenance_status=str(row["provenance_status"] or ""),
+                provenance_status=str(row["provenance_status"] or "").strip().lower(),
+                training_finished_at=str(row["training_finished_at"] or ""),
+                checkpoint_kind=str(row["checkpoint_kind"] or ""),
+                task_type=str(row["task_type"] or ""),
+                **background,
             )
-            for row in self.repository.list_models_for_target(
-                str(target or "").strip().lower()
+            if item.model_id:
+                result.append(item)
+        return result
+
+    def _frozen_contract(self, track_id: str) -> dict[str, Any] | None:
+        if str(self._track_row(track_id)["status"]).upper() not in {"SEALED", "RETIRED"}:
+            return None
+        try:
+            manifest = json.loads(
+                (self._track_root(track_id) / "track_manifest.json").read_text(encoding="utf-8")
             )
-        ]
+            contract = manifest.get("experiment_contract")
+            if isinstance(contract, Mapping):
+                return dict(contract)
+            # Older seals may store participants only in the original artifact.
+            path = self.participants_path(track_id)
+            payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            return dict(payload) if isinstance(payload, Mapping) else {}
+        except (OSError, ValueError, AttributeError):
+            return {}
 
     def load_participants(self, track_id: str) -> tuple[ParticipantModel, ...]:
+        from .participant_background import METRIC_FIELDS, metric_value
         path = self.participants_path(track_id)
-        track = self._track_row(track_id)
         try:
-            payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-            if str(track["status"]) in {"SEALED", "RETIRED"}:
-                manifest = json.loads((self._track_root(track_id) / "track_manifest.json").read_text(encoding="utf-8"))
-                contract = manifest.get("experiment_contract")
-                if isinstance(contract, Mapping):
-                    payload = contract
+            payload = self._frozen_contract(track_id)
+            if payload is None:
+                payload = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
             rows = payload.get("participants") if isinstance(payload, Mapping) else []
         except Exception:
             return ()
@@ -320,10 +384,17 @@ class ParticipantPoolAuditService:
                     model_id=model_id,
                     sha256=str(row.get("sha256") or "").lower(),
                     run_id=str(row.get("run_id") or ""),
+                    # Legacy drafts must reselect participants before a new audit.
+                    # Frozen tracks keep exactly the lineage recorded at seal time.
+                    dataset_id=str(row.get("dataset_id") or ""),
                     target=str(row.get("target") or ""),
                     family=str(row.get("family") or ""),
                     scale=str(row.get("scale") or "unknown"),
                     provenance_status=str(row.get("provenance_status") or ""),
+                    training_finished_at=str(row.get("training_finished_at") or ""),
+                    checkpoint_kind=str(row.get("checkpoint_kind") or ""),
+                    task_type=str(row.get("task_type") or ""),
+                    **{key: metric_value(row.get(key)) for key in METRIC_FIELDS},
                 )
             )
         return tuple(result)
@@ -338,7 +409,7 @@ class ParticipantPoolAuditService:
                    if item.model_id in available]
         if participant_fingerprint(current) != participant_fingerprint(participants):
             raise EvaluationTrackError(
-                "Historia lub checkpoint uczestnika zmieniły się w rejestrze. "
+                "Historia, lineage lub checkpoint uczestnika zmieniły się w rejestrze. "
                 "Wybierz ponownie modele uczestniczące i ponów audyt."
             )
 
@@ -354,7 +425,7 @@ class ParticipantPoolAuditService:
             )
         available = {
             item.model_id: item
-            for item in self.list_eligible_models(str(track["target"] or ""))
+            for item in self.list_eligible_models(str(track["target"] or ""), include_background=True)
         }
         selected = []
         for model_id in dict.fromkeys(str(value or "").strip() for value in model_ids):
@@ -362,7 +433,7 @@ class ParticipantPoolAuditService:
                 item = available.get(model_id)
                 if item is None:
                     raise EvaluationTrackError(
-                        f"Model {model_id} nie pasuje do targetu toru."
+                        f"Model {model_id} nie pasuje do targetu toru lub ma niepełne lineage run/dataset."
                     )
                 selected.append(item)
         if not selected:
@@ -395,6 +466,13 @@ class ParticipantPoolAuditService:
 
 
     def _read_track_audit_state(self, track_id: str) -> dict[str, Any]:
+        frozen = self._frozen_contract(track_id)
+        if frozen is not None:
+            # Never import or rewrite historical state using today's registry.
+            audit = frozen.get("audit")
+            if isinstance(audit, Mapping):
+                return dict(audit)
+            return self.repository.get_evaluation_track_audit_state(track_id) or {}
         state = self.repository.get_evaluation_track_audit_state(track_id)
         if state is not None:
             return state
@@ -420,8 +498,13 @@ class ParticipantPoolAuditService:
         participants = self.load_participants(track_id)
         if not participants:
             raise EvaluationTrackError("Tor nie ma wybranych modeli uczestniczących.")
-        self._assert_registered_participants(track_id, participants)
-        if state.get("participant_fingerprint") != participant_fingerprint(participants):
+        frozen = self._frozen_contract(track_id)
+        fingerprint = participant_fingerprint(participants)
+        if frozen is None:
+            self._assert_registered_participants(track_id, participants)
+        elif not any("dataset_id" in row for row in frozen.get("participants", [])):
+            fingerprint = _legacy_participant_fingerprint(participants)
+        if state.get("participant_fingerprint") != fingerprint:
             raise EvaluationTrackError("Zestaw modeli zmienił się po audycie puli.")
         current = {
             str(row["sha256"] or "").lower()
@@ -432,7 +515,7 @@ class ParticipantPoolAuditService:
 
     def get_track_audit_state(self, track_id: str) -> dict[str, Any]:
         state = self._read_track_audit_state(track_id)
-        if state.get("status") == "CURRENT":
+        if state.get("status") == "CURRENT" and self._frozen_contract(track_id) is None:
             try:
                 self._assert_audit_state_matches(track_id, state)
             except EvaluationTrackError as exc:

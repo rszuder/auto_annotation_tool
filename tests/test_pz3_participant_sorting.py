@@ -12,6 +12,7 @@ def model(
     family="YOLO26",
     scale="n",
     run_id="RUN-1",
+    dataset_id="DS-1",
     provenance_status="complete",
 ):
     return SimpleNamespace(
@@ -19,6 +20,7 @@ def model(
         family=family,
         scale=scale,
         run_id=run_id,
+        dataset_id=dataset_id,
         provenance_status=provenance_status,
     )
 
@@ -95,6 +97,12 @@ class ParticipantModelSortingTests(unittest.TestCase):
             [item.model_id for item in result],
             ["MODEL-1", "MODEL-2", "MODEL-10"],
         )
+
+    def test_participant_sort_by_dataset(self):
+        items = [model("M10", dataset_id="DS-10"), model("M2", dataset_id="DS-2"),
+                 model("M0", dataset_id=""), model("M1", dataset_id="DS-1")]
+        result = sorted(items, key=lambda item: participant_model_sort_key(item, "dataset"))
+        self.assertEqual([item.dataset_id for item in result], ["DS-1", "DS-2", "DS-10", ""])
 
 
 if __name__ == "__main__":

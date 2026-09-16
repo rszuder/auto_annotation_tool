@@ -16,6 +16,7 @@ from typing import Any, Mapping
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from .app_theme_definitions import get_runtime_palette
 from .pz3_participant_audit import (
     BatchProgressDialog,
     ParticipantAuditMatrixDialog,
@@ -688,7 +689,7 @@ class EvaluationTracksPanel:
         runtime_service, a obce checkpointy dodajemy jawnie przez
         „Zarejestruj istniejący model…”.
         """
-        models = self.participant_audit.list_eligible_models(
+        models = self.participant_audit.list_participant_catalog(
             str(target or "").strip().lower()
         )
         return (
@@ -711,7 +712,7 @@ class EvaluationTracksPanel:
         )
         if not path:
             return (
-                self.participant_audit.list_eligible_models(target),
+                self.participant_audit.list_participant_catalog(target),
                 "",
                 "Rejestracja anulowana.",
             )
@@ -728,7 +729,7 @@ class EvaluationTracksPanel:
                 parent=self.parent,
             )
             return (
-                self.participant_audit.list_eligible_models(target),
+                self.participant_audit.list_participant_catalog(target),
                 "",
                 "Brak odpowiedniego runu.",
             )
@@ -741,7 +742,7 @@ class EvaluationTracksPanel:
         ).show()
         if not run_id:
             return (
-                self.participant_audit.list_eligible_models(target),
+                self.participant_audit.list_participant_catalog(target),
                 "",
                 "Rejestracja anulowana.",
             )
@@ -758,7 +759,7 @@ class EvaluationTracksPanel:
             parent=self.parent,
         ):
             return (
-                self.participant_audit.list_eligible_models(target),
+                self.participant_audit.list_participant_catalog(target),
                 "",
                 "Rejestracja anulowana.",
             )
@@ -770,7 +771,7 @@ class EvaluationTracksPanel:
             target=target,
             repository=self.repository,
         )
-        models = self.participant_audit.list_eligible_models(target)
+        models = self.participant_audit.list_participant_catalog(target)
         return (
             models,
             registration.model_id,
@@ -787,7 +788,7 @@ class EvaluationTracksPanel:
             model_id,
             repository=self.repository,
         )
-        models = self.participant_audit.list_eligible_models(target)
+        models = self.participant_audit.list_participant_catalog(target)
         return (
             models,
             f"Wyrejestrowano {result.model_id}. Plik .pt pozostawiono bez zmian.",
@@ -799,7 +800,7 @@ class EvaluationTracksPanel:
             return False
         try:
             track = self.service.get_track(track_id)
-            models = self.participant_audit.list_eligible_models(str(track.get("target") or ""))
+            models = self.participant_audit.list_participant_catalog(str(track.get("target") or ""))
             current = {item.model_id for item in self.participant_audit.load_participants(track_id)}
         except Exception as exc:
             self._show_error("Nie udało się odczytać modeli uczestniczących", exc)
@@ -807,6 +808,7 @@ class EvaluationTracksPanel:
         result = ParticipantSelectionDialog(
             self.parent,
             models=models,
+            palette=get_runtime_palette(self.app),
             selected_ids=current,
             track_name=str(track.get("name") or track_id),
             on_refresh=lambda: self._refresh_participant_model_registry(

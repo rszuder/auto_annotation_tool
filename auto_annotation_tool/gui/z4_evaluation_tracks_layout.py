@@ -5,6 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, font as tkfont
 
+from .notebook_icons import notebook_tab_icon
 from .app_theme_definitions import get_runtime_palette
 
 
@@ -152,8 +153,8 @@ class EvaluationTracksLayout:
         self.images_page = ttk.Frame(self.notebook, padding=8)
         self.details_page = ttk.Frame(self.notebook, padding=8)
         self.manage_page = ttk.Frame(self.notebook, padding=10)
-        for page, title in ((self.images_page, "Obrazy toru"), (self.details_page, "Szczegóły i GT"), (self.manage_page, "Zarządzanie")):
-            self.notebook.add(page, text=title)
+        for page, title, icon in ((self.images_page, "Obrazy toru", "images"), (self.details_page, "Szczegóły i GT", "checklist"), (self.manage_page, "Zarządzanie", "settings")):
+            self.notebook.add(page, text=title, **notebook_tab_icon(self.notebook, icon))
             page.columnconfigure(0, weight=1)
             page.rowconfigure(0, weight=1)
 

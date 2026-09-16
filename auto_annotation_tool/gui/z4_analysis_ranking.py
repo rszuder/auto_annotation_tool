@@ -25,6 +25,8 @@ import textwrap
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
+from .notebook_icons import notebook_tab_icon
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -2099,12 +2101,12 @@ def _open_ranking_report_viewer(self):
     score_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
     metrics_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
     plate_diffs_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
-    notebook.add(method_tab, text="Metoda")
-    notebook.add(results_tab, text="Tabela wyników")
-    notebook.add(score_tab, text="Wykres oceny")
-    notebook.add(metrics_tab, text="Metryki")
+    notebook.add(method_tab, text="Metoda", **notebook_tab_icon(notebook, "book"))
+    notebook.add(results_tab, text="Tabela wyników", **notebook_tab_icon(notebook, "dataset"))
+    notebook.add(score_tab, text="Wykres oceny", **notebook_tab_icon(notebook, "ranking"))
+    notebook.add(metrics_tab, text="Metryki", **notebook_tab_icon(notebook, "settings"))
     if str(context.get("target") or "") == "plate":
-        notebook.add(plate_diffs_tab, text="Analiza tablic")
+        notebook.add(plate_diffs_tab, text="Analiza tablic", **notebook_tab_icon(notebook, "annotation"))
 
     method_tab.grid_rowconfigure(0, weight=1)
     method_tab.grid_columnconfigure(0, weight=1)
