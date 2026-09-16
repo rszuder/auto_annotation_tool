@@ -1619,12 +1619,17 @@ class RegistryRepository:
             return list(
                 connection.execute(
                     """
-                    SELECT model_id, project_id, run_id, target, task_type,
-                           yolo_family, yolo_scale, checkpoint_kind, sha256,
-                           provenance_status, created_at
-                    FROM models
-                    WHERE LOWER(COALESCE(target, '')) = LOWER(?)
-                    ORDER BY yolo_family, yolo_scale, created_at DESC, model_id
+                    SELECT model.model_id, model.project_id, model.run_id, model.target,
+                           model.task_type, model.yolo_family, model.yolo_scale,
+                           model.checkpoint_kind, model.sha256,
+                           model.provenance_status, model.created_at, run.dataset_id,
+                           run.finished_at AS training_finished_at, run.output_relative_path,
+                           run.project_id AS run_project_id, run.target AS run_target
+                    FROM models AS model
+                    LEFT JOIN training_runs AS run ON run.run_id = model.run_id
+                    WHERE LOWER(COALESCE(model.target, '')) = LOWER(?)
+                    ORDER BY model.yolo_family, model.yolo_scale,
+                             model.created_at DESC, model.model_id
                     """,
                     (str(target or "").strip(),),
                 ).fetchall()

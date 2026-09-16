@@ -8,6 +8,13 @@ from queue import Empty, SimpleQueue
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from .pz3_participant_profile import (
+    ParticipantProfilePanel, architecture_label, format_metric, participant_eligible,
+    provenance_badge, quality_metric, short_identifier, training_date_sort_value,
+)
+from .app_tooltips import hide_simple_tooltip
+from ..registry.participant_background import metric_value
+
 from .pz3_audit_resolution_dialog import ParticipantAuditMatrixDialog
 
 from ..registry.participant_pool_audit import (
@@ -188,6 +195,18 @@ def participant_model_sort_key(
     if column == "model":
         return _natural_sort_key(item.model_id)
 
+    if column == "arch":
+        return (_natural_sort_key(item.family), _MODEL_SCALE_ORDER.get(item.scale, 50),
+                _natural_sort_key(item.model_id))
+
+    if column in {"quality", "pose_quality"}:
+        value = quality_metric(item)[1] if column == "quality" else metric_value(getattr(item, "pose_map50_95", None))
+        return (value is None, value if value is not None else 0, _natural_sort_key(item.model_id))
+
+    if column == "finished":
+        value = training_date_sort_value(getattr(item, "training_finished_at", ""))
+        return (value is None, value or 0, _natural_sort_key(item.model_id))
+
     if column == "family":
         value = str(item.family or "").strip()
         return (
@@ -204,8 +223,8 @@ def participant_model_sort_key(
             _natural_sort_key(item.model_id),
         )
 
-    if column == "run":
-        value = str(item.run_id or "").strip()
+    if column in {"run", "dataset"}:
+        value = str((item.run_id if column == "run" else item.dataset_id) or "").strip()
         return (
             1 if not value else 0,
             _natural_sort_key(value),
@@ -234,9 +253,10 @@ class ParticipantSelectionDialog:
         on_refresh=None,
         on_register=None,
         on_unregister=None,
+        palette=None,
     ):
         self.models = list(models)
-        self.selected = set(selected_ids)
+        self.selected = set(selected_ids) & {item.model_id for item in self.models if participant_eligible(item)}
         self.result = None
         self._sort_column = ""
         self._sort_reverse = False
@@ -252,10 +272,11 @@ class ParticipantSelectionDialog:
         )
         self.window = tk.Toplevel(parent)
         self.window.title("Modele uczestniczące w eksperymencie")
-        self.window.geometry("900x580")
-        self.window.minsize(720, 460)
+        self.window.geometry("1140x780")
+        self.window.minsize(1000, 700)
         self.window.resizable(True, True)
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.palette = palette
         self._build(track_name)
         self._populate()
         self.window.grab_set()
@@ -264,29 +285,55 @@ class ParticipantSelectionDialog:
         root = ttk.Frame(self.window, padding=14)
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
+        root.rowconfigure(3, weight=1)
         ttk.Label(root, text="Modele uczestniczące", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(
+        description = ttk.Label(
             root,
             text=(
                 f"Tor: {track_name}\n"
-                "Audyt dotyczy wyłącznie train/val zaznaczonych modeli "
-                    "(wraz z ancestry fine-tune). Modele spoza rankingu nie blokują puli.\n"
-    "Historia treningu pokazuje, czy znamy train/val modelu potrzebne do audytu."
+                "Audyt dotyczy train/val uczestników. Pochodzenie pokazuje Run i Dataset; historia „Pełna” wymaga obu.\n"
+                "Kliknij wiersz, aby zobaczyć profil. Udział zmienisz polem wyboru lub spacją. mAP opisuje walidację treningu."
             ),
-            wraplength=840,
+            wraplength=1080,
             justify=tk.LEFT,
-        ).grid(row=1, column=0, sticky="ew", pady=(4, 10))
+        )
+        description.grid(row=1, column=0, sticky="ew", pady=(4, 10))
+        root.bind(
+            "<Configure>",
+            lambda event: description.configure(wraplength=max(260, event.width - 28)),
+            add="+",
+        )
+        toolbar = ttk.Frame(root)
+        toolbar.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(toolbar, text="Sortuj:").pack(side=tk.LEFT)
+        self._sort_fields = {
+            "Model": "model", "Architektura": "arch", "Run": "run", "Dataset": "dataset",
+            "mAP50–95 Pose": "pose_quality", "Jakość walidacyjna": "quality",
+            "Historia": "prov", "Data zakończenia": "finished",
+        }
+        self.sort_var = tk.StringVar(self.window, "Model")
+        sort_picker = ttk.Combobox(toolbar, textvariable=self.sort_var,
+                                  values=tuple(self._sort_fields), state="readonly", width=24)
+        sort_picker.pack(side=tk.LEFT, padx=6)
+        sort_picker.bind("<<ComboboxSelected>>", lambda _event: self._sort_models(
+            self._sort_fields[self.sort_var.get()]))
+        ttk.Button(toolbar, text="Odwróć kolejność", command=lambda: self._sort_models(
+            self._sort_fields[self.sort_var.get()])).pack(side=tk.LEFT)
+        ttk.Label(toolbar, text="Pełne identyfikatory i metryki w profilu poniżej.").pack(side=tk.RIGHT)
         frame = ttk.Frame(root)
-        frame.grid(row=2, column=0, sticky="nsew")
+        frame.grid(row=3, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        cols = ("sel", "model", "family", "scale", "run", "prov")
-        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
+        cols = ("sel", "model", "arch", "origin", "quality", "prov")
+        style = ttk.Style(self.window)
+        scale = max(1.0, float(self.window.tk.call("tk", "scaling")) / (96 / 72))
+        style.configure("ParticipantCatalog.Treeview", rowheight=round(46 * scale))
+        self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended",
+                                 style="ParticipantCatalog.Treeview", height=5)
         for key, title, width in (
-            ("sel", "Udział", 64), ("model", "Model ID", 240),
-            ("family", "Rodzina", 100), ("scale", "Skala", 70),
-            ("run", "Run", 220), ("prov", "Historia treningu", 170),
+            ("sel", "Udział", 56), ("model", "Model", 200),
+            ("arch", "Architektura", 115), ("origin", "Pochodzenie", 290),
+            ("quality", "Jakość (mAP50–95)", 145), ("prov", "Historia", 170),
         ):
             self._column_titles[key] = title
             self.tree.heading(
@@ -297,11 +344,17 @@ class ParticipantSelectionDialog:
             self.tree.column(
                 key,
                 width=width,
+                minwidth=width,
+                stretch=key in {"model", "origin"},
                 anchor=tk.CENTER if key == "sel" else tk.W,
             )
         self.tree.grid(row=0, column=0, sticky="nsew")
-        ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree.yview).grid(row=0, column=1, sticky="ns")
-        self.tree.bind("<Double-1>", lambda _e: self._toggle(), add="+")
+        vertical = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree.yview)
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=self.tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.tree.bind("<space>", lambda _event: (self._toggle(), "break")[1], add="+")
         self.tree.bind(
             "<Button-1>",
             self._toggle_participation_cell,
@@ -312,8 +365,10 @@ class ParticipantSelectionDialog:
             self._update_selection_status,
             add="+",
         )
+        self.profile = ParticipantProfilePanel(root, palette=self.palette)
+        self.profile.frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         registry_actions = ttk.Frame(root)
-        registry_actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        registry_actions.grid(row=5, column=0, sticky="ew", pady=(10, 0))
         registry_actions.columnconfigure(3, weight=1)
         ttk.Button(
             registry_actions,
@@ -336,7 +391,7 @@ class ParticipantSelectionDialog:
         ).grid(row=0, column=3, sticky="e", padx=(12, 0))
 
         actions = ttk.Frame(root)
-        actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        actions.grid(row=6, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(actions, text="Zaznacz / odznacz", command=self._toggle).pack(side=tk.LEFT)
         ttk.Button(actions, text="Wyczyść", command=self._clear).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(actions, text="Anuluj", command=self._cancel).pack(side=tk.RIGHT)
@@ -344,7 +399,7 @@ class ParticipantSelectionDialog:
 
     def _replace_models(self, models, *, select_model_id=""):
         self.models = list(models or [])
-        available = {item.model_id for item in self.models}
+        available = {item.model_id for item in self.models if participant_eligible(item)}
         self.selected.intersection_update(available)
         if select_model_id and select_model_id in available:
             self.selected.add(select_model_id)
@@ -443,6 +498,7 @@ class ParticipantSelectionDialog:
 
     def _update_selection_status(self, _event=None):
         rows = tuple(self.tree.selection())
+        self.profile.show([item for item in self.models if item.model_id in rows], self.models)
         if not rows:
             self.registry_status.set(
                 f"Uczestnicy: {len(self.selected)} / {len(self.models)}"
@@ -472,10 +528,12 @@ class ParticipantSelectionDialog:
         if region != "cell" or column != "#1" or not row:
             return None
 
-        if row in self.selected:
-            self.selected.remove(row)
-        else:
-            self.selected.add(row)
+        eligible = any(item.model_id == row and participant_eligible(item) for item in self.models)
+        if eligible:
+            if row in self.selected:
+                self.selected.remove(row)
+            else:
+                self.selected.add(row)
 
         self._populate()
         if self.tree.exists(row):
@@ -488,20 +546,28 @@ class ParticipantSelectionDialog:
     def _sorted_models(self):
         if not getattr(self, "_sort_column", ""):
             return list(self.models)
-        return sorted(
-            self.models,
-            key=lambda item: participant_model_sort_key(
-                item,
-                self._sort_column,
-                self.selected,
-            ),
-            reverse=bool(getattr(self, "_sort_reverse", False)),
-        )
+        column = self._sort_column
+        def missing(item):
+            if column == "quality":
+                return quality_metric(item)[1] is None
+            if column == "pose_quality":
+                return metric_value(getattr(item, "pose_map50_95", None)) is None
+            if column == "finished":
+                return training_date_sort_value(getattr(item, "training_finished_at", "")) is None
+            return False
+        present = [item for item in self.models if not missing(item)]
+        absent = [item for item in self.models if missing(item)]
+        return sorted(present, key=lambda item: participant_model_sort_key(item, column, self.selected),
+                      reverse=bool(getattr(self, "_sort_reverse", False))) + absent
 
     def _refresh_sort_headings(self):
         titles = getattr(self, "_column_titles", {})
         active = getattr(self, "_sort_column", "")
         reverse = bool(getattr(self, "_sort_reverse", False))
+        if active in {"run", "dataset"}:
+            active = "origin"
+        elif active == "pose_quality":
+            active = "quality"
         for key, title in titles.items():
             suffix = ""
             if key == active:
@@ -513,6 +579,10 @@ class ParticipantSelectionDialog:
             )
 
     def _sort_models(self, column):
+        column = "run" if column == "origin" else column
+        for label, field in self._sort_fields.items():
+            if field == column:
+                self.sort_var.set(label)
         rows = tuple(self.tree.selection())
         focus = str(self.tree.focus() or "")
 
@@ -546,9 +616,11 @@ class ParticipantSelectionDialog:
             self.tree.insert(
                 "", tk.END, iid=item.model_id,
                 values=(
-                    "☑" if item.model_id in self.selected else "☐",
-                    item.model_id, item.family or "-", item.scale or "-",
-                    item.run_id or "-", training_history_label(item.provenance_status),
+                    ("☑" if item.model_id in self.selected else "☐") if participant_eligible(item) else "—",
+                    short_identifier(item.model_id, limit=27), architecture_label(item),
+                    f"{short_identifier(item.run_id) or '—'}\n{short_identifier(item.dataset_id) or '—'}",
+                    f"{quality_metric(item)[0]} {format_metric(quality_metric(item)[1])}",
+                    provenance_badge(item)[0],
                 ),
             )
         self.registry_status.set(
@@ -558,7 +630,10 @@ class ParticipantSelectionDialog:
 
     def _toggle(self):
         rows = tuple(self.tree.selection())
+        eligible = {item.model_id for item in self.models if participant_eligible(item)}
         for iid in rows:
+            if iid not in eligible:
+                continue
             if iid in self.selected:
                 self.selected.remove(iid)
             else:
@@ -577,7 +652,8 @@ class ParticipantSelectionDialog:
         self._update_selection_status()
 
     def _accept(self):
-        self.result = tuple(item.model_id for item in self.models if item.model_id in self.selected)
+        self.result = tuple(item.model_id for item in self.models
+                            if item.model_id in self.selected and participant_eligible(item))
         self._close()
 
     def _cancel(self):
@@ -585,6 +661,7 @@ class ParticipantSelectionDialog:
         self._close()
 
     def _close(self):
+        hide_simple_tooltip(self.profile)
         try:
             self.window.grab_release()
         except Exception:

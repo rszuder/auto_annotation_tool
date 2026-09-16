@@ -20,8 +20,8 @@ class ParticipantPoolAuditTests(unittest.TestCase):
         self.assertEqual(common_status([STATUS_CLEAN, STATUS_CLEAN]), STATUS_CLEAN)
 
     def test_participant_fingerprint_is_order_independent(self):
-        a = ParticipantModel("M1", "a"*64, "R1", "plate", "yolo26", "n", "complete")
-        b = ParticipantModel("M2", "b"*64, "R2", "plate", "yolo26", "s", "complete")
+        a = ParticipantModel("M1", "a"*64, "R1", "D1", "plate", "yolo26", "n", "complete")
+        b = ParticipantModel("M2", "b"*64, "R2", "D2", "plate", "yolo26", "s", "complete")
         self.assertEqual(participant_fingerprint([a, b]), participant_fingerprint([b, a]))
         self.assertNotEqual(participant_fingerprint([a]), participant_fingerprint([a, b]))
 

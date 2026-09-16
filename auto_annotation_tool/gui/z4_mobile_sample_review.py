@@ -5,6 +5,8 @@ import json
 import queue
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from .notebook_icons import notebook_tab_icon
+
 import tkinter as tk
 from tkinter import filedialog, ttk
 
@@ -128,7 +130,7 @@ class MobileSampleReviewWindow:
         review = tk.Frame(tabs, bg=self.bg)
         review.columnconfigure(1, weight=1)
         review.rowconfigure(0, weight=1)
-        tabs.add(review, text="Weryfikacja")
+        tabs.add(review, text="Weryfikacja", **notebook_tab_icon(tabs, "checklist"))
         left = tk.Frame(review, bg=self.bg)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         left.rowconfigure(1, weight=1)
@@ -211,13 +213,13 @@ class MobileSampleReviewWindow:
         summary = tk.Frame(tabs, bg=self.bg)
         summary.rowconfigure(0, weight=1)
         summary.columnconfigure(0, weight=1)
-        tabs.add(summary, text="Statystyki")
+        tabs.add(summary, text="Statystyki", **notebook_tab_icon(tabs, "ranking"))
         frame, self.stats_tree = self._table(summary, ("Zakres", "Miara", "Wynik"), (150, 480, 150), height=20)
         frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         details = tk.Frame(tabs, bg=self.bg)
         details.rowconfigure(1, weight=1)
         details.columnconfigure(0, weight=1)
-        tabs.add(details, text="Sesja i modele")
+        tabs.add(details, text="Sesja i modele", **notebook_tab_icon(tabs, "training"))
         reviewer = tk.Frame(details, bg=self.bg)
         reviewer.grid(row=0, column=0, sticky="ew", padx=8, pady=8)
         self._label(reviewer, "Osoba weryfikująca (opcjonalny identyfikator)").grid(row=0, column=0, padx=5)

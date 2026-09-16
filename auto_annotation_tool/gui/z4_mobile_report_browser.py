@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .notebook_icons import notebook_tab_icon
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -1378,7 +1380,7 @@ class MobileReportBrowser:
             height=17,
         )
         self.summary_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(summary, text="Podsumowanie")
+        self.notebook.add(summary, text="Podsumowanie", **notebook_tab_icon(self.notebook, "checklist"))
 
         comparison = tab_frame()
         self.comparison_table = _WrappedLabelTable(
@@ -1390,7 +1392,7 @@ class MobileReportBrowser:
             height=17,
         )
         self.comparison_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(comparison, text="Porównywalność")
+        self.notebook.add(comparison, text="Porównywalność", **notebook_tab_icon(self.notebook, "compare"))
 
         config = tab_frame()
         self.config_table = _WrappedLabelTable(
@@ -1402,7 +1404,7 @@ class MobileReportBrowser:
             height=17,
         )
         self.config_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(config, text="Konfiguracja")
+        self.notebook.add(config, text="Konfiguracja", **notebook_tab_icon(self.notebook, "settings"))
 
         latency = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
         latency.grid_columnconfigure(0, weight=1)
@@ -1419,7 +1421,7 @@ class MobileReportBrowser:
             height=11,
         )
         self.latency_table.shell.grid(row=1, column=0, sticky="nsew")
-        self.notebook.add(latency, text="Opóźnienia")
+        self.notebook.add(latency, text="Opóźnienia", **notebook_tab_icon(self.notebook, "history"))
 
         artifacts = tab_frame()
         self.artifacts_table = _WrappedLabelTable(
@@ -1431,7 +1433,7 @@ class MobileReportBrowser:
             height=17,
         )
         self.artifacts_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(artifacts, text="Artefakty")
+        self.notebook.add(artifacts, text="Artefakty", **notebook_tab_icon(self.notebook, "dataset"))
 
         quality = tab_frame()
         self.quality_table = _WrappedLabelTable(
@@ -1443,7 +1445,7 @@ class MobileReportBrowser:
             height=17,
         )
         self.quality_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(quality, text="Jakość")
+        self.notebook.add(quality, text="Jakość", **notebook_tab_icon(self.notebook, "ranking"))
 
         diagnostics = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
         diagnostics.grid_columnconfigure(0, weight=1)
@@ -1472,7 +1474,7 @@ class MobileReportBrowser:
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.grid(row=1, column=0, sticky="nsew")
         log_scroll.grid(row=1, column=1, sticky="ns")
-        self.notebook.add(diagnostics, text="Diagnostyka")
+        self.notebook.add(diagnostics, text="Diagnostyka", **notebook_tab_icon(self.notebook, "training"))
 
         crops = tab_frame()
         self.crops_table = _TreeTable(
@@ -1484,7 +1486,7 @@ class MobileReportBrowser:
             height=17,
         )
         self.crops_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(crops, text="Cropy")
+        self.notebook.add(crops, text="Cropy", **notebook_tab_icon(self.notebook, "crop"))
 
         raw = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
         raw.grid_columnconfigure(0, weight=1)
@@ -1504,7 +1506,7 @@ class MobileReportBrowser:
         self.raw_text.grid(row=0, column=0, sticky="nsew")
         raw_scroll_y.grid(row=0, column=1, sticky="ns")
         raw_scroll_x.grid(row=1, column=0, sticky="ew")
-        self.notebook.add(raw, text="Surowe dane")
+        self.notebook.add(raw, text="Surowe dane", **notebook_tab_icon(self.notebook, "code"))
 
     def _set_status(self, text: str, tone: str = "info") -> None:
         colors = {"info": self.muted, "success": self.success, "warning": self.warning, "error": self.error}

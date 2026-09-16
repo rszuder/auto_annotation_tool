@@ -27,6 +27,7 @@ from .free_mode_assistant import (
     FreeModeAssistantOverlay,
     get_mobile_export_assistant_context,
 )
+from .notebook_icons import MAIN_TAB_ICONS, notebook_tab_icon
 from .lazy_notebook_tab import _LazyNotebookTab
 from .app_delegates import bind_app_delegates
 from .app_theme_runtime import bind_app_theme_runtime
@@ -955,11 +956,16 @@ class AutoAnnotationApp:
         }
         return labels.get(tab_key, tab_key)
 
+    def get_main_tab_options(self, tab_key: str) -> dict:
+        options = {"text": self.get_main_tab_label(tab_key)}
+        if tab_key in MAIN_TAB_ICONS:
+            options.update(notebook_tab_icon(self.notebook, MAIN_TAB_ICONS[tab_key]))
+        return options
+
     def refresh_main_tab_labels(self, active_tab_key: str = None):
         for key, tab in self.tabs.items():
             try:
-                label = self.get_main_tab_label(key)
-                self.notebook.tab(str(tab.frame), text=label)
+                self.notebook.tab(str(tab.frame), **self.get_main_tab_options(key))
             except Exception:
                 pass
 
@@ -1022,7 +1028,7 @@ class AutoAnnotationApp:
     def _add_lazy_tab(self, tab_key: str):
         placeholder = _LazyNotebookTab(self, tab_key)
         self.tabs[tab_key] = placeholder
-        self.notebook.add(placeholder.frame, text=self.get_main_tab_label(tab_key))
+        self.notebook.add(placeholder.frame, **self.get_main_tab_options(tab_key))
         return placeholder
 
     def _apply_theme_to_single_tab(self, tab):
@@ -1111,12 +1117,12 @@ class AutoAnnotationApp:
 
             real_widget = str(real_tab.frame)
             try:
-                self.notebook.insert(tab_index, real_tab.frame, text=self.get_main_tab_label(tab_key), state="hidden")
+                self.notebook.insert(tab_index, real_tab.frame, **self.get_main_tab_options(tab_key), state="hidden")
             except Exception:
                 try:
-                    self.notebook.insert(tab_index, real_tab.frame, text=self.get_main_tab_label(tab_key))
+                    self.notebook.insert(tab_index, real_tab.frame, **self.get_main_tab_options(tab_key))
                 except Exception:
-                    self.notebook.add(real_tab.frame, text=self.get_main_tab_label(tab_key))
+                    self.notebook.add(real_tab.frame, **self.get_main_tab_options(tab_key))
                 try:
                     self.notebook.hide(real_widget)
                 except Exception:
@@ -1302,7 +1308,7 @@ class AutoAnnotationApp:
             try:
                 _progress(56, "Ładowanie zakładki Z1...")
                 self.tabs['campaign'] = CampaignTab(self.notebook, self)
-                self.notebook.add(self.tabs['campaign'].frame, text=self.get_main_tab_label("campaign"))
+                self.notebook.add(self.tabs['campaign'].frame, **self.get_main_tab_options("campaign"))
 
             except Exception as e:
                 logger.error(f"Nie udało się załadować zakładki Kampanii: {e}")

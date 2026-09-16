@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .notebook_icons import notebook_tab_icon
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG
 from .z4_campaign_flow import return_to_campaign_from_step4
@@ -1840,7 +1841,7 @@ def refresh_step4_analysis_tab_visibility(host: "TrainingTab"):
     if ranking_enabled:
         if not getattr(host, "_step4_ranking_tab_visible", False):
             try:
-                host.right_nb.add(host.ranking_tab, text="Ranking")
+                host.right_nb.add(host.ranking_tab, text="Ranking", **notebook_tab_icon(host.right_nb, "ranking"))
             except Exception:
                 try:
                     host.right_nb.insert("end", host.ranking_tab, text="Ranking")

@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 
 from ..config import CONFIG, logger
+from .notebook_icons import notebook_tab_icon
 from ..icons import IconManager
 from ..validators import (
     validate_yolo_dataset, validate_model_file, 
@@ -38,7 +39,7 @@ class ValidationTab:
         
         # --- Walidacja datasetu YOLO ---
         ds_frame = ttk.Frame(notebook)
-        notebook.add(ds_frame, text="Dataset YOLO (Folder)")
+        notebook.add(ds_frame, text="Dataset YOLO (Folder)", **notebook_tab_icon(notebook, "dataset"))
         
         input_ds_frame = ttk.Frame(ds_frame)
         input_ds_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -62,7 +63,7 @@ class ValidationTab:
         
         # --- Walidacja modelu ---
         model_frame = ttk.Frame(notebook)
-        notebook.add(model_frame, text="Model YOLO (.pt)")
+        notebook.add(model_frame, text="Model YOLO (.pt)", **notebook_tab_icon(notebook, "training"))
         
         input_mod_frame = ttk.Frame(model_frame)
         input_mod_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -85,7 +86,7 @@ class ValidationTab:
         
         # --- Walidacja CVAT XML ---
         cvat_frame = ttk.Frame(notebook)
-        notebook.add(cvat_frame, text="CVAT XML (Anotacje)")
+        notebook.add(cvat_frame, text="CVAT XML (Anotacje)", **notebook_tab_icon(notebook, "annotation"))
         
         input_cvat_frame = ttk.Frame(cvat_frame)
         input_cvat_frame.pack(fill=tk.X, padx=10, pady=5)

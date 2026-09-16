@@ -109,8 +109,8 @@ class PZ3DialogInteractionTests(unittest.TestCase):
 
     def test_model_checkbox_selection_and_sort_preserve_membership(self):
         models = [
-            ParticipantModel("M2", "b" * 64, "R2", "plate", "YOLO26", "s", "known"),
-            ParticipantModel("M1", "a" * 64, "R1", "plate", "YOLO26", "n", "complete"),
+            ParticipantModel("M2", "b" * 64, "R2", "DS-PLATE-002", "plate", "YOLO26", "s", "known"),
+            ParticipantModel("M1", "a" * 64, "R1", "DS-PLATE-001", "plate", "YOLO26", "n", "complete"),
         ]
         refresh = Mock(return_value=(models, "Lista odświeżona"))
         dialog = ParticipantSelectionDialog(
@@ -130,6 +130,31 @@ class PZ3DialogInteractionTests(unittest.TestCase):
         dialog._refresh_registry()
         refresh.assert_called_once()
         dialog._cancel()
+
+    def test_participant_dialog_shows_compact_origin_and_registry_values(self):
+        from pz3_test_support import PZ3Fixture
+        fixture = PZ3Fixture(Path(self.temp.name) / "dataset_dialog")
+        with fixture.repo.database.transaction() as db:
+            db.execute("UPDATE datasets SET dataset_id='DS-PLATE-001' WHERE dataset_id='D1'")
+            db.execute("UPDATE datasets SET dataset_id='DS-PLATE-002' WHERE dataset_id='D2'")
+            db.execute("UPDATE models SET provenance_status='known' WHERE model_id='M2'")
+        models = [p for p in fixture.audit.list_participant_catalog("plate") if p.model_id in {"M1", "M2"}]
+        dialog = ParticipantSelectionDialog(self.root, models=models, selected_ids={"M1", "M2"}, track_name="Dataset")
+        self.addCleanup(dialog._cancel)
+        dialog.window.update()
+        self.assertEqual(tuple(dialog.tree["columns"]), ("sel", "model", "arch", "origin", "quality", "prov"))
+        self.assertIn("DS-PLATE-001", dialog.tree.set("M1", "origin"))
+        self.assertIn("DS-PLATE-002", dialog.tree.set("M2", "origin"))
+        self.assertEqual(dialog.tree.set("M1", "prov"), "● Pełna")
+        self.assertEqual(dialog.tree.set("M2", "prov"), "● Potwierdzona ręcznie")
+        dialog._sort_models("dataset")
+        self.assertEqual(dialog.tree.get_children(), ("M1", "M2"))
+        dialog._sort_models("dataset")
+        self.assertEqual(dialog.tree.get_children(), ("M2", "M1"))
+        self.assertEqual(dialog.selected, {"M1", "M2"})
+        dialog.tree.selection_set("M1")
+        dialog.window.update()
+        self.assertEqual(dialog.profile.values["dataset"].get(), "DS-PLATE-001")
 
 
 if __name__ == "__main__":

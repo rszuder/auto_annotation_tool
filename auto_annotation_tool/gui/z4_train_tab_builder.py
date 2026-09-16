@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+from .notebook_icons import notebook_tab_icon
 from ..campaign_manager import CAMPAIGN
 from ..config import (
     CONFIG,
@@ -1445,8 +1446,8 @@ def _build_train_tab(self):
 
     self.hist_tab = ttk.Frame(self.right_nb)
     self.ranking_tab = ttk.Frame(self.right_nb)
-    self.right_nb.add(self.hist_tab, text="Historia treningów")
-    self.right_nb.add(self.ranking_tab, text="Ranking")
+    self.right_nb.add(self.hist_tab, text="Historia treningów", **notebook_tab_icon(self.right_nb, "history"))
+    self.right_nb.add(self.ranking_tab, text="Ranking", **notebook_tab_icon(self.right_nb, "ranking"))
     self._step4_ranking_tab_visible = True
     self.right_nb.bind("<<NotebookTabChanged>>", self._sync_step4_analysis_nav_buttons)
 

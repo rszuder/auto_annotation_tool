@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from ..campaign_manager import CAMPAIGN
 from ..config import logger
+from .notebook_icons import notebook_tab_icon
 from .web_slim_scrollbar import blend_hex_colors
 from .z3_view_models import (
     Step3ExtractStepCardViewModel,
@@ -25,18 +26,18 @@ def create_step3_widgets(host: "CharacterAnnotationTab") -> None:
     host.main_nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=(0, 0))
 
     host.tab_extract = ttk.Frame(host.main_nb)
-    host.main_nb.add(host.tab_extract, text="[PZ1] Wyodrębnianie zaanotowanych tablic")
+    host.main_nb.add(host.tab_extract, text="[PZ1] Wyodrębnianie zaanotowanych tablic", **notebook_tab_icon(host.main_nb, "crop"))
     host._build_extraction_tab(host.tab_extract)
 
     host.tab_detect = ttk.Frame(host.main_nb)
-    host.main_nb.add(host.tab_detect, text="[PZ2] Wykrywanie znaków i analiza")
+    host.main_nb.add(host.tab_detect, text="[PZ2] Wykrywanie znaków i analiza", **notebook_tab_icon(host.main_nb, "characters"))
     host._build_lazy_subtab_placeholder(
         host.tab_detect,
         "PZ2 zostanie przygotowane przy pierwszym wejściu do wykrywania znaków.",
     )
 
     host.tab_dataset = ttk.Frame(host.main_nb)
-    host.main_nb.add(host.tab_dataset, text="[PZ3] Integracje i dataset (YOLO)")
+    host.main_nb.add(host.tab_dataset, text="[PZ3] Integracje i dataset (YOLO)", **notebook_tab_icon(host.main_nb, "dataset"))
     host._build_lazy_subtab_placeholder(
         host.tab_dataset,
         "PZ3 zostanie przygotowane przy pierwszym wejściu do eksportu datasetu znaków.",
