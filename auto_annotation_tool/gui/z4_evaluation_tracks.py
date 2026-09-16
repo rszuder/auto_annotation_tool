@@ -591,9 +591,33 @@ class EvaluationTracksPanel:
         )
 
     def select_experiment_sample_in_z2(self) -> None:
-        self.prepare_ground_truth_in_z2(sample_selection=True)
+        from .pz3_sample_route import enter_sample_selection
+        from ..registry.sample_selection import prepare_sample_selection
+        track_id = self._require_current_track()
+        if not track_id:
+            return
+        progress = None
+        try:
+            loader = getattr(self.app, "_ensure_tab_loaded", None)
+            annotation = loader("annotation", select=False) if callable(loader) else self.app.tabs.get("annotation")
+            if annotation is None or getattr(annotation, "is_processing", False):
+                raise EvaluationTrackError("Poczekaj na zakończenie bieżącej operacji Z2.")
+            if getattr(annotation, "_preview_dirty_images", None) and not annotation._save_preview_edits(interactive=True):
+                return
+            progress = BatchProgressDialog(self.parent, title="Przygotowanie wyboru próby")
+            context = progress.run(lambda update: prepare_sample_selection(self.service, track_id, progress=update))
+            progress.close()
+            progress = None
+            self.app.notebook.select(annotation.frame)
+            if enter_sample_selection(annotation, context):
+                self._set_status("Otwarto surowe obrazy w Z2. Wybierz próbę spacją lub z menu listy.")
+        except Exception as exc:
+            self._show_error("Nie udało się otworzyć wyboru próby", exc)
+        finally:
+            if progress is not None:
+                progress.close()
 
-    def prepare_ground_truth_in_z2(self, *, sample_selection=False) -> None:
+    def prepare_ground_truth_in_z2(self) -> None:
         from .pz3_gt_route import enter_experiment_gt_workspace
         from .experiment_gt_workflow import ExperimentGtEntryDecision
         from ..registry.experiment_gt_workspace import prepare_gt_workspace, working_gt_path
@@ -617,6 +641,9 @@ class EvaluationTracksPanel:
                 raise EvaluationTrackError("Edytor Z2 nie jest dostępny.")
             if getattr(annotation_tab, "is_processing", False):
                 raise EvaluationTrackError("Poczekaj na zakończenie bieżącej anotacji Z2.")
+            from .pz3_sample_route import sample_context
+            if sample_context(annotation_tab):
+                raise EvaluationTrackError("Zatwierdź albo anuluj wybór próby przed otwarciem GT.")
             if getattr(annotation_tab, "_preview_dirty_images", None):
                 if not annotation_tab._save_preview_edits(interactive=True):
                     return
@@ -630,11 +657,8 @@ class EvaluationTracksPanel:
                 )
                 if decision is None:
                     return
-            from ..registry.sample_selection import prepare_reviewed_sample
-            prepare = prepare_reviewed_sample if sample_selection else prepare_gt_workspace
-            progress = BatchProgressDialog(
-                self.parent, title="Przygotowanie próby i GT" if sample_selection else "Przygotowanie Ground Truth")
-            context = progress.run(lambda update: prepare(
+            progress = BatchProgressDialog(self.parent, title="Przygotowanie Ground Truth")
+            context = progress.run(lambda update: prepare_gt_workspace(
                 self.service, track_id, mode=decision.mode, progress=update,
             ))
             progress.close()
@@ -644,9 +668,7 @@ class EvaluationTracksPanel:
             self.app.notebook.select(annotation_tab.frame)
             if not enter_experiment_gt_workspace(annotation_tab, context):
                 return
-            self._set_status(
-                "Otwarto dobór próby i GT w Z2. Zatwierdzaj zdjęcia spacją po ręcznej kontroli."
-                if sample_selection else "Otwarto roboczy Ground Truth eksperymentu w Z2.")
+            self._set_status("Otwarto roboczy Ground Truth eksperymentu w Z2.")
         except Exception as exc:
             self._show_error("Nie udało się otworzyć Ground Truth", exc)
         finally:

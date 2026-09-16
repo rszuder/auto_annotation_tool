@@ -243,6 +243,11 @@ def _on_preview_canvas_leave(self, event=None):
 
 
 def _update_preview_toolbar_state(self, *, refresh_summary: bool = True):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import refresh_sample_ui
+        refresh_sample_ui(self)
+        return
     total = len(self.current_annotations)
     has_selection = self.current_preview_index is not None and total > 0
     has_image = has_selection and getattr(self.preview_canvas, "original_image", None) is not None
@@ -766,6 +771,11 @@ def _schedule_preview_selection_render(
 
 
 def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        self._preview_fullscreen_toggle_bbox = None
+        self._preview_super_correction_badge_bbox = None
+        return
     ann = self._get_preview_annotation()
     if ann is None or canvas.original_image is None:
         self._preview_super_correction_badge_bbox = None
@@ -2841,6 +2851,9 @@ def _save_preview_edits(self, *args, **kwargs):
 
 
 def _delete_current_preview_image_hard(self, event=None):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return "break"
     if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
             and self._experiment_gt_context.get("source") == "pz3"):
         self._update_preview_edit_status(
@@ -2964,6 +2977,9 @@ def _move_current_preview_image_to_stage(self):
 
 
 def _on_preview_canvas_right_click(self, event):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return "break"
     canvas = getattr(self, "preview_canvas", None)
     if canvas is None:
         return None
@@ -3025,6 +3041,9 @@ def _on_preview_canvas_right_click(self, event):
 
 
 def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return False
     press_started = time.perf_counter()
     phase_at = press_started
     phase_ms: dict[str, float] = {}

@@ -149,6 +149,10 @@ YOLO = None
 
 
 def _refresh_free_mode_workflow_ui(self):
+    from .pz3_sample_route import sample_context, show_sample_workspace
+    if sample_context(self):
+        show_sample_workspace(self)
+        return
     try:
         apply_pending_experiment_gt_entry(self)
     except Exception:

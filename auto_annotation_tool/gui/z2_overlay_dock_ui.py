@@ -827,14 +827,14 @@ def render_preview_image_status_overlay(owner, *, force_render: bool = False) ->
     success = str(palette.get("success", "#2fbf71"))
     error = str(palette.get("error", "#c7422f"))
 
-    approved = bool(owner._preview_annotation_is_explicitly_approved(ann))
+    from .pz3_sample_route import sample_context, sample_selected, sample_badge_text
+    reviewing_sample = bool(sample_context(owner))
+    approved = sample_selected(owner, ann) if reviewing_sample else bool(owner._preview_annotation_is_explicitly_approved(ann))
     status_fill = success if approved else error
     status_text = "#111111" if owner._legend_color_is_light(status_fill) else "#ffffff"
     outline = blend_hex_colors(status_fill, panel_fill, 0.08)
     filename = str(getattr(ann, "filename", "") or "").strip()
     label_text = "ZDJĘCIE\nZATWIERDZONE [OK]" if approved else "ZDJĘCIE\nNIEZATWIERDZONE"
-    from .pz3_sample_route import sample_context, sample_badge_text
-    reviewing_sample = bool(sample_context(owner))
     if reviewing_sample:
         label_text = sample_badge_text(owner, approved)
 

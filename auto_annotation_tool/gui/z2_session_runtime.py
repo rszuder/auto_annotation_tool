@@ -347,6 +347,9 @@ def _normalize_free_mode_screen_value(screen: str | None = None) -> str:
 
 
 def _is_free_mode_session_context(self) -> bool:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return True
     if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
             and self._experiment_gt_context.get("source") == "pz3"):
         return True
@@ -2346,6 +2349,9 @@ def _on_free_mode_session_var_changed(self, *_args):
 
 
 def _queue_free_mode_session_save(self, *, include_preview_approved: bool = True, delay_ms: int = 350):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     if (isinstance(getattr(self, "_experiment_gt_context", None), dict)
             and self._experiment_gt_context.get("source") == "pz3"):
         return
@@ -2633,6 +2639,9 @@ def _schedule_preview_resume_persist(
     include_preview_approved: bool = False,
     delay_ms: int = 120,
 ) -> None:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     self._cancel_preview_resume_persist()
 
     def _flush():
@@ -2668,6 +2677,9 @@ def _invalidate_preview_runtime_caches(self) -> None:
 
 
 def flush_free_mode_session_state(self):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     flush_started_at = time.perf_counter()
     pending = getattr(self, "_free_mode_session_save_after_id", None)
     if pending:

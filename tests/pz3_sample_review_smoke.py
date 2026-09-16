@@ -1,4 +1,4 @@
-"""Final hardening smoke: real preannotation; controlled ranking predictions; temporary Workspace."""
+"""RAW sample selection first; real preannotation only on the final sample."""
 from contextlib import ExitStack
 from pathlib import Path
 import sys
@@ -290,103 +290,151 @@ def main():
                 app.notebook.select(training.frame)
                 training.main_nb.select(training.tab_tracks)
                 settle()
-                with patch("auto_annotation_tool.gui.z4_evaluation_tracks.show_experiment_gt_entry",
-                           return_value=ExperimentGtEntryDecision("manual", "unspecified")), \
-                     patch.object(panel, "_show_error", side_effect=lambda title, exc: (_ for _ in ()).throw(exc)):
-                    panel.btn_sample_selection.invoke()
-                settle()
-                assert annotation._experiment_gt_context["track_id"] == fixture.track
-                assert annotation.free_mode_screen_var.get() == "manual_review"
-                assert len(annotation.current_annotations) == 20
-                assert annotation._experiment_gt_return_button.winfo_ismapped()
-                assert annotation.preview_host.winfo_ismapped()
-                capture_window(root, "output/pz3_sample_gt_editor.png")
-
-                snapshot, snapshot_sha = preannotation_with_project_model(annotation, root, fixture, settle)
-
-                xml = Path(annotation._experiment_gt_context["annotation_path"])
-                tree = ET.parse(xml)
-                for node in tree.getroot().findall("image"):
-                    ET.SubElement(node, "polygon", label="plate", points="10,10;80,10;80,40;10,40")
-                tree.write(xml, encoding="utf-8", xml_declaration=True)
-                assert annotation._open_existing_run_for_manual_review(
-                    run_dir=xml.parent, allow_fallback=False, show_dialog=False, entry_mode="continue")
-                from auto_annotation_tool.gui.pz3_sample_route import approved_sample_names, sample_counter
-                from auto_annotation_tool.gui.pz3_gt_route import refresh_experiment_gt_ui
-                refresh_experiment_gt_ui(annotation)
-                assert not approved_sample_names(annotation), "AUTO must not approve the sample"
-                assert len(annotation.current_annotations) == 20  # Includes images with no AUTO detections.
+                from auto_annotation_tool.gui.pz3_sample_route import (
+                    sample_context, selected_sample_names, sample_counter, cancel_sample_review)
                 original_bytes = {path: path.read_bytes() for path in images}
-                def select(index):
+                raw_approval_calls = []
+                original_approval_check = annotation._preview_annotation_can_be_approved_for_export
+                def approval_check(ann):
+                    if sample_context(annotation):
+                        raw_approval_calls.append(str(getattr(ann, "filename", "")))
+                    return original_approval_check(ann)
+                with patch("auto_annotation_tool.registry.experiment_gt_workspace.prepare_gt_workspace",
+                           side_effect=AssertionError("GT must not be prepared during RAW selection")) as prepare_gt, \
+                     patch("auto_annotation_tool.annotators.runtime_factory.create_plate_annotator",
+                           side_effect=AssertionError("No inference during RAW selection")) as inference, \
+                     patch.object(annotation, "_preview_annotation_can_be_approved_for_export",
+                                  side_effect=approval_check):
+                    panel.btn_sample_selection.invoke()
+                    for _ in range(3):
+                        settle()
+                    assert sample_context(annotation)["track_id"] == fixture.track, errors
+                    assert not annotation._experiment_gt_context
+                    assert len(annotation.current_annotations) == 20
+                    assert all(not ann.detections for ann in annotation.current_annotations)
+                    assert annotation.current_annotation_xml_path is None
+                    assert not list(fixture.workspace.rglob("annotations.xml"))
+                    assert not annotation.preview_tools.winfo_ismapped()
+                    def select(index):
+                        annotation.preview_listbox.selection_clear(0, tk.END)
+                        annotation.preview_listbox.selection_set(index)
+                        annotation.preview_listbox.activate(index)
+                        annotation.preview_listbox.event_generate("<<ListboxSelect>>")
+                        annotation.preview_listbox.focus_force()
+                        settle()
+                        assert annotation.current_preview_index == index
+                    select(0)
+                    annotation.preview_listbox.event_generate("<KeyPress-space>")
+                    annotation.preview_listbox.event_generate("<KeyRelease-space>")
+                    settle()
+                    assert len(selected_sample_names(annotation)) == 1, sample_counter(annotation)
                     annotation.preview_listbox.selection_clear(0, tk.END)
-                    annotation.preview_listbox.selection_set(index)
-                    annotation.preview_listbox.activate(index)
-                    annotation.preview_listbox.event_generate("<<ListboxSelect>>")
-                    annotation.preview_listbox.focus_force()
+                    annotation.preview_listbox.selection_set(1, 5)
+                    menu = annotation.preview_list_context_menu
+                    x, y, width, height = annotation.preview_listbox.bbox(3)
+                    annotation.preview_listbox.event_generate("<Button-3>", x=x + 15, y=y + height // 2)
                     settle()
-                    assert annotation.current_preview_index == index
-                select(0)
-                annotation.preview_listbox.event_generate("<KeyPress-space>")
-                annotation.preview_listbox.event_generate("<KeyRelease-space>")
-                settle()
-                assert len(approved_sample_names(annotation)) == 1, sample_counter(annotation)
-                annotation.preview_listbox.selection_clear(0, tk.END)
-                annotation.preview_listbox.selection_set(1, 4)
-                menu = annotation.preview_list_context_menu
-                approve_index = next(i for i in range(menu.index("end") + 1)
-                                     if menu.type(i) == "command"
-                                     and menu.entrycget(i, "label") == "Oznacz zaznaczone jako OK")
-                menu.invoke(approve_index)
-                settle()
-                assert len(approved_sample_names(annotation)) == 5, sample_counter(annotation)
-                select(9)
-                assert len(approved_sample_names(annotation)) == 5
-                capture_window(root, "output/pz3_sample_normal.png")
-                annotation._toggle_preview_fullscreen()
-                for _ in range(3):
+                    menu.invoke("Dodaj zaznaczone do próby")
+                    menu.unpost()
                     settle()
-                badge = annotation.preview_image_status_lbl
-                assert annotation._preview_fullscreen_active
-                assert badge.winfo_ismapped(), "Approval badge is hidden in fullscreen"
-                assert "5 / 20" in badge.cget("text"), badge.cget("text")
-                assert root.winfo_containing(badge.winfo_rootx() + badge.winfo_width() // 2,
-                                             badge.winfo_rooty() + badge.winfo_height() // 2) is badge
-                badge.event_generate("<Button-1>")
-                settle()
-                assert len(approved_sample_names(annotation)) == 6, sample_counter(annotation)
-                assert "6 / 20" in badge.cget("text"), badge.cget("text")
-                badge.event_generate("<Button-1>")
-                settle()
-                assert len(approved_sample_names(annotation)) == 5
-                annotation.preview_canvas.focus_force()
-                annotation.preview_canvas.event_generate("<KeyPress-space>")
-                annotation.preview_canvas.event_generate("<KeyRelease-space>")
-                settle()
-                assert len(approved_sample_names(annotation)) == 6, sample_counter(annotation)
-                capture_window(root, "output/pz3_sample_fullscreen.png")
-                expected_names = approved_sample_names(annotation)
-                print("REVIEW PASS: list Space, group menu approval, navigation, fullscreen mouse and Space; 6 / 20", flush=True)
-                annotation._preview_dirty_images = {ann.filename for ann in annotation.current_annotations}
-                with patch("tkinter.messagebox.askyesno", return_value=True):
-                    annotation._experiment_gt_return_button.invoke()
-                settle()
-                assert not errors, errors
-                assert fixture.service.get_track(fixture.track)["gt_relative_path"]
-                assert not annotation._experiment_gt_context
-                assert len(annotation.current_annotations) == 6
+                    assert len(selected_sample_names(annotation)) == 6, sample_counter(annotation)
+                    app._schedule_z2_main_tab_entry_refresh("annotation")
+                    settle()
+                    assert sample_context(annotation)
+                    assert not annotation._experiment_gt_context
+                    annotation._select_preview_index(9)
+                    settle()
+                    assert len(annotation.preview_listbox.curselection()) == 5
+                    assert len(selected_sample_names(annotation)) == 6
+                    annotation._sample_filter_var.set("W próbie")
+                    annotation._refresh_preview_list(preserve_selection=True, render_current=False)
+                    settle()
+                    assert annotation.preview_listbox.size() == 6
+                    assert "6 / 20" in sample_counter(annotation)
+                    annotation._sample_filter_var.set("Wszystkie")
+                    annotation._refresh_preview_list(preserve_selection=True, render_current=False)
+                    settle()
+                    select(9)
+                    capture_window(root, "output/pz3_raw_sample_normal.png")
+                    annotation._toggle_preview_fullscreen()
+                    for _ in range(3):
+                        settle()
+                    badge = annotation.preview_image_status_lbl
+                    assert annotation._preview_fullscreen_active
+                    assert badge.winfo_ismapped()
+                    assert "6 / 20" in badge.cget("text"), badge.cget("text")
+                    badge.event_generate("<Button-1>")
+                    settle()
+                    assert len(selected_sample_names(annotation)) == 7
+                    badge.event_generate("<Button-1>")
+                    settle()
+                    annotation.preview_canvas.focus_force()
+                    annotation.preview_canvas.event_generate("<KeyPress-space>")
+                    annotation.preview_canvas.event_generate("<KeyRelease-space>")
+                    settle()
+                    assert len(selected_sample_names(annotation)) == 7
+                    annotation.preview_canvas.event_generate("<KeyPress-space>")
+                    annotation.preview_canvas.event_generate("<KeyRelease-space>")
+                    settle()
+                    assert len(selected_sample_names(annotation)) == 6
+                    capture_window(root, "output/pz3_raw_sample_fullscreen.png")
+                    expected_names = selected_sample_names(annotation)
+                    assert not annotation._preview_approved_filenames
+                    assert all(not getattr(ann, "_approved_for_training", False)
+                               for ann in annotation.current_annotations)
+                    cancel_sample_review(annotation)
+                    settle()
+                    assert len(fixture.service.list_members(fixture.track)) == 20
+                    assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "CURRENT"
+                    panel.btn_sample_selection.invoke()
+                    for _ in range(3):
+                        settle()
+                    assert selected_sample_names(annotation) == expected_names
+                    with patch("tkinter.messagebox.askyesno", return_value=True):
+                        button(annotation._sample_bar, "Zatwierdź próbę i wróć do PZ3").invoke()
+                    settle()
+                    assert not errors, errors
+                    prepare_gt.assert_not_called()
+                    inference.assert_not_called()
+                assert not sample_context(annotation)
+                track = fixture.service.get_track(fixture.track)
+                assert track["gt_relative_path"] is None
+                assert track["gt_sha256"] is None
+                assert not list(fixture.workspace.rglob("annotations.xml"))
                 assert {r["original_name"] for r in fixture.service.list_members(fixture.track)} == expected_names
-                assert len(ET.parse(xml).getroot().findall("image")) == 6
                 assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "STALE"
-                assert str(panel.btn_verify["state"]) == "disabled"
+                assert str(panel.btn_prepare_z2["state"]) == "disabled"
                 for path, content in original_bytes.items():
                     assert path.read_bytes() == content
-                capture_window(root, "output/pz3_sample_draft.png")
-                track_root = fixture.service._track_root(fixture.service.get_track(fixture.track))
+                print("RAW PASS: 20 images, zero annotations, select 6; no GT or inference; audit STALE", flush=True)
+                print("RAW approval guard calls:", raw_approval_calls, flush=True)
+                assert not raw_approval_calls, raw_approval_calls
+                capture_window(root, "output/pz3_raw_sample_draft.png")
+                track_root = fixture.service._track_root(track)
                 final_paths = [track_root / row["track_relative_path"]
                                for row in fixture.service.list_members(fixture.track)]
                 final_report = fixture.audit.audit_paths(fixture.track, final_paths)
                 fixture.audit.record_ingested_report(fixture.track, final_report, final_paths)
                 panel.refresh_tracks(select_track_id=fixture.track)
+                with patch("auto_annotation_tool.gui.z4_evaluation_tracks.show_experiment_gt_entry",
+                           return_value=ExperimentGtEntryDecision("manual", "unspecified")):
+                    panel.btn_prepare_z2.invoke()
+                settle()
+                assert len(annotation.current_annotations) == 6
+                assert not sample_context(annotation)
+                snapshot, snapshot_sha = preannotation_with_project_model(annotation, root, fixture, settle)
+                xml = Path(annotation._experiment_gt_context["annotation_path"])
+                tree = ET.parse(xml)
+                assert len(tree.getroot().findall("image")) == 6
+                for node in tree.getroot().findall("image"):
+                    ET.SubElement(node, "polygon", label="plate", points="10,10;80,10;80,40;10,40")
+                tree.write(xml, encoding="utf-8", xml_declaration=True)
+                assert annotation._open_existing_run_for_manual_review(
+                    run_dir=xml.parent, allow_fallback=False, show_dialog=False, entry_mode="continue")
+                annotation._preview_dirty_images = {ann.filename for ann in annotation.current_annotations}
+                annotation._experiment_gt_return_button.invoke()
+                settle()
+                assert fixture.service.get_track(fixture.track)["gt_relative_path"]
                 with patch("auto_annotation_tool.gui.z4_evaluation_tracks.messagebox.askyesno", return_value=True):
                     panel.btn_verify.invoke()
                 assert fixture.service.get_track(fixture.track)["status"] == "VERIFIED"
@@ -430,7 +478,7 @@ def main():
                     assert {row["model_id"] for row in results} == {"M1", "M2"}, (results, errors)
                     assert set(invoked_models) == {fixture.workspace / "M1.pt", fixture.workspace / "M2.pt"}
                     assert not errors, errors
-                    Path("output/pz3_sample_smoke.json").write_text(
+                    Path("output/pz3_raw_sample_smoke.json").write_text(
                         json.dumps({"scope": "Real preannotation CPU; deterministic ranking predictions; synthetic GUI fixture, not thesis measurements",
                                     "real_checkpoints": [str(path) for path in real_models],
                                     "selected_names": sorted(expected_names), "candidate_count": 20, "selected_count": 6, "results": results}, ensure_ascii=False, indent=2, default=str),

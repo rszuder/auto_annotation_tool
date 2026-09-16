@@ -928,8 +928,6 @@ def _update_preview_approval_badge_fast(self, approved: bool) -> None:
             self._refresh_preview_canvas_light()
         except Exception:
             pass
-        from .pz3_sample_route import refresh_sample_ui
-        refresh_sample_ui(self)
     except Exception:
         pass
 
@@ -1223,6 +1221,9 @@ def _set_selected_preview_images_approved(
     refresh_export_sources: bool = True,
     schedule_followup_refresh: bool = False,
 ) -> None:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     approval_started = time.perf_counter()
     try:
         self._mark_preview_user_interaction(quiet_ms=1400)
@@ -1920,6 +1921,11 @@ def _rename_selected_preview_image_file(self):
         pass
 
 def _refresh_preview_workspace_visibility(self, *, manual_review_active: bool | None = None):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import show_sample_workspace
+        show_sample_workspace(self)
+        return
     if manual_review_active is None:
         has_existing_run = self._get_preferred_annotation_run_dir(require_xml=True) is not None
         manual_review_active = bool(self._manual_review_active and has_existing_run)
@@ -2658,6 +2664,11 @@ def _build_preview_list_summary_cache_key(self, annotations: list[ImageAnnotatio
 
 
 def _refresh_preview_list_summary(self, *, lightweight: bool = False):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import refresh_sample_ui
+        refresh_sample_ui(self)
+        return
     annotations = list(self.current_annotations or [])
     visible_entries = list(getattr(self, "_preview_list_display_indices", []) or [])
     visible_count = int(len(visible_entries))
@@ -3499,6 +3510,9 @@ def _save_preview_edits(
     refresh_workflow: bool = True,
     refresh_export_sources: bool = True,
 ):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return True
     save_started_at = time.perf_counter()
     export_elapsed_ms = 0.0
     manifest_elapsed_ms = 0.0

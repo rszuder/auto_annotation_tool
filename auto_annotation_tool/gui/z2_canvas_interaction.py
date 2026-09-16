@@ -745,6 +745,17 @@ def _event_has_control_modifier(event=None) -> bool:
         return False
 
 def _preview_shortcuts_enabled(self, event=None, allow_when_fullscreen: bool = False) -> bool:
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        key = str(getattr(event, "keysym", "")).lower()
+        widget = getattr(event, "widget", None)
+        if key not in {"space", "return", "escape", "q", "e", "left", "right", "up", "down", "home", "end", "a"}:
+            return False
+        if key == "a" and not (int(getattr(event, "state", 0) or 0) & 0x0004):
+            return False
+        if widget is not None and widget.winfo_class() in {"Entry", "TEntry", "Text", "TCombobox", "Spinbox"}:
+            return False
+        return True
     if allow_when_fullscreen and bool(getattr(self, "_preview_fullscreen_active", False)):
         return True
 
@@ -808,8 +819,9 @@ def _pane_has_child(pane, child) -> bool:
         return False
 
 def _sync_left_column_pane_layout(self, *, show_preview: bool, compact_layout: bool):
+    from .pz3_sample_route import sample_context
     context = getattr(self, "_experiment_gt_context", None)
-    if isinstance(context, dict) and context.get("source") == "pz3":
+    if sample_context(self) or (isinstance(context, dict) and context.get("source") == "pz3"):
         self.left_scroll_shell.grid_remove()
         self.main_left_frame.grid_rowconfigure(0, minsize=0, weight=0)
         self.main_left_frame.grid_rowconfigure(1, minsize=0, weight=1)
@@ -1234,6 +1246,9 @@ def _on_preview_toggle_image_approval_shortcut(self, event=None):
         return None
     if self._preview_shortcut_is_duplicate(event, "preview-toggle-image-approval"):
         return "break"
+    from .pz3_sample_route import sample_context, toggle_sample_badge
+    if sample_context(self):
+        return toggle_sample_badge(self, event)
     if self._preview_draw_mode:
         self._update_preview_edit_status(
             "Dokończ albo anuluj rysowanie nowej ramki przed zmianą statusu OK spacją."
@@ -1547,6 +1562,11 @@ def _place_preview_legend_overlay(
     height_override: float | None = None,
     refresh: bool = True,
 ):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        from .pz3_sample_route import _hide
+        _hide(self, "preview_hint_frame")
+        return
     if not bool(getattr(self, "_startup_ui_ready", False)):
         return
     preview_overlay = getattr(self, "preview_hint_frame", None)
@@ -1936,6 +1956,9 @@ def _set_preview_fullscreen(self, active: bool):
         pass
 
 def _toggle_preview_draw_mode(self):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     ann = self._get_preview_annotation()
     if ann is None or self.preview_canvas.original_image is None:
         return
@@ -1976,6 +1999,9 @@ def _toggle_preview_draw_mode(self):
         pass
 
 def _toggle_preview_delete_mode(self):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     ann = self._get_preview_annotation()
     if ann is None or self.preview_canvas.original_image is None:
         return
@@ -2367,6 +2393,9 @@ def _get_preview_canvas_cursor(self) -> str:
     return "arrow"
 
 def _undo_preview_edit(self, event=None):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     image_key = self._get_preview_history_image_key()
     undo_stack = self._get_preview_history_stack("undo", image_key, create=False)
     if not image_key or not isinstance(undo_stack, list) or not undo_stack:
@@ -2386,6 +2415,9 @@ def _undo_preview_edit(self, event=None):
     return "break"
 
 def _redo_preview_edit(self, event=None):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     image_key = self._get_preview_history_image_key()
     redo_stack = self._get_preview_history_stack("redo", image_key, create=False)
     if not image_key or not isinstance(redo_stack, list) or not redo_stack:

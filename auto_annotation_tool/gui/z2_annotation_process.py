@@ -2464,6 +2464,10 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             logger.debug(f"Nie udało się wymusić prawego panelu bramki grafu Z2: {exc}")
 
 def _start_annotation(self):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        self._update_preview_edit_status("Najpierw zatwierdź próbę i ponów audyt. Preanotacja jest dostępna w etapie GT.")
+        return
     route = self._get_workflow_route()
     manual_entry_mode = self._get_manual_entry_mode()
     try:

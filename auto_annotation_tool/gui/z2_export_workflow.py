@@ -93,6 +93,9 @@ YOLO = None
 
 
 def _start_plate_dataset_export(self):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     if not self._ensure_preview_edits_saved("eksport datasetu tablic"):
         return
 
@@ -693,6 +696,9 @@ def _prompt_z2_export_choice(self, state: dict) -> str | None:
     return result.get("choice")
 
 def _start_plate_annotation_package_export(self):
+    from .pz3_sample_route import sample_context
+    if sample_context(self):
+        return
     if not self._is_free_mode_session_context():
         return
     if not self._ensure_preview_edits_saved("eksport anotacji tablic"):

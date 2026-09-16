@@ -98,9 +98,6 @@ def finish_experiment_gt_run(host, run_dir):
 
 
 def return_gt_to_pz3(host):
-    from .pz3_sample_route import sample_context, return_sample_to_pz3
-    if sample_context(host):
-        return return_sample_to_pz3(host)
     context = experiment_context(host) or {}
     if not context or getattr(host, "is_processing", False):
         return
@@ -168,5 +165,3 @@ def refresh_experiment_gt_ui(host):
         widget = getattr(host, attr, None)
         if widget is not None:
             widget.configure(text="Oznacz wszystkie tablice i narożniki. Zapisz GT w PZ3 po pełnym ręcznym przeglądzie puli.")
-    from .pz3_sample_route import refresh_sample_ui
-    refresh_sample_ui(host)

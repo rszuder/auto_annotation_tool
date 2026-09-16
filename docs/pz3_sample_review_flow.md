@@ -1,58 +1,67 @@
-# Dobór próby rankingowej i GT w Z2
+# Wybór próby eksperymentalnej przed Ground Truth
 
-Uzgodnienie użytkownika z 2026-09-15 zmienia wcześniejszy handoff
-`handoff_pz3_sample_selection_in_z2.md`: preanotacja dotyczy szerokiej,
-już zaakceptowanej przez audyt puli. Ręczne zatwierdzenie zdjęcia w Z2
-oznacza wybór do finalnej próby i akceptację jego GT po sprawdzeniu
-wszystkich tablic i narożników.
+Uzgodnienie z 2026-09-16 zastępuje wcześniejszy wspólny krok wyboru i GT.
+Finalna próba jest wybierana z audytowanej puli na podstawie surowych obrazów,
+bez wykonywania preanotacji. Preanotacja Ground Truth jest wykonywana dopiero
+po zatwierdzeniu próby i ponownym audycie jej finalnego składu.
 
 ## Praca użytkownika
 
 1. W PZ3 wybierz uczestników i dodaj szeroką pulę. Rozstrzygnij audyt.
-2. Użyj **Dobierz próbę i GT w Z2…**.
-3. Uruchom **Preanotacja…** z wybranym modelem dla całej puli.
-4. Przeglądaj i poprawiaj anotacje. Zatwierdzaj interesujące zdjęcia:
-   spacją na liście, przez PPM → **Oznacz zaznaczone jako OK**,
-   a w pełnym ekranie spacją lub kliknięciem statusu **W PRÓBIE / POZA PRÓBĄ**.
-   Ponowne przełączenie cofa zatwierdzenie.
-5. Licznik zatwierdzonych dotyczy całej puli i pozostaje niezależny od
-   bieżącego zdjęcia, przewijania i filtra. Jest widoczny w górnym pasku,
-   a w pełnym ekranie także na klikalnym statusie.
-6. **Przekaż zatwierdzone do PZ3** redukuje DRAFT do tych zdjęć i zapisuje
-   odpowiadający im XML GT. Oryginalne pliki użytkownika pozostają nietknięte.
-7. Ponów audyt finalnej próby, potwierdź kompletność GT, wykonaj VERIFY i SEAL.
-8. Ranking korzysta dokładnie z zatwierdzonej próby.
+2. Użyj **Wybierz próbę w Z2…**.
+3. Oglądaj surowe zdjęcia. **Spacja** lub kliknięcie statusu przełącza
+   **W PRÓBIE / POZA PRÓBĄ**, również dla zdjęć z zerową liczbą anotacji.
+4. Zaznacz grupę przez Ctrl/Shift i użyj **Dodaj zaznaczone do próby** albo
+   **Usuń zaznaczone z próby** w menu PPM. Dostępne są również przyciski nad listą.
+5. Licznik **Wybrano: X / Y** jest globalny. Filtry **Wszystkie**, **W próbie**
+   i **Poza próbą** nie zmieniają zapamiętanego wyboru. Działają nawigacja,
+   zoom i pełny ekran. Zaznaczenie grupowe pozostaje przy nawigacji między obrazami.
+6. **Zatwierdź próbę i wróć do PZ3** zapisuje dokładny skład finalnej próby.
+   GT nadal nie istnieje, a audyt otrzymuje status STALE.
+7. Ponów audyt finalnej próby. Dopiero CURRENT odblokowuje **Przygotuj GT w Z2**.
+8. Teraz uruchom **Preanotacja…** na finalnej próbie albo wykonaj anotacje ręcznie.
+   Sprawdź wszystkie tablice i narożniki, zapisz GT, wykonaj VERIFY i SEAL.
+9. Controlled ranking używa dokładnie finalnych członków toru i odpowiadającego im GT.
 
-**Wróć bez przekazania** zachowuje robocze anotacje i zatwierdzenia do
-kontynuacji. Nie zmienia członków DRAFT ani nie publikuje GT.
+**Anuluj i wróć** nie zmienia draftu i nie zapisuje GT.
+Wybór pozostaje w pamięci bieżącej sesji aplikacji, aby umożliwić kontynuację.
+Poprzedni podgląd Z2 i jego zatwierdzenia anotacji są przywracane po wyjściu.
 
 ## Kontrakt
 
-- Nowy tryb wymaga DRAFT tablic, uczestników, niepustej puli i aktualnego audytu.
-  Nie otwiera selekcji po publikacji GT; późniejsze korekty GT mają istniejącą trasę.
-- Tryb korzysta z istniejącego kontekstu edycji GT Z2 z flagą
-  `sample_selection`. Pozwala na preanotację i ręczną korektę.
-- Zatwierdzenia są zapisywane przez istniejący mechanizm Z2. Commit
-  przelicza wybrane nazwy na SHA z migawki puli i sprawdza ją ponownie w transakcji.
-- Finalni członkowie toru = obrazy w finalnym GT = obrazy rankingu.
-- Commit zapisuje członków, GT i stan audytu razem. Błąd zapisu plików lub
-  zatwierdzania transakcji przywraca poprzednie dane i pliki.
-- Po commit audyt jest STALE. GT jest już w DRAFT, ale VERIFY i SEAL
-  pozostają niedostępne do ponownego audytu.
-- `sample_selection.json` zapisuje metodę, liczby kandydatów i wybranych,
-  SHA wybranych obrazów, identyfikator audytu i datę. Manifest oraz SEAL
-  obejmują ten plik integralnością; stare tory nie wymagają nowego artefaktu.
-- Pełny snapshot AUTO pozostaje niezmieniony. Metryki AUTO względem finalnego
-  GT obejmują wyłącznie finalną próbę.
-- Indeksy członków pozostają stabilne; wybór nie jest oparty na pozycji w GUI.
+- Wejście wymaga DRAFT tablic, uczestników, niepustej puli i CURRENT.
+  Opublikowane GT blokuje ponowny dobór próby.
+- Kontekst `_pz3_sample_selection_context` i zbiór
+  `_experiment_sample_selected_sha256` są niezależne od kontekstu GT
+  oraz approval anotacji i treningu.
+- Podgląd korzysta z istniejącego canvasu Z2, listy i cache.
+  Lekkie rekordy obrazów mają początkowo wymiary 1×1; właściwy obraz
+  i jego rozmiar są odczytywane dopiero przy wyświetlaniu.
+- RAW nie uruchamia modeli, nie tworzy XML, nie zapisuje GT, nie rysuje
+  polygonów i nie eksportuje datasetu.
+- `commit_sample_selection()` przyjmuje wybrane SHA i migawkę audytu/puli;
+  nie przyjmuje XML ani metadanych GT.
+- Transakcja sprawdza ponownie membership i audit_id. Błędy zapisu plików
+  lub zatwierdzania bazy przywracają poprzednie członkostwo i kopie.
+- Oryginalne pliki użytkownika pozostają nietknięte. Usuwane są tylko
+  niewybrane kopie toru i jego stagingu.
+- `sample_selection.json` zawiera metodę, liczby, wybrane SHA, datę,
+  identyfikator audytu oraz opcjonalną notatkę kryteriów. Manifest i SEAL
+  obejmują go integralnością jak przed rozdzieleniem etapów.
+- Standardowe `prepare_gt_workspace()`, `publish_working_gt()`, VERIFY,
+  SEAL oraz zamrożeni uczestnicy i zabezpieczenia rankingu zachowują kontrakt:
+  **TRACK MEMBERS == GT IMAGES == RANKING IMAGES**.
 
 ## Weryfikacja
 
 Testy: `test_pz3_reviewed_sample.py`, `test_pz3_sample_review_gui.py`.
-Smoke: `python tests/pz3_sample_review_smoke.py`.
 
-Smoke używa tymczasowego Workspace, 20 syntetycznych obrazów, rzeczywistej
-preanotacji CPU na kopii lokalnego modelu i wyboru 6 zdjęć przez GUI.
-Sprawdza reaudyt, GT, VERIFY, SEAL i ranking dwóch zamrożonych uczestników.
-Predykcje rankingu i poprawione GT są deterministyczną fiksturą testową,
-nie wynikami eksperymentu pracy dyplomowej.
+Smoke: `python tests/pz3_sample_review_smoke.py`.
+Sprawdza 20 surowych obrazów, zero anotacji i brak wywołań GT/inference podczas
+wyboru 6 zdjęć, anulowanie/powrót, filtry, licznik, spację i kliknięcie statusu.
+Po commit sprawdza brak GT i STALE, potem reaudyt, rzeczywistą preanotację CPU
+wyłącznie 6 obrazów, korektę GT, VERIFY, SEAL i porównanie dwóch uczestników.
+
+Obrazy i ręczne GT smoke są syntetyczne, a predykcje rankingu deterministyczne.
+To test integracji, nie wyniki eksperymentu pracy dyplomowej.
+Stary lifecycle jest dodatkowo sprawdzany przez `tests/pz3_final_hardening_smoke.py`.
