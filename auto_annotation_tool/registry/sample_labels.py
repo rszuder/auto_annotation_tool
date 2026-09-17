@@ -137,6 +137,112 @@ class SampleLabels:
                                 if sha in retained}}
 
 
+
+def _validate_raw_sample_labels(payload, track_id, members, *, allow_orphans=False):
+    # Strict validation used for persistence/SEAL. Normal UI loading remains tolerant.
+    if not isinstance(payload, dict) or payload.get("schema") != LABELS_SCHEMA:
+        raise ValueError("Nieprawidłowy schema pliku etykiet próbki.")
+    if str(payload.get("track_id") or "") != str(track_id):
+        raise ValueError("Plik etykiet należy do innego toru.")
+
+    rows = payload.get("labels")
+    assignments = payload.get("assignments")
+    if not isinstance(rows, list) or not isinstance(assignments, dict):
+        raise ValueError("Nieprawidłowa lista etykiet lub przypisań próbki.")
+
+    label_ids = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("Nieprawidłowy wpis etykiety próbki.")
+        label_id = row.get("id")
+        if not isinstance(label_id, str) or not label_id.strip():
+            raise ValueError("Nieprawidłowy identyfikator etykiety próbki.")
+        if label_id in label_ids:
+            raise ValueError("Powtórzony identyfikator etykiety próbki.")
+        label_ids.append(label_id)
+
+    label_ids = set(label_ids)
+    current = {
+        str(value or "").strip().lower()
+        for value in members
+        if str(value or "").strip()
+    }
+    assignment_sha = set()
+
+    for raw_sha, label_id in assignments.items():
+        if not isinstance(raw_sha, str) or not raw_sha.strip():
+            raise ValueError("Nieprawidłowy SHA w przypisaniu etykiety próbki.")
+        sha = raw_sha.strip().lower()
+        if raw_sha != sha:
+            raise ValueError("SHA w sample_labels.json musi być zapisany małymi literami.")
+        if not isinstance(label_id, str) or label_id not in label_ids:
+            raise ValueError("Przypisanie odwołuje się do nieistniejącej etykiety.")
+        assignment_sha.add(sha)
+
+    orphan = assignment_sha - current
+    if orphan and not allow_orphans:
+        preview = ", ".join(sorted(orphan)[:3])
+        raise ValueError(
+            "Etykiety próbki zawierają przypisania do obrazów spoza bieżącej "
+            f"próby: {preview}"
+        )
+
+    state = SampleLabels(current, payload, track_id=track_id)
+    return state, orphan
+
+
+def validate_sample_labels_for_members(service, track_id, *, track=None):
+    # Fail closed if the optional metadata artifact is inconsistent.
+    track = dict(track if track is not None else service.get_track(track_id))
+    root = service._track_root(track)
+    path = root / LABELS_FILE
+    if not path.is_file():
+        return None
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Nie można odczytać {LABELS_FILE}: {exc}") from exc
+
+    members = {
+        str(row.get("sha256") or "").strip().lower()
+        for row in service.list_members(track_id)
+        if str(row.get("sha256") or "").strip()
+    }
+    state, _ = _validate_raw_sample_labels(
+        payload, track_id, members, allow_orphans=False
+    )
+    return state.payload(track_id)
+
+
+def prune_sample_labels_to_members(service, track_id, *, track=None):
+    # Drop only orphan assignments after intentional membership reduction.
+    # Label definitions stay, even when their count falls to zero.
+    track = dict(track if track is not None else service.get_track(track_id))
+    root = service._track_root(track)
+    path = root / LABELS_FILE
+    if not path.is_file():
+        return False
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Nie można odczytać {LABELS_FILE}: {exc}") from exc
+
+    members = {
+        str(row.get("sha256") or "").strip().lower()
+        for row in service.list_members(track_id)
+        if str(row.get("sha256") or "").strip()
+    }
+    state, orphan = _validate_raw_sample_labels(
+        payload, track_id, members, allow_orphans=True
+    )
+    if not orphan:
+        return False
+
+    service._atomic_json(path, state.payload(track_id))
+    return True
+
 def load_sample_labels(track_root, track_id, members):
     path = Path(track_root) / LABELS_FILE
     if not path.exists():

@@ -1,3 +1,4 @@
+import gc
 import tempfile
 import threading
 import time
@@ -277,6 +278,7 @@ class Z4AsyncTrainingPreflightTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.dataset = Path(self.temp.name) / "dataset"
         self.dataset.mkdir()
+        gc.collect()  # collect Tk/Tcl objects on the main test thread
         (self.dataset / "data.yaml").write_text(
             "path: .\ntrain: images/train\nval: images/val\nnames:\n  0: char\n", encoding="utf-8",
         )
@@ -284,7 +286,9 @@ class Z4AsyncTrainingPreflightTests(unittest.TestCase):
         self.addCleanup(self.host.frame.destroy)
         for target, replacement in (
             ("YOLO_AVAILABLE", True),
-            ("cleanup_gpu_memory", Mock()),
+            # Plain callable: avoid unittest.mock becoming the place where GC
+            # collects old Tk/Tcl objects inside Z4TrainingPreflight worker.
+            ("cleanup_gpu_memory", lambda: None),
         ):
             patcher = patch.object(z4_training_runtime, target, replacement)
             patcher.start()

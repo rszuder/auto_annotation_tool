@@ -534,7 +534,24 @@ class EvaluationTrackService:
         ParticipantPoolAuditService(
             self.workspace, repository=self.repository
         ).invalidate_track_audit(track_id, reason="members_removed")
+
+        # Etykiety opisują finalną próbę. Po usunięciu membera (np. podczas
+        # finalnego re-audytu) orphan SHA nie może pozostać w sample_labels.json.
+        from .sample_labels import prune_sample_labels_to_members
+        labels_error = None
+        try:
+            prune_sample_labels_to_members(self, track_id)
+        except Exception as exc:
+            labels_error = exc
+
+        # Membership jest już zapisany w SQLite, więc manifest odświeżamy
+        # również wtedy, gdy stary/uszkodzony plik etykiet wymaga naprawy.
         self._write_manifest(track_id)
+        if labels_error is not None:
+            raise EvaluationTrackError(
+                "Usunięto obrazy z toru, ale nie udało się uzgodnić "
+                f"sample_labels.json z finalną próbą: {labels_error}"
+            ) from labels_error
 
         return {
             "track_id": str(track_id),
@@ -943,6 +960,17 @@ class EvaluationTrackService:
             "dataset_profile": preparation.get("dataset_profile", "unspecified"),
             "gt_mode": preparation.get("mode", ""),
         }
+        # Jeśli opcjonalne etykiety istnieją, muszą opisywać wyłącznie
+        # aktualnych członków finalnej próbki.
+        from .sample_labels import validate_sample_labels_for_members
+        try:
+            validate_sample_labels_for_members(self, track_id, track=track)
+        except Exception as exc:
+            raise EvaluationTrackError(
+                "Nie można zapieczętować toru: niespójne etykiety próbki: "
+                + str(exc)
+            ) from exc
+
         preflight = self._content_integrity(track_id)
         if not preflight.ok:
             raise EvaluationTrackError(
