@@ -7,7 +7,9 @@ import test_pz3_reviewed_sample as sample_support
 from auto_annotation_tool.registry.sample_labels import (
     SampleLabels, LABELS_FILE, LABELS_SCHEMA, MAX_LABEL_LENGTH, load_sample_labels,
 )
-from auto_annotation_tool.registry.sample_selection import prepare_sample_selection
+from auto_annotation_tool.registry.sample_selection import (
+    prepare_sample_selection, save_sample_review_draft, load_sample_review_draft,
+)
 from auto_annotation_tool.registry.track_service import EvaluationTrackError
 
 
@@ -103,6 +105,38 @@ class SampleLabelPersistenceTests(unittest.TestCase):
         self.case.make_final_gt()
         self.f.service.verify(self.f.track, manual_gt_complete=True)
         self.assertTrue(self.f.service.seal(self.f.track).ok)
+
+    def test_working_review_draft_roundtrips_and_is_removed_on_commit(self):
+        selected = set(list(self.members.values())[:2])
+        working = SampleLabels(selected)
+        label = working.add("Noc")
+        working.activate(label)
+        working.assign(selected, label)
+        save_sample_review_draft(
+            self.f.service,
+            self.f.track,
+            selected_sha256=selected,
+            sample_labels=working.payload(self.f.track),
+            active_label=label,
+            expected_member_sha256=self.members,
+        )
+        loaded = load_sample_review_draft(
+            self.f.service,
+            self.f.track,
+            self.f.service.list_members(self.f.track),
+        )
+        self.assertEqual(set(loaded["selected_member_sha256"]), selected)
+        self.assertEqual(loaded["active_label"], label)
+        context = prepare_sample_selection(self.f.service, self.f.track)
+        self.assertEqual(set(context["sample_initial_selected_sha256"]), selected)
+        self.assertEqual(context["sample_active_label"], label)
+
+        self.commit()
+        self.assertIsNone(load_sample_review_draft(
+            self.f.service,
+            self.f.track,
+            self.f.service.list_members(self.f.track),
+        ))
 
     def test_sample_labels_json_roundtrip_and_commit_contains_only_retained_sha(self):
         self.commit()

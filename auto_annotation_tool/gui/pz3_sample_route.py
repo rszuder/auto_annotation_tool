@@ -8,6 +8,7 @@ from ..data_models import ImageAnnotation
 from ..registry import EvaluationTrackService
 from .pz3_participant_audit import BatchProgressDialog
 from ..registry.sample_labels import SampleLabels
+from ..registry.sample_selection import save_sample_review_draft, clear_sample_review_draft
 from .pz3_sample_labels_ui import label_state, SampleLabelsPanel, build_label_menu
 
 
@@ -16,6 +17,30 @@ def sample_context(host):
     if isinstance(context, dict) and context.get("purpose") == "sample_selection" and context.get("track_id"):
         return context
     return None
+
+
+def persist_sample_review_draft(host):
+    context = sample_context(host)
+    if not context or not context.get("workspace") or getattr(host, "is_processing", False):
+        return False
+    state = getattr(host, "_sample_label_state", None)
+    if not isinstance(state, SampleLabels):
+        state = label_state(host)
+    try:
+        service = EvaluationTrackService(context.get("workspace") or CONFIG.WORKSPACE_DIR)
+        save_sample_review_draft(
+            service,
+            context["track_id"],
+            selected_sha256=set(host._experiment_sample_selected_sha256),
+            sample_labels=state.payload(context["track_id"]),
+            active_label=state.active_id,
+            expected_member_sha256=context["sample_member_sha256"],
+        )
+        host._sample_draft_save_error = ""
+        return True
+    except Exception as exc:
+        host._sample_draft_save_error = str(exc)
+        return False
 
 
 def sample_selected(host, ann=None):
@@ -53,6 +78,7 @@ def set_sample_selection(host, selected, actual_indices=None):
     indices = [int(i) for i in indices if 0 <= int(i) < len(host.current_annotations)]
     shas = [context["sample_member_sha256"].get(host.current_annotations[i].filename) for i in indices]
     label_state(host).set_membership((sha for sha in shas if sha), selected)
+    persist_sample_review_draft(host)
     refresh_sample_rows(host, indices, membership_changed=True)
     refresh_sample_ui(host)
 
@@ -244,7 +270,9 @@ def enter_sample_selection(host, context):
     saved_labels = saved.get("labels") if saved.get("members") == context["sample_member_sha256"] else context.get("sample_labels")
     host._sample_label_state = SampleLabels(host._experiment_sample_selected_sha256, saved_labels,
                                            track_id=context["track_id"])
-    active_label = saved.get("active_label", "")
+    session_matches = saved.get("members") == context["sample_member_sha256"]
+    active_label = (saved.get("active_label", "") if session_matches
+                    else context.get("sample_active_label", ""))
     if active_label in host._sample_label_state.labels:
         host._sample_label_state.activate(active_label)
     host._experiment_gt_context = {}
@@ -447,6 +475,10 @@ def return_sample_to_pz3(host):
         messagebox.showerror("Zapis próby", str(exc), parent=host.frame)
         return
     progress.close()
+    try:
+        clear_sample_review_draft(service, context["track_id"])
+    except Exception:
+        pass
     _return_to_pz3(
         host, context["track_id"],
         ("Zapisano etykiety próbki. Skład próby i audyt pozostają bez zmian." if metadata_only else

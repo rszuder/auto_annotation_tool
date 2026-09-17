@@ -17,6 +17,116 @@ from .final_sample_policy import has_selected_sample
 SELECTION_FILE = "sample_selection.json"
 SELECTION_SCHEMA = "alpr.experiment_sample_selection.v1"
 
+SAMPLE_REVIEW_DRAFT_SCHEMA = "alpr.experiment_sample_review_draft.v1"
+SAMPLE_REVIEW_DRAFT_DIR = "sample_review_drafts"
+
+
+def _sample_review_draft_path(service, track_id):
+    track = service.get_track(track_id)
+    paths = experiment_workspace_for_track(service.workspace, track)
+    path = paths.state_root / SAMPLE_REVIEW_DRAFT_DIR / f"{track_id}.json"
+    workspace = service.workspace.resolve()
+    if not path.resolve().is_relative_to(workspace):
+        raise EvaluationTrackError("Stan roboczy próby wychodzi poza Workspace.")
+    return path
+
+
+def load_sample_review_draft(service, track_id, members):
+    path = _sample_review_draft_path(service, track_id)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        current = {
+            str(row["sha256"]).strip().lower()
+            for row in members
+            if str(row.get("sha256") or "").strip()
+        }
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != SAMPLE_REVIEW_DRAFT_SCHEMA
+            or payload.get("track_id") != track_id
+            or not isinstance(payload.get("member_sha256"), list)
+            or set(payload["member_sha256"]) != current
+        ):
+            return None
+        raw_selected = payload.get("selected_member_sha256")
+        if not isinstance(raw_selected, list):
+            return None
+        selected = {
+            str(value).strip().lower()
+            for value in raw_selected
+            if isinstance(value, str) and str(value).strip()
+        }
+        if not selected.issubset(current):
+            return None
+        state = SampleLabels(selected, payload.get("sample_labels"), track_id=track_id)
+        active = str(payload.get("active_label") or "")
+        if active not in state.labels:
+            active = ""
+        return {
+            "selected_member_sha256": sorted(selected),
+            "sample_labels": state.payload(track_id),
+            "active_label": active,
+        }
+    except Exception:
+        return None
+
+
+def save_sample_review_draft(
+    service,
+    track_id,
+    *,
+    selected_sha256,
+    sample_labels,
+    active_label,
+    expected_member_sha256,
+):
+    track = service.get_track(track_id)
+    if track["status"] != "DRAFT" or track["target"] != "plate":
+        raise EvaluationTrackError("Stan roboczy próby można zapisać tylko dla DRAFT tablic.")
+    members = service.list_members(track_id)
+    current_map = {
+        str(row["original_name"]): str(row["sha256"]).strip().lower()
+        for row in members
+    }
+    expected = {
+        str(name): str(sha).strip().lower()
+        for name, sha in dict(expected_member_sha256).items()
+    }
+    if current_map != expected:
+        raise EvaluationTrackError("Skład puli zmienił się. Otwórz próbę ponownie z PZ3.")
+    current = set(current_map.values())
+    selected = {
+        str(value).strip().lower()
+        for value in selected_sha256
+        if str(value or "").strip()
+    }
+    if not selected.issubset(current):
+        raise EvaluationTrackError("Stan roboczy zawiera obraz spoza bieżącej puli.")
+    state = SampleLabels(selected, sample_labels, track_id=track_id)
+    active = str(active_label or "")
+    if active not in state.labels:
+        active = ""
+    payload = {
+        "schema": SAMPLE_REVIEW_DRAFT_SCHEMA,
+        "track_id": track_id,
+        "member_sha256": sorted(current),
+        "selected_member_sha256": sorted(selected),
+        "sample_labels": state.payload(track_id),
+        "active_label": active,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = _sample_review_draft_path(service, track_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    service._atomic_json(path, payload)
+    return payload
+
+
+def clear_sample_review_draft(service, track_id):
+    _sample_review_draft_path(service, track_id).unlink(missing_ok=True)
+
+
 
 def prepare_sample_selection(service, track_id, *, progress=None):
     track = service.get_track(track_id)
@@ -36,6 +146,12 @@ def prepare_sample_selection(service, track_id, *, progress=None):
     initial_selected = (current_sha.intersection(value for value in previous_selected if isinstance(value, str))
                         if previous.get("schema") == SELECTION_SCHEMA and previous.get("track_id") == track_id
                         and isinstance(previous_selected, list) else set())
+    draft_review = load_sample_review_draft(service, track_id, members)
+    if draft_review is not None:
+        initial_selected = set(draft_review["selected_member_sha256"])
+    final_labels = load_sample_labels(track_root, track_id, current_sha)
+    review_labels = draft_review["sample_labels"] if draft_review is not None else final_labels
+    review_active_label = draft_review["active_label"] if draft_review is not None else ""
     if progress:
         progress("Przygotowanie listy kandydatów", len(members), len(members))
     return {
@@ -46,7 +162,8 @@ def prepare_sample_selection(service, track_id, *, progress=None):
         "sample_image_paths": {row["original_name"]: str(track_root / row["track_relative_path"])
                                for row in members},
         "sample_audit_id": state.get("audit_id"),
-        "sample_labels": load_sample_labels(track_root, track_id, current_sha),
+        "sample_labels": review_labels,
+        "sample_active_label": review_active_label,
         "sample_initial_selected_sha256": sorted(initial_selected),
         "sample_committed_sha256": ([row["sha256"] for row in members]
                                     if has_selected_sample(service.workspace, track, members) else []),
@@ -127,6 +244,7 @@ def commit_sample_selection(service, track_id, *, keep_sha256, expected_member_s
                 progress("Zapis wybranej próby", index + 1, len(rejected))
         selection_bytes = json_bytes(selection)
         replace_bytes(track_root / SELECTION_FILE, selection_bytes)
+        stage_file(_sample_review_draft_path(service, track_id), "review_draft")
         manifest = deepcopy(original_manifest)
         manifest.update(
             members=[{key: row[key] for key in (
