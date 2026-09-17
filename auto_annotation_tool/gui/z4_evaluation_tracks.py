@@ -26,6 +26,10 @@ from .pz3_participant_audit import (
 from .pz3_audit_resolution_dialog import format_audit_state
 from .pz3_workflow_view import build_pz3_workflow_view_state, has_selected_sample
 from ..registry.final_sample_policy import assert_final_sample_ready_for_gt, final_sample_ready_for_gt
+from ..registry.sample_selection import (
+    sample_review_summary,
+    finalize_sample_review_draft,
+)
 from ..registry.audit_resolution import audit_path_key
 from ..registry.participant_pool_audit import (
     ParticipantPoolAuditService,
@@ -520,18 +524,40 @@ class EvaluationTracksPanel:
             lines.append(f"Poprzednia wersja: {track.get('parent_track_id')}")
 
         audit_state = self.participant_audit.get_track_audit_state(track_id)
+        sample_summary = sample_review_summary(self.service, track_id, members)
+        if sample_summary["status"] == "WORKING":
+            lines += [
+                "",
+                f"Próba robocza: {sample_summary['selected_count']} / {sample_summary['candidate_count']}",
+                f"Etykiety próbki: {sample_summary['label_count']} · opisane: {sample_summary['assigned_count']} · bez etykiety: {sample_summary['unlabeled_count']}",
+            ]
+            if sample_summary["labels"]:
+                lines.append(
+                    "Rozkład etykiet: "
+                    + ", ".join(f"{row['name']}: {row['count']}" for row in sample_summary["labels"])
+                )
+        elif sample_summary["status"] == "FINALIZED":
+            lines += [
+                "",
+                f"Finalna próba: {sample_summary['selected_count']}",
+                f"Etykiety próbki: {sample_summary['label_count']} · opisane: {sample_summary['assigned_count']} · bez etykiety: {sample_summary['unlabeled_count']}",
+            ]
         lines += ["", format_audit_state(audit_state)]
         self._set_detail_text("\n".join(lines))
         self._current_readiness = self.service.get_preparation_state(track_id)
+        finalized = has_selected_sample(self.workspace, track, members)
         self._workflow_view = build_pz3_workflow_view_state(
-            self._current_readiness, audit_state=audit_state,
-            sample_selected=has_selected_sample(self.workspace, track, members),
+            self._current_readiness,
+            audit_state=audit_state,
+            sample_selected=finalized,
+            sample_review=sample_summary,
         )
         if getattr(self, "_layout", None) is not None:
             self._layout.set_track(
                 track, member_count=len(members), audit_state=audit_state,
                 readiness=self._current_readiness, workflow=self._workflow_view,
                 participant_count=len(self.participant_audit.load_participants(track_id)),
+                sample_summary=sample_summary,
             )
         for iid in self.member_tree.get_children():
             self.member_tree.delete(iid)
@@ -624,6 +650,57 @@ class EvaluationTracksPanel:
         finally:
             if progress is not None:
                 progress.close()
+
+    def finalize_sample_selection(self) -> None:
+        track_id = self._require_current_track()
+        if not track_id:
+            return
+        try:
+            members = self.service.list_members(track_id)
+            summary = sample_review_summary(self.service, track_id, members)
+            if summary.get("status") != "WORKING" or not summary.get("selected_count"):
+                raise EvaluationTrackError(
+                    "Najpierw zapisz roboczą próbę z co najmniej jednym obrazem."
+                )
+            audit_state = self.participant_audit.get_track_audit_state(track_id)
+            if audit_state.get("status") != "CURRENT":
+                raise EvaluationTrackError(
+                    "Najpierw wykonaj aktualny audyt niezależności szerokiej puli."
+                )
+            labels_text = ", ".join(
+                f"{row['name']}: {row['count']}" for row in summary.get("labels", [])
+            ) or "brak etykiet"
+            if not messagebox.askyesno(
+                "Finalizować próbę?",
+                (
+                    f"Szeroka pula: {summary['candidate_count']}\n"
+                    f"Finalna próba: {summary['selected_count']}\n"
+                    f"Etykiety: {summary['label_count']} ({labels_text})\n\n"
+                    "Ta operacja utrwali wybrany podzbiór jako finalną próbę i "
+                    "usunie z DRAFT pozostałe wewnętrzne kopie obrazów. "
+                    "Ponowny audyt próbki nie będzie potrzebny, ponieważ jest to "
+                    "podzbiór już zaudytowanej puli.\n\n"
+                    "Po finalizacji przechodzimy do Ground Truth."
+                ),
+                parent=self.parent,
+            ):
+                return
+            progress = BatchProgressDialog(self.parent, title="Finalizacja próby")
+            try:
+                result = progress.run(
+                    lambda update: finalize_sample_review_draft(
+                        self.service, track_id, progress=update
+                    )
+                )
+            finally:
+                progress.close()
+            self.refresh_tracks(select_track_id=track_id)
+            self._set_status(
+                f"Sfinalizowano próbę: {result['selected_count']} obrazów. "
+                "Audyt pozostaje aktualny. Następny krok: Ground Truth."
+            )
+        except Exception as exc:
+            self._show_error("Nie udało się sfinalizować próby", exc)
 
     def prepare_ground_truth_in_z2(self) -> None:
         from .pz3_gt_route import enter_experiment_gt_workspace
@@ -1635,22 +1712,18 @@ class EvaluationTracksPanel:
         if button is None or tree is None:
             return
         row = self._track_rows.get(self.current_track_id, {})
-        is_draft = (
-            str(row.get("status") or "").strip().upper()
-            == STATUS_DRAFT
-        )
+        is_draft = str(row.get("status") or "").strip().upper() == STATUS_DRAFT
+        workflow = getattr(self, "_workflow_view", None)
+        readiness = getattr(self, "_current_readiness", None)
+        finalized = bool(getattr(workflow, "sample_selected", False))
+        gt_exists = bool(getattr(readiness, "gt_exists", False))
         try:
             has_selection = bool(tree.selection())
         except Exception:
             has_selection = False
+        enabled = is_draft and has_selection and not finalized and not gt_exists
         try:
-            button.configure(
-                state=(
-                    tk.NORMAL
-                    if is_draft and has_selection
-                    else tk.DISABLED
-                )
-            )
+            button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
         except Exception:
             pass
 
@@ -1700,60 +1773,45 @@ class EvaluationTracksPanel:
             self.service.get_preparation_state(str(track["track_id"]))
             if track and track.get("track_id") else track_readiness(None)
         )
-        participant_entry_ready = self._participant_entry_ready(track)
-        can_gt = readiness.can_prepare_gt and final_sample_ready_for_gt(
-            self.workspace, track, self.service.list_members(str(track["track_id"])),
-            {"status": "CURRENT" if readiness.audit_current else "STALE"},
-        )
+        workflow = getattr(self, "_workflow_view", None)
+        if workflow is None or not track:
+            workflow = build_pz3_workflow_view_state(readiness)
+
         mapping = (
+            (getattr(self, "btn_add_images", None), workflow.can_add_images),
+            (getattr(self, "btn_open_experiment_sources", None), workflow.can_add_images),
+            (getattr(self, "btn_participants", None), workflow.can_select_participants),
+            (getattr(self, "btn_audit_pool", None), workflow.can_audit_pool),
+            (getattr(self, "btn_sample_selection", None), workflow.can_edit_sample),
+            (getattr(self, "btn_finalize_sample", None), workflow.can_finalize_sample),
+            (getattr(self, "btn_prepare_z2", None), workflow.can_prepare_gt),
+            (getattr(self, "btn_set_gt", None), workflow.can_set_gt),
+            (getattr(self, "btn_verify", None), workflow.can_verify),
+            (getattr(self, "btn_seal", None), workflow.can_seal),
+            (getattr(self, "btn_compare", None), workflow.can_compare),
             (
-                self.btn_add_images,
-                readiness.can_add_images,
+                getattr(self, "btn_remove_images", None),
+                state.can_remove_images and not workflow.sample_selected and not readiness.gt_exists,
             ),
-            (self.btn_participants, state.can_select_participants),
-            (
-                self.btn_audit_pool,
-                readiness.can_audit,
-            ),
-            (self.btn_remove_images, state.can_remove_images),
-            (self.btn_set_gt, can_gt),
-            (self.btn_verify, readiness.can_verify),
-            (self.btn_seal, readiness.can_seal and not self._participant_audit_seal_issue(
-                str((track or {}).get("track_id") or ""), track or {}
-            )),
-            (self.btn_integrity, state.can_check_integrity),
-            (self.btn_clone, state.can_clone),
-            (self.btn_retire, state.can_retire),
-            (self.btn_delete_draft, state.can_delete_draft),
-            (self.btn_open_experiment_sources, state.can_add_images),
-            (
-                self.btn_prepare_z2,
-                can_gt and readiness.target == "plate",
-            ),
+            (getattr(self, "btn_integrity", None), state.can_check_integrity),
+            (getattr(self, "btn_clone", None), state.can_clone),
+            (getattr(self, "btn_retire", None), state.can_retire),
+            (getattr(self, "btn_delete_draft", None), state.can_delete_draft),
         )
         for button, enabled in mapping:
+            if button is None:
+                continue
             try:
-                button.configure(
-                    state=tk.NORMAL if enabled else tk.DISABLED
-                )
+                button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
             except Exception:
                 pass
-        sample_button = getattr(self, "btn_sample_selection", None)
-        if sample_button is not None:
-            sample_button.configure(state=tk.NORMAL if (
-                readiness.can_prepare_gt and readiness.target == "plate"
-                and readiness.participants_ready and readiness.audit_current and not readiness.gt_exists
-            ) else tk.DISABLED)
-        compare_button = getattr(self, "btn_compare", None)
-        if compare_button is not None:
-            compare_button.configure(state=tk.NORMAL if readiness.sealed else tk.DISABLED)
         audit_sample = getattr(self, "btn_audit_sample", None)
         if audit_sample is not None:
-            audit_sample.configure(state=tk.NORMAL if readiness.can_audit else tk.DISABLED)
+            audit_sample.configure(state=tk.DISABLED)
+        self._refresh_remove_images_button_state()
         layout = getattr(self, "_layout", None)
         if layout is not None:
             layout.refresh_primary_action()
-        self._refresh_remove_images_button_state()
 
     def _status_hint_for_track(
         self,

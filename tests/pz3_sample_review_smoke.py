@@ -403,8 +403,7 @@ def main():
                     assert selected_sample_names(annotation) == expected_names
                     assert label_state(annotation).active_id == label_id
                     assert label_state(annotation).counts[label_id] == 6
-                    with patch("tkinter.messagebox.askyesno", return_value=True):
-                        button(annotation._sample_bar, "Zatwierdź próbę i wróć do PZ3").invoke()
+                    button(annotation._sample_bar, "Zapisz roboczą próbę i wróć do PZ3").invoke()
                     settle()
                     assert not errors, errors
                     prepare_gt.assert_not_called()
@@ -413,30 +412,37 @@ def main():
                 track = fixture.service.get_track(fixture.track)
                 assert track["gt_relative_path"] is None
                 assert track["gt_sha256"] is None
+                assert len(fixture.service.list_members(fixture.track)) == 20
+                assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "CURRENT"
                 labels_path = fixture.workspace / track["relative_path"] / "sample_labels.json"
+                assert not labels_path.exists()
+                panel.refresh_tracks(select_track_id=fixture.track)
+                assert str(panel.btn_audit_pool["state"]) == "disabled"
+                assert str(panel.btn_sample_selection["state"]) == "normal"
+                assert str(panel.btn_finalize_sample["state"]) == "normal"
+                assert str(panel.btn_prepare_z2["state"]) == "disabled"
+                with patch("auto_annotation_tool.gui.z4_evaluation_tracks.messagebox.askyesno", return_value=True):
+                    panel.btn_finalize_sample.invoke()
+                settle()
+                assert not errors, errors
+                assert {r["original_name"] for r in fixture.service.list_members(fixture.track)} == expected_names
+                assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "CURRENT"
                 labels_payload = json.loads(labels_path.read_text(encoding="utf-8"))
                 assert labels_payload["labels"] == [{"id": label_id, "name": "Noc"}]
                 assert set(labels_payload["assignments"]) == {
                     member["sha256"] for member in fixture.service.list_members(fixture.track)}
                 assert not list(fixture.workspace.rglob("annotations.xml"))
-                assert {r["original_name"] for r in fixture.service.list_members(fixture.track)} == expected_names
-                assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "STALE"
-                assert str(panel.btn_prepare_z2["state"]) == "disabled"
-                assert str(panel.btn_set_gt["state"]) == "disabled"
+                assert str(panel.btn_audit_pool["state"]) == "disabled"
+                assert str(panel.btn_sample_selection["state"]) == "disabled"
+                assert str(panel.btn_finalize_sample["state"]) == "disabled"
+                assert str(panel.btn_prepare_z2["state"]) == "normal"
+                assert str(panel.btn_set_gt["state"]) == "normal"
                 for path, content in original_bytes.items():
                     assert path.read_bytes() == content
-                print("RAW PASS: 20 images, zero annotations, select 6; no GT or inference; audit STALE", flush=True)
+                print("RAW PASS: szeroka pula zachowana podczas edycji; finalizacja podzbioru zachowuje audit CURRENT", flush=True)
                 print("RAW approval guard calls:", raw_approval_calls, flush=True)
                 assert not raw_approval_calls, raw_approval_calls
                 capture_window(root, "output/pz3_raw_sample_draft.png")
-                track_root = fixture.service._track_root(track)
-                final_paths = [track_root / row["track_relative_path"]
-                               for row in fixture.service.list_members(fixture.track)]
-                final_report = fixture.audit.audit_paths(fixture.track, final_paths)
-                fixture.audit.record_ingested_report(fixture.track, final_report, final_paths)
-                panel.refresh_tracks(select_track_id=fixture.track)
-                assert str(panel.btn_prepare_z2["state"]) == "normal"
-                assert str(panel.btn_set_gt["state"]) == "normal"
                 with patch("auto_annotation_tool.gui.z4_evaluation_tracks.show_experiment_gt_entry",
                            return_value=ExperimentGtEntryDecision("manual", "unspecified")):
                     panel.btn_prepare_z2.invoke()

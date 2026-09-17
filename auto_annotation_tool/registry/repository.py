@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from contextlib import nullcontext
 from pathlib import Path
+import hashlib
 import sqlite3
 import json
 from typing import Any, Mapping
@@ -1066,7 +1067,29 @@ class RegistryRepository:
                 (len(retained), track_id),
             )
             state = json.loads(audit_row["state_json"])
-            state.update(status="STALE", reason="sample_selection_committed")
+            retained_shas = {
+                str(row["sha256"] or "").strip().lower()
+                for row in retained
+                if str(row["sha256"] or "").strip()
+            }
+            manual = sorted(
+                set(state.get("accepted_suspect_sha256") or []).intersection(retained_shas)
+            )
+            # Domknięcie na podzbiór: wszystkie pozostawione obrazy były już
+            # objęte audytem CURRENT szerokiej puli. Samo usuwanie kandydatów
+            # nie może utworzyć nowej zależności z train/val.
+            state.update(
+                status="CURRENT",
+                reason="",
+                member_fingerprint=hashlib.sha256(
+                    "\n".join(sorted(retained_shas)).encode("utf-8")
+                ).hexdigest(),
+                audited_member_sha256=sorted(retained_shas),
+                accepted_suspect_sha256=manual,
+                member_count=len(retained_shas),
+                manual_verified_count=len(manual),
+                clean_count=max(0, len(retained_shas) - len(manual)),
+            )
             self._upsert_track_audit_state(connection, track_id, state)
             prepare_files(dict(track), retained, rows)
             connection.commit()

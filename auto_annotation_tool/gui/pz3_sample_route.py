@@ -8,7 +8,7 @@ from ..data_models import ImageAnnotation
 from ..registry import EvaluationTrackService
 from .pz3_participant_audit import BatchProgressDialog
 from ..registry.sample_labels import SampleLabels
-from ..registry.sample_selection import save_sample_review_draft, clear_sample_review_draft
+from ..registry.sample_selection import save_sample_review_draft
 from .pz3_sample_labels_ui import label_state, SampleLabelsPanel, build_label_menu
 
 
@@ -317,10 +317,8 @@ def enter_sample_selection(host, context):
                                  host._sample_title_label.configure(wraplength=max(1, event.width)))
     actions = ttk.Frame(bar)
     actions.grid(row=0, column=1, sticky="e")
-    ttk.Button(actions, text="Zatwierdź próbę i wróć do PZ3",
+    ttk.Button(actions, text="Zapisz roboczą próbę i wróć do PZ3",
                command=lambda: return_sample_to_pz3(host)).pack(side="right")
-    ttk.Button(actions, text="Anuluj i wróć",
-               command=lambda: cancel_sample_review(host)).pack(side="right", padx=6)
     host._sample_fullscreen_button = ttk.Button(actions, command=host._toggle_preview_fullscreen)
     host._sample_fullscreen_button.pack(side="right", padx=6)
     host._sample_bar_stacked = None
@@ -428,60 +426,30 @@ def _return_to_pz3(host, track_id, status):
 
 
 def cancel_sample_review(host):
+    # Kompatybilne wyjście bez finalizacji. Zmiany są autosave'owane na bieżąco.
     context = sample_context(host)
     if context and not getattr(host, "is_processing", False):
-        _return_to_pz3(host, context["track_id"], "Anulowano przekazanie próby. Skład draftu pozostaje bez zmian.")
-
+        _return_to_pz3(
+            host, context["track_id"],
+            "Powrót do PZ3. Roboczy wybór próbki pozostaje zapisany.",
+        )
 
 def return_sample_to_pz3(host):
     context = sample_context(host)
     if not context or getattr(host, "is_processing", False):
         return
-    selected = set(host._experiment_sample_selected_sha256)
-    if not selected:
-        messagebox.showwarning("Próba eksperymentalna", "Wybierz co najmniej jedno zdjęcie.", parent=host.frame)
+    if not persist_sample_review_draft(host):
+        messagebox.showerror(
+            "Zapis próby",
+            getattr(host, "_sample_draft_save_error", "Nie udało się zapisać stanu roboczego."),
+            parent=host.frame,
+        )
         return
-    state = getattr(host, "_sample_label_state", None)
-    labels = state.payload(context["track_id"]) if isinstance(state, SampleLabels) else None
-    metadata_only = (selected == set(context.get("sample_committed_sha256", ()))
-                     and labels is not None and (bool(labels["labels"]) or context.get("sample_labels") is not None))
-    next_step = ("Skład próby i wynik audytu pozostaną bez zmian." if metadata_only else
-                 "Po zatwierdzeniu ponownie audytuj próbę przed przygotowaniem GT.")
-    if not messagebox.askyesno(
-        "Zatwierdzić próbę eksperymentalną?",
-        f"Pula po audycie: {context['candidate_count']}\nWybrano: {len(selected)}\n"
-        f"Usuwane z draftu: {context['candidate_count'] - len(selected)}\n\n"
-        "Oryginalne pliki źródłowe pozostaną bez zmian.\n"
-        + next_step,
-        parent=host.frame,
-    ):
-        return
-    service = EvaluationTrackService(context.get("workspace") or CONFIG.WORKSPACE_DIR)
-    progress = BatchProgressDialog(host.frame, title="Zapisywanie próby")
-    try:
-        if metadata_only:
-            result = progress.run(lambda update: service.save_sample_labels(
-                context["track_id"], sample_labels=labels,
-                expected_member_sha256=context["sample_member_sha256"]))
-        else:
-            label_args = {"sample_labels": labels} if labels is not None else {}
-            result = progress.run(lambda update: service.commit_sample_selection(
-                context["track_id"], keep_sha256=selected,
-                expected_member_sha256=context["sample_member_sha256"],
-                expected_audit_id=context["sample_audit_id"], progress=update, **label_args,
-            ))
-    except Exception as exc:
-        progress.close()
-        messagebox.showerror("Zapis próby", str(exc), parent=host.frame)
-        return
-    progress.close()
-    try:
-        clear_sample_review_draft(service, context["track_id"])
-    except Exception:
-        pass
-    _return_to_pz3(
-        host, context["track_id"],
-        ("Zapisano etykiety próbki. Skład próby i audyt pozostają bez zmian." if metadata_only else
-         f"Wybrano próbę: {result['selected_count']} z {result['candidate_count']} zdjęć. "
-         "Ponownie audytuj finalną pulę przed przygotowaniem GT."),
+    state = label_state(host)
+    selected = len(host._experiment_sample_selected_sha256)
+    status = (
+        f"Zapisano roboczą próbę: {selected} z {context['candidate_count']} obrazów · "
+        f"etykiety: {len(state.labels)} · opisane: {len(state.assignments)}. "
+        "Możesz wrócić do próbki i dalej ją edytować. Finalizacja odbywa się osobnym CTA w PZ3."
     )
+    _return_to_pz3(host, context["track_id"], status)

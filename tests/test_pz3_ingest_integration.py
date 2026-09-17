@@ -188,50 +188,26 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual("Audyt: do wykonania", self.panel._layout.audit_var.get())
         self.errors.assert_not_called()
 
-    def test_current_audit_button_rechecks_and_shows_owned_result_dialog(self):
-        from auto_annotation_tool.gui.pz3_audit_resolution_dialog import ParticipantAuditMatrixDialog
-        self.root.geometry("1100x780+20+20")
-        self.root.deiconify()
-        self.root.update()
+    def test_current_audit_cta_is_disabled_after_current_result(self):
         self.ingest([self.f.image("RECHECK_001.png", seed=1900)])
         self.panel.audit_current_pool()
-        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "CURRENT")
+        self.assertEqual(
+            self.f.audit.get_track_audit_state(self.f.track)["status"],
+            "CURRENT",
+        )
+        self.panel.refresh_tracks(select_track_id=self.f.track)
+        self.assertEqual(str(self.panel.btn_audit_pool["state"]), "disabled")
+
         before = len(self.f.repo.list_evaluation_track_audits(self.f.track))
-        self.messages.reset_mock()
-        self.root.grab_set()
-        failures = []
-        seen = []
-
-        def show_result(dialog):
-            def apply():
-                try:
-                    # Native window controls coexist with the modal input grab.
-                    self.assertFalse(dialog.window.transient())
-                    self.assertEqual(dialog.window.resizable(), (1, 1))
-                    self.assertTrue(dialog.window.winfo_viewable())
-                    self.assertEqual(self.root.grab_current(), dialog.window)
-                    self.assertIn("Trwa ponowna kontrola", self.panel.status_var.get())
-                    seen.append(True)
-                    dialog.apply_button.invoke()
-                except BaseException as exc:
-                    failures.append(exc)
-                    dialog._cancel()
-            dialog.window.after(80, apply)
-            return self._real_audit_show(dialog)
-
-        with patch.object(ParticipantAuditMatrixDialog, "show", new=show_result), \
-             patch.object(self.panel.participant_audit, "audit_paths",
-                          wraps=self.panel.participant_audit.audit_paths) as audit:
-            self.panel.btn_audit_pool.invoke()
-        self.assertFalse(failures, failures)
-        self.assertEqual(seen, [True])
-        audit.assert_called_once()
-        self.assertEqual(self.root.grab_current(), self.root)
-        self.root.grab_release()
-        self.assertEqual(len(self.f.repo.list_evaluation_track_audits(self.f.track)), before + 1)
-        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "CURRENT")
-        self.assertIn("Pula jest aktualna", self.messages.showinfo.call_args.args[1])
-        self.assertIn("Audyt zakończony", self.panel.status_var.get())
+        self.panel.btn_audit_pool.invoke()
+        self.assertEqual(
+            len(self.f.repo.list_evaluation_track_audits(self.f.track)),
+            before,
+        )
+        self.assertEqual(
+            self.f.audit.get_track_audit_state(self.f.track)["status"],
+            "CURRENT",
+        )
         self.errors.assert_not_called()
 
     def test_current_audit_rejects_problem_images_in_the_same_flow(self):
@@ -460,30 +436,48 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(len(json.loads(manifest.read_text(encoding="utf-8"))["members"]), 1)
         self.panel.participant_audit.assert_track_audit_ready(self.f.track)
 
-    def test_gt_verify_and_seal_block_stale_then_accept_current_audit(self):
+    def test_stale_audit_after_gt_blocks_seal_without_reopening_audit_cta(self):
         clean = self.f.image("IMG_006.png")
         self.ingest([clean])
         self.panel.audit_current_pool()
+
         context = self.f.service.activate_z2_context(self.f.track)
         self.assertTrue((Path(context["source_dir"]) / clean.name).exists())
+
         gt = Path(self.temp.name) / "gt.xml"
-        gt.write_text('<annotations><image id="0" name="IMG_006.png" width="192" height="128">'
-                      '<polygon label="plate" points="10,10;70,10;70,40;10,40"/>'
-                      '</image></annotations>', encoding="utf-8")
+        gt.write_text(
+            '<annotations><image id="0" name="IMG_006.png" width="192" height="128">'
+            '<polygon label="plate" points="10,10;70,10;70,40;10,40"/>'
+            '</image></annotations>',
+            encoding="utf-8",
+        )
+
         self.f.select_and_reaudit()
         self.panel.service.set_ground_truth(self.f.track, gt)
         self.panel.verify_track()
         self.errors.assert_not_called()
-        self.assertEqual(self.f.service.get_track(self.f.track)["status"], "VERIFIED")
-        self.panel.participant_audit.invalidate_track_audit(self.f.track, reason="test")
-        self.panel.seal_track()
-        self.assertEqual(self.f.service.get_track(self.f.track)["status"], "VERIFIED")
+        self.assertEqual(
+            self.f.service.get_track(self.f.track)["status"],
+            "VERIFIED",
+        )
+
+        # Stan wymuszony sztucznie po finalizacji. Nie wracamy do etapu
+        # audytu próbki; SEAL pozostaje zablokowany fail-closed.
+        self.panel.participant_audit.invalidate_track_audit(
+            self.f.track,
+            reason="test",
+        )
         self.panel.refresh_tracks(select_track_id=self.f.track)
-        self.assertEqual(str(self.panel.btn_audit_pool["state"]), "normal")
-        self.panel.audit_current_pool()
+
+        self.assertEqual(str(self.panel.btn_audit_pool["state"]), "disabled")
+        self.assertEqual(str(self.panel.btn_seal["state"]), "disabled")
+
         self.panel.seal_track()
-        self.errors.assert_not_called()
-        self.assertEqual(self.f.service.get_track(self.f.track)["status"], "SEALED")
+        self.assertEqual(
+            self.f.service.get_track(self.f.track)["status"],
+            "VERIFIED",
+        )
+        self.messages.showwarning.assert_called()
 
     def test_guided_flow_reloads_sample_and_highlights_exactly_one_enabled_action(self):
         from auto_annotation_tool.registry.sample_selection import prepare_sample_selection
@@ -492,51 +486,74 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
             self.panel.refresh_tracks(select_track_id=self.f.track)
             self.root.update()
             self.assertEqual(self.panel._workflow_view.step, step)
-            accented = [name for name in self.panel._layout.workflow_buttons
-                        if getattr(self.panel, name).cget("style") == "PZ3.Primary.TButton"]
-            self.assertEqual(accented, [primary])
-            self.assertEqual(str(getattr(self.panel, primary).cget("state")), "normal")
-            self.assertNotEqual(self.panel._layout.new_button.cget("style"), "PZ3.Primary.TButton")
 
-        self.f.track = self.f.service.create_draft(name="Guided flow", target="plate", purpose="ranking")
+            accented = [
+                name
+                for name in self.panel._layout.workflow_buttons
+                if getattr(self.panel, name).cget("style")
+                == "PZ3.Primary.TButton"
+            ]
+            self.assertEqual(accented, [primary])
+            self.assertEqual(
+                str(getattr(self.panel, primary).cget("state")),
+                "normal",
+            )
+            self.assertNotEqual(
+                self.panel._layout.new_button.cget("style"),
+                "PZ3.Primary.TButton",
+            )
+
+        self.f.track = self.f.service.create_draft(
+            name="Guided flow",
+            target="plate",
+            purpose="ranking",
+        )
         expect("SELECT_MODELS", "btn_participants")
-        self.assertEqual(self.panel._layout.audit_var.get(), "Audyt: czeka na wybór modeli")
+
         self.f.audit.save_participants(self.f.track, ["M1", "M2"])
         expect("ADD_IMAGES", "btn_add_images")
-        self.assertEqual(self.panel._layout.audit_var.get(), "Audyt: czeka na pulę obrazów")
-        paths = [self.f.image("FLOW_001.png", seed=1221), self.f.image("FLOW_002.png", seed=1222)]
+
+        paths = [
+            self.f.image("FLOW_001.png", seed=1221),
+            self.f.image("FLOW_002.png", seed=1222),
+        ]
         self.ingest(paths)
         expect("AUDIT_POOL", "btn_audit_pool")
+
         self.panel.btn_audit_pool.invoke()
         expect("SELECT_SAMPLE", "btn_sample_selection")
+
+        # Backend commit reprezentuje finalizację podzbioru.
         context = prepare_sample_selection(self.f.service, self.f.track)
         keep = [context["sample_member_sha256"]["FLOW_001.png"]]
         self.f.service.commit_sample_selection(
-            self.f.track, keep_sha256=keep,
+            self.f.track,
+            keep_sha256=keep,
             expected_member_sha256=context["sample_member_sha256"],
             expected_audit_id=context["sample_audit_id"],
         )
-        expect("REAUDIT_SAMPLE", "btn_audit_sample")
-        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "STALE")
-        self.assertEqual(self.panel.btn_audit_sample.cget("text"), "Audyt próby")
-        self.assertIn("Finalna próba wymaga ponownego sprawdzenia", self.panel._layout.next_step_var.get())
-        self.assertEqual(str(self.panel.btn_prepare_z2["state"]), "disabled")
-        self.panel.btn_audit_sample.invoke()
+
+        self.assertEqual(
+            self.f.audit.get_track_audit_state(self.f.track)["status"],
+            "CURRENT",
+        )
         expect("PREPARE_GT", "btn_prepare_z2")
-        gt = Path(self.temp.name)/"guided.xml"
-        gt.write_text('<annotations><image id="0" name="FLOW_001.png" width="192" height="128">'
-                      '<polygon label="plate" points="10,10;70,10;70,40;10,40"/>'
-                      '</image></annotations>', encoding="utf-8")
+        self.assertEqual(str(self.panel.btn_audit_pool["state"]), "disabled")
+
+        gt = Path(self.temp.name) / "guided.xml"
+        gt.write_text(
+            '<annotations><image id="0" name="FLOW_001.png" width="192" height="128">'
+            '<polygon label="plate" points="10,10;70,10;70,40;10,40"/>'
+            '</image></annotations>',
+            encoding="utf-8",
+        )
+
         self.f.service.set_ground_truth(self.f.track, gt)
         expect("VERIFY", "btn_verify")
+
         self.panel.btn_verify.invoke()
         expect("SEAL", "btn_seal")
+
         self.panel.btn_seal.invoke()
         expect("COMPARE", "btn_compare")
         self.errors.assert_not_called()
-
-
-
-if __name__ == "__main__":
-    unittest.main()
-

@@ -76,7 +76,7 @@ class RawSampleSelectionTests(unittest.TestCase):
         self.assertNotIn("annotation_path", context)
         self.assert_no_gt()
 
-    def test_exact_raw_subset_originals_and_reaudit_before_gt(self):
+    def test_exact_raw_subset_keeps_current_audit_and_goes_to_gt(self):
         originals = {path: path.read_bytes() for path in self.images}
         result = self.commit(criteria_note="Different light and viewing angles")
         self.assertEqual(result["selected_count"], 6)
@@ -87,11 +87,8 @@ class RawSampleSelectionTests(unittest.TestCase):
         self.assert_no_gt()
         for path, content in originals.items():
             self.assertEqual(path.read_bytes(), content)
-        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "STALE")
-        self.assertFalse(self.service.get_preparation_state(self.track).can_prepare_gt)
-        with self.assertRaises(EvaluationTrackError):
-            prepare_gt_workspace(self.service, self.track)
-        self.reaudit()
+        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "CURRENT")
+        self.assertTrue(self.service.get_preparation_state(self.track).can_prepare_gt)
         gt = self.make_final_gt()
         self.assertEqual({node.get("name") for node in ET.parse(gt).getroot().findall("image")},
                          {row["original_name"] for row in final})
@@ -143,13 +140,13 @@ class RawSampleSelectionTests(unittest.TestCase):
             self.commit()
         self.assert_unchanged()
 
-    def test_choosing_every_image_still_requires_reaudit_and_does_not_create_gt(self):
+    def test_choosing_every_image_keeps_audit_current_and_does_not_create_gt(self):
         result = self.commit(keep_sha256={row["sha256"] for row in self.rows})
         self.assertEqual(result["removed_count"], 0)
         self.assertEqual(result["selected_count"], 20)
         self.assert_no_gt()
         self.assertTrue((self.root / "sample_selection.json").exists())
-        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "STALE")
+        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "CURRENT")
 
     def test_manifest_write_failure_rolls_back_db_sources_and_audit(self):
         original_replace = Path.replace
@@ -192,7 +189,7 @@ class RawSampleSelectionTests(unittest.TestCase):
         self.commit(keep_sha256=keep)
         self.assert_no_gt()
         self.assertEqual(len(self.service.list_members(self.track)), 10)
-        self.reaudit()
+        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "CURRENT")
         xml = self.make_final_gt()
         self.assertEqual(len(ET.parse(xml).getroot().findall("image")), 10)
         self.service.verify(self.track, manual_gt_complete=True)

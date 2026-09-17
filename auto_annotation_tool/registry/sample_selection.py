@@ -47,8 +47,16 @@ def load_sample_review_draft(service, track_id, members):
             or payload.get("schema") != SAMPLE_REVIEW_DRAFT_SCHEMA
             or payload.get("track_id") != track_id
             or not isinstance(payload.get("member_sha256"), list)
-            or set(payload["member_sha256"]) != current
         ):
+            return None
+        stored = {
+            str(value).strip().lower()
+            for value in payload.get("member_sha256", [])
+            if isinstance(value, str) and str(value).strip()
+        }
+        # Dodanie obrazów nie kasuje wykonanej pracy. Usunięte obrazy są
+        # automatycznie odcinane od roboczej selekcji i przypisań etykiet.
+        if stored and current and stored.isdisjoint(current):
             return None
         raw_selected = payload.get("selected_member_sha256")
         if not isinstance(raw_selected, list):
@@ -57,9 +65,7 @@ def load_sample_review_draft(service, track_id, members):
             str(value).strip().lower()
             for value in raw_selected
             if isinstance(value, str) and str(value).strip()
-        }
-        if not selected.issubset(current):
-            return None
+        }.intersection(current)
         state = SampleLabels(selected, payload.get("sample_labels"), track_id=track_id)
         active = str(payload.get("active_label") or "")
         if active not in state.labels:
@@ -125,6 +131,79 @@ def save_sample_review_draft(
 
 def clear_sample_review_draft(service, track_id):
     _sample_review_draft_path(service, track_id).unlink(missing_ok=True)
+
+def sample_review_summary(service, track_id, members=None):
+    """Jeden stabilny stan roboczej/finalnej próbki dla PZ3 i CTA."""
+    track = service.get_track(track_id)
+    members = list(members if members is not None else service.list_members(track_id))
+    current = {
+        str(row.get("sha256") or "").strip().lower()
+        for row in members
+        if str(row.get("sha256") or "").strip()
+    }
+    finalized = has_selected_sample(service.workspace, track, members)
+    if finalized:
+        labels_payload = load_sample_labels(service._track_root(track), track_id, current)
+        selected = set(current)
+        status = "FINALIZED"
+        active = ""
+    else:
+        draft = load_sample_review_draft(service, track_id, members)
+        if draft is None:
+            return {
+                "status": "NONE", "selected_count": 0, "candidate_count": len(current),
+                "label_count": 0, "assigned_count": 0, "unlabeled_count": 0,
+                "labels": [], "active_label": "",
+            }
+        selected = set(draft["selected_member_sha256"])
+        labels_payload = draft.get("sample_labels")
+        status = "WORKING"
+        active = draft.get("active_label", "")
+
+    state = SampleLabels(selected, labels_payload, track_id=track_id)
+    rows = [
+        {"id": label_id, "name": name, "count": int(state.counts[label_id])}
+        for label_id, name in state.labels.items()
+    ]
+    return {
+        "status": status,
+        "selected_count": len(selected),
+        "candidate_count": len(current),
+        "label_count": len(state.labels),
+        "assigned_count": len(state.assignments),
+        "unlabeled_count": state.unlabeled_count,
+        "labels": rows,
+        "active_label": active if active in state.labels else "",
+    }
+
+
+def finalize_sample_review_draft(service, track_id, *, progress=None):
+    """Finalny, świadomy commit podzbioru już zaudytowanej szerokiej puli."""
+    track = service.get_track(track_id)
+    if str(track.get("status") or "").upper() != "DRAFT":
+        raise EvaluationTrackError("Próbę można finalizować tylko dla DRAFT.")
+    members = service.list_members(track_id)
+    audit = ParticipantPoolAuditService(service.workspace, repository=service.repository)
+    audit.assert_track_audit_ready(track_id)
+    audit_state = audit.get_track_audit_state(track_id)
+    if audit_state.get("status") != "CURRENT":
+        raise EvaluationTrackError("Najpierw wykonaj aktualny audyt niezależności szerokiej puli.")
+    draft = load_sample_review_draft(service, track_id, members)
+    if draft is None or not draft.get("selected_member_sha256"):
+        raise EvaluationTrackError("Najpierw zapisz roboczą próbę z co najmniej jednym obrazem.")
+    expected = {
+        str(row["original_name"]): str(row["sha256"]).strip().lower()
+        for row in members
+    }
+    return commit_sample_selection(
+        service,
+        track_id,
+        keep_sha256=set(draft["selected_member_sha256"]),
+        expected_member_sha256=expected,
+        expected_audit_id=audit_state.get("audit_id"),
+        progress=progress,
+        sample_labels=draft.get("sample_labels"),
+    )
 
 
 
@@ -286,5 +365,5 @@ def commit_sample_selection(service, track_id, *, keep_sha256, expected_member_s
     if stage.exists():
         shutil.rmtree(stage, ignore_errors=True)
     if progress:
-        progress("Próba zapisana. Ponownie audytuj pulę przed GT.", len(keep), len(keep))
+        progress("Finalna próba zapisana. Możesz przygotować GT.", len(keep), len(keep))
     return result
