@@ -9,13 +9,14 @@ from auto_annotation_tool.gui.source_filename_review_dialog import _SourceFilena
 from auto_annotation_tool.gui.pz3_participant_audit import ParticipantSelectionDialog
 from pz3_gui_capture import capture_window
 
-case = PZ3IngestIntegrationTests("test_mixed_folder_adds_clean_and_updates_actual_table")
+case = PZ3IngestIntegrationTests("test_mixed_folder_adds_candidates_then_explicit_audit_filters_pool")
 case.setUp()
 try:
     case.root.geometry("1200x850+30+30")
     case.root.deiconify()
     case.root.update()
     case.ingest(case.f.mixed())
+    case.panel.audit_current_pool()
     case.root.update()
     capture_window(case.root, "output/pz3_smoke_panel.png")
 

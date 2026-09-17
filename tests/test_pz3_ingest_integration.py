@@ -91,44 +91,92 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.root.update()
         return len(self.panel.member_tree.get_children())
 
+    def test_import_after_name_correction_restores_hidden_app_and_finishes(self):
+        from auto_annotation_tool.gui.source_filename_review_dialog import _SourceFilenameReviewDialog
+        bad=self.f.image("bad-name.png",seed=10001)
+        other=self.f.image("READY_002.png",seed=10002)
+        self.root.geometry("1100x780+20+20")
+        self.root.deiconify()
+        self.root.update()
+        failures=[]
+        real_show=_SourceFilenameReviewDialog.show_selection
+
+        def show(dialog):
+            def correct_and_save():
+                try:
+                    dialog.tree.selection_set(str(bad))
+                    dialog.rename_button.invoke()
+                    dialog._edit_entry.delete(0,"end")
+                    dialog._edit_entry.insert(0,"READY_001.png")
+                    dialog._commit_inline_edit()
+                    self.root.withdraw()
+                    self.root.update_idletasks()
+                    dialog.apply_button.invoke()
+                except BaseException as exc:
+                    failures.append(exc)
+                    dialog._cancel()
+            dialog.window.after(25,correct_and_save)
+            return real_show(dialog)
+
+        with patch.object(_SourceFilenameReviewDialog,"show_selection",new=show):
+            self.assertEqual(self.ingest([bad,other]),2)
+        self.assertFalse(failures,failures)
+        self.assertTrue(self.root.winfo_viewable())
+        self.assertIn(self.root.state(),{"normal","zoomed"})
+        self.assertIsNone(self.root.grab_current())
+        self.assertEqual({row["original_name"] for row in self.f.service.list_members(self.f.track)},
+                         {"READY_001.png","READY_002.png"})
+        self.errors.assert_not_called()
+
     def success_text(self):
         messages = [c.args[1] for c in self.messages.showinfo.call_args_list
                     if c.args[0] == "Dodawanie obrazów zakończone"]
         return messages[-1] if messages else ""
 
-    def test_mixed_folder_adds_clean_and_updates_actual_table(self):
+    def test_mixed_folder_adds_candidates_then_explicit_audit_filters_pool(self):
         self.panel._layout.notebook.select(self.panel._layout.details_page)
-        self.assertEqual(self.ingest(self.f.mixed(), folder=True), 1)
+        with patch.object(self.panel, "_run_participant_pool_audit",
+                          wraps=self.panel._run_participant_pool_audit) as audit:
+            self.assertEqual(self.ingest(self.f.mixed(), folder=True), 4)
+            audit.assert_not_called()
         self.errors.assert_not_called()
         self.messages.showerror.assert_not_called()
-        self.assertIn("Dodano do toru: 1", self.success_text())
-        for line in ("Duplikaty w wyborze: 1", "Pominięte zależne: 1",
-                     "Pominięte nieustalone: 1", "Pominięte po weryfikacji: 1"):
-            self.assertIn(line, self.success_text())
+        self.assertIn("Dodano do toru: 4", self.success_text())
+        self.assertIn("Duplikaty w wyborze: 1", self.success_text())
+        self.assertIn("Następny krok", self.success_text())
         self.assertEqual(self.panel._layout.notebook.select(), str(self.panel._layout.images_page))
-        self.assertEqual(len(self.f.service.list_members(self.f.track)), 1)
+        self.assertFalse(self.f.service.get_preparation_state(self.f.track).can_prepare_gt)
+        self.panel.audit_current_pool()
+        self.assertEqual(len(self.panel.member_tree.get_children()), 1)
         self.panel.participant_audit.assert_track_audit_ready(self.f.track)
+        self.errors.assert_not_called()
 
-    def test_yes_adds_suspect_with_recorded_acknowledgement(self):
+
+    def test_explicit_audit_accepts_suspect_with_recorded_acknowledgement(self):
         self.audit_default_choice = "accept"
-        self.assertEqual(self.ingest(self.f.mixed()), 2)
-        self.assertIn("Dodano do toru: 2", self.success_text())
+        self.assertEqual(self.ingest(self.f.mixed()), 4)
+        self.panel.audit_current_pool()
+        self.assertEqual(len(self.f.service.list_members(self.f.track)), 2)
         state = self.f.repo.get_evaluation_track_audit_state(self.f.track)
         self.assertEqual(len(state["accepted_suspect_sha256"]), 1)
 
-    def test_new_ingest_does_not_reask_about_previously_accepted_images(self):
+
+    def test_new_ingest_invalidates_previous_audit_without_starting_another(self):
         clean, _, suspect, *_ = self.f.mixed()
         self.audit_default_choice = "accept"
         self.ingest([suspect])
+        self.panel.audit_current_pool()
+        before = len(self.audit_reports)
         self.messages.reset_mock()
-        self.audit_default_choice = "reject"
         self.assertEqual(self.ingest([clean]), 2)
-        self.assertEqual(len(self.audit_reports[-1].candidates), 1)
-        self.assertEqual(self.audit_reports[-1].candidates[0].filename, clean.name)
+        self.assertEqual(len(self.audit_reports), before)
+        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "STALE")
+        self.assertEqual(self.panel._layout.audit_var.get(), "Audyt: wymaga ponowienia")
+        self.assertFalse(self.f.service.get_preparation_state(self.f.track).can_prepare_gt)
         self.messages.askyesno.assert_not_called()
         self.messages.askyesnocancel.assert_not_called()
         self.messages.askokcancel.assert_not_called()
-        self.panel.participant_audit.assert_track_audit_ready(self.f.track)
+
 
     def test_existing_invalid_pool_does_not_block_new_clean_images(self):
         clean, dependent, *_ = self.f.mixed()
@@ -137,7 +185,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(self.ingest([clean]), 2)
         state = self.f.repo.get_evaluation_track_audit_state(self.f.track)
         self.assertEqual(state["status"], "STALE")
-        self.assertEqual("Audyt: nieaktualny", self.panel._layout.audit_var.get())
+        self.assertEqual("Audyt: do wykonania", self.panel._layout.audit_var.get())
         self.errors.assert_not_called()
 
     def test_current_audit_button_rechecks_and_shows_owned_result_dialog(self):
@@ -146,6 +194,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.root.deiconify()
         self.root.update()
         self.ingest([self.f.image("RECHECK_001.png", seed=1900)])
+        self.panel.audit_current_pool()
         self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "CURRENT")
         before = len(self.f.repo.list_evaluation_track_audits(self.f.track))
         self.messages.reset_mock()
@@ -156,7 +205,9 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         def show_result(dialog):
             def apply():
                 try:
-                    self.assertEqual(str(dialog.window.transient()), str(self.root))
+                    # Native window controls coexist with the modal input grab.
+                    self.assertFalse(dialog.window.transient())
+                    self.assertEqual(dialog.window.resizable(), (1, 1))
                     self.assertTrue(dialog.window.winfo_viewable())
                     self.assertEqual(self.root.grab_current(), dialog.window)
                     self.assertIn("Trwa ponowna kontrola", self.panel.status_var.get())
@@ -225,16 +276,20 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])
         self.assertIn("Audyt anulowany", self.panel.status_var.get())
 
-    def test_cancel_suspect_decision_does_not_change_draft(self):
+    def test_cancel_explicit_audit_preserves_imported_candidates(self):
+        self.assertEqual(self.ingest(self.f.mixed()), 4)
         before = self.f.repo.get_evaluation_track_audit_state(self.f.track)
         self.audit_cancel = True
-        self.assertEqual(self.ingest(self.f.mixed()), 0)
+        self.panel.audit_current_pool()
+        self.assertEqual(len(self.f.service.list_members(self.f.track)), 4)
         self.assertEqual(self.f.repo.get_evaluation_track_audit_state(self.f.track), before)
-        self.assertEqual(self.success_text(), "")
+        self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])
+
 
     def test_repeated_folder_is_duplicate_and_preserves_current_audit(self):
         clean = self.f.mixed()[0]
         self.assertEqual(self.ingest([clean], folder=True), 1)
+        self.panel.audit_current_pool()
         before = self.f.repo.get_evaluation_track_audit_state(self.f.track)
         with patch.object(self.panel, "_run_participant_pool_audit") as run_audit:
             self.assertEqual(self.ingest([clean], folder=True), 1)
@@ -242,12 +297,16 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertEqual(self.f.repo.get_evaluation_track_audit_state(self.f.track), before)
         self.assertIn("Już w torze: 1", self.messages.showinfo.call_args.args[1])
 
-    def test_no_acceptable_candidates_preserves_existing_audit(self):
+    def test_imported_dependent_image_requires_audit_before_gt(self):
         clean, dependent, *_ = self.f.mixed()
         self.ingest([clean])
-        before = self.f.repo.get_evaluation_track_audit_state(self.f.track)
-        self.assertEqual(self.ingest([dependent]), 1)
-        self.assertEqual(self.f.repo.get_evaluation_track_audit_state(self.f.track), before)
+        self.panel.audit_current_pool()
+        self.assertEqual(self.ingest([dependent]), 2)
+        self.assertFalse(self.f.service.get_preparation_state(self.f.track).can_prepare_gt)
+        self.panel.audit_current_pool()
+        self.assertEqual(len(self.f.service.list_members(self.f.track)), 1)
+        self.panel.participant_audit.assert_track_audit_ready(self.f.track)
+
 
     def test_review_renamed_path_is_still_audited_and_added(self):
         bad = self.f.image("bad.png")
@@ -259,6 +318,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
             self.assertEqual(self.ingest([bad]), 1)
         row = self.f.service.list_members(self.f.track)[0]
         self.assertEqual(row["original_name"], "IMG_004.png")
+        self.panel.audit_current_pool()
         self.panel.participant_audit.assert_track_audit_ready(self.f.track)
 
     def test_logical_duplicate_does_not_block_other_clean_images(self):
@@ -324,13 +384,14 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
 
     def test_resolution_write_failure_keeps_images_but_never_claims_current(self):
         import sqlite3
+        self.assertEqual(self.ingest([self.f.image("IMG_110.png")]), 1)
         with patch.object(self.panel.repository, "record_evaluation_track_audit",
                           side_effect=sqlite3.OperationalError("test write failure")):
-            self.assertEqual(self.ingest([self.f.image("IMG_110.png")]), 1)
+            self.panel.audit_current_pool()
         self.errors.assert_called_once()
-        self.assertEqual(self.success_text(), "")
         self.assertEqual(self.f.repo.get_evaluation_track_audit_state(self.f.track)["status"], "STALE")
         self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])
+
 
     def test_missing_member_file_is_visible_as_unknown_and_can_be_removed(self):
         clean = self.f.image("IMG_110.png")
@@ -346,30 +407,21 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.assertTrue(clean.exists())
         self.errors.assert_not_called()
 
-    def test_partial_preflight_passes_exactly_eleven_paths_to_batch(self):
-        import hashlib
-        from auto_annotation_tool.registry.participant_pool_audit import (
-            AUDIT_SCHEMA, ParticipantPoolAuditReport, CandidateVerdict, participant_fingerprint,
-            STATUS_CLEAN, STATUS_DEPENDENT, STATUS_UNKNOWN, STATUS_SUSPECT,
-        )
+    def test_import_defers_all_independence_decisions_until_explicit_audit(self):
         paths = [self.f.image(f"IMG_{i+500:03d}.png", seed=500+i) for i in range(17)]
-        statuses = [STATUS_CLEAN]*10 + [STATUS_DEPENDENT]*3 + [STATUS_UNKNOWN]*2 + [STATUS_SUSPECT]*2
-        participants = self.panel.participant_audit.load_participants(self.f.track)
-        report = ParticipantPoolAuditReport(
-            AUDIT_SCHEMA, self.f.track, participant_fingerprint(participants), participants,
-            tuple(CandidateVerdict(str(path), path.name, hashlib.sha256(path.read_bytes()).hexdigest(),
-                                   "", status, ()) for path, status in zip(paths, statuses)),
-            3, 2, 10, 2, "2026-09-14T12:00:00+00:00",
-        )
-        self.audit_choices[paths[-2].name] = "accept"
-        with patch.object(self.panel.participant_audit, "audit_paths", return_value=report):
+        with patch.object(self.panel.participant_audit, "audit_paths",
+                          side_effect=AssertionError("Audit must be explicit")) as audit:
             with patch.object(self.panel.service, "add_members_batch",
                               wraps=self.panel.service.add_members_batch) as batch:
-                self.assertEqual(self.ingest(paths), 11)
-        self.assertEqual(len(batch.call_args.args[1]), 11)
-        self.assertIn(paths[-2], batch.call_args.args[1])
-        self.assertNotIn(paths[-1], batch.call_args.args[1])
-        self.panel.participant_audit.assert_track_audit_ready(self.f.track)
+                self.assertEqual(self.ingest(paths), 17)
+        self.assertEqual(list(batch.call_args.args[1]), paths)
+        audit.assert_not_called()
+        self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])
+        self.assertFalse(self.f.service.get_preparation_state(self.f.track).can_prepare_gt)
+        self.assertEqual(str(self.panel.btn_prepare_z2["state"]), "disabled")
+        self.assertEqual(str(self.panel.btn_verify["state"]), "disabled")
+        self.assertEqual(str(self.panel.btn_seal["state"]), "disabled")
+
 
     def test_correction_archives_existing_ground_truth_with_members(self):
         paths = self.f.mixed()[:4]
@@ -403,6 +455,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
     def test_gt_verify_and_seal_block_stale_then_accept_current_audit(self):
         clean = self.f.image("IMG_006.png")
         self.ingest([clean])
+        self.panel.audit_current_pool()
         context = self.f.service.activate_z2_context(self.f.track)
         self.assertTrue((Path(context["source_dir"]) / clean.name).exists())
         gt = Path(self.temp.name) / "gt.xml"
@@ -422,6 +475,57 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.panel.seal_track()
         self.errors.assert_not_called()
         self.assertEqual(self.f.service.get_track(self.f.track)["status"], "SEALED")
+
+    def test_guided_flow_reloads_sample_and_highlights_exactly_one_enabled_action(self):
+        from auto_annotation_tool.registry.sample_selection import prepare_sample_selection
+
+        def expect(step, primary):
+            self.panel.refresh_tracks(select_track_id=self.f.track)
+            self.root.update()
+            self.assertEqual(self.panel._workflow_view.step, step)
+            accented = [name for name in self.panel._layout.workflow_buttons
+                        if getattr(self.panel, name).cget("style") == "Accent.TButton"]
+            self.assertEqual(accented, [primary])
+            self.assertEqual(str(getattr(self.panel, primary).cget("state")), "normal")
+            self.assertNotEqual(self.panel._layout.new_button.cget("style"), "Accent.TButton")
+
+        self.f.track = self.f.service.create_draft(name="Guided flow", target="plate", purpose="ranking")
+        expect("SELECT_MODELS", "btn_participants")
+        self.assertEqual(self.panel._layout.audit_var.get(), "Audyt: czeka na wybór modeli")
+        self.f.audit.save_participants(self.f.track, ["M1", "M2"])
+        expect("ADD_IMAGES", "btn_add_images")
+        self.assertEqual(self.panel._layout.audit_var.get(), "Audyt: czeka na pulę obrazów")
+        paths = [self.f.image("FLOW_001.png", seed=1221), self.f.image("FLOW_002.png", seed=1222)]
+        self.ingest(paths)
+        expect("AUDIT_POOL", "btn_audit_pool")
+        self.panel.btn_audit_pool.invoke()
+        expect("SELECT_SAMPLE", "btn_sample_selection")
+        context = prepare_sample_selection(self.f.service, self.f.track)
+        keep = [context["sample_member_sha256"]["FLOW_001.png"]]
+        self.f.service.commit_sample_selection(
+            self.f.track, keep_sha256=keep,
+            expected_member_sha256=context["sample_member_sha256"],
+            expected_audit_id=context["sample_audit_id"],
+        )
+        expect("REAUDIT_SAMPLE", "btn_audit_sample")
+        self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "STALE")
+        self.assertEqual(self.panel.btn_audit_sample.cget("text"), "Sprawdź finalną próbę")
+        self.assertIn("Finalna próba wymaga ponownego sprawdzenia", self.panel._layout.next_step_var.get())
+        self.assertEqual(str(self.panel.btn_prepare_z2["state"]), "disabled")
+        self.panel.btn_audit_sample.invoke()
+        expect("PREPARE_GT", "btn_prepare_z2")
+        gt = Path(self.temp.name)/"guided.xml"
+        gt.write_text('<annotations><image id="0" name="FLOW_001.png" width="192" height="128">'
+                      '<polygon label="plate" points="10,10;70,10;70,40;10,40"/>'
+                      '</image></annotations>', encoding="utf-8")
+        self.f.service.set_ground_truth(self.f.track, gt)
+        expect("VERIFY", "btn_verify")
+        self.panel.btn_verify.invoke()
+        expect("SEAL", "btn_seal")
+        self.panel.btn_seal.invoke()
+        expect("COMPARE", "btn_compare")
+        self.errors.assert_not_called()
+
 
 
 if __name__ == "__main__":

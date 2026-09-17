@@ -3097,7 +3097,9 @@ def _load_preview_image_cached(self, img_path: Path, ann=None, *, update_annotat
         preview_image = image_cache.get(cache_key)
     if preview_image is None:
         load_started_at = time.perf_counter()
-        img = cv2.imread(str(img_path))
+        # OpenCV cannot reliably open Unicode paths on Windows.
+        encoded = np.frombuffer(img_path.read_bytes(), dtype=np.uint8)
+        img = cv2.imdecode(encoded, cv2.IMREAD_COLOR) if encoded.size else None
         if img is None:
             raise ValueError("Nie można załadować obrazu do podglądu.")
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)

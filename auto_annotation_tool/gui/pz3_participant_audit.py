@@ -266,12 +266,11 @@ class ParticipantSelectionDialog:
         self.on_unregister = on_unregister
         self.registry_status = tk.StringVar(
             master=parent,
-            value=(
-                f"Uczestnicy: {len(self.selected)} / {len(self.models)}"
-            ),
+            value="",
         )
         self.window = tk.Toplevel(parent)
-        self.window.title("Modele uczestniczące w eksperymencie")
+        self.selection_status = tk.StringVar(parent)
+        self.window.title("Wybierz modele do eksperymentu")
         self.window.geometry("1140x780")
         self.window.minsize(1000, 700)
         self.window.resizable(True, True)
@@ -286,13 +285,13 @@ class ParticipantSelectionDialog:
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(3, weight=1)
-        ttk.Label(root, text="Modele uczestniczące", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(root, text=f"Wybierz modele · {track_name}", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
         description = ttk.Label(
             root,
             text=(
-                f"Tor: {track_name}\n"
-                "Audyt dotyczy train/val uczestników. Pochodzenie pokazuje Run i Dataset; historia „Pełna” wymaga obu.\n"
-                "Kliknij wiersz, aby zobaczyć profil. Udział zmienisz polem wyboru lub spacją. mAP opisuje walidację treningu."
+                "Wybierz modele, które chcesz porównać w tym eksperymencie.\n"
+                "Kliknij model, aby zobaczyć jego szczegóły. Pochodzenie, dataset treningowy i metryki "
+                "pomagają zweryfikować właściwy model przed zatwierdzeniem."
             ),
             wraplength=1080,
             justify=tk.LEFT,
@@ -319,7 +318,7 @@ class ParticipantSelectionDialog:
             self._sort_fields[self.sort_var.get()]))
         ttk.Button(toolbar, text="Odwróć kolejność", command=lambda: self._sort_models(
             self._sort_fields[self.sort_var.get()])).pack(side=tk.LEFT)
-        ttk.Label(toolbar, text="Pełne identyfikatory i metryki w profilu poniżej.").pack(side=tk.RIGHT)
+        ttk.Label(toolbar, textvariable=self.selection_status, font=("Segoe UI", 9, "bold")).pack(side=tk.RIGHT)
         frame = ttk.Frame(root)
         frame.grid(row=3, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
@@ -331,9 +330,9 @@ class ParticipantSelectionDialog:
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended",
                                  style="ParticipantCatalog.Treeview", height=5)
         for key, title, width in (
-            ("sel", "Udział", 56), ("model", "Model", 200),
-            ("arch", "Architektura", 115), ("origin", "Pochodzenie", 290),
-            ("quality", "Jakość (mAP50–95)", 145), ("prov", "Historia", 170),
+            ("sel", "W eksperymencie", 125), ("model", "Model", 170),
+            ("arch", "Architektura", 100), ("origin", "Pochodzenie", 240),
+            ("quality", "Jakość (mAP50–95)", 145), ("prov", "Historia", 150),
         ):
             self._column_titles[key] = title
             self.tree.heading(
@@ -366,36 +365,39 @@ class ParticipantSelectionDialog:
             add="+",
         )
         self.profile = ParticipantProfilePanel(root, palette=self.palette)
-        self.profile.frame.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        registry_actions = ttk.Frame(root)
-        registry_actions.grid(row=5, column=0, sticky="ew", pady=(10, 0))
-        registry_actions.columnconfigure(3, weight=1)
-        ttk.Button(
-            registry_actions,
-            text="Odśwież listę",
-            command=self._refresh_registry,
-        ).grid(row=0, column=0, sticky="w")
-        ttk.Button(
-            registry_actions,
-            text="Zarejestruj istniejący model…",
-            command=self._register_model,
-        ).grid(row=0, column=1, sticky="w", padx=(6, 0))
-        ttk.Button(
-            registry_actions,
-            text="Wyrejestruj model…",
-            command=self._unregister_model,
-        ).grid(row=0, column=2, sticky="w", padx=(6, 0))
-        ttk.Label(
-            registry_actions,
-            textvariable=self.registry_status,
-        ).grid(row=0, column=3, sticky="e", padx=(12, 0))
-
+        self.profile.frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        selection_actions = ttk.Frame(root)
+        selection_actions.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        self.add_button = ttk.Button(selection_actions, text="Dodaj do eksperymentu",
+                                     command=lambda: self._set_participation(True))
+        self.add_button.pack(side=tk.LEFT)
+        self.remove_button = ttk.Button(selection_actions, text="Usuń z eksperymentu",
+                                        command=lambda: self._set_participation(False))
+        self.remove_button.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(selection_actions, text="Usuń wszystkie z wyboru",
+                   command=self._clear).pack(side=tk.RIGHT)
+        self.registry_actions = ttk.LabelFrame(root, text="Zarządzanie katalogiem modeli", padding=(8, 6))
+        self.registry_actions.grid(row=6, column=0, sticky="ew", pady=(8, 0))
+        self.registry_actions.columnconfigure(3, weight=1)
+        ttk.Button(self.registry_actions, text="Odśwież modele", command=self._refresh_registry,
+                   state="normal" if callable(self.on_refresh) else "disabled").grid(row=0, column=0, sticky="w")
+        ttk.Button(self.registry_actions, text="Dodaj model z dysku…", command=self._register_model,
+                   state="normal" if callable(self.on_register) else "disabled").grid(
+            row=0, column=1, sticky="w", padx=(6, 0))
+        self.catalog_menu = tk.Menu(self.window, tearoff=False)
+        self.catalog_menu.add_command(label="Usuń ręcznie dodany model z katalogu…",
+                                      command=self._unregister_model,
+                                      state="normal" if callable(self.on_unregister) else "disabled")
+        more = ttk.Menubutton(self.registry_actions, text="⋯", menu=self.catalog_menu, width=3)
+        more.grid(row=0, column=2, sticky="w", padx=(6, 0))
+        ttk.Label(self.registry_actions, textvariable=self.registry_status, width=1,
+                  wraplength=380).grid(row=0, column=3, sticky="ew", padx=(12, 0))
         actions = ttk.Frame(root)
-        actions.grid(row=6, column=0, sticky="ew", pady=(8, 0))
-        ttk.Button(actions, text="Zaznacz / odznacz", command=self._toggle).pack(side=tk.LEFT)
-        ttk.Button(actions, text="Wyczyść", command=self._clear).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(actions, text="Anuluj", command=self._cancel).pack(side=tk.RIGHT)
-        ttk.Button(actions, text="Zapisz uczestników", command=self._accept).pack(side=tk.RIGHT, padx=(0, 6))
+        actions.grid(row=7, column=0, sticky="ew", pady=(8, 0))
+        self.accept_button = ttk.Button(actions, text="Zatwierdź wybór", command=self._accept,
+                                       style="Accent.TButton")
+        self.accept_button.pack(side=tk.RIGHT)
+        ttk.Button(actions, text="Anuluj", command=self._cancel).pack(side=tk.RIGHT, padx=(0, 6))
 
     def _replace_models(self, models, *, select_model_id=""):
         self.models = list(models or [])
@@ -403,8 +405,8 @@ class ParticipantSelectionDialog:
         self.selected.intersection_update(available)
         if select_model_id and select_model_id in available:
             self.selected.add(select_model_id)
-        self.registry_status.set(
-            f"Uczestnicy: {len(self.selected)} / {len(self.models)}"
+        self.selection_status.set(
+            f"Wybrane modele: {len(self.selected)} z {len(self.models)}"
         )
         self._populate()
 
@@ -447,12 +449,12 @@ class ParticipantSelectionDialog:
     def _register_model(self):
         if not callable(self.on_register):
             return
-        self.registry_status.set("Rejestracja modelu…")
+        self.registry_status.set("Dodawanie modelu do katalogu…")
         self.window.update_idletasks()
         try:
             models, model_id, message = self.on_register()
         except Exception as exc:
-            self.registry_status.set(f"Błąd rejestracji: {exc}")
+            self.registry_status.set(f"Błąd dodawania modelu: {exc}")
             return
         self._replace_models(models, select_model_id=str(model_id or ""))
         if message:
@@ -464,16 +466,16 @@ class ParticipantSelectionDialog:
         selected_rows = tuple(self.tree.selection())
         if len(selected_rows) != 1:
             messagebox.showinfo(
-                "Wyrejestrowanie modelu",
-                "Zaznacz dokładnie jeden model na liście.",
+                "Usuwanie modelu z katalogu",
+                "Kliknij jeden model, aby wskazać go w katalogu.",
                 parent=self.window,
             )
             return
         model_id = str(selected_rows[0])
         if not messagebox.askyesno(
-            "Wyrejestrować model?",
+            "Usunąć model z katalogu?",
             (
-                f"Wyrejestrować {model_id} z puli modeli?\n\n"
+                f"Usunąć {model_id} z katalogu modeli?\n\n"
                 "Plik .pt NIE zostanie usunięty z dysku. "
                 "Operacja dotyczy wyłącznie ręcznie dodanych modeli. "
                 "Modele używane przez tor lub zapisany eksperyment są chronione."
@@ -481,45 +483,39 @@ class ParticipantSelectionDialog:
             parent=self.window,
         ):
             return
-        self.registry_status.set("Wyrejestrowywanie modelu…")
+        self.registry_status.set("Usuwanie modelu z katalogu…")
         self.window.update_idletasks()
         try:
             models, message = self.on_unregister(model_id)
         except Exception as exc:
-            self.registry_status.set("Wyrejestrowanie zablokowane.")
+            self.registry_status.set("Usunięcie modelu z katalogu zablokowane.")
             messagebox.showerror(
-                "Nie można wyrejestrować modelu",
+                "Nie można usunąć modelu z katalogu",
                 str(exc),
                 parent=self.window,
             )
             return
         self._replace_models(models)
-        self.registry_status.set(str(message or "Model wyrejestrowany."))
+        self.registry_status.set(str(message or "Model usunięty z katalogu."))
 
     def _update_selection_status(self, _event=None):
-        rows = tuple(self.tree.selection())
+        rows = set(self.tree.selection())
         self.profile.show([item for item in self.models if item.model_id in rows], self.models)
-        if not rows:
-            self.registry_status.set(
-                f"Uczestnicy: {len(self.selected)} / {len(self.models)}"
-            )
-            return
+        self.selection_status.set(f"Wybrane modele: {len(self.selected)} z {len(self.models)}")
+        eligible = {item.model_id for item in self.models if participant_eligible(item)}
+        self.add_button.configure(state="normal" if (rows & eligible) - self.selected else "disabled")
+        self.remove_button.configure(state="normal" if rows & self.selected else "disabled")
 
-        if len(rows) == 1:
-            model_id = str(rows[0])
-            state = "tak" if model_id in self.selected else "nie"
-            short_id = model_id if len(model_id) <= 28 else model_id[:28] + "…"
-            self.registry_status.set(
-                f"Wybrany: {short_id} · uczestniczy: {state}"
-            )
-            return
-
-        participating = sum(
-            1 for model_id in rows if model_id in self.selected
-        )
-        self.registry_status.set(
-            f"Zaznaczono: {len(rows)} · uczestniczy: {participating}"
-        )
+    def _set_participation(self, enabled):
+        rows = tuple(self.tree.selection())
+        eligible = {item.model_id for item in self.models if participant_eligible(item)}
+        if enabled:
+            self.selected.update(set(rows) & eligible)
+        else:
+            self.selected.difference_update(rows)
+        self._populate()
+        self.tree.selection_set([row for row in rows if self.tree.exists(row)])
+        self._update_selection_status()
 
     def _toggle_participation_cell(self, event):
         region = self.tree.identify_region(event.x, event.y)
@@ -623,10 +619,11 @@ class ParticipantSelectionDialog:
                     provenance_badge(item)[0],
                 ),
             )
-        self.registry_status.set(
-            f"Uczestnicy: {len(self.selected)} / {len(self.models)}"
+        self.selection_status.set(
+            f"Wybrane modele: {len(self.selected)} z {len(self.models)}"
         )
         self._refresh_sort_headings()
+        self._update_selection_status()
 
     def _toggle(self):
         rows = tuple(self.tree.selection())
@@ -776,6 +773,7 @@ class TrainingRunSelectionDialog:
 
 class BatchProgressDialog:
     def __init__(self, parent, title="Dodawanie puli obrazów"):
+        self.parent = parent
         self._previous_grab = parent.grab_current()
         self.window = tk.Toplevel(parent)
         self.window.title(title)
@@ -846,7 +844,7 @@ class BatchProgressDialog:
             self.bar.stop()
             self.window.grab_release()
             self.window.destroy()
-            if self._previous_grab is not None and self._previous_grab.winfo_exists():
-                self._previous_grab.grab_set()
+            from .app_window_recovery import restore_parent_after_modal
+            restore_parent_after_modal(self.parent, self._previous_grab)
         except tk.TclError:
             pass

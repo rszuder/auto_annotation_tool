@@ -24,6 +24,7 @@ from .pz3_participant_audit import (
     TrainingRunSelectionDialog,
 )
 from .pz3_audit_resolution_dialog import format_audit_state
+from .pz3_workflow_view import build_pz3_workflow_view_state, has_selected_sample
 from ..registry.audit_resolution import audit_path_key
 from ..registry.participant_pool_audit import (
     ParticipantPoolAuditService,
@@ -521,9 +522,16 @@ class EvaluationTracksPanel:
         lines += ["", format_audit_state(audit_state)]
         self._set_detail_text("\n".join(lines))
         self._current_readiness = self.service.get_preparation_state(track_id)
+        self._workflow_view = build_pz3_workflow_view_state(
+            self._current_readiness, audit_state=audit_state,
+            sample_selected=has_selected_sample(self.workspace, track, members),
+        )
         if getattr(self, "_layout", None) is not None:
-            self._layout.set_track(track, member_count=len(members), audit_state=audit_state,
-                                   readiness=self._current_readiness)
+            self._layout.set_track(
+                track, member_count=len(members), audit_state=audit_state,
+                readiness=self._current_readiness, workflow=self._workflow_view,
+                participant_count=len(self.participant_audit.load_participants(track_id)),
+            )
         for iid in self.member_tree.get_children():
             self.member_tree.delete(iid)
         for row in members:
@@ -542,9 +550,7 @@ class EvaluationTracksPanel:
             track,
             member_count=len(members),
         )
-        self._set_status(
-            self._current_readiness.next_step
-        )
+        self._set_status(self._workflow_view.status_text)
 
     def _clear_selected_details(self) -> None:
         if getattr(self, "_layout", None) is not None:
@@ -825,7 +831,7 @@ class EvaluationTracksPanel:
         if result is None:
             return False
         if not result:
-            messagebox.showwarning("Modele uczestniczące", "Wybierz co najmniej jeden model.", parent=self.parent)
+            messagebox.showwarning("Wybierz modele", "Wybierz co najmniej jeden model.", parent=self.parent)
             return False
         try:
             participants = self.participant_audit.save_participants(track_id, result)
@@ -875,7 +881,7 @@ class EvaluationTracksPanel:
             members = self.service.list_members(track_id)
             if not self.participant_audit.load_participants(track_id):
                 messagebox.showwarning(
-                    "Modele uczestniczące", "Najpierw wybierz modele uczestniczące.",
+                    "Wybierz modele", "Najpierw wybierz modele do eksperymentu.",
                     parent=self.parent,
                 )
                 return
@@ -942,7 +948,7 @@ class EvaluationTracksPanel:
             f"Ręcznie zaakceptowano: {len(resolution.accepted_suspects)}\n\n"
             + format_audit_state(state, compact=True)
         )
-        self._set_status(text.replace("\n", " | "))
+        self._set_status(outcome + " " + self._workflow_view.status_text)
         messagebox.showinfo("Zapisano wynik audytu", text, parent=self.parent)
 
     def add_images(self) -> None:
@@ -960,16 +966,16 @@ class EvaluationTracksPanel:
         participants = self.participant_audit.load_participants(track_id)
         if purpose in {"ranking", "final_test"} and not participants:
             messagebox.showwarning(
-                "Modele uczestniczące",
+                "Wybierz modele",
                 (
-                    "Najpierw wybierz modele uczestniczące w eksperymencie. "
+                    "Najpierw wybierz modele do eksperymentu. "
                     "Niezależność puli obrazów będzie oceniana względem "
                     "train/val właśnie tych modeli."
                 ),
                 parent=self.parent,
             )
             self._set_status(
-                "Najpierw wybierz modele uczestniczące. "
+                "Najpierw wybierz modele do eksperymentu. "
                 "Dopiero potem można dodać pulę obrazów."
             )
             return
@@ -983,7 +989,8 @@ class EvaluationTracksPanel:
                 self.parent,
                 selection.source_dir,
                 recursive=False,
-                title="Podgląd i korekta nazw — PZ3",
+                title="Kontrola nazw plików — PZ3",
+                audit_next_step=True,
             ):
                 return
             selected_paths = list(
@@ -993,7 +1000,8 @@ class EvaluationTracksPanel:
             review_result = review_source_image_paths(
                 self.parent,
                 selection.paths,
-                title="Podgląd i korekta nazw — PZ3",
+                title="Kontrola nazw plików — PZ3",
+                audit_next_step=True,
             )
             if not review_result.ok:
                 return
@@ -1059,52 +1067,14 @@ class EvaluationTracksPanel:
             return
 
 
-        resolution = None
-        accepted_new = list(unique_paths)
-        previous_state = self.participant_audit.get_track_audit_state(track_id)
-        expected_shas = {str(row["sha256"]).lower() for row in existing_members}
-        if participants:
-            try:
-                resolution = self._run_participant_pool_audit(
-                    track_id, unique_paths, mode="ingest", track=track
-                )
-            except Exception as exc:
-                self._show_error("Audyt puli nie powiódł się", exc)
-                return
-            if resolution.cancelled:
-                return
-            accepted_new = list(resolution.accepted_paths)
-
-        sha_map = {str(path): fingerprints.get(path, "") for path in accepted_new}
-        if resolution is not None:
-            report_by_path = {
-                audit_path_key(item.path): item for item in resolution.report.candidates
-            }
-            sha_map.update({
-                str(path): report_by_path[audit_path_key(path)].sha256 for path in accepted_new
-            })
+        sha_map = {str(path): fingerprints.get(path, "") for path in unique_paths}
 
         def ingest(update):
-            if resolution is not None:
-                self.participant_audit.validate_resolution_target(track_id, resolution, expected_shas)
-            indices = []
-            if accepted_new:
-                indices = self.service.add_members_batch(
-                    track_id, accepted_new, sha256_by_path=sha_map, progress=update
-                )
-            if resolution is not None:
-                update("Zapis decyzji i audytu", 0, 1)
-                try:
-                    self.service.ensure_audit_manifest(track_id)
-                    self.participant_audit.record_resolution(
-                        track_id, resolution, mode="ingest", previous_state=previous_state
-                    )
-                except Exception:
-                    self.participant_audit.invalidate_track_audit(track_id, reason="resolution_write_failed")
-                    raise
-            return indices
+            return self.service.add_members_batch(
+                track_id, unique_paths, sha256_by_path=sha_map, progress=update
+            )
 
-        progress = BatchProgressDialog(self.parent, title="Zastosowanie wyniku audytu")
+        progress = BatchProgressDialog(self.parent, title="Dodawanie obrazów do puli")
         try:
             added_indices = progress.run(ingest)
         except Exception as exc:
@@ -1133,14 +1103,9 @@ class EvaluationTracksPanel:
             f"Kolizje nazw: {len(skipped_name)}",
             f"Błędy odczytu: {len(preflight.hash_errors)}",
         ]
-        if resolution is not None:
-            final_lines += [
-                f"Pominięte zależne: {len(resolution.rejected_dependent)}",
-                f"Pominięte nieustalone: {len(resolution.rejected_unknown)}",
-                f"Pominięte po weryfikacji: {len(resolution.rejected_suspects)}",
-                f"Ręcznie zaakceptowano: {len(resolution.accepted_suspects)}",
-            ]
-        self._set_status(" | ".join(final_lines))
+        next_step = self._workflow_view.status_text
+        final_lines += ["", next_step]
+        self._set_status(next_step)
         messagebox.showinfo("Dodawanie obrazów zakończone", "\n".join(final_lines), parent=self.parent)
 
     def remove_selected_images(self) -> None:
@@ -1771,6 +1736,12 @@ class EvaluationTracksPanel:
         compare_button = getattr(self, "btn_compare", None)
         if compare_button is not None:
             compare_button.configure(state=tk.NORMAL if readiness.sealed else tk.DISABLED)
+        audit_sample = getattr(self, "btn_audit_sample", None)
+        if audit_sample is not None:
+            audit_sample.configure(state=tk.NORMAL if readiness.can_audit else tk.DISABLED)
+        layout = getattr(self, "_layout", None)
+        if layout is not None:
+            layout.refresh_primary_action()
         self._refresh_remove_images_button_state()
 
     def _status_hint_for_track(

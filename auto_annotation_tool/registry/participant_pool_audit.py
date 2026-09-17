@@ -261,7 +261,9 @@ def _sha256_file(path: Path) -> str:
 
 
 def _phash64_file(path: Path) -> str:
-    image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    # Python handles Unicode paths on Windows; OpenCV only decodes the bytes.
+    encoded = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE) if encoded.size else None
     if image is None:
         raise ValueError(f"Nie można odczytać obrazu do pHash: {path}")
     image = cv2.resize(image, (32, 32), interpolation=cv2.INTER_AREA)

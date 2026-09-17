@@ -34,6 +34,10 @@ class AuditDecisionDialogTests(unittest.TestCase):
 
     def test_filters_details_and_decisions_stay_in_one_window(self):
         dialog = self.dialog(mode="ingest")
+        self.assertEqual(dialog.filter_var.get(), STATUS_SUSPECT)
+        self.assertEqual(len(dialog.tree.get_children()), 1)
+        dialog.filter_var.set("all")
+        dialog._populate()
         self.assertEqual(len(dialog.tree.get_children()), 4)
         self.assertEqual(str(dialog.apply_button["state"]), "disabled")
         dialog.filter_var.set(STATUS_SUSPECT)
@@ -78,10 +82,82 @@ class AuditDecisionDialogTests(unittest.TestCase):
         self.assertEqual(str(dialog.apply_button["state"]), "disabled")
         dialog._cancel()
 
+    def test_bulk_rejection_shows_changed_rows_feedback_and_can_be_undone(self):
+        dialog = self.dialog(mode="pool")
+        dialog.filter_var.set(STATUS_DEPENDENT)
+        dialog._populate()
+        dialog.reject_all_button.invoke()
+        dialog.window.update()
+        self.assertEqual(dialog.filter_var.get(), STATUS_SUSPECT)
+        self.assertEqual(dialog.tree.selection(), ("2",))
+        self.assertIn("Twoja decyzja", dialog.tree.set("2", "decision"))
+        self.assertIn("Oznaczono do odrzucenia: 1", dialog.feedback_var.get())
+        self.assertIn("po zapisaniu audytu", dialog.feedback_var.get())
+        self.assertEqual(dialog.summary_vars["pending"].get(), "0")
+        self.assertEqual(dialog.summary_vars["rejected"].get(), "3")
+        self.assertEqual(str(dialog.reject_all_button["state"]), "disabled")
+        self.assertEqual(str(dialog.undo_batch_button["state"]), "normal")
+        dialog.undo_batch_button.invoke()
+        self.assertEqual(dialog.tree.set("2", "decision"), "Wybierz decyzję")
+        self.assertEqual(dialog.summary_vars["pending"].get(), "1")
+        self.assertEqual(str(dialog.apply_button["state"]), "disabled")
+        self.assertEqual(str(dialog.undo_batch_button["state"]), "disabled")
+        self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])
+        dialog._cancel()
+
+    def test_bulk_rejection_preserves_reviewed_acceptance_and_later_edits(self):
+        from dataclasses import replace
+        from pathlib import Path
+        suspect = self.report.candidates[2]
+        copy = self.f.sources / "SUSPECT_002.bmp"
+        copy.write_bytes(Path(suspect.path).read_bytes())
+        self.report = replace(self.report, suspect_count=2, candidates=self.report.candidates + (
+            replace(suspect, path=str(copy), filename=copy.name),))
+        dialog = self.dialog(mode="pool")
+        dialog.set_decision(2, "accept")
+        dialog.reject_all_button.invoke()
+        self.assertEqual(len(dialog.resolution().accepted_suspects), 1)
+        self.assertEqual(len(dialog.resolution().rejected_suspects), 1)
+        dialog.undo_batch_button.invoke()
+        self.assertEqual(len(dialog.resolution().accepted_suspects), 1)
+        self.assertEqual(len(dialog.resolution().unresolved), 1)
+        dialog.reject_all_button.invoke()
+        dialog.set_decision(4, "accept")
+        dialog._undo_batch_rejection()
+        self.assertEqual(len(dialog.resolution().accepted_suspects), 2)
+        dialog._cancel()
+
+    def test_main_view_uses_plain_reasons_and_keeps_technical_evidence_separate(self):
+        dialog = self.dialog()
+        self.assertEqual(dialog.detail_tabs.index(dialog.detail_tabs.select()), 0)
+        for candidate in self.report.candidates:
+            reason = dialog._candidate_reason(candidate)
+            self.assertNotIn("SHA", reason)
+            self.assertNotIn("pHash", reason)
+            self.assertNotIn("train/val", reason)
+        self.assertIn("Podobny", dialog.tree.set("2", "reason"))
+        self.assertIn("pHash", dialog.detail.get("1.0", "end"))
+        dialog.window.geometry("980x680")
+        dialog.window.update()
+        for button in (dialog.reject_all_button, dialog.undo_batch_button, dialog.accept_button,
+                       dialog.reject_button, dialog.reset_button, dialog.next_button, dialog.apply_button):
+            with self.subTest(button=button["text"]):
+                self.assertTrue(button.winfo_viewable())
+                self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                     dialog.window.winfo_rootx() + dialog.window.winfo_width())
+                self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
+                                     dialog.window.winfo_rooty() + dialog.window.winfo_height())
+        self.assertLessEqual(dialog.next_button.winfo_rooty() + dialog.next_button.winfo_height(),
+                             dialog.detail_tabs.winfo_rooty() + dialog.detail_tabs.winfo_height())
+        self.assertTrue(dialog.tree.bbox("2", "decision"))
+        dialog._cancel()
+
     def test_cancel_after_decision_does_not_write_members_or_decisions(self):
         dialog = self.dialog(mode="ingest")
         dialog.set_decision(2, "accept")
+        pending_layout = dialog._fit_job
         dialog._cancel()
+        self.assertNotIn(pending_layout, self.root.tk.splitlist(self.root.tk.call("after", "info")))
         self.assertTrue(dialog.result.cancelled)
         self.assertEqual(self.f.service.list_members(self.f.track), [])
         self.assertEqual(self.f.repo.list_evaluation_track_audits(self.f.track), [])

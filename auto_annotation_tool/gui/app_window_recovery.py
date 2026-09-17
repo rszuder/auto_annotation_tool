@@ -111,6 +111,40 @@ def restore_visible_modal(window) -> bool:
         return False
 
 
+def restore_parent_after_modal(parent, previous_grab=None) -> bool:
+    """Return from a completed foreground dialog without reviving hidden grabs."""
+    owner = _safe_toplevel(parent)
+    if owner is None:
+        return False
+    try:
+        current = parent.grab_current()
+        if current is not None:
+            top = _safe_toplevel(current)
+            if _safe_window_state(top) in {"normal", "zoomed"} and current.winfo_viewable():
+                return False  # Another visible dialog now owns the interaction.
+            current.grab_release()
+
+        # Independently minimized tools keep that state; return to the main app.
+        if _window_recovery_opted_out(owner) and _safe_window_state(owner) in {"iconic", "withdrawn"}:
+            owner = owner._root()
+        if _safe_window_state(owner) in {"iconic", "withdrawn"}:
+            owner.deiconify()
+        owner.update_idletasks()
+
+        focus = owner
+        if _safe_widget_exists(previous_grab):
+            top = _safe_toplevel(previous_grab)
+            if _safe_window_state(top) in {"normal", "zoomed"} and previous_grab.winfo_viewable():
+                previous_grab.grab_set()
+                focus = top
+        focus.lift()
+        focus.focus_force()
+        return True
+    except Exception:
+        logger.debug("Nie udało się przywrócić rodzica po zamknięciu modala.", exc_info=True)
+        return False
+
+
 def _append_recoverable_toplevel(app, window, result: list, seen: set[str]) -> None:
     top = _safe_toplevel(window)
     if top is None or top is getattr(app, "root", None):

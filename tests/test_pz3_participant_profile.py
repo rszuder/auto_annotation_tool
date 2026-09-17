@@ -121,6 +121,35 @@ class ParticipantProfileGuiTests(unittest.TestCase):
         self.dialog.window.update()
         self.assertEqual(self.dialog.selected,{"MODEL-A","MODEL-B"})
 
+    def test_participant_dialog_title_and_selection_copy(self):
+        self.assertEqual(self.dialog.window.title(), "Wybierz modele do eksperymentu")
+        self.assertEqual(self.dialog.tree.heading("sel", "text"), "W eksperymencie")
+        self.assertEqual(self.dialog.selection_status.get(), "Wybrane modele: 1 z 2")
+        self.select("MODEL-B")
+        self.assertEqual(self.dialog.selection_status.get(), "Wybrane modele: 1 z 2")
+        self.assertEqual(self.dialog.selected, {"MODEL-A"})
+        self.assertEqual(self.dialog.accept_button.cget("text"), "Zatwierdź wybór")
+        self.assertEqual(self.dialog.accept_button.cget("style"), "Accent.TButton")
+
+    def test_participant_catalog_actions_are_secondary(self):
+        self.assertEqual(self.dialog.registry_actions.cget("text"), "Zarządzanie katalogiem modeli")
+        for widget in self.dialog.registry_actions.winfo_children():
+            if "style" in widget.keys():
+                self.assertNotEqual(widget.cget("style"), "Accent.TButton")
+        self.assertEqual(self.dialog.catalog_menu.entrycget(0, "label"),
+                         "Usuń ręcznie dodany model z katalogu…")
+
+    def test_explicit_add_remove_actions_are_idempotent_for_mixed_selection(self):
+        self.select("MODEL-A", "MODEL-B")
+        self.dialog.add_button.invoke()
+        self.assertEqual(self.dialog.selected, {"MODEL-A", "MODEL-B"})
+        self.assertEqual(self.dialog.selection_status.get(), "Wybrane modele: 2 z 2")
+        self.assertEqual(str(self.dialog.add_button.cget("state")), "disabled")
+        self.dialog.remove_button.invoke()
+        self.assertEqual(self.dialog.selected, set())
+        self.assertEqual(self.dialog.selection_status.get(), "Wybrane modele: 0 z 2")
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,6 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable, Iterable, Mapping, Sequence
 
 from ..config import CONFIG
+from .app_window_recovery import restore_parent_after_modal
 
 
 @dataclass(frozen=True)
@@ -255,20 +256,24 @@ def prepend_candidate_preflight_summary(
 class _PZ3SourceChooser:
     def __init__(self, parent) -> None:
         self.parent = parent
+        self._previous_grab = parent.grab_current()
         self.result: PZ3SourceSelection | None = None
         self.window = tk.Toplevel(parent)
+        self.window.withdraw()
         self.window.title("Dodaj obrazy do toru PZ3")
         # Pełnoprawne okno systemowe: min/max/X.
-        self.window.geometry("620x330")
-        self.window.minsize(540, 290)
+        self.window.geometry("620x360")
+        self.window.minsize(540, 340)
         self.window.resizable(True, True)
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
         self._build()
-        try:
+        self.window.deiconify()
+        self.window.lift()
+        self.window.update_idletasks()
+        if not self.window.winfo_viewable():
             self.window.wait_visibility()
-            self.window.grab_set()
-        except Exception:
-            pass
+        self.window.grab_set()
+        self.window.focus_force()
 
     def _build(self) -> None:
         root = ttk.Frame(self.window, padding=18)
@@ -284,8 +289,8 @@ class _PZ3SourceChooser:
         ttk.Label(
             root,
             text=(
-                "Obie ścieżki trafiają do tego samego kontraktu nazw, "
-                "kontroli duplikatów i audytu train/val."
+                "Najpierw sprawdzisz nazwy i dodasz obrazy. Następnie użyj "
+                "„Sprawdź niezależność puli”, aby porównać obrazy z train/val wybranych modeli."
             ),
             justify=tk.LEFT,
             wraplength=560,
@@ -390,6 +395,7 @@ class _PZ3SourceChooser:
         except Exception:
             pass
         self.window.destroy()
+        restore_parent_after_modal(self.parent, self._previous_grab)
 
     def show(self) -> PZ3SourceSelection | None:
         self.window.wait_window()

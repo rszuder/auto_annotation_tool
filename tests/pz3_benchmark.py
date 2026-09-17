@@ -22,7 +22,7 @@ from pz3_gui_capture import capture_window
 
 
 def run(source_dir, output):
-    case = PZ3IngestIntegrationTests("test_mixed_folder_adds_clean_and_updates_actual_table")
+    case = PZ3IngestIntegrationTests("test_mixed_folder_adds_candidates_then_explicit_audit_filters_pool")
     case.setUp()
     try:
         paths = sorted(p.resolve() for p in source_dir.iterdir()
@@ -116,6 +116,7 @@ def run(source_dir, output):
                 heartbeat()
                 start = time.perf_counter()
                 case.panel.add_images()
+                case.panel.audit_current_pool()
                 case.root.update()
                 elapsed = time.perf_counter() - start
                 case.root.after_cancel(timer)
