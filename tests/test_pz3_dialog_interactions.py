@@ -107,6 +107,59 @@ class PZ3DialogInteractionTests(unittest.TestCase):
         self.assertEqual(dialog.rename_stems, {})
         dialog._cancel()
 
+    def test_name_review_is_visible_and_distinguishes_filename_count_from_audit(self):
+        self.root.geometry("1100x780+20+20")
+        self.root.deiconify()
+        self.root.update()
+        self.root.grab_set()
+        dialog = _SourceFilenameReviewDialog(
+            self.root,self.directory,recursive=False,title="PZ3 names",audit_next_step=True)
+        self.addCleanup(lambda: dialog._cancel() if dialog.window.winfo_exists() else None)
+        dialog.window.update()
+        self.assertEqual(dialog.window.state(),"normal")
+        self.assertTrue(dialog.window.winfo_viewable())
+        self.assertEqual(self.root.grab_current(),dialog.window)
+        self.assertIn("nazwy do poprawy: 2",dialog.summary_var.get())
+        self.assertIn("Sprawdź niezależność puli",dialog.summary_var.get())
+        self.assertEqual(dialog.tree.heading("problem","text"),"Problem z nazwą")
+        dialog.window.grab_release()
+        dialog.window.iconify()
+        self.root.update()
+        self.assertEqual(dialog.window.state(),"iconic")
+        dialog._present()
+        self.root.update()
+        self.assertEqual(dialog.window.state(),"normal")
+        self.assertTrue(dialog.window.winfo_viewable())
+        self.assertEqual(self.root.grab_current(),dialog.window)
+        dialog._cancel()
+        self.assertEqual(self.root.grab_current(),self.root)
+        self.root.grab_release()
+
+    def test_successful_name_review_restores_parent_grab(self):
+        self.root.deiconify()
+        self.root.update()
+        self.root.grab_set()
+        dialog=self.dialog()
+        for i,path in enumerate(self.paths):
+            dialog.rename_stems[str(path)]=f"GOOD_{i+1:03d}"
+        dialog._apply()
+        self.assertTrue(dialog.result)
+        self.assertEqual(self.root.grab_current(),self.root)
+        self.root.grab_release()
+
+    def test_source_chooser_restores_parent_before_filename_review(self):
+        from auto_annotation_tool.gui.pz3_source_ingest_ui import _PZ3SourceChooser
+        self.root.deiconify()
+        self.root.update()
+        self.root.grab_set()
+        chooser=_PZ3SourceChooser(self.root)
+        self.assertTrue(chooser.window.winfo_viewable())
+        self.assertEqual(chooser.window.state(),"normal")
+        self.assertEqual(self.root.grab_current(),chooser.window)
+        chooser._cancel()
+        self.assertEqual(self.root.grab_current(),self.root)
+        self.root.grab_release()
+
     def test_model_checkbox_selection_and_sort_preserve_membership(self):
         models = [
             ParticipantModel("M2", "b" * 64, "R2", "DS-PLATE-002", "plate", "YOLO26", "s", "known"),
@@ -120,7 +173,7 @@ class PZ3DialogInteractionTests(unittest.TestCase):
         dialog.tree.event_generate("<Button-1>", x=x+width//2, y=y+height//2)
         dialog.window.update()
         self.assertEqual(dialog.selected, {"M1", "M2"})
-        self.assertIn("M2", dialog.registry_status.get())
+        self.assertIn("M2", dialog.profile.title.get())
         self.assertEqual(dialog.tree.item("M2", "values")[0], "☑")
         dialog._sort_models("scale")
         self.assertEqual(dialog.tree.get_children(), ("M1", "M2"))

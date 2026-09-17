@@ -24,6 +24,42 @@ class ParticipantAuditIntegrationTests(unittest.TestCase):
         unrelated = self.f.audit.audit_paths(self.f.track, [self.f.references["M3"]])
         self.assertEqual(unrelated.candidates[0].common_status, STATUS_CLEAN)
 
+    def test_unicode_candidate_paths_preserve_audit_verdicts_and_hashes(self):
+        paths = self.f.mixed()
+        baseline = self.f.audit.audit_paths(self.f.track, paths)
+        folder = self.f.root / "Por\u00f3wnanie_jako\u015bci" / "obrazy"
+        folder.mkdir(parents=True)
+        copies = []
+        for path in paths:
+            copied = folder / ("Za\u017c\u00f3\u0142\u0107_" + path.name)
+            copied.write_bytes(path.read_bytes())
+            copies.append(copied)
+        report = self.f.audit.audit_paths(self.f.track, copies)
+        for expected, actual in zip(baseline.candidates, report.candidates):
+            with self.subTest(file=actual.filename):
+                self.assertEqual(actual.common_status, expected.common_status)
+                self.assertEqual(actual.sha256, expected.sha256)
+                self.assertEqual(actual.phash64, expected.phash64)
+                self.assertEqual(actual.per_model, expected.per_model)
+
+    def test_unicode_training_paths_keep_full_reference_coverage(self):
+        candidate = self.f.image("IMG_006.png")
+        baseline = self.f.audit.audit_paths(self.f.track, [candidate])
+        folder = self.f.root / "Dane_treningowe_\u017c\u00f3\u0142\u0107"
+        folder.mkdir()
+        for number in (1, 2):
+            original = self.f.references[f"M{number}"]
+            copied = folder / ("Zdj\u0119cie_" + original.name)
+            copied.write_bytes(original.read_bytes())
+            with self.f.repo.database.transaction() as db:
+                db.execute("UPDATE image_artifacts SET external_path=? WHERE artifact_id=?",
+                           (str(copied), f"A{number}"))
+        report = self.f.audit.audit_paths(self.f.track, [candidate])
+        self.assertEqual(report.candidates, baseline.candidates)
+        self.assertEqual(report.candidates[0].common_status, STATUS_CLEAN)
+        self.assertTrue(all(item.phash_reference_coverage == 1.0
+                            for item in report.candidates[0].per_model))
+
     def test_incomplete_phash_coverage_is_unknown(self):
         with self.f.repo.database.transaction() as db:
             db.execute("INSERT INTO dataset_members(dataset_id, artifact_id, source_image_id, split, file_sha256) "

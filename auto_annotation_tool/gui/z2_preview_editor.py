@@ -474,56 +474,9 @@ def _render_preview_image(
         return
 
     try:
-        try:
-            stat = img_path.stat()
-            cache_key = (
-                str(img_path.resolve()),
-                int(getattr(stat, "st_mtime_ns", 0) or 0),
-                int(getattr(stat, "st_size", 0) or 0),
-            )
-        except Exception:
-            cache_key = (str(img_path), 0, 0)
-        image_cache = getattr(self, "_preview_render_image_cache", None)
-        if not isinstance(image_cache, dict):
-            image_cache = {}
-            self._preview_render_image_cache = image_cache
-        preview_image = image_cache.get(cache_key)
-        if preview_image is None:
-            load_started_at = time.perf_counter()
-            img = cv2.imread(str(img_path))
-            if img is None:
-                raise ValueError("Nie można załadować obrazu do podglądu.")
+        from .z2_preview_state import _load_preview_image_cached
 
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            preview_image = Image.fromarray(img_rgb)
-            image_cache[cache_key] = preview_image
-            load_elapsed_ms = max(0.0, (time.perf_counter() - load_started_at) * 1000.0)
-            if load_elapsed_ms >= 120.0:
-                try:
-                    logger.info(
-                        "[Z2 PERF] preview_image_load total=%.0fms cache=%s file=%s",
-                        load_elapsed_ms,
-                        len(image_cache),
-                        Path(img_path).name,
-                    )
-                except Exception:
-                    pass
-            while len(image_cache) > PREVIEW_IMAGE_CACHE_LIMIT:
-                try:
-                    image_cache.pop(next(iter(image_cache)))
-                except Exception:
-                    break
-        try:
-            image_width = max(1, int(getattr(preview_image, "width", 1) or 1))
-            image_height = max(1, int(getattr(preview_image, "height", 1) or 1))
-            if (
-                int(getattr(ann, "width", 0) or 0) != image_width
-                or int(getattr(ann, "height", 0) or 0) != image_height
-            ):
-                ann.width = image_width
-                ann.height = image_height
-        except Exception:
-            pass
+        preview_image = _load_preview_image_cached(self, img_path, ann)
         render_interaction_fast = bool(fast_fullscreen)
         if reset_view:
             if hasattr(self.preview_canvas, "set_image_fit_to_view"):

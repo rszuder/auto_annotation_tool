@@ -10,7 +10,7 @@ from test_pz3_ingest_integration import PZ3IngestIntegrationTests
 from pz3_gui_capture import capture_window
 
 real_show = ParticipantAuditMatrixDialog.show
-case = PZ3IngestIntegrationTests("test_mixed_folder_adds_clean_and_updates_actual_table")
+case = PZ3IngestIntegrationTests("test_mixed_folder_adds_candidates_then_explicit_audit_filters_pool")
 case.setUp()
 failures = []
 try:
@@ -35,6 +35,9 @@ try:
     def interactive_show(dialog):
         def interact():
             try:
+                assert len(dialog.tree.get_children()) == 2
+                dialog.filter_var.set("all")
+                dialog._populate()
                 assert len(dialog.tree.get_children()) == 10
                 assert dialog.report.clean_count == 5
                 assert dialog.report.dependent_count == 2
@@ -68,7 +71,9 @@ try:
         return real_show(dialog)
 
     with patch.object(ParticipantAuditMatrixDialog, "show", new=interactive_show):
-        assert case.ingest(paths) == 6, failures
+        assert case.ingest(paths) == 10, failures
+        case.panel.audit_current_pool()
+        assert len(case.panel.member_tree.get_children()) == 6, failures
     assert not failures, failures
     case.root.update()
     assert case.panel._layout.audit_var.get() == "Audyt: aktualny"

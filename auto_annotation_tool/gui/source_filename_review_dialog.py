@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
     ImageTk = None
 
 from .zoomable_canvas import ZoomableCanvas
+from .app_window_recovery import restore_parent_after_modal
 
 from ..config import CONFIG
 from ..source_filename_contract import (
@@ -271,8 +272,12 @@ class _SourceFilenameReviewDialog:
         recursive: bool,
         title: str,
         selected_paths: Iterable[Path | str] | None = None,
+        audit_next_step: bool = False,
     ) -> None:
         self.parent = parent
+        self.audit_next_step = bool(audit_next_step)
+        self._previous_grab = parent.grab_current()
+        self._closed = False
         self.root = Path(root)
         self.recursive = bool(recursive)
         self.result = False
@@ -293,300 +298,172 @@ class _SourceFilenameReviewDialog:
         self._review_rows_by_iid = {}
 
         self.window = tk.Toplevel(parent)
+        self.window.withdraw()
         self.window.title(title)
         # Pełne okno systemowe: bez transient/overrideredirect.
-        self.window.geometry("1040x690")
-        self.window.minsize(820, 560)
+        width = min(1160, max(900, self.window.winfo_screenwidth() - 80))
+        height = min(760, max(600, self.window.winfo_screenheight() - 100))
+        self.window.geometry(f"{width}x{height}")
+        self.window.minsize(900, 600)
         self.window.resizable(True, True)
         self.window.protocol("WM_DELETE_WINDOW", self._cancel)
         self.window.bind("<Destroy>", self._on_window_destroy, add="+")
         self._build()
         self._reload()
-        try:
+        self._present()
+
+    def _present(self) -> None:
+        # A newly opened full system window must not stay iconic or behind its owner.
+        self.window.deiconify()
+        self.window.lift()
+        self.window.update_idletasks()
+        if not self.window.winfo_viewable():
             self.window.wait_visibility()
-            self.window.grab_set()
-        except Exception:
-            pass
+        self.window.grab_set()
+        self.tree.focus_force()
 
     def _build(self) -> None:
-        outer = ttk.Frame(self.window, padding=12)
+        outer = ttk.Frame(self.window, padding=16)
         outer.pack(fill=tk.BOTH, expand=True)
-        outer.columnconfigure(0, weight=3)
-        outer.columnconfigure(1, weight=2)
-        outer.rowconfigure(2, weight=1)
+        outer.columnconfigure(0, weight=1)
+        outer.rowconfigure(3, weight=1)
 
+        header = ttk.Frame(outer)
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
         ttk.Label(
-            outer,
-            text="Podgląd i korekta nazw zasobu O",
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, columnspan=2, sticky="w")
+            header, text="Kontrola nazw plików", font=("Segoe UI", 13, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(header, text="Zasady i skróty", style="Toolbutton",
+                   command=self._show_review_help).grid(row=0, column=1, sticky="e")
 
-        self.summary_var = tk.StringVar()
-        ttk.Label(
-            outer,
-            textvariable=self.summary_var,
-            wraplength=950,
-            justify=tk.LEFT,
-        ).grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            pady=(6, 10),
-        )
+        self.summary_var = tk.StringVar(self.window)
+        self._wrapped_label(outer, textvariable=self.summary_var).grid(
+            row=1, column=0, sticky="ew", pady=(4, 12))
 
-        left = ttk.Frame(outer)
-        left.grid(row=2, column=0, sticky="nsew", padx=(0, 10))
-        left.rowconfigure(0, weight=1)
+        # One aligned bar: file decisions on the left, viewing tools on the right.
+        toolbar = ttk.Frame(outer)
+        toolbar.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        toolbar.columnconfigure(3, weight=1)
+        self.rename_button = ttk.Button(toolbar, text="Zmień nazwę",
+                                       command=self._plan_rename, state=tk.DISABLED)
+        self.rename_button.grid(row=0, column=0, padx=(0, 6))
+        self.reject_button = ttk.Button(toolbar, text="Odrzuć plik",
+                                       command=self._reject_selected, state=tk.DISABLED)
+        self.reject_button.grid(row=0, column=1, padx=(0, 6))
+        self.more_menu = tk.Menu(self.window, tearoff=False)
+        self.more_menu.add_command(label="Odrzuć pozostałe błędne", command=self._reject_all)
+        ttk.Menubutton(toolbar, text="Więcej", menu=self.more_menu).grid(row=0, column=2)
+
+        view_tools = ttk.Frame(toolbar)
+        view_tools.grid(row=0, column=4, sticky="e")
+        self.preview_zoom_var = tk.StringVar(self.window, "100%")
+        ttk.Button(view_tools, text="−", width=3, style="Toolbutton",
+                   command=lambda: self._preview_zoom(1 / 1.25)).pack(side=tk.LEFT)
+        ttk.Label(view_tools, textvariable=self.preview_zoom_var, width=6, anchor="center").pack(side=tk.LEFT)
+        ttk.Button(view_tools, text="+", width=3, style="Toolbutton",
+                   command=lambda: self._preview_zoom(1.25)).pack(side=tk.LEFT)
+        ttk.Button(view_tools, text="Dopasuj", style="Toolbutton",
+                   command=self._preview_fit).pack(side=tk.LEFT, padx=(6, 0))
+
+        self.panes = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
+        self.panes.grid(row=3, column=0, sticky="nsew")
+        self._pane_fraction = 0.40
+        self.panes.bind("<Configure>", self._fit_review_panes, add="+")
+        self.panes.bind("<ButtonRelease-1>", self._remember_review_panes, add="+")
+        left = ttk.Frame(self.panes, padding=(0, 0, 12, 0))
         left.columnconfigure(0, weight=1)
+        left.rowconfigure(1, weight=1)
+        right = ttk.Frame(self.panes, padding=(12, 0, 0, 0))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        self.panes.add(left, weight=2)
+        self.panes.add(right, weight=3)
 
+        ttk.Label(left, text="Pliki do sprawdzenia", style="PanelMuted.TLabel").grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         self.tree = ttk.Treeview(
-            left,
-            columns=("problem", "action"),
-            show="tree headings",
-            selectmode="browse",
+            left, columns=("problem", "action"), displaycolumns=("action",),
+            show="tree headings", selectmode="browse", height=6,
         )
-        self._heading_titles = {
-            "#0": "Plik",
-            "problem": "Walidacja",
-            "action": "Decyzja",
-        }
-        self.tree.heading(
-            "#0",
-            text="Plik",
-            command=lambda: self._sort_by_column("#0"),
-        )
-        self.tree.heading(
-            "problem",
-            text="Walidacja",
-            command=lambda: self._sort_by_column("problem"),
-        )
-        self.tree.heading(
-            "action",
-            text="Decyzja",
-            command=lambda: self._sort_by_column("action"),
-        )
-        self.tree.column("#0", width=280)
-        self.tree.column("problem", width=340)
-        self.tree.column("action", width=180)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-
-        scroll = ttk.Scrollbar(
-            left,
-            orient=tk.VERTICAL,
-            command=self.tree.yview,
-        )
-        scroll.grid(row=0, column=1, sticky="ns")
+        self._heading_titles = {"#0": "Plik", "problem": "Problem z nazwą", "action": "Decyzja"}
+        for column, title in self._heading_titles.items():
+            self.tree.heading(column, text=title, command=lambda col=column: self._sort_by_column(col))
+        self.tree.column("#0", width=230, minwidth=150, stretch=True)
+        self.tree.column("action", width=135, minwidth=110, stretch=False)
+        self.tree.grid(row=1, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.tree.yview)
+        scroll.grid(row=1, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scroll.set)
         horizontal = ttk.Scrollbar(left, orient=tk.HORIZONTAL, command=self.tree.xview)
-        horizontal.grid(row=1, column=0, sticky="ew")
+        horizontal.grid(row=2, column=0, sticky="ew")
         self.tree.configure(xscrollcommand=horizontal.set)
 
-        self.tree.bind(
-            "<<TreeviewSelect>>",
-            self._on_select,
-            add="+",
-        )
-        self.tree.bind(
-            "<Return>",
-            self._begin_inline_edit,
-            add="+",
-        )
-        self.tree.bind(
-            "<F2>",
-            self._begin_inline_edit,
-            add="+",
-        )
-        self.tree.bind(
-            "<Up>",
-            lambda _event: self._move_selection(-1),
-            add="+",
-        )
-        self.tree.bind(
-            "<Down>",
-            lambda _event: self._move_selection(1),
-            add="+",
-        )
-        self.tree.bind(
-            "<Double-1>",
-            self._on_tree_double_click,
-            add="+",
-        )
+        self.problem_var = tk.StringVar(self.window, "Wybierz plik, aby zobaczyć problem z nazwą.")
+        self._wrapped_label(left, textvariable=self.problem_var).grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.tree.bind("<<TreeviewSelect>>", self._on_select, add="+")
+        self.tree.bind("<Return>", self._begin_inline_edit, add="+")
+        self.tree.bind("<F2>", self._begin_inline_edit, add="+")
+        self.tree.bind("<Up>", lambda _event: self._move_selection(-1), add="+")
+        self.tree.bind("<Down>", lambda _event: self._move_selection(1), add="+")
+        self.tree.bind("<Double-1>", self._on_tree_double_click, add="+")
 
-        right = ttk.Frame(outer)
-        right.grid(row=2, column=1, sticky="nsew")
-        right.columnconfigure(0, weight=1)
-        right.rowconfigure(0, weight=1)
-
-        preview_box = ttk.LabelFrame(
-            right,
-            text="Podgląd",
-            padding=6,
-        )
-        preview_box.grid(row=0, column=0, sticky="nsew")
-        preview_box.columnconfigure(0, weight=1)
-        preview_box.rowconfigure(0, weight=1)
-
-        self.preview = ZoomableCanvas(
-            preview_box,
-            highlightthickness=0,
-            height=300,
-        )
-        self.preview.grid(row=0, column=0, sticky="nsew")
+        self.preview_caption_var = tk.StringVar(self.window, "Podgląd obrazu")
+        self._wrapped_label(right, textvariable=self.preview_caption_var).grid(
+            row=0, column=0, sticky="ew", pady=(0, 6))
+        self.preview = ZoomableCanvas(right, highlightthickness=0, width=1, height=1)
+        self.preview.grid(row=1, column=0, sticky="nsew")
         self.preview.show_info = False
         self.preview.reset_shortcut_enabled = True
-
-        self.preview_zoom_var = tk.StringVar(
-            master=self.window,
-            value="100%",
-        )
-        preview_controls = ttk.Frame(preview_box)
-        preview_controls.grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            pady=(6, 0),
-        )
-        preview_controls.columnconfigure(1, weight=1)
-
-        ttk.Button(
-            preview_controls,
-            text="−",
-            width=3,
-            command=lambda: self._preview_zoom(1 / 1.25),
-        ).grid(row=0, column=0, sticky="w")
-
-        ttk.Label(
-            preview_controls,
-            textvariable=self.preview_zoom_var,
-            anchor="center",
-        ).grid(row=0, column=1, sticky="ew", padx=6)
-
-        ttk.Button(
-            preview_controls,
-            text="+",
-            width=3,
-            command=lambda: self._preview_zoom(1.25),
-        ).grid(row=0, column=2, sticky="e")
-
-        ttk.Button(
-            preview_controls,
-            text="Dopasuj",
-            command=self._preview_fit,
-        ).grid(row=0, column=3, sticky="e", padx=(6, 0))
-
-        self.preview_caption_var = tk.StringVar(
-            master=self.window,
-            value="Wybierz plik z listy.",
-        )
-        ttk.Label(
-            preview_box,
-            textvariable=self.preview_caption_var,
-            wraplength=360,
-            justify=tk.LEFT,
-        ).grid(
-            row=2,
-            column=0,
-            sticky="ew",
-            pady=(6, 0),
-        )
-
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            self.preview.bind(
-                sequence,
-                self._on_preview_zoom_event,
-                add="+",
-            )
+            self.preview.bind(sequence, self._on_preview_zoom_event, add="+")
 
-        ttk.Label(
-            right,
-            text=(
-                "Rolka myszy / + / − — zoom\n"
-                "LPM + przeciąganie — pan\n"
-                "Dopasuj / Home / R — cały obraz\n\n"
-                "Enter / F2 — edycja nazwy na liście\n"
-                "Enter — zatwierdź zmianę\n"
-                "Esc — anuluj edycję\n"
-                "↑ / ↓ — poprzedni / następny plik"
-            ),
-            justify=tk.LEFT,
-            wraplength=360,
-        ).grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            pady=(10, 8),
-        )
-
-        ttk.Button(
-            right,
-            text="Odrzuć z zasobu",
-            command=self._reject_selected,
-        ).grid(row=2, column=0, sticky="w")
-
-        ttk.Separator(right).grid(
-            row=3,
-            column=0,
-            sticky="ew",
-            pady=12,
-        )
-
-        ttk.Button(
-            right,
-            text="Odrzuć pozostałe błędne",
-            command=self._reject_all,
-        ).grid(row=4, column=0, sticky="w")
-
-        ttk.Label(
-            right,
-            text=(
-                "„Odrzuć” nie usuwa pliku. Poprawne, zaplanowane zmiany nazw "
-                "nie są odrzucane przez „Odrzuć pozostałe błędne”. "
-                "Zmiany na dysku są wykonywane dopiero przez "
-                "„Zapisz i kontynuuj”."
-            ),
-            wraplength=360,
-            justify=tk.LEFT,
-        ).grid(
-            row=5,
-            column=0,
-            sticky="ew",
-            pady=(10, 0),
-        )
-
+        ttk.Separator(outer).grid(row=4, column=0, sticky="ew", pady=(12, 10))
         footer = ttk.Frame(outer)
-        footer.grid(
-            row=3,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            pady=(12, 0),
-        )
+        footer.grid(row=5, column=0, sticky="ew")
         footer.columnconfigure(0, weight=1)
-
-        self.status_var = tk.StringVar()
-        ttk.Label(
-            footer,
-            textvariable=self.status_var,
-            wraplength=680,
-            justify=tk.LEFT,
-        ).grid(row=0, column=0, sticky="w")
-
-        ttk.Button(
-            footer,
-            text="Anuluj",
-            command=self._cancel,
-        ).grid(row=0, column=1, padx=(8, 0))
-
+        self.status_var = tk.StringVar(self.window)
+        self._wrapped_label(footer, textvariable=self.status_var).grid(
+            row=0, column=0, sticky="ew", padx=(0, 16))
+        ttk.Button(footer, text="Anuluj", command=self._cancel).grid(
+            row=0, column=1, padx=(0, 8))
         self.apply_button = ttk.Button(
-            footer,
-            text="Zapisz i kontynuuj",
-            command=self._apply,
-        )
-        self.apply_button.grid(
-            row=0,
-            column=2,
-            padx=(8, 0),
+            footer, text="Zapisz i kontynuuj", command=self._apply, style="Accent.TButton")
+        self.apply_button.grid(row=0, column=2)
+
+    @staticmethod
+    def _wrapped_label(parent, **kwargs):
+        label = ttk.Label(parent, width=1, wraplength=400, justify=tk.LEFT,
+                          style="PanelMuted.TLabel", **kwargs)
+        label.bind("<Configure>", lambda event: label.configure(wraplength=max(80, event.width)), add="+")
+        return label
+
+    def _fit_review_panes(self, event=None):
+        width = self.panes.winfo_width()
+        if width > 1:
+            self.panes.sashpos(0, max(260, min(width - 320, int(width * self._pane_fraction))))
+
+    def _remember_review_panes(self, _event=None):
+        width = self.panes.winfo_width()
+        if width > 1:
+            self._pane_fraction = self.panes.sashpos(0) / width
+
+    def _show_review_help(self):
+        messagebox.showinfo(
+            "Kontrola nazw · zasady i skróty",
+            f"Źródło: {self.root}\n\n"
+            "Enter / F2 / dwuklik nazwy — edycja\n"
+            "Enter — zatwierdź nazwę · Esc — anuluj edycję\n"
+            "↑ / ↓ — poprzedni / następny plik\n"
+            "Rolka / + / − — zoom · przeciąganie — przesunięcie obrazu\n"
+            "Dopasuj / Home / R — cały obraz\n\n"
+            "Dopiero „Zapisz i kontynuuj” zmienia nazwy plików źródłowych. "
+            "Odrzucone pliki zostaną przeniesione do sąsiedniego katalogu __odrzucone_nazwy. "
+            "„Odrzuć pozostałe błędne” zachowuje poprawne, zaplanowane nazwy."
+            + (" Usunięcie draftu nie cofa zmian w źródłach. Audyt niezależności wykonasz "
+               "po dodaniu obrazów przyciskiem „Sprawdź niezależność puli”." if self.audit_next_step else ""),
+            parent=self.window,
         )
 
     def _iter_current_images(self) -> list[Path]:
@@ -644,21 +521,19 @@ class _SourceFilenameReviewDialog:
                 tk.END,
                 iid=iid,
                 text=self._display_name_for_row(row),
-                values=(row.problem, row.action),
+                values=(row.problem, {"DO DECYZJI": "Do poprawy", "ODRZUĆ": "Odrzucony"}.get(row.action, row.action)),
             )
 
         unresolved = sum(1 for row in rows if row.unresolved)
         self.summary_var.set(
-            f"Źródło: {self.root}\n"
-            f"Obrazów w zakresie: {len(paths)} | "
-            f"wymagających decyzji: {unresolved} | "
-            f"zmiany nazw: {len(self.rename_stems)} | "
-            f"odrzucenia: {len(self.rejected_paths)}"
+            f"Obrazy: {len(paths)}  ·  nazwy do poprawy: {unresolved}  ·  "
+            f"Zmiany: {len(self.rename_stems)}  ·  Odrzucone: {len(self.rejected_paths)}"
+            + ("\nDalej w PZ3: „Sprawdź niezależność puli”." if self.audit_next_step else "")
         )
 
         if unresolved:
             self.status_var.set(
-                f"Pozostało {unresolved} plików bez decyzji."
+                "Zmień nazwę lub odrzuć plik z błędną nazwą."
             )
             try:
                 self.apply_button.configure(state=tk.DISABLED)
@@ -666,8 +541,7 @@ class _SourceFilenameReviewDialog:
                 pass
         else:
             self.status_var.set(
-                "Wszystkie problematyczne pliki mają decyzję. "
-                "Kliknij „Zapisz i kontynuuj”."
+                "Gotowe do zapisania zmian."
             )
             try:
                 self.apply_button.configure(state=tk.NORMAL)
@@ -688,8 +562,9 @@ class _SourceFilenameReviewDialog:
             self.tree.see(target)
             self._on_select()
         else:
+            self._on_select()
             self._preview_clear(
-                "Brak plików wymagających decyzji."
+                "Brak problemów z nazwami plików."
             )
 
     def _display_name_for_row(self, row: SourceReviewRow) -> str:
@@ -977,6 +852,11 @@ class _SourceFilenameReviewDialog:
 
     def _on_select(self, _event=None) -> None:
         path = self._selected_path()
+        row = self._review_rows_by_iid.get(str(path)) if path is not None else None
+        self.problem_var.set(row.problem if row is not None else "Wybierz plik z listy.")
+        self.rename_button.configure(state=tk.NORMAL if path is not None else tk.DISABLED)
+        self.reject_button.configure(
+            state=tk.NORMAL if path is not None and str(path) not in self.rejected_paths else tk.DISABLED)
         if path is None:
             return
 
@@ -1198,22 +1078,28 @@ class _SourceFilenameReviewDialog:
             rejected=result.rejected,
             quarantine_dir=result.quarantine_dir,
         )
-        self.window.destroy()
+        self._close()
 
     def _cancel(self) -> None:
         self.result = False
         self.selection_result = SourceReviewSelectionResult(False)
-        try:
-            self.window.grab_release()
-        except Exception:
-            pass
+        self._close()
+
+    def _close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.window.grab_release()
         self.window.destroy()
+        restore_parent_after_modal(self.parent, self._previous_grab)
 
     def show(self) -> bool:
+        self._present()
         self.window.wait_window()
         return self.result
 
     def show_selection(self) -> SourceReviewSelectionResult:
+        self._present()
         self.window.wait_window()
         return self.selection_result
 
@@ -1224,6 +1110,7 @@ def review_source_image_directory(
     *,
     recursive: bool = True,
     title: str = "Podgląd i korekta zasobu O",
+    audit_next_step: bool = False,
 ) -> bool:
     path = Path(root)
     report = validate_source_image_directory(path, recursive=recursive)
@@ -1241,6 +1128,7 @@ def review_source_image_directory(
         path,
         recursive=recursive,
         title=title,
+        audit_next_step=audit_next_step,
     ).show()
 
 
@@ -1249,6 +1137,7 @@ def review_source_image_paths(
     paths: Iterable[Path | str],
     *,
     title: str = "Podgląd i korekta wybranych obrazów",
+    audit_next_step: bool = False,
 ) -> SourceReviewSelectionResult:
     selected = tuple(Path(item) for item in paths if Path(item).exists() and Path(item).is_file())
     if not selected:
@@ -1266,4 +1155,5 @@ def review_source_image_paths(
         recursive=False,
         title=title,
         selected_paths=selected,
+        audit_next_step=audit_next_step,
     ).show_selection()

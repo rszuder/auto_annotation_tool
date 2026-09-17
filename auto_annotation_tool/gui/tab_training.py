@@ -2119,10 +2119,19 @@ class TrainingTab:
             return False
 
     def _refresh_ranking_reference_ui(self, *_args):
+        if getattr(self, "_rank_target_syncing", False):
+            return  # StringVar traces during one target update must not restart it.
         if not self._is_ranking_available_for_selected_target():
             return
-        if not self._is_ranking_tab_active() and getattr(self, "rank_target_lbl", None) is None:
-            return
+        from .pz3_comparison import comparison_context
+        modal = getattr(self, "_ranking_results_modal", None)
+        try:
+            modal_open = modal is not None and bool(modal.winfo_exists())
+        except tk.TclError:
+            modal_open = False
+        context = comparison_context(self)
+        if not self._is_ranking_tab_active() and not modal_open and not context:
+            return  # The notebook refreshes this view when Analiza modeli opens.
 
         target = self._get_ranking_task_target()
         if not getattr(self, "_rank_target_syncing", False):
@@ -2135,16 +2144,17 @@ class TrainingTab:
                         self._ensure_plate_ranking_engine()
                     except Exception:
                         pass
-                    models_var = getattr(self, "rank_models_dir", None)
-                    if models_var is not None:
-                        models_var.set(str(self._get_ranking_models_default_dir()))
-                    data_var = getattr(self, "rank_data_dir", None)
-                    if data_var is not None:
-                        data_var.set("")
-                    try:
-                        self._prefill_ranking_reference_if_empty()
-                    except Exception:
-                        pass
+                    if context is None:
+                        models_var = getattr(self, "rank_models_dir", None)
+                        if models_var is not None:
+                            models_var.set(str(self._get_ranking_models_default_dir()))
+                        data_var = getattr(self, "rank_data_dir", None)
+                        if data_var is not None:
+                            data_var.set("")
+                        try:
+                            self._prefill_ranking_reference_if_empty()
+                        except Exception:
+                            pass
                 finally:
                     self._rank_target_syncing = False
 

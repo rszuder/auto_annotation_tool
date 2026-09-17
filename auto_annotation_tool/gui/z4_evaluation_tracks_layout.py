@@ -7,6 +7,7 @@ from tkinter import ttk, font as tkfont
 
 from .notebook_icons import notebook_tab_icon
 from .app_theme_definitions import get_runtime_palette
+from .pz3_workflow_view import build_pz3_workflow_view_state
 
 
 class EvaluationTracksLayout:
@@ -22,6 +23,12 @@ class EvaluationTracksLayout:
         self.audit_var = tk.StringVar(panel.parent, "")
         self.gt_var = tk.StringVar(panel.parent, "")
         self.verification_var = tk.StringVar(panel.parent, "")
+        self.pool_summary_var = tk.StringVar(panel.parent, "")
+        self.next_step_var = tk.StringVar(panel.parent, "")
+        self.feedback_var = tk.StringVar(panel.parent, "")
+        self.primary_action = ""
+        self._has_track = False
+        self.workflow_buttons = []
         self._track_title = self.title_var.get()
         self._status_tones = ("muted", "muted", "muted", "muted")
 
@@ -44,9 +51,10 @@ class EvaluationTracksLayout:
         self._build_header()
         self._build_form()
         self._build_body()
-        self._wrapped_label(self.root, textvariable=panel.status_var).grid(
-            row=4, column=0, sticky="ew", pady=(8, 0)
-        )
+        self.feedback_label = self._wrapped_label(self.root, textvariable=self.feedback_var)
+        self.feedback_label.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self._feedback_trace = panel.status_var.trace_add("write", self._sync_feedback)
+        self._sync_feedback()
         self.canvas.bind("<Configure>", self._schedule_fit, add="+")
         self.root.bind("<Configure>", self._schedule_fit, add="+")
         self.root.bind("<Destroy>", self._destroy, add="+")
@@ -85,7 +93,7 @@ class EvaluationTracksLayout:
         ttk.Button(header, text="Odśwież", command=self.panel.refresh_tracks).grid(
             row=0, column=1, rowspan=2, padx=(12, 6)
         )
-        self.new_button = ttk.Button(header, text="+ Nowy tor", command=self.toggle_form, style="Accent.TButton")
+        self.new_button = ttk.Button(header, text="+ Nowy tor", command=self.toggle_form)
         self.new_button.grid(row=0, column=2, rowspan=2)
 
     def _build_form(self):
@@ -202,7 +210,7 @@ class EvaluationTracksLayout:
         self.status_row = ttk.Frame(self.track_header)
         self.status_row.grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
         self.status_badges = []
-        for column, variable in enumerate((self.audit_var, self.gt_var, self.verification_var)):
+        for column, variable in enumerate((self.audit_var, self.gt_var)):
             badge = ttk.Label(
                 self.status_row, textvariable=variable, padding=(8, 3),
                 font=("Segoe UI", 9),
@@ -257,30 +265,51 @@ class EvaluationTracksLayout:
         panel = self.panel
         self.workflow = ttk.Frame(self.root)
         self.workflow.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self._wrapped_label(self.workflow, textvariable=self.next_step_var,
+                            style="TLabel", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
         groups = (
-            ("1 · Uczestnicy i pula", (
-                ("btn_participants", "Modele uczestniczące…", panel.select_participant_models),
+            ("1 · Przygotuj pulę", (
+                ("btn_participants", "Wybierz modele…", panel.select_participant_models),
                 ("btn_add_images", "Dodaj obrazy…", panel.add_images),
-                ("btn_audit_pool", "Audytuj pulę", panel.audit_current_pool),
+                ("btn_audit_pool", "Sprawdź niezależność puli", panel.audit_current_pool),
             )),
-            ("2 · Próba i Ground Truth", (
-                ("btn_sample_selection", "Wybierz próbę w Z2…", panel.select_experiment_sample_in_z2),
-                ("btn_prepare_z2", "Przygotuj GT w Z2", panel.prepare_ground_truth_in_z2),
-                ("btn_set_gt", "Wczytaj GT (XML)…", panel.set_ground_truth),
+            ("2 · Przygotuj Ground Truth", (
+                ("btn_sample_selection", "Wybierz próbę…", panel.select_experiment_sample_in_z2),
+                ("btn_audit_sample", "Sprawdź finalną próbę", panel.audit_current_pool),
+                ("btn_prepare_z2", "Przygotuj Ground Truth", panel.prepare_ground_truth_in_z2),
+                ("btn_set_gt", "Wczytaj gotowy Ground Truth…", panel.set_ground_truth),
             )),
-            ("3 · Zatwierdzenie", (
-                ("btn_verify", "Zweryfikuj", panel.verify_track),
-                ("btn_seal", "Zapieczętuj", panel.seal_track),
-                ("btn_compare", "Porównaj modele…", panel.open_comparison),
+            ("3 · Zatwierdź eksperyment", (
+                ("btn_verify", "Zweryfikuj eksperyment", panel.verify_track),
+                ("btn_seal", "Zapieczętuj eksperyment", panel.seal_track),
+                ("btn_compare", "Porównaj modele", panel.open_comparison),
             )),
         )
         for column, (title, buttons) in enumerate(groups):
             self.workflow.columnconfigure(column, weight=1, uniform="workflow")
             group = ttk.LabelFrame(self.workflow, text=title, padding=8)
-            group.grid(row=0, column=column, sticky="nsew", padx=(0, 8 if column < 2 else 0))
+            group.grid(row=1, column=column, sticky="nsew", padx=(0, 8 if column < 2 else 0))
             group.columnconfigure(0, weight=1)
             for row, (attr, label, command) in enumerate(buttons):
-                self._button(group, attr, label, command).grid(row=row, column=0, sticky="ew", pady=(0 if row == 0 else 6, 0))
+                self.workflow_buttons.append(attr)
+                self._button(group, attr, label, command).grid(
+                    row=row, column=0, sticky="ew", pady=(0 if row == 0 else 6, 0))
+            if column == 0:
+                self._wrapped_label(group, textvariable=self.pool_summary_var).grid(
+                    row=5, column=0, sticky="ew", pady=(6, 0))
+                self._wrapped_label(group, text="Sprawdza, czy obrazy testowe nie pokrywają się z train/val wybranych modeli.").grid(
+                    row=6, column=0, sticky="ew", pady=(3, 0))
+        panel.btn_audit_sample.grid_remove()
+
+    def refresh_primary_action(self):
+        for attr in self.workflow_buttons:
+            button = getattr(self.panel, attr)
+            active = (not self.form_open and attr == self.primary_action
+                      and str(button.cget("state")) != "disabled")
+            button.configure(style="Accent.TButton" if active else "TButton")
+        self.new_button.configure(style="Accent.TButton" if not self._has_track and not self.form_open else "TButton")
+        self.create_button.configure(style="Accent.TButton" if self.form_open else "TButton")
 
     def _button(self, parent, attr, text, command):
         button = ttk.Button(parent, text=text, command=command)
@@ -310,23 +339,39 @@ class EvaluationTracksLayout:
         else:
             self.form.grid_remove()
         self.new_button.configure(text="Zwiń formularz" if visible else "+ Nowy tor")
+        self.refresh_primary_action()
         self._schedule_fit()
 
-    def set_track(self, track=None, *, member_count=0, audit_state=None, readiness=None):
+    def set_track(self, track=None, *, member_count=0, audit_state=None, readiness=None,
+                  workflow=None, participant_count=0):
+        self._has_track = bool(track)
         if track:
             self._track_title = f"{track.get('name') or 'Bez nazwy'} · v{int(track.get('version') or 0)}"
             status = str(track.get("status") or "-").upper()
             self.lifecycle_var.set(status)
             self.lifecycle_badge.grid()
-            audit_status = (audit_state or {}).get("status", "MISSING")
-            audit_label, audit_tone = {
-                "CURRENT": ("aktualny", "success"),
-                "STALE": ("nieaktualny", "warning"),
-            }.get(audit_status, ("brak", "muted"))
+            if workflow is None:
+                from ..registry.track_readiness import track_readiness
+                readiness = readiness or track_readiness(
+                    track, participant_count=participant_count, member_count=member_count,
+                    audit_state=audit_state, gt_exists=bool(track.get("gt_relative_path")))
+                workflow = build_pz3_workflow_view_state(readiness, audit_state=audit_state)
+            audit_label, audit_tone = workflow.audit_label, workflow.audit_tone
+            self.primary_action = workflow.primary_action
+            self.next_step_var.set(workflow.status_text)
+            self.pool_summary_var.set(f"Modele: {participant_count} wybrane  ·  Obrazy: {member_count}")
+            self.panel.btn_audit_sample.configure(text=workflow.audit_button_label)
+            if workflow.sample_selected:
+                self.panel.btn_audit_pool.grid_remove()
+                self.panel.btn_audit_sample.grid()
+            else:
+                self.panel.btn_audit_pool.grid()
+                self.panel.btn_audit_sample.grid_remove()
             self.audit_var.set(f"Audyt: {audit_label}")
             gt_exists = readiness.gt_exists if readiness is not None else None
             gt_verified = readiness.gt_verified if readiness is not None else None
-            self.gt_var.set("GT: zapisane" if gt_exists else "GT: brak" if gt_exists is False else "GT: —")
+            self.gt_var.set("Ground Truth: zweryfikowany" if gt_verified else
+                            "Ground Truth: gotowy" if gt_exists else "Ground Truth: brak")
             self.verification_var.set(
                 "Weryfikacja: gotowa" if gt_verified else
                 "Weryfikacja: oczekuje" if gt_exists else "Weryfikacja: —"
@@ -338,9 +383,15 @@ class EvaluationTracksLayout:
                 "success" if gt_verified else "muted",
             )
             self.status_row.grid()
-            self.count_var.set(f"Obrazy: {member_count}")
+            self.count_var.set(f"Finalna próba: {member_count}" if workflow.sample_selected
+                               else f"Obrazy: {member_count}")
         else:
             self._track_title = "Wybierz tor z listy"
+            self.primary_action = ""
+            self.next_step_var.set("Wybierz tor lub utwórz nowy eksperyment.")
+            self.pool_summary_var.set("")
+            self.panel.btn_audit_sample.grid_remove()
+            self.panel.btn_audit_pool.grid()
             self.lifecycle_var.set("")
             self.audit_var.set("")
             self.gt_var.set("")
@@ -348,8 +399,21 @@ class EvaluationTracksLayout:
             self.lifecycle_badge.grid_remove()
             self.status_row.grid_remove()
             self.count_var.set("Obrazy toru")
+        self.refresh_primary_action()
         self._fit_track_title()
         self._paint_status_badges()
+        self._schedule_fit()
+
+    def _sync_feedback(self, *_args):
+        text = self.panel.status_var.get().strip()
+        guidance = self.next_step_var.get()
+        if guidance and text.endswith(guidance):
+            text = text[:-len(guidance)].strip()
+        self.feedback_var.set(text)
+        if text:
+            self.feedback_label.grid()
+        else:
+            self.feedback_label.grid_remove()
         self._schedule_fit()
 
     def _minimum_right_width(self):
@@ -379,6 +443,8 @@ class EvaluationTracksLayout:
             self._fit_job = self.root.after_idle(self._fit_viewport)
 
     def _destroy(self, event):
+        if event.widget == self.root:
+            self.panel.status_var.trace_remove("write", self._feedback_trace)
         if event.widget == self.root and self._fit_job is not None:
             self.root.after_cancel(self._fit_job)
             self._fit_job = None

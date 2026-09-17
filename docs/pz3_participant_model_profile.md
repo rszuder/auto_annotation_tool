@@ -1,8 +1,9 @@
 # Profil modeli uczestniczących w PZ3
 
-Katalog uczestników pokazuje sześć kolumn: Udział, Model, Architektura,
+Katalog uczestników pokazuje sześć kolumn: W eksperymencie, Model, Architektura,
 Pochodzenie (Run i Dataset), Jakość (mAP50–95), Historia.
-Kliknięcie wiersza otwiera profil; pole Udział, spacja i przycisk zmieniają uczestnictwo.
+Kliknięcie wiersza otwiera profil; pole W eksperymencie, spacja oraz Dodaj/Usuń zmieniają udział.
+Aktualna hierarchia akcji i prowadzenie PZ3: [PZ3 — prowadzenie](pz3_guided_workflow.md).
 
 Profil zawiera pełne Run/Dataset, datę zakończenia treningu, osobne mAP Pose/BBox,
 status pochodzenia, rodzaj checkpointu oraz skrócony SHA z kopiowaniem pełnej wartości.

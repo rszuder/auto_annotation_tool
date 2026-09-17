@@ -832,25 +832,51 @@ def _open_selected_run_analysis(self, event=None):
         return
     self._open_run_analysis_window(run)
 
-def _ranking_model_content_key(path: Path, cache: dict[str, str] | None = None) -> str:
+def _ranking_model_content_key(path: Path, cache: dict | None = None) -> str:
+    """UI deduplication only; execution and frozen-contract guards hash independently."""
     path = Path(path)
     try:
         path_key = str(path.resolve()).lower()
-    except Exception:
+    except OSError:
         path_key = str(path).lower()
-    if cache is not None and path_key in cache:
-        return cache[path_key]
-    digest = hashlib.sha256()
+
+    def signature():
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
     try:
+        before = signature()
+        cached = cache.get(path_key) if cache is not None else None
+        if cached is not None and cached[0] == before:
+            return cached[1]
+        digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         value = digest.hexdigest()
+        after = signature()
     except OSError:
-        value = f"path:{path_key}"
+        if cache is not None:
+            cache.pop(path_key, None)
+        return f"path:{path_key}"
+
     if cache is not None:
-        cache[path_key] = value
+        cache.pop(path_key, None)
+        if before == after:
+            # Bound memory to this window's recent files. Replaced or changed
+            # checkpoints get a fresh hash; incomplete reads are never cached.
+            while len(cache) >= 512:
+                cache.pop(next(iter(cache)))
+            cache[path_key] = (after, value)
     return value
+
+
+def _ranking_model_content_cache(self) -> dict:
+    cache = getattr(self, "_ranking_model_content_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        self._ranking_model_content_cache = cache
+    return cache
 
 
 def _collect_project_ranking_model_candidates(self, target: str | None = None) -> list[Path]:
@@ -888,7 +914,7 @@ def _collect_project_ranking_model_candidates(self, target: str | None = None) -
     candidates: list[Path] = []
     seen: set[str] = set()
     seen_content: set[str] = set()
-    content_hash_cache: dict[str, str] = {}
+    content_hash_cache = _ranking_model_content_cache(self)
 
     def add_path(path_like) -> None:
         if not path_like:
@@ -972,7 +998,7 @@ def _collect_ranking_model_candidates(self, models_dir: Path, target: str | None
     candidates: list[Path] = []
     seen: set[str] = set()
     seen_content: set[str] = set()
-    content_hash_cache: dict[str, str] = {}
+    content_hash_cache = _ranking_model_content_cache(self)
 
     def add_path(path_like, *, require_domain_name: bool = True) -> None:
         if not path_like:
@@ -1101,7 +1127,7 @@ def _collect_ranking_participant_candidates(
     candidates: list[Path] = []
     seen: set[str] = set()
     seen_content: set[str] = set()
-    content_hash_cache: dict[str, str] = {}
+    content_hash_cache = _ranking_model_content_cache(self)
 
     def add_path(path_like, *, require_domain_name: bool = True, force_scope: str | None = None) -> None:
         if not path_like:
@@ -3631,6 +3657,7 @@ def _build_ranking_panel_v2(self, parent):
     self.btn_run_rank = ttk.Button(
         rank_primary,
         text="Wybierz źródło analizy roboczej",
+        state=tk.DISABLED,
         style="Accent.TButton",
         command=self._run_ranking_v2,
     )
