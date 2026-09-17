@@ -1184,7 +1184,7 @@ def _place_preview_overlay_dock(self, *, force_render: bool = False) -> None:
     dock_width, dock_height = self._render_preview_overlay_dock(force_render=force_render)
     x = max(8, frame_width - dock_width - 10)
     y = 46 if bool(getattr(self, "_preview_fullscreen_active", False)) else 52
-    y = min(max(8, y), max(8, frame_height - dock_height - 10))
+    # A tall drawer must not move into the reserved fullscreen-control row.
     try:
         place_drawer(self, frame_width, int(x), int(y), int(dock_width), int(dock_height))
     except Exception:

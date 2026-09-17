@@ -7,6 +7,8 @@ from ..config import CONFIG
 from ..data_models import ImageAnnotation
 from ..registry import EvaluationTrackService
 from .pz3_participant_audit import BatchProgressDialog
+from ..registry.sample_labels import SampleLabels
+from .pz3_sample_labels_ui import label_state, SampleLabelsPanel, build_label_menu
 
 
 def sample_context(host):
@@ -48,36 +50,56 @@ def set_sample_selection(host, selected, actual_indices=None):
     if not context or getattr(host, "is_processing", False):
         return
     indices = host._get_selected_preview_actual_indices() if actual_indices is None else actual_indices
-    chosen = host._experiment_sample_selected_sha256
-    for index in indices:
-        if 0 <= int(index) < len(host.current_annotations):
-            ann = host.current_annotations[int(index)]
-            sha = context["sample_member_sha256"].get(ann.filename)
-            if sha:
-                chosen.add(sha) if selected else chosen.discard(sha)
+    indices = [int(i) for i in indices if 0 <= int(i) < len(host.current_annotations)]
+    shas = [context["sample_member_sha256"].get(host.current_annotations[i].filename) for i in indices]
+    label_state(host).set_membership((sha for sha in shas if sha), selected)
+    refresh_sample_rows(host, indices, membership_changed=True)
+    refresh_sample_ui(host)
+
+
+def refresh_sample_rows(host, indices, *, membership_changed=False):
+    """Touch only affected Listbox rows; do not re-render the current image."""
+    from bisect import bisect_left
     host._sample_selection_version = getattr(host, "_sample_selection_version", 0) + 1
     listbox = getattr(host, "preview_listbox", None)
     filter_var = getattr(host, "_sample_filter_var", None)
-    if listbox is not None and filter_var is not None and filter_var.get() == "Wszystkie":
-        # Keep group selection and the viewport. A Space press must not rebuild
-        # thousands of rows or decode the image again.
-        selected_rows = tuple(listbox.curselection())
-        active = listbox.index(tk.ACTIVE)
-        anchor = listbox.index(tk.ANCHOR)
-        for index in indices:
-            display = host._get_preview_display_index(int(index))
-            if display is not None:
-                ann = host.current_annotations[int(index)]
-                listbox.delete(display)
-                listbox.insert(display, sample_list_text(host, ann, display))
-        listbox.selection_clear(0, tk.END)
-        for display in selected_rows:
-            listbox.selection_set(display)
-        listbox.activate(active)
-        listbox.selection_anchor(anchor)
-    else:
-        refresh_sample_list(host)
-    refresh_sample_ui(host)
+    if listbox is None or not indices:
+        return
+    active, anchor = listbox.index(tk.ACTIVE), listbox.index(tk.ANCHOR)
+    view = listbox.yview()
+    mode = filter_var.get() if filter_var is not None else "Wszystkie"
+    mapping = getattr(host, "_preview_list_display_index_map", None)
+    if membership_changed and mode != "Wszystkie":
+        visible = list(getattr(host, "_preview_list_display_indices", ()))
+        previous = list(visible)
+        for index in sorted(set(indices), reverse=True):
+            position = bisect_left(visible, index)
+            present = position < len(visible) and visible[position] == index
+            included = sample_selected(host, host.current_annotations[index]) == (mode == "W próbie")
+            if present and not included:
+                visible.pop(position)
+                listbox.delete(position)
+            elif not present and included:
+                visible.insert(position, index)
+                listbox.insert(position, sample_list_text(host, host.current_annotations[index]))
+        host._preview_list_display_indices = visible
+        mapping = host._preview_list_display_index_map = {index: row for row, index in enumerate(visible)}
+        if previous:
+            active = mapping.get(previous[min(active, len(previous)-1)], min(active, max(0, len(visible)-1)))
+            anchor = mapping.get(previous[min(anchor, len(previous)-1)], active)
+    for index in set(indices):
+        # The general Z2 accessor copies its whole lookup; use the existing map.
+        display = mapping.get(index) if isinstance(mapping, dict) else host._get_preview_display_index(index)
+        if display is not None:
+            selected = listbox.selection_includes(display)
+            listbox.delete(display)
+            listbox.insert(display, sample_list_text(host, host.current_annotations[index]))
+            if selected:
+                listbox.selection_set(display)
+    listbox.activate(active)
+    listbox.selection_anchor(anchor)
+    if view:
+        listbox.yview_moveto(view[0])
 
 
 def refresh_sample_list(host):
@@ -114,8 +136,11 @@ def sample_list_entries(host):
 
 def sample_list_text(host, ann, display_index=None):
     status = "W PRÓBIE" if sample_selected(host, ann) else "POZA PRÓBĄ"
-    number = f"{display_index + 1}. " if display_index is not None else ""
-    return f"{number}[{status}] {ann.filename}"
+    state = getattr(host, "_sample_label_state", None)
+    context = sample_context(host)
+    label = state.label_for(context["sample_member_sha256"].get(ann.filename)) if state else ""
+    label = label if len(label) <= 18 else label[:17] + "…"
+    return f"{'[' + status + ']':<13} {label:<18} {ann.filename}"
 
 
 def _hide(host, attr):
@@ -157,8 +182,12 @@ def refresh_sample_ui(host):
         return
     label = getattr(host, "_sample_title_label", None)
     if label is not None and label.winfo_exists():
+        state = label_state(host)
+        active = state.labels.get(state.active_id, "")
+        active = (active[:23] + "…") if len(active) > 24 else active
+        active_text = f" · Aktywna: {active}" if active else ""
         label.configure(text=f"Wybór próby · {context.get('name') or context['track_id']}\n"
-                             + sample_counter(host))
+                             + sample_counter(host) + active_text)
     summary = getattr(host, "preview_list_summary_var", None)
     if summary is not None:
         summary.set("Surowe obrazy · " + sample_counter(host))
@@ -166,6 +195,9 @@ def refresh_sample_ui(host):
     if fullscreen is not None and fullscreen.winfo_exists():
         fullscreen.configure(text="Wyjdź z pełnego ekranu" if getattr(host, "_preview_fullscreen_active", False)
                              else "Pełny ekran (Enter)")
+    labels = getattr(host, "_sample_labels_panel", None)
+    if labels is not None:
+        labels.refresh()
     host._place_preview_image_status_overlay(force_render=True)
 
 
@@ -199,13 +231,22 @@ def enter_sample_selection(host, context):
         "preview_lf": host.preview_lf.cget("text"),
     }
     host._sample_previous_menu = host.preview_list_context_menu
+    host._sample_previous_list_font = host.preview_listbox.cget("font")
+    host._sample_previous_xscroll = host.preview_listbox.cget("xscrollcommand")
     host._clear_preview_editor_state(clear_dirty=True)
     host._pz3_sample_selection_context = dict(context)
     sessions = getattr(host, "_sample_sessions", {})
     saved = sessions.get(context["track_id"], {})
     host._experiment_sample_selected_sha256 = (
-        set(saved.get("selected", ())) if saved.get("members") == context["sample_member_sha256"] else set()
+        set(saved.get("selected", ())) if saved.get("members") == context["sample_member_sha256"]
+        else set(context.get("sample_initial_selected_sha256", context.get("sample_committed_sha256", ())))
     )
+    saved_labels = saved.get("labels") if saved.get("members") == context["sample_member_sha256"] else context.get("sample_labels")
+    host._sample_label_state = SampleLabels(host._experiment_sample_selected_sha256, saved_labels,
+                                           track_id=context["track_id"])
+    active_label = saved.get("active_label", "")
+    if active_label in host._sample_label_state.labels:
+        host._sample_label_state.activate(active_label)
     host._experiment_gt_context = {}
     host._experiment_gt_workflow_active = False
     host._manual_review_active = False
@@ -220,6 +261,20 @@ def enter_sample_selection(host, context):
         ImageAnnotation(filename=name, width=1, height=1, detections=[])
         for name in context["sample_member_sha256"]
     ]
+    host._sample_actual_by_sha = {context["sample_member_sha256"][ann.filename]: i
+                                 for i, ann in enumerate(host.current_annotations)}
+    host.preview_listbox.configure(font=("Consolas", 9))
+    host._sample_list_hscroll = ttk.Scrollbar(host.preview_list_frame, orient="horizontal",
+                                             command=host.preview_listbox.xview)
+    def scroll_columns(first, last):
+        scrollbar = host._sample_list_hscroll
+        scrollbar.set(first, last)
+        if float(first) <= 0 and float(last) >= 1:
+            scrollbar.pack_forget()
+        else:
+            scrollbar.pack(side="bottom", fill="x", before=host.preview_listbox)
+    host.preview_listbox.configure(xscrollcommand=scroll_columns)
+    host._sample_xscroll_callback = host.preview_listbox.cget("xscrollcommand")
     host.input_dir_var.set(context["source_dir"])
     host.plate_dataset_images_var.set(context["source_dir"])
     host.plate_dataset_run_var.set("")
@@ -227,27 +282,47 @@ def enter_sample_selection(host, context):
     bar = host._sample_bar = ttk.Frame(host.frame, padding=(10, 8))
     siblings = host.frame.pack_slaves()
     bar.pack(side="top", fill="x", before=siblings[0] if siblings else None)
-    host._sample_title_label = ttk.Label(bar)
-    host._sample_title_label.pack(side="left", fill="x", expand=True)
-    ttk.Button(bar, text="Zatwierdź próbę i wróć do PZ3",
+    bar.columnconfigure(0, weight=1)
+    host._sample_title_label = ttk.Label(bar, width=1, wraplength=300)
+    host._sample_title_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    host._sample_title_label.bind("<Configure>", lambda event:
+                                 host._sample_title_label.configure(wraplength=max(1, event.width)))
+    actions = ttk.Frame(bar)
+    actions.grid(row=0, column=1, sticky="e")
+    ttk.Button(actions, text="Zatwierdź próbę i wróć do PZ3",
                command=lambda: return_sample_to_pz3(host)).pack(side="right")
-    ttk.Button(bar, text="Anuluj i wróć",
+    ttk.Button(actions, text="Anuluj i wróć",
                command=lambda: cancel_sample_review(host)).pack(side="right", padx=6)
-    host._sample_fullscreen_button = ttk.Button(bar, command=host._toggle_preview_fullscreen)
+    host._sample_fullscreen_button = ttk.Button(actions, command=host._toggle_preview_fullscreen)
     host._sample_fullscreen_button.pack(side="right", padx=6)
+    host._sample_bar_stacked = None
+    def fit_bar(event):
+        stacked = event.width < actions.winfo_reqwidth() + int(240 * bar.tk.call("tk", "scaling") / 1.333)
+        if stacked != host._sample_bar_stacked:
+            host._sample_bar_stacked = stacked
+            host._sample_title_label.grid_configure(columnspan=2 if stacked else 1,
+                                                    pady=(0, 6) if stacked else 0)
+            actions.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                   columnspan=2 if stacked else 1)
+    bar.bind("<Configure>", fit_bar)
     filters = host._sample_filter_bar = ttk.Frame(host.preview_list_lf, padding=(0, 4))
     first = host.preview_list_lf.pack_slaves()
     filters.pack(fill="x", before=first[0] if first else None)
     select_filter = ttk.Combobox(filters, textvariable=host._sample_filter_var, state="readonly",
                                 values=("Wszystkie", "W próbie", "Poza próbą"), width=14)
-    select_filter.pack(side="left")
+    select_filter.grid(row=0, column=0, sticky="w")
     select_filter.bind("<<ComboboxSelected>>",
                       lambda event: refresh_sample_list(host))
-    ttk.Button(filters, text="+ Do próby", command=lambda: set_sample_selection(host, True)).pack(side="left", padx=4)
-    ttk.Button(filters, text="− Z próby", command=lambda: set_sample_selection(host, False)).pack(side="left")
+    ttk.Button(filters, text="+ Do próby", command=lambda: set_sample_selection(host, True)).grid(row=0, column=1, padx=4)
+    ttk.Button(filters, text="− Z próby", command=lambda: set_sample_selection(host, False)).grid(row=0, column=2)
+    ttk.Label(filters, text=f"{'STAN':<13} {'ETYKIETA':<18} PLIK", font=("Consolas", 9)).grid(
+        row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    host._sample_labels_panel = SampleLabelsPanel(host, host.preview_list_lf)
+    host._sample_labels_panel.pack(fill="x", before=filters)
     menu = host.preview_list_context_menu = tk.Menu(host.preview_listbox, tearoff=0)
     menu.add_command(label="Dodaj zaznaczone do próby", command=lambda: set_sample_selection(host, True))
     menu.add_command(label="Usuń zaznaczone z próby", command=lambda: set_sample_selection(host, False))
+    host._sample_labels_menu = build_label_menu(host, menu)
     menu.add_separator()
     menu.add_command(label="Zaznacz widoczne", command=lambda: host.preview_listbox.selection_set(0, tk.END))
     show_sample_workspace(host)
@@ -265,6 +340,8 @@ def leave_sample_selection(host):
     sessions[context["track_id"]] = {
         "members": context["sample_member_sha256"],
         "selected": set(host._experiment_sample_selected_sha256),
+        "labels": label_state(host).payload(context["track_id"]),
+        "active_label": label_state(host).active_id,
     }
     host._sample_sessions = sessions
     host._cancel_preview_list_population()
@@ -273,6 +350,15 @@ def leave_sample_selection(host):
     host._experiment_sample_selected_sha256 = set()
     host._sample_bar.destroy()
     host._sample_filter_bar.destroy()
+    host._sample_labels_panel.destroy()
+    host._sample_labels_panel = None
+    host._sample_label_state = None
+    host._sample_actual_by_sha = {}
+    host.preview_listbox.configure(font=host._sample_previous_list_font)
+    host.preview_listbox.configure(xscrollcommand=host._sample_previous_xscroll)
+    host.preview_listbox.deletecommand(host._sample_xscroll_callback)
+    host._sample_list_hscroll.destroy()
+    host.preview_listbox.xview_moveto(0)
     host.preview_list_context_menu.destroy()
     host.preview_list_context_menu = host._sample_previous_menu
     for name, value in host._sample_previous_state.items():
@@ -327,23 +413,35 @@ def return_sample_to_pz3(host):
     if not selected:
         messagebox.showwarning("Próba eksperymentalna", "Wybierz co najmniej jedno zdjęcie.", parent=host.frame)
         return
+    state = getattr(host, "_sample_label_state", None)
+    labels = state.payload(context["track_id"]) if isinstance(state, SampleLabels) else None
+    metadata_only = (selected == set(context.get("sample_committed_sha256", ()))
+                     and labels is not None and (bool(labels["labels"]) or context.get("sample_labels") is not None))
+    next_step = ("Skład próby i wynik audytu pozostaną bez zmian." if metadata_only else
+                 "Po zatwierdzeniu ponownie audytuj próbę przed przygotowaniem GT.")
     if not messagebox.askyesno(
         "Zatwierdzić próbę eksperymentalną?",
         f"Pula po audycie: {context['candidate_count']}\nWybrano: {len(selected)}\n"
         f"Usuwane z draftu: {context['candidate_count'] - len(selected)}\n\n"
         "Oryginalne pliki źródłowe pozostaną bez zmian.\n"
-        "Po zatwierdzeniu ponownie audytuj próbę przed przygotowaniem GT.",
+        + next_step,
         parent=host.frame,
     ):
         return
     service = EvaluationTrackService(context.get("workspace") or CONFIG.WORKSPACE_DIR)
     progress = BatchProgressDialog(host.frame, title="Zapisywanie próby")
     try:
-        result = progress.run(lambda update: service.commit_sample_selection(
-            context["track_id"], keep_sha256=selected,
-            expected_member_sha256=context["sample_member_sha256"],
-            expected_audit_id=context["sample_audit_id"], progress=update,
-        ))
+        if metadata_only:
+            result = progress.run(lambda update: service.save_sample_labels(
+                context["track_id"], sample_labels=labels,
+                expected_member_sha256=context["sample_member_sha256"]))
+        else:
+            label_args = {"sample_labels": labels} if labels is not None else {}
+            result = progress.run(lambda update: service.commit_sample_selection(
+                context["track_id"], keep_sha256=selected,
+                expected_member_sha256=context["sample_member_sha256"],
+                expected_audit_id=context["sample_audit_id"], progress=update, **label_args,
+            ))
     except Exception as exc:
         progress.close()
         messagebox.showerror("Zapis próby", str(exc), parent=host.frame)
@@ -351,6 +449,7 @@ def return_sample_to_pz3(host):
     progress.close()
     _return_to_pz3(
         host, context["track_id"],
-        f"Wybrano próbę: {result['selected_count']} z {result['candidate_count']} zdjęć. "
-        "Ponownie audytuj finalną pulę przed przygotowaniem GT.",
+        ("Zapisano etykiety próbki. Skład próby i audyt pozostają bez zmian." if metadata_only else
+         f"Wybrano próbę: {result['selected_count']} z {result['candidate_count']} zdjęć. "
+         "Ponownie audytuj finalną pulę przed przygotowaniem GT."),
     )

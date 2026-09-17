@@ -206,7 +206,7 @@ class FinalSampleGtGuiTests(FinalSampleSetup, unittest.TestCase):
     def test_prepare_gt_disabled_before_sample_selection(self):
         self.assertEqual(str(self.panel.btn_prepare_z2["state"]), "disabled")
         self.assertEqual(str(self.panel.btn_sample_selection["state"]), "normal")
-        self.assertEqual(str(self.panel.btn_sample_selection["style"]), "Accent.TButton")
+        self.assertEqual(str(self.panel.btn_sample_selection["style"]), "PZ3.Primary.TButton")
 
     def test_set_gt_disabled_before_sample_selection(self):
         self.assertEqual(str(self.panel.btn_set_gt["state"]), "disabled")
@@ -230,12 +230,12 @@ class FinalSampleGtGuiTests(FinalSampleSetup, unittest.TestCase):
         for button in (self.panel.btn_prepare_z2, self.panel.btn_set_gt):
             self.assertEqual(str(button["state"]), "disabled")
         self.assertEqual(str(self.panel.btn_audit_sample["state"]), "normal")
-        self.assertEqual(str(self.panel.btn_audit_sample["style"]), "Accent.TButton")
+        self.assertEqual(str(self.panel.btn_audit_sample["style"]), "PZ3.Primary.TButton")
         self.audit()
         self.refresh()
         for button in (self.panel.btn_prepare_z2, self.panel.btn_set_gt):
             self.assertEqual(str(button["state"]), "normal")
-        self.assertEqual(str(self.panel.btn_prepare_z2["style"]), "Accent.TButton")
+        self.assertEqual(str(self.panel.btn_prepare_z2["style"]), "PZ3.Primary.TButton")
         with patch(GUI + "filedialog.askopenfilename", return_value=str(self.xml())):
             self.panel.set_ground_truth()
         self.errors.assert_not_called()

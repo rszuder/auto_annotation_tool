@@ -493,10 +493,10 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
             self.root.update()
             self.assertEqual(self.panel._workflow_view.step, step)
             accented = [name for name in self.panel._layout.workflow_buttons
-                        if getattr(self.panel, name).cget("style") == "Accent.TButton"]
+                        if getattr(self.panel, name).cget("style") == "PZ3.Primary.TButton"]
             self.assertEqual(accented, [primary])
             self.assertEqual(str(getattr(self.panel, primary).cget("state")), "normal")
-            self.assertNotEqual(self.panel._layout.new_button.cget("style"), "Accent.TButton")
+            self.assertNotEqual(self.panel._layout.new_button.cget("style"), "PZ3.Primary.TButton")
 
         self.f.track = self.f.service.create_draft(name="Guided flow", target="plate", purpose="ranking")
         expect("SELECT_MODELS", "btn_participants")
@@ -518,7 +518,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         )
         expect("REAUDIT_SAMPLE", "btn_audit_sample")
         self.assertEqual(self.f.audit.get_track_audit_state(self.f.track)["status"], "STALE")
-        self.assertEqual(self.panel.btn_audit_sample.cget("text"), "Sprawdź finalną próbę")
+        self.assertEqual(self.panel.btn_audit_sample.cget("text"), "Audyt próby")
         self.assertIn("Finalna próba wymaga ponownego sprawdzenia", self.panel._layout.next_step_var.get())
         self.assertEqual(str(self.panel.btn_prepare_z2["state"]), "disabled")
         self.panel.btn_audit_sample.invoke()

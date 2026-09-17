@@ -108,8 +108,10 @@ def place_drawer(owner, frame_width, x, y, width, height):
     slide = getattr(owner, "_preview_drawer_slide", None)
     if slide is None:
         slide = owner._preview_drawer_slide = PreviewDrawerSlide(owner)
+    # Keep the top row free for the fullscreen icon and Superkorekta badge.
     slide.place(frame_width, x, y, width, height,
-                fullscreen=bool(getattr(owner, "_preview_fullscreen_active", False)))
+                fullscreen=bool(getattr(owner, "_preview_fullscreen_active", False)),
+                toggle_y=46)
 
 
 def suspend_drawer(owner):

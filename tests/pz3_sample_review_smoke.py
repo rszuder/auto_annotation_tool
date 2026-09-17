@@ -321,6 +321,8 @@ def main():
                     assert annotation.current_annotation_xml_path is None
                     assert not list(fixture.workspace.rglob("annotations.xml"))
                     assert not annotation.preview_tools.winfo_ismapped()
+                    from auto_annotation_tool.gui.pz3_sample_labels_ui import add_sample_label, label_state
+                    label_id = add_sample_label(annotation, "Noc")
                     def select(index):
                         annotation.preview_listbox.selection_clear(0, tk.END)
                         annotation.preview_listbox.selection_set(index)
@@ -338,12 +340,15 @@ def main():
                     annotation.preview_listbox.selection_set(1, 5)
                     menu = annotation.preview_list_context_menu
                     x, y, width, height = annotation.preview_listbox.bbox(3)
-                    annotation.preview_listbox.event_generate("<Button-3>", x=x + 15, y=y + height // 2)
-                    settle()
+                    # Exercise the real right-click handler and menu command.
+                    # Native Windows menu tracking can wait for physical input.
+                    with patch.object(menu, "tk_popup") as popup:
+                        annotation.preview_listbox.event_generate("<Button-3>", x=x + 15, y=y + height // 2)
+                        popup.assert_called_once()
                     menu.invoke("Dodaj zaznaczone do próby")
-                    menu.unpost()
                     settle()
                     assert len(selected_sample_names(annotation)) == 6, sample_counter(annotation)
+                    assert label_state(annotation).counts[label_id] == 6
                     app._schedule_z2_main_tab_entry_refresh("annotation")
                     settle()
                     assert sample_context(annotation)
@@ -396,6 +401,8 @@ def main():
                     for _ in range(3):
                         settle()
                     assert selected_sample_names(annotation) == expected_names
+                    assert label_state(annotation).active_id == label_id
+                    assert label_state(annotation).counts[label_id] == 6
                     with patch("tkinter.messagebox.askyesno", return_value=True):
                         button(annotation._sample_bar, "Zatwierdź próbę i wróć do PZ3").invoke()
                     settle()
@@ -406,6 +413,11 @@ def main():
                 track = fixture.service.get_track(fixture.track)
                 assert track["gt_relative_path"] is None
                 assert track["gt_sha256"] is None
+                labels_path = fixture.workspace / track["relative_path"] / "sample_labels.json"
+                labels_payload = json.loads(labels_path.read_text(encoding="utf-8"))
+                assert labels_payload["labels"] == [{"id": label_id, "name": "Noc"}]
+                assert set(labels_payload["assignments"]) == {
+                    member["sha256"] for member in fixture.service.list_members(fixture.track)}
                 assert not list(fixture.workspace.rglob("annotations.xml"))
                 assert {r["original_name"] for r in fixture.service.list_members(fixture.track)} == expected_names
                 assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "STALE"

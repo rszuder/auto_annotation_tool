@@ -170,6 +170,8 @@ def test_assistant_avoids_compass_and_stays_inside_canvas(bounds):
 @pytest.mark.parametrize("fullscreen,width", [(False, 500), (True, 1000)])
 def test_fullscreen_control_is_visible_and_clickable_above_drawer(root, fullscreen, width):
     window = tk.Toplevel(root)
+    # Native desktop hit testing requires an unobscured test window.
+    window.attributes("-topmost", True)
     window.geometry(f"{width}x500+40+40")
     surface = tk.Frame(window)
     surface.pack(fill=tk.BOTH, expand=True)

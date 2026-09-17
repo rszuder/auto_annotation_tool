@@ -778,12 +778,15 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
         canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
         canvas_height = max(1.0, float(canvas.winfo_height() or 1.0))
 
+        # HUD positions are viewport offsets; Canvas may have a scrolled origin.
+        viewport_x = float(canvas.canvasx(0))
+        viewport_y = float(canvas.canvasy(0))
         toggle_size = 24.0
         toggle_pad = 12.0
         toggle_gap = 8.0
-        toggle_x2 = max(toggle_pad + toggle_size, canvas_width - toggle_pad)
+        toggle_x2 = viewport_x + max(toggle_pad + toggle_size, canvas_width - toggle_pad)
         toggle_x1 = toggle_x2 - toggle_size
-        toggle_y1 = toggle_pad
+        toggle_y1 = viewport_y + toggle_pad
         toggle_y2 = toggle_y1 + toggle_size
         toggle_fill = str(legend_theme.get("panel_fill", "#1f2933"))
         toggle_outline = str(legend_theme.get("shell_outline", "#2fbf71"))
@@ -852,14 +855,16 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
         text_w = float(font_obj.measure(overlay_state_text))
         badge_h = 22.0
         badge_w = lamp_d + gap + text_w + gap + handle_w + (pad_x * 2.0)
-        default_x = max(14.0, toggle_x1 - toggle_gap - badge_w)
+        default_x = max(14.0, toggle_x1 - viewport_x - toggle_gap - badge_w)
         state_anchor_x = float(getattr(self, "_preview_super_correction_badge_offset_x", default_x) or default_x)
         state_anchor_x = min(max(0.0, state_anchor_x), max(0.0, canvas_width - badge_w))
-        max_badge_x_before_toggle = max(0.0, toggle_x1 - toggle_gap - badge_w)
+        max_badge_x_before_toggle = max(0.0, toggle_x1 - viewport_x - toggle_gap - badge_w)
         state_anchor_x = min(state_anchor_x, max_badge_x_before_toggle)
         state_anchor_y = min(max(0.0, state_anchor_y), max(0.0, canvas_height - badge_h))
         self._preview_super_correction_badge_offset_x = state_anchor_x
         self._preview_super_correction_badge_offset_y = state_anchor_y
+        state_anchor_x += viewport_x
+        state_anchor_y += viewport_y
         state_bg_id = canvas.create_rectangle(
             state_anchor_x,
             state_anchor_y,
@@ -3046,8 +3051,8 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
             self._preview_super_correction_drag_state = {
                 "press_canvas_x": float(canvas_x),
                 "press_canvas_y": float(canvas_y),
-                "start_x": float(x1),
-                "start_y": float(y1),
+                "start_x": float(x1) - float(canvas.canvasx(0)),
+                "start_y": float(y1) - float(canvas.canvasy(0)),
                 "width": max(1.0, float(x2 - x1)),
                 "height": max(1.0, float(y2 - y1)),
             }
