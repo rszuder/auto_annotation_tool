@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import sys
 import tempfile
+import traceback
 import json
 import sqlite3
 import shutil
@@ -237,6 +238,8 @@ def main():
             report = fixture.audit.audit_paths(fixture.track, images)
             fixture.audit.record_ingested_report(fixture.track, report, images)
 
+        fixture.select_and_reaudit()
+
         root = tk.Tk()
         root.title("PZ3 — controlled experiment flow smoke")
         root.geometry("1380x880+20+20")
@@ -245,7 +248,10 @@ def main():
                                  side_effect=lambda title, message, **kw: errors.append((title, str(message)))))
         stack.enter_context(patch("tkinter.messagebox.showinfo", return_value=None))
         stack.enter_context(patch("tkinter.messagebox.showwarning", return_value=None))
-        root.report_callback_exception = lambda *args: errors.append(args)
+        def report_callback_error(*args):
+            errors.append(args)
+            traceback.print_exception(*args)
+        root.report_callback_exception = report_callback_error
         app = AutoAnnotationApp.__new__(AutoAnnotationApp)
         app.root = root
         app.themes = THEME_DEFINITIONS
@@ -375,10 +381,11 @@ def main():
                 print("SMOKE PASS: real Z2 editor, fixed XML, saved GT, verified/sealed track, exact frozen participants and comparison window")
             except BaseException as exc:
                 failures.append(exc)
+                traceback.print_exc()
             finally:
                 for job in root.tk.call("after", "info"):
                     root.tk.call("after", "cancel", job)
-                root.destroy()
+                root.tk.call("destroy", root._w)
         root.after(0, exercise)
         root.mainloop()
         if failures:

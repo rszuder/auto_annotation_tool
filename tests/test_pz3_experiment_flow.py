@@ -24,6 +24,7 @@ class PZ3ExperimentFlowTests(unittest.TestCase):
         report = self.fixture.audit.audit_paths(self.track, [image])
         self.service.add_member(self.track, image)
         self.fixture.audit.record_ingested_report(self.track, report, [image])
+        self.fixture.select_and_reaudit()
         return image
 
     def _draw_gt(self, context):
@@ -207,6 +208,7 @@ class PZ3ExperimentFlowTests(unittest.TestCase):
         self.service.add_member(self.track, other)
         report = self.fixture.audit.audit_paths(self.track, [first, other])
         self.fixture.audit.record_ingested_report(self.track, report, [first, other])
+        self.fixture.select_and_reaudit()
         context = prepare_gt_workspace(self.service, self.track)
         working = Path(context["annotation_path"])
         prediction = working.parent.parent / "auto_run" / "annotations.xml"
@@ -232,6 +234,7 @@ class PZ3ExperimentFlowTests(unittest.TestCase):
         self.service.add_member(self.track, second)
         report = self.fixture.audit.audit_paths(self.track, [first, second])
         self.fixture.audit.record_ingested_report(self.track, report, [first, second])
+        self.fixture.select_and_reaudit()
         context = prepare_gt_workspace(self.service, self.track)
         publish_working_gt(self.service, self.track, self._draw_gt(context))
         second_member = next(row for row in self.service.list_members(self.track)

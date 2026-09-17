@@ -40,6 +40,21 @@ class PZ3Fixture:
         self.track = self.service.create_draft(name="PZ3 integration", target="plate", purpose="ranking")
         self.audit.save_participants(self.track, ["M1", "M2"])
 
+    def select_and_reaudit(self, track_id=None):
+        """Commit the current pool as a final sample through the production services."""
+        from auto_annotation_tool.registry.sample_selection import prepare_sample_selection
+        track_id = track_id or self.track
+        context = prepare_sample_selection(self.service, track_id)
+        self.service.commit_sample_selection(
+            track_id, keep_sha256=set(context["sample_member_sha256"].values()),
+            expected_member_sha256=context["sample_member_sha256"],
+            expected_audit_id=context["sample_audit_id"],
+        )
+        root = self.workspace / self.service.get_track(track_id)["relative_path"]
+        paths = [root / row["track_relative_path"] for row in self.service.list_members(track_id)]
+        report = self.audit.audit_paths(track_id, paths)
+        self.audit.record_ingested_report(track_id, report, paths)
+
     def image(self, name, seed=100, size=(192, 128)):
         path = self.sources / name
         pixels = np.random.default_rng(seed).integers(0, 256, (size[1], size[0], 3), dtype=np.uint8)

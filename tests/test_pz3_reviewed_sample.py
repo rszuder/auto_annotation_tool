@@ -119,6 +119,9 @@ class RawSampleSelectionTests(unittest.TestCase):
         self.f.repo.update_evaluation_track(self.track, status="DRAFT")
         xml = Path(self.temp.name) / "existing.xml"
         xml.write_text("<annotations/>", encoding="utf-8")
+        self.commit(keep_sha256={row["sha256"] for row in self.rows})
+        self.reaudit()
+        self.context = prepare_sample_selection(self.service, self.track)
         self.service.set_ground_truth(self.track, xml)
         with self.assertRaises((EvaluationTrackError, ValueError)):
             self.commit()

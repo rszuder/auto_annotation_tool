@@ -20,6 +20,8 @@ def enter_experiment_gt_workspace(host, context):
         raise RuntimeError("Poczekaj na zakończenie bieżącej anotacji.")
     service = EvaluationTrackService(CONFIG.WORKSPACE_DIR)
     track_id = str(context.get("track_id") or "")
+    from ..registry.final_sample_policy import assert_final_sample_ready_for_gt
+    assert_final_sample_ready_for_gt(service, track_id)
     state = service.get_preparation_state(track_id)
     if not state.can_prepare_gt or state.target != "plate":
         raise RuntimeError(state.next_step)

@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from pathlib import Path
 import sys
 import tempfile
+import traceback
 import json
 import sqlite3
 import shutil
@@ -245,7 +246,10 @@ def main():
                                  side_effect=lambda title, message, **kw: errors.append((title, str(message)))))
         stack.enter_context(patch("tkinter.messagebox.showinfo", return_value=None))
         stack.enter_context(patch("tkinter.messagebox.showwarning", return_value=None))
-        root.report_callback_exception = lambda *args: errors.append(args)
+        def report_callback_error(*args):
+            errors.append(args)
+            traceback.print_exception(*args)
+        root.report_callback_exception = report_callback_error
         app = AutoAnnotationApp.__new__(AutoAnnotationApp)
         app.root = root
         app.themes = THEME_DEFINITIONS
@@ -305,6 +309,8 @@ def main():
                            side_effect=AssertionError("No inference during RAW selection")) as inference, \
                      patch.object(annotation, "_preview_annotation_can_be_approved_for_export",
                                   side_effect=approval_check):
+                    assert str(panel.btn_prepare_z2["state"]) == "disabled"
+                    assert str(panel.btn_set_gt["state"]) == "disabled"
                     panel.btn_sample_selection.invoke()
                     for _ in range(3):
                         settle()
@@ -404,6 +410,7 @@ def main():
                 assert {r["original_name"] for r in fixture.service.list_members(fixture.track)} == expected_names
                 assert fixture.audit.get_track_audit_state(fixture.track)["status"] == "STALE"
                 assert str(panel.btn_prepare_z2["state"]) == "disabled"
+                assert str(panel.btn_set_gt["state"]) == "disabled"
                 for path, content in original_bytes.items():
                     assert path.read_bytes() == content
                 print("RAW PASS: 20 images, zero annotations, select 6; no GT or inference; audit STALE", flush=True)
@@ -416,6 +423,8 @@ def main():
                 final_report = fixture.audit.audit_paths(fixture.track, final_paths)
                 fixture.audit.record_ingested_report(fixture.track, final_report, final_paths)
                 panel.refresh_tracks(select_track_id=fixture.track)
+                assert str(panel.btn_prepare_z2["state"]) == "normal"
+                assert str(panel.btn_set_gt["state"]) == "normal"
                 with patch("auto_annotation_tool.gui.z4_evaluation_tracks.show_experiment_gt_entry",
                            return_value=ExperimentGtEntryDecision("manual", "unspecified")):
                     panel.btn_prepare_z2.invoke()
@@ -490,10 +499,11 @@ def main():
                 print("SMOKE PASS: real Z2 editor, fixed XML, saved GT, verified/sealed track, exact frozen participants and comparison window")
             except BaseException as exc:
                 failures.append(exc)
+                traceback.print_exc()
             finally:
                 for job in root.tk.call("after", "info"):
                     root.tk.call("after", "cancel", job)
-                root.destroy()
+                root.tk.call("destroy", root._w)
         root.after(0, exercise)
         root.mainloop()
         if failures:

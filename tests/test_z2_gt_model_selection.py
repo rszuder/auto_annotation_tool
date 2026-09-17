@@ -86,6 +86,7 @@ class GtModelSelectionTests(unittest.TestCase):
         report = self.fixture.audit.audit_paths(self.fixture.track, self.images)
         self.fixture.service.add_members_batch(self.fixture.track, self.images)
         self.fixture.audit.record_ingested_report(self.fixture.track, report, self.images)
+        self.fixture.select_and_reaudit()
         context = prepare_gt_workspace(self.fixture.service, self.fixture.track)
         self.assertTrue(enter_experiment_gt_workspace(self.host, context))
         self.host.plate_custom_var.set("")

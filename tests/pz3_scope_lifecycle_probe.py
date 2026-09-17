@@ -129,6 +129,7 @@ def exercise_scope_lifecycle(host, panel, fixture, settle):
     report = fixture.audit.audit_paths(track_b, [image])
     service.add_member(track_b, image)
     fixture.audit.record_ingested_report(track_b, report, [image])
+    fixture.select_and_reaudit(track_b)
     gt_context = prepare_gt_workspace(service, track_b)
     xml = Path(gt_context["annotation_path"])
     tree = ET.parse(xml)

@@ -428,7 +428,15 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         self.f.service.add_members_batch(self.f.track, paths)
         gt = Path(self.temp.name) / "gt.xml"
         gt.write_text("<annotations/>", encoding="utf-8")
-        self.f.service.set_ground_truth(self.f.track, gt)
+        # Historical GT can predate both the sample selection and its audit.
+        track = self.f.service.get_track(self.f.track)
+        stored_gt = self.f.workspace / track["relative_path"] / "ground_truth" / "annotations.xml"
+        stored_gt.parent.mkdir(parents=True, exist_ok=True)
+        stored_gt.write_bytes(gt.read_bytes())
+        self.f.repo.update_evaluation_track(
+            self.f.track, gt_relative_path=self.f.service._workspace_relative(stored_gt),
+            gt_format="cvat_xml", gt_sha256=self.f.service._sha256(stored_gt))
+        self.f.service.ensure_audit_manifest(self.f.track)
         self.panel.refresh_tracks(select_track_id=self.f.track)
         self.panel.audit_current_pool()
         updated = self.f.service.get_track(self.f.track)
@@ -462,6 +470,7 @@ class PZ3IngestIntegrationTests(unittest.TestCase):
         gt.write_text('<annotations><image id="0" name="IMG_006.png" width="192" height="128">'
                       '<polygon label="plate" points="10,10;70,10;70,40;10,40"/>'
                       '</image></annotations>', encoding="utf-8")
+        self.f.select_and_reaudit()
         self.panel.service.set_ground_truth(self.f.track, gt)
         self.panel.verify_track()
         self.errors.assert_not_called()

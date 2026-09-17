@@ -25,6 +25,7 @@ from .pz3_participant_audit import (
 )
 from .pz3_audit_resolution_dialog import format_audit_state
 from .pz3_workflow_view import build_pz3_workflow_view_state, has_selected_sample
+from ..registry.final_sample_policy import assert_final_sample_ready_for_gt, final_sample_ready_for_gt
 from ..registry.audit_resolution import audit_path_key
 from ..registry.participant_pool_audit import (
     ParticipantPoolAuditService,
@@ -635,6 +636,7 @@ class EvaluationTracksPanel:
             return
         progress = None
         try:
+            assert_final_sample_ready_for_gt(self.service, track_id)
             readiness = self.service.get_preparation_state(track_id)
             if not readiness.can_prepare_gt or readiness.target != "plate":
                 raise EvaluationTrackError(readiness.next_step)
@@ -1231,6 +1233,11 @@ class EvaluationTracksPanel:
         track_id = self._require_current_track()
         if not track_id:
             return
+        try:
+            assert_final_sample_ready_for_gt(self.service, track_id)
+        except Exception as exc:
+            self._show_error("Nie udało się zapisać Ground Truth", exc)
+            return
         dialog_options = {}
         try:
             experiment_paths = self.service.get_experiment_workspace(track_id)
@@ -1694,6 +1701,10 @@ class EvaluationTracksPanel:
             if track and track.get("track_id") else track_readiness(None)
         )
         participant_entry_ready = self._participant_entry_ready(track)
+        can_gt = readiness.can_prepare_gt and final_sample_ready_for_gt(
+            self.workspace, track, self.service.list_members(str(track["track_id"])),
+            {"status": "CURRENT" if readiness.audit_current else "STALE"},
+        )
         mapping = (
             (
                 self.btn_add_images,
@@ -1705,7 +1716,7 @@ class EvaluationTracksPanel:
                 readiness.can_audit,
             ),
             (self.btn_remove_images, state.can_remove_images),
-            (self.btn_set_gt, readiness.can_prepare_gt),
+            (self.btn_set_gt, can_gt),
             (self.btn_verify, readiness.can_verify),
             (self.btn_seal, readiness.can_seal and not self._participant_audit_seal_issue(
                 str((track or {}).get("track_id") or ""), track or {}
@@ -1717,7 +1728,7 @@ class EvaluationTracksPanel:
             (self.btn_open_experiment_sources, state.can_add_images),
             (
                 self.btn_prepare_z2,
-                readiness.can_prepare_gt and readiness.target == "plate",
+                can_gt and readiness.target == "plate",
             ),
         )
         for button, enabled in mapping:
