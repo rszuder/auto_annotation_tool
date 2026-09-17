@@ -2,6 +2,7 @@
 import hashlib
 import json
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 
 def requires_final_sample_before_gt(track):
@@ -27,25 +28,34 @@ def has_selected_sample(workspace, track, members):
         return False
 
 
-def _valid_existing_gt(workspace, track):
-    """Keep the legacy editing route only for the GT actually stored in the track."""
+def _valid_existing_gt(workspace, track, members):
+    """Legacy GT is usable only for exactly the current image membership."""
     relative = str(track.get("gt_relative_path") or "")
     expected = str(track.get("gt_sha256") or "").lower()
-    if not relative or not expected:
+    if not relative or not expected or str(track.get("gt_format") or "").lower() != "cvat_xml":
         return False
     try:
-        digest = hashlib.sha256()
-        with (Path(workspace) / relative).open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest() == expected
-    except OSError:
+        content = (Path(workspace) / relative).read_bytes()
+        if hashlib.sha256(content).hexdigest() != expected:
+            return False
+        root = ET.fromstring(content)
+        if root.tag != "annotations":
+            return False
+        names = [Path(node.get("name", "")).name for node in root.findall("image")]
+        current = [str(member["original_name"]) for member in members]
+        return (
+            bool(current)
+            and all(names)
+            and len(names) == len(set(names)) == len(current)
+            and set(names) == set(current)
+        )
+    except (OSError, ET.ParseError, ValueError, LookupError, TypeError):
         return False
 
 
 def final_sample_gt_issue(workspace, track, members, audit_state):
     track = dict(track or {})
-    if not requires_final_sample_before_gt(track) or _valid_existing_gt(workspace, track):
+    if not requires_final_sample_before_gt(track) or _valid_existing_gt(workspace, track, members):
         return ""
     if not has_selected_sample(workspace, track, members):
         return ("Najpierw wybierz finalną próbę i zatwierdź jej skład, a następnie sprawdź ją ponownie. "
