@@ -30,6 +30,7 @@ class EvaluationTracksLayout:
         self._has_track = False
         self.workflow_buttons = []
         self._sample_selected = False
+        self._sample_working = False
         self._workflow_rows = None
         self._track_title = self.title_var.get()
         self._status_tones = ("muted", "muted", "muted", "muted")
@@ -313,8 +314,8 @@ class EvaluationTracksLayout:
                 ("btn_audit_pool", "Audyt niezależności", panel.audit_current_pool, 2, 0, 2),
             )),
             ("02   Próba i GT", (
-                ("btn_sample_selection", "Wybierz próbę…", panel.select_experiment_sample_in_z2, 1, 0, 2),
-                ("btn_audit_sample", "Audyt próby", panel.audit_current_pool, 1, 1, 1),
+                ("btn_sample_selection", "Wybierz / edytuj próbę…", panel.select_experiment_sample_in_z2, 1, 0, 1),
+                ("btn_finalize_sample", "Finalizuj próbę", panel.finalize_sample_selection, 1, 1, 1),
                 ("btn_prepare_z2", "Przygotuj GT", panel.prepare_ground_truth_in_z2, 2, 0, 1),
                 ("btn_set_gt", "Wczytaj GT…", panel.set_ground_truth, 2, 1, 1),
             )),
@@ -343,7 +344,6 @@ class EvaluationTracksLayout:
                                    style="PZ3.Muted.TLabel", anchor=tk.CENTER)
         self.pool_note.grid(row=2, column=0, columnspan=3, sticky="nsew")
         self.pool_note.grid_remove()
-        panel.btn_audit_sample.grid_remove()
 
     def _fit_workflow(self, available):
         # Three columns on wide panels; aligned action rows when DPI/width
@@ -352,8 +352,7 @@ class EvaluationTracksLayout:
         gap = self.px(6)
         half_buttons = ["btn_participants", "btn_add_images", "btn_prepare_z2",
                         "btn_set_gt", "btn_verify", "btn_seal"]
-        if self._sample_selected:
-            half_buttons += ["btn_sample_selection", "btn_audit_sample"]
+        half_buttons += ["btn_sample_selection", "btn_finalize_sample"]
         half_width = max(getattr(panel, name).winfo_reqwidth() for name in half_buttons)
         full_width = max(panel.btn_audit_pool.winfo_reqwidth(),
                          panel.btn_compare.winfo_reqwidth(),
@@ -406,8 +405,7 @@ class EvaluationTracksLayout:
         if self._sample_selected:
             panel.btn_audit_pool.grid_remove()
         else:
-            panel.btn_audit_sample.grid_remove()
-            self.pool_note.grid_remove()
+                self.pool_note.grid_remove()
 
     def refresh_primary_action(self):
         if self._has_track and not self.form_open:
@@ -460,7 +458,7 @@ class EvaluationTracksLayout:
         self._schedule_fit()
 
     def set_track(self, track=None, *, member_count=0, audit_state=None, readiness=None,
-                  workflow=None, participant_count=0):
+                  workflow=None, participant_count=0, sample_summary=None):
         self._has_track = bool(track)
         self._workflow_rows = None
         if track:
@@ -477,20 +475,35 @@ class EvaluationTracksLayout:
             audit_label, audit_tone = workflow.audit_label, workflow.audit_tone
             self.primary_action = workflow.primary_action
             self._sample_selected = workflow.sample_selected
+            self._sample_working = workflow.sample_working
             self.panel.btn_participants.configure(text=f"Modele ({participant_count})\u2026")
             self.next_step_var.set(workflow.status_text)
-            self.pool_summary_var.set(f"Modele: {participant_count} wybrane  ·  Obrazy: {member_count}")
-            self.panel.btn_audit_sample.configure(text="Audyt próby")
-            if workflow.sample_selected:
-                self.panel.btn_audit_pool.grid_remove()
-                self.panel.btn_audit_sample.grid()
-                self.panel.btn_sample_selection.grid_configure(columnspan=1)
+            summary = sample_summary or {}
+            base = f"Modele: {participant_count} wybrane  ·  Obrazy puli: {member_count}"
+            if summary.get("status") == "WORKING":
+                sample_text = (
+                    f"Próba robocza: {summary.get('selected_count', 0)}"
+                    f"  ·  Etykiety: {summary.get('label_count', 0)}"
+                    f"  ·  Bez etykiety: {summary.get('unlabeled_count', 0)}"
+                )
+                base += "  ·  " + sample_text
+                self.pool_note.configure(text=sample_text)
                 self.pool_note.grid()
+                self.panel.btn_sample_selection.configure(text="Edytuj próbę…")
+            elif summary.get("status") == "FINALIZED":
+                sample_text = (
+                    f"Finalna próba: {summary.get('selected_count', member_count)}"
+                    f"  ·  Etykiety: {summary.get('label_count', 0)}"
+                )
+                base += "  ·  " + sample_text
+                self.pool_note.configure(text=sample_text)
+                self.pool_note.grid()
+                self.panel.btn_sample_selection.configure(text="Próba sfinalizowana")
             else:
-                self.panel.btn_audit_pool.grid()
-                self.panel.btn_audit_sample.grid_remove()
-                self.panel.btn_sample_selection.grid_configure(columnspan=3)
                 self.pool_note.grid_remove()
+                self.panel.btn_sample_selection.configure(text="Wybierz próbę…")
+            self.pool_summary_var.set(base)
+            self.panel.btn_audit_pool.grid()
             self.audit_var.set(f"Audyt: {audit_label}")
             gt_exists = readiness.gt_exists if readiness is not None else None
             gt_verified = readiness.gt_verified if readiness is not None else None
@@ -507,14 +520,21 @@ class EvaluationTracksLayout:
                 "success" if gt_verified else "muted",
             )
             self.status_row.grid()
-            self.count_var.set(f"Finalna próba: {member_count}" if workflow.sample_selected
-                               else f"Obrazy: {member_count}")
+            if (sample_summary or {}).get("status") == "WORKING":
+                self.count_var.set(
+                    f"Obrazy puli: {member_count} · próba robocza: {(sample_summary or {}).get('selected_count', 0)}"
+                )
+            elif workflow.sample_selected:
+                self.count_var.set(f"Finalna próba: {member_count}")
+            else:
+                self.count_var.set(f"Obrazy: {member_count}")
         else:
             self._track_title = "Wybierz tor z listy"
+            self._sample_selected = False
+            self._sample_working = False
             self.primary_action = ""
             self.next_step_var.set("Wybierz tor lub utwórz nowy eksperyment.")
             self.pool_summary_var.set("")
-            self.panel.btn_audit_sample.grid_remove()
             self.panel.btn_audit_pool.grid()
             self.lifecycle_var.set("")
             self.audit_var.set("")

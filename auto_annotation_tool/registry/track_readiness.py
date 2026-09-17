@@ -26,7 +26,14 @@ class TrackReadiness:
 
     @property
     def can_audit(self):
-        return self.status in {"DRAFT", "VERIFIED"} and self.members_present and self.participants_ready
+        # Audyt jest etapem szerokiej puli. Po CURRENT CTA pozostaje wyłączone.
+        return (
+            self.status == "DRAFT"
+            and self.members_present
+            and self.participants_ready
+            and not self.audit_current
+            and not self.gt_exists
+        )
 
     @property
     def can_prepare_gt(self):

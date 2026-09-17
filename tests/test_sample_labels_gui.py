@@ -186,37 +186,26 @@ class SampleLabelsGuiTests(unittest.TestCase):
             self.assertEqual(host.preview_listbox.curselection(), (1,))
         host._refresh_preview_list.assert_not_called()
 
-    def test_metadata_only_return_keeps_sample_commit_and_audit(self):
+    def test_return_keeps_working_sample_outside_final_membership_commit(self):
         host = self.host
-        host._pz3_sample_selection_context["sample_committed_sha256"] = ["a", "c"]
         ui.add_sample_label(host, "Noc")
-        with patch.object(route.messagebox, "askyesno", return_value=True), \
-             patch.object(route, "BatchProgressDialog") as dialog, \
-             patch.object(route, "EvaluationTrackService") as service, \
-             patch.object(route, "_return_to_pz3") as back:
-            dialog.return_value.run.side_effect = lambda operation: operation(Mock())
-            service.return_value.save_sample_labels.return_value = {"selected_count": 2, "candidate_count": 2}
+        with patch.object(route, "persist_sample_review_draft", return_value=True),              patch.object(route, "EvaluationTrackService") as service,              patch.object(route, "_return_to_pz3") as back:
             route.return_sample_to_pz3(host)
-        service.return_value.commit_sample_selection.assert_not_called()
-        service.return_value.save_sample_labels.assert_called_once()
-        self.assertIn("audyt pozostają bez zmian", back.call_args.args[2])
+        service.assert_not_called()
+        back.assert_called_once()
 
-    def test_first_commit_passes_optional_sha_metadata_with_membership(self):
+    def test_working_autosave_carries_labels_and_selected_sha(self):
         host = self.host
+        host._pz3_sample_selection_context["workspace"] = "WORKSPACE"
         label = ui.add_sample_label(host, "Noc")
         ui.assign_sample_label(host, label, [0])
-        with patch.object(route.messagebox, "askyesno", return_value=True), \
-             patch.object(route, "BatchProgressDialog") as dialog, \
-             patch.object(route, "EvaluationTrackService") as service, \
-             patch.object(route, "_return_to_pz3"):
-            dialog.return_value.run.side_effect = lambda operation: operation(Mock())
-            service.return_value.commit_sample_selection.return_value = {"selected_count": 2, "candidate_count": 3}
-            route.return_sample_to_pz3(host)
-        service.return_value.save_sample_labels.assert_not_called()
-        kwargs = service.return_value.commit_sample_selection.call_args.kwargs
-        self.assertEqual(kwargs["keep_sha256"], {"a", "c"})
+        with patch.object(route, "EvaluationTrackService") as service,              patch.object(route, "save_sample_review_draft") as save:
+            self.assertTrue(route.persist_sample_review_draft(host))
+        service.assert_called_once_with("WORKSPACE")
+        kwargs = save.call_args.kwargs
+        self.assertEqual(kwargs["selected_sha256"], {"a", "c"})
         self.assertEqual(kwargs["sample_labels"]["assignments"], {"a": label})
-
+        self.assertEqual(kwargs["active_label"], label)
 
 class SampleLabelsRealWorkspaceTests(unittest.TestCase):
     def test_leave_and_reopen_restores_labels_membership_and_active_label(self):

@@ -1,4 +1,4 @@
-"""New plate GT requires a committed final sample and a fresh audit."""
+"""New plate GT requires a finalized subset of the already audited pool."""
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
@@ -69,39 +69,37 @@ class FinalSampleSetup:
 class FinalSampleGtBackendTests(FinalSampleSetup, unittest.TestCase):
     def test_prepare_gt_backend_rejects_before_sample_selection(self):
         with patch.object(self.service, "_sync_experiment_sources_from_members") as sync:
-            with self.assertRaisesRegex(EvaluationTrackError, "wybierz finalną próbę"):
+            with self.assertRaisesRegex(EvaluationTrackError, "finalną próbę"):
                 prepare_gt_workspace(self.service, self.track)
         sync.assert_not_called()
         self.assertFalse(self.ready())
 
     def test_set_gt_backend_rejects_before_sample_selection(self):
-        with self.assertRaisesRegex(EvaluationTrackError, "wybierz finalną próbę"):
+        with self.assertRaisesRegex(EvaluationTrackError, "finalną próbę"):
             self.service.set_ground_truth(self.track, self.xml())
         self.assertIsNone(self.service.get_track(self.track)["gt_relative_path"])
 
-    def test_gt_still_blocked_after_sample_commit_before_reaudit(self):
+    def test_gt_enabled_immediately_after_finalizing_audited_subset(self):
         self.commit()
-        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "STALE")
-        self.assertFalse(self.ready())
-        self.assert_both_blocked("ponownego sprawdzenia")
+        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "CURRENT")
+        self.assertTrue(self.ready())
+        self.assertTrue(Path(prepare_gt_workspace(self.service, self.track)["annotation_path"]).is_file())
 
-    def test_selecting_whole_pool_still_requires_final_reaudit(self):
+    def test_selecting_whole_pool_preserves_current_audit(self):
         self.commit(count=3)
         self.assertEqual(len(self.service.list_members(self.track)), 3)
-        self.assert_both_blocked("ponownego sprawdzenia")
+        self.assertEqual(self.f.audit.get_track_audit_state(self.track)["status"], "CURRENT")
+        self.assertTrue(self.ready())
 
-    def test_gt_enabled_after_sample_selection_and_final_reaudit(self):
+    def test_gt_enabled_after_sample_finalization_without_second_audit(self):
         self.commit()
-        self.audit()
         self.assertTrue(self.ready())
         context = prepare_gt_workspace(self.service, self.track)
         self.assertEqual(len(ET.parse(context["annotation_path"]).getroot().findall("image")), 2)
 
-    def test_import_gt_allowed_only_after_final_sample_reaudit(self):
-        self.assert_both_blocked("wybierz finalną próbę")
+    def test_import_gt_allowed_after_finalization_without_second_audit(self):
+        self.assert_both_blocked("finalną próbę")
         self.commit()
-        self.assert_both_blocked("ponownego sprawdzenia")
-        self.audit()
         destination = self.service.set_ground_truth(self.track, self.xml())
         self.assertTrue(destination.is_file())
         self.assertEqual(len(ET.parse(destination).getroot().findall("image")), 2)
@@ -109,10 +107,8 @@ class FinalSampleGtBackendTests(FinalSampleSetup, unittest.TestCase):
     def test_final_test_has_the_same_gate(self):
         with self.f.repo.database.transaction() as db:
             db.execute("UPDATE evaluation_tracks SET purpose=? WHERE track_id=?", ("final_test", self.track))
-        self.assert_both_blocked("wybierz finalną próbę")
+        self.assert_both_blocked("finalną próbę")
         self.commit()
-        self.assert_both_blocked("ponownego sprawdzenia")
-        self.audit()
         self.assertTrue(self.service.set_ground_truth(self.track, self.xml()).is_file())
 
     def test_validation_flow_not_forced_through_sample_selection(self):
@@ -169,7 +165,7 @@ class FinalSampleGtBackendTests(FinalSampleSetup, unittest.TestCase):
         self.assertTrue(self.ready())
         self.service.add_members_batch(self.track, [self.images[-1]])
         self.audit()
-        self.assert_both_blocked("wybierz finalną próbę")
+        self.assert_both_blocked("finalną próbę")
 
     def test_deleted_or_malformed_selection_cannot_be_replaced_by_current_audit(self):
         self.commit()
@@ -179,9 +175,9 @@ class FinalSampleGtBackendTests(FinalSampleSetup, unittest.TestCase):
         for content in ("{}", "[]", "broken"):
             with self.subTest(content=content):
                 selection.write_text(content, encoding="utf-8")
-                self.assert_both_blocked("wybierz finalną próbę")
+                self.assert_both_blocked("finalną próbę")
         selection.unlink()
-        self.assert_both_blocked("wybierz finalną próbę")
+        self.assert_both_blocked("finalną próbę")
 
 
 class FinalSampleGtGuiTests(FinalSampleSetup, unittest.TestCase):
@@ -215,26 +211,22 @@ class FinalSampleGtGuiTests(FinalSampleSetup, unittest.TestCase):
         with patch("auto_annotation_tool.registry.experiment_gt_workspace.prepare_gt_workspace") as prepare:
             self.panel.prepare_ground_truth_in_z2()
         prepare.assert_not_called()
-        self.assertIn("wybierz finalną próbę", str(self.errors.call_args.args[1]))
+        self.assertIn("finalną próbę", str(self.errors.call_args.args[1]))
 
     def test_direct_import_entry_cannot_open_picker_before_sample(self):
         with patch(GUI + "filedialog.askopenfilename") as picker, patch.object(self.service, "set_ground_truth") as save:
             self.panel.set_ground_truth()
         picker.assert_not_called()
         save.assert_not_called()
-        self.assertIn("wybierz finalną próbę", str(self.errors.call_args.args[1]))
+        self.assertIn("finalną próbę", str(self.errors.call_args.args[1]))
 
-    def test_buttons_follow_commit_then_reaudit(self):
+    def test_buttons_follow_finalization_without_second_audit(self):
         self.commit()
         self.refresh()
         for button in (self.panel.btn_prepare_z2, self.panel.btn_set_gt):
-            self.assertEqual(str(button["state"]), "disabled")
-        self.assertEqual(str(self.panel.btn_audit_sample["state"]), "normal")
-        self.assertEqual(str(self.panel.btn_audit_sample["style"]), "PZ3.Primary.TButton")
-        self.audit()
-        self.refresh()
-        for button in (self.panel.btn_prepare_z2, self.panel.btn_set_gt):
             self.assertEqual(str(button["state"]), "normal")
+        self.assertEqual(str(self.panel.btn_audit_pool["state"]), "disabled")
+        self.assertEqual(str(self.panel.btn_finalize_sample["state"]), "disabled")
         self.assertEqual(str(self.panel.btn_prepare_z2["style"]), "PZ3.Primary.TButton")
         with patch(GUI + "filedialog.askopenfilename", return_value=str(self.xml())):
             self.panel.set_ground_truth()

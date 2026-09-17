@@ -58,13 +58,16 @@ def final_sample_gt_issue(workspace, track, members, audit_state):
     if not requires_final_sample_before_gt(track) or _valid_existing_gt(workspace, track, members):
         return ""
     if not has_selected_sample(workspace, track, members):
-        return ("Najpierw wybierz finalną próbę i zatwierdź jej skład, a następnie sprawdź ją ponownie. "
-                "Dopiero wtedy możesz przygotować lub wczytać Ground Truth.")
+        return (
+            "Najpierw wybierz i sfinalizuj finalną próbę z zaudytowanej puli. "
+            "Roboczy wybór i etykiety nie są jeszcze finalnym zestawem Ground Truth."
+        )
     if (audit_state or {}).get("status") != "CURRENT":
-        return ("Finalna próba wymaga ponownego sprawdzenia przed przygotowaniem "
-                "lub wczytaniem Ground Truth.")
+        return (
+            "Audyt niezależności puli nie jest aktualny. "
+            "W finalnej próbce nie wykonuje się osobnego drugiego audytu."
+        )
     return ""
-
 
 def final_sample_ready_for_gt(workspace, track, members, audit_state):
     return not final_sample_gt_issue(workspace, track, members, audit_state)

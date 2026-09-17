@@ -58,53 +58,32 @@ class SampleSelectionGuiTests(unittest.TestCase):
         host._get_preview_approved_filenames_base.assert_not_called()
         self.assertEqual(host._experiment_gt_context, {})
 
-    def test_commit_uses_sha_and_never_saves_gt(self):
+    def test_return_saves_working_state_without_committing_membership(self):
         host = self.host()
-        expected = dict(host._pz3_sample_selection_context["sample_member_sha256"])
-        with patch.object(route.messagebox, "askyesno", return_value=True), \
-             patch.object(route, "BatchProgressDialog") as dialog, \
-             patch.object(route, "EvaluationTrackService") as service, \
-             patch.object(route, "_return_to_pz3") as back:
-            update = Mock()
-            dialog.return_value.run.side_effect = lambda operation: operation(update)
-            service.return_value.commit_sample_selection.return_value = {"selected_count": 2, "candidate_count": 3}
+        with patch.object(route, "persist_sample_review_draft", return_value=True) as persist,              patch.object(route, "_return_to_pz3") as back,              patch.object(route, "EvaluationTrackService") as service:
             route.return_sample_to_pz3(host)
-        service.return_value.commit_sample_selection.assert_called_once_with(
-            "TRK", keep_sha256={"a", "c"}, expected_member_sha256=expected,
-            expected_audit_id="AUDIT", progress=update)
-        dialog.return_value.close.assert_called_once()
+        persist.assert_called_once_with(host)
+        service.assert_not_called()
         back.assert_called_once()
         host._save_preview_edits.assert_not_called()
         host._get_current_annotation_xml_path.assert_not_called()
 
-    def test_cancelled_confirmation_and_empty_selection_do_not_write_draft(self):
-        for empty in (False, True):
-            host = self.host()
-            if empty:
-                host._experiment_sample_selected_sha256.clear()
-            with self.subTest(empty=empty), \
-                 patch.object(route.messagebox, "askyesno", return_value=False), \
-                 patch.object(route.messagebox, "showwarning"), \
-                 patch.object(route, "EvaluationTrackService") as service:
-                route.return_sample_to_pz3(host)
-                service.assert_not_called()
-                host._save_preview_edits.assert_not_called()
-                self.assertIsNotNone(route.sample_context(host))
-
-    def test_commit_failure_keeps_selection_open(self):
+    def test_return_accepts_empty_working_selection(self):
         host = self.host()
-        with patch.object(route.messagebox, "askyesno", return_value=True), \
-             patch.object(route.messagebox, "showerror") as error, \
-             patch.object(route, "BatchProgressDialog") as dialog, \
-             patch.object(route, "EvaluationTrackService") as service, \
-             patch.object(route, "_return_to_pz3") as back:
-            dialog.return_value.run.side_effect = lambda operation: operation(Mock())
-            service.return_value.commit_sample_selection.side_effect = OSError("disk full")
+        host._experiment_sample_selected_sha256.clear()
+        with patch.object(route, "persist_sample_review_draft", return_value=True),              patch.object(route, "_return_to_pz3") as back:
+            route.return_sample_to_pz3(host)
+        back.assert_called_once()
+        self.assertEqual(host._experiment_sample_selected_sha256, set())
+
+    def test_failed_working_save_keeps_selection_open(self):
+        host = self.host()
+        host._sample_draft_save_error = "disk full"
+        with patch.object(route, "persist_sample_review_draft", return_value=False),              patch.object(route.messagebox, "showerror") as error,              patch.object(route, "_return_to_pz3") as back:
             route.return_sample_to_pz3(host)
         back.assert_not_called()
         error.assert_called_once()
         self.assertEqual(host._experiment_sample_selected_sha256, {"a", "c"})
-        dialog.return_value.close.assert_called_once()
 
     def test_cancel_does_not_save_or_change_membership(self):
         host = self.host()

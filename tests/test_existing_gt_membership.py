@@ -153,26 +153,48 @@ class ExistingGtMembershipTests(unittest.TestCase):
         self.assertTrue(self.ready())
         self.assertFalse((self.track_root / "sample_selection.json").exists())
 
-    def test_existing_gt_addition_requires_selection_and_reaudit_before_new_gt(self):
-        self.service.add_member(self.track, self.f.image("ADDED_001.png", seed=1900))
+    def test_existing_gt_addition_requires_selection_but_not_second_reaudit(self):
+        self.service.add_member(
+            self.track,
+            self.f.image("ADDED_001.png", seed=1900),
+        )
         self.assert_gt_invalidated()
+
+        # Zmiana szerokiej puli unieważnia poprzedni audyt i nadal blokuje GT.
         self.assert_gate_closed()
+
+        # Audytujemy już poszerzoną szeroką pulę.
         self.audit()
         self.assert_gate_closed()
+
+        # Finalizacja próbki jest wyborem podzbioru tej samej,
+        # już zaudytowanej puli, więc nie wymaga drugiego audytu.
         context = prepare_sample_selection(self.service, self.track)
         self.service.commit_sample_selection(
-            self.track, keep_sha256=set(context["sample_member_sha256"].values()),
+            self.track,
+            keep_sha256=set(context["sample_member_sha256"].values()),
             expected_member_sha256=context["sample_member_sha256"],
-            expected_audit_id=context["sample_audit_id"])
-        for action in (lambda: prepare_gt_workspace(self.service, self.track),
-                       lambda: self.service.set_ground_truth(self.track, self.gt)):
-            with self.assertRaisesRegex(EvaluationTrackError, "ponownego sprawdzenia"):
-                action()
-        self.audit()
+            expected_audit_id=context["sample_audit_id"],
+        )
+
+        self.assertEqual(
+            self.f.audit.get_track_audit_state(self.track)["status"],
+            "CURRENT",
+        )
+
         context = prepare_gt_workspace(self.service, self.track)
         xml = Path(context["annotation_path"])
-        names = {node.get("name") for node in ET.parse(xml).getroot().findall("image")}
-        self.assertEqual(names, {row["original_name"] for row in self.service.list_members(self.track)})
+        names = {
+            node.get("name")
+            for node in ET.parse(xml).getroot().findall("image")
+        }
+        self.assertEqual(
+            names,
+            {
+                row["original_name"]
+                for row in self.service.list_members(self.track)
+            },
+        )
         self.service.set_ground_truth(self.track, xml)
         self.assertTrue(self.ready())
 
