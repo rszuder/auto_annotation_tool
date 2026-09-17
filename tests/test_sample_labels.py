@@ -77,6 +77,61 @@ class SampleLabelDataTests(unittest.TestCase):
         self.labels.set_membership(["4321"], False)
         self.assertEqual(self.labels.unlabeled_count, 9999)
 
+    def test_locked_label_freezes_members_and_count_until_unlock(self):
+        self.labels.assign(["a"], self.night)
+        self.labels.set_label_locked(self.night, True)
+
+        self.assertTrue(self.labels.is_sha_locked("a"))
+        self.assertEqual(self.labels.assign(["a"], self.day), set())
+        self.assertEqual(self.labels.set_membership(["a"], False), set())
+        self.assertEqual(self.labels.assignments["a"], self.night)
+        self.assertIn("a", self.selected)
+        self.assertEqual(self.labels.counts[self.night], 1)
+
+        self.labels.set_label_locked(self.night, False)
+        self.assertEqual(self.labels.assign(["a"], self.day), {"a"})
+        self.assertEqual(self.labels.assignments["a"], self.day)
+
+    def test_locked_target_rejects_new_members_but_mixed_bulk_skips_only_locked(self):
+        self.labels.assign(["a"], self.night)
+        self.labels.assign(["b"], self.day)
+        self.labels.set_label_locked(self.night, True)
+
+        blocked = self.labels.blocked_for_assignment(["a", "b"], self.day)
+        changed = self.labels.assign(["a", "b"], self.day)
+
+        self.assertEqual(blocked, {"a"})
+        self.assertEqual(changed, set())
+        self.assertEqual(self.labels.assignments["a"], self.night)
+        self.assertEqual(self.labels.assignments["b"], self.day)
+
+        self.labels.set_label_locked(self.day, True)
+        self.assertFalse(self.labels.can_assign("a", self.day))
+
+    def test_unlabeled_lock_freezes_unlabeled_group(self):
+        self.labels.assign(["a"], self.night)
+        self.labels.set_unlabeled_locked(True)
+
+        self.assertEqual(self.labels.assign(["b"], self.day), set())
+        self.assertEqual(self.labels.set_membership(["b"], False), set())
+        self.assertIn("b", self.selected)
+        self.assertNotIn("b", self.labels.assignments)
+
+        self.assertEqual(self.labels.assign(["a"], ""), set())
+        self.assertEqual(self.labels.assignments["a"], self.night)
+
+        self.labels.set_unlabeled_locked(False)
+        self.assertEqual(self.labels.assign(["b"], self.day), {"b"})
+
+    def test_locked_label_cannot_be_activated_renamed_or_deleted(self):
+        self.labels.set_label_locked(self.night, True)
+        with self.assertRaises(ValueError):
+            self.labels.activate(self.night)
+        with self.assertRaises(ValueError):
+            self.labels.rename(self.night, "Noc 2")
+        with self.assertRaises(ValueError):
+            self.labels.delete(self.night)
+
 
 class SampleLabelPersistenceTests(unittest.TestCase):
     def setUp(self):
@@ -311,6 +366,41 @@ class SampleLabelPersistenceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(EvaluationTrackError, "etykiet"):
             self.f.service.seal(self.f.track)
+
+    def test_working_review_draft_persists_label_locks(self):
+        selected = set(list(self.members.values())[:2])
+        working = SampleLabels(selected)
+        label = working.add("Noc")
+        working.assign(selected, label)
+        working.set_label_locked(label, True)
+        working.set_unlabeled_locked(True)
+
+        save_sample_review_draft(
+            self.f.service,
+            self.f.track,
+            selected_sha256=selected,
+            sample_labels=working.payload(self.f.track),
+            active_label="",
+            locked_label_ids=working.locked_label_ids,
+            unlabeled_locked=working.unlabeled_locked,
+            expected_member_sha256=self.members,
+        )
+
+        loaded = load_sample_review_draft(
+            self.f.service,
+            self.f.track,
+            self.f.service.list_members(self.f.track),
+        )
+        self.assertEqual(set(loaded["locked_label_ids"]), {label})
+        self.assertTrue(loaded["unlabeled_locked"])
+
+        context = prepare_sample_selection(
+            self.f.service, self.f.track
+        )
+        self.assertEqual(
+            set(context["sample_locked_label_ids"]), {label}
+        )
+        self.assertTrue(context["sample_unlabeled_locked"])
 
 
 

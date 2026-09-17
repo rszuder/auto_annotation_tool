@@ -66,17 +66,27 @@ def load_sample_review_draft(service, track_id, members):
             for value in raw_selected
             if isinstance(value, str) and str(value).strip()
         }.intersection(current)
-        state = SampleLabels(selected, payload.get("sample_labels"), track_id=track_id)
+        state = SampleLabels(
+            selected,
+            payload.get("sample_labels"),
+            track_id=track_id,
+            locked_label_ids=payload.get("locked_label_ids", ()),
+            unlabeled_locked=bool(payload.get("unlabeled_locked", False)),
+        )
         active = str(payload.get("active_label") or "")
-        if active not in state.labels:
+        if active not in state.labels or state.is_label_locked(active):
             active = ""
         return {
             "selected_member_sha256": sorted(selected),
             "sample_labels": state.payload(track_id),
             "active_label": active,
+            "locked_label_ids": sorted(state.locked_label_ids),
+            "unlabeled_locked": state.unlabeled_locked,
         }
     except Exception:
         return None
+
+
 
 
 def save_sample_review_draft(
@@ -86,6 +96,8 @@ def save_sample_review_draft(
     selected_sha256,
     sample_labels,
     active_label,
+    locked_label_ids=(),
+    unlabeled_locked=False,
     expected_member_sha256,
 ):
     track = service.get_track(track_id)
@@ -110,9 +122,13 @@ def save_sample_review_draft(
     }
     if not selected.issubset(current):
         raise EvaluationTrackError("Stan roboczy zawiera obraz spoza bieżącej puli.")
-    state = SampleLabels(selected, sample_labels, track_id=track_id)
+    state = SampleLabels(
+        selected, sample_labels, track_id=track_id,
+        locked_label_ids=locked_label_ids,
+        unlabeled_locked=unlabeled_locked,
+    )
     active = str(active_label or "")
-    if active not in state.labels:
+    if active not in state.labels or state.is_label_locked(active):
         active = ""
     payload = {
         "schema": SAMPLE_REVIEW_DRAFT_SCHEMA,
@@ -121,12 +137,16 @@ def save_sample_review_draft(
         "selected_member_sha256": sorted(selected),
         "sample_labels": state.payload(track_id),
         "active_label": active,
+        "locked_label_ids": sorted(state.locked_label_ids),
+        "unlabeled_locked": state.unlabeled_locked,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     path = _sample_review_draft_path(service, track_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     service._atomic_json(path, payload)
     return payload
+
+
 
 
 def clear_sample_review_draft(service, track_id):
@@ -231,6 +251,8 @@ def prepare_sample_selection(service, track_id, *, progress=None):
     final_labels = load_sample_labels(track_root, track_id, current_sha)
     review_labels = draft_review["sample_labels"] if draft_review is not None else final_labels
     review_active_label = draft_review["active_label"] if draft_review is not None else ""
+    review_locked_label_ids = (draft_review.get("locked_label_ids", []) if draft_review is not None else [])
+    review_unlabeled_locked = (bool(draft_review.get("unlabeled_locked", False)) if draft_review is not None else False)
     if progress:
         progress("Przygotowanie listy kandydatów", len(members), len(members))
     return {
@@ -243,10 +265,13 @@ def prepare_sample_selection(service, track_id, *, progress=None):
         "sample_audit_id": state.get("audit_id"),
         "sample_labels": review_labels,
         "sample_active_label": review_active_label,
+        "sample_locked_label_ids": sorted(review_locked_label_ids),
+        "sample_unlabeled_locked": review_unlabeled_locked,
         "sample_initial_selected_sha256": sorted(initial_selected),
         "sample_committed_sha256": ([row["sha256"] for row in members]
                                     if has_selected_sample(service.workspace, track, members) else []),
     }
+
 
 
 def commit_sample_selection(service, track_id, *, keep_sha256, expected_member_sha256,

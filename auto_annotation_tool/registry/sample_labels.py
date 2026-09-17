@@ -10,38 +10,73 @@ MAX_LABEL_LENGTH = 60
 
 
 class SampleLabels:
-    """One label per selected SHA, with incremental counts and reverse lookup.
+    """One label per selected SHA, with optional working-group locks.
 
     ``selected`` is the existing sample membership set, shared with the GUI.
-    Label operations never add or remove membership.
+    Locks are working-draft state only. They are deliberately NOT emitted by
+    ``payload()`` and therefore do not become part of final sample_labels.json.
     """
 
-    def __init__(self, selected, payload=None, *, track_id=None):
+    def __init__(
+        self,
+        selected,
+        payload=None,
+        *,
+        track_id=None,
+        locked_label_ids=(),
+        unlabeled_locked=False,
+    ):
         self.selected = selected
         self.labels = {}
         self.assignments = {}
         self.counts = Counter()
         self.members_by_label = {}
         self.active_id = ""
+        self.locked_label_ids = set()
+        self.unlabeled_locked = bool(unlabeled_locked)
+
         if payload is not None:
-            if (not isinstance(payload, dict) or payload.get("schema") != LABELS_SCHEMA
-                    or (track_id is not None and payload.get("track_id") != track_id)):
-                raise ValueError("Nieprawidłowy plik etykiet próbki lub identyfikator toru.")
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema") != LABELS_SCHEMA
+                or (track_id is not None and payload.get("track_id") != track_id)
+            ):
+                raise ValueError(
+                    "Nieprawidłowy plik etykiet próbki lub identyfikator toru."
+                )
             rows, assignments = payload.get("labels"), payload.get("assignments")
             if not isinstance(rows, list) or not isinstance(assignments, dict):
-                raise ValueError("Nieprawidłowa lista etykiet lub przypisań próbki.")
+                raise ValueError(
+                    "Nieprawidłowa lista etykiet lub przypisań próbki."
+                )
             for row in rows:
                 if not isinstance(row, dict):
                     raise ValueError("Nieprawidłowy wpis etykiety próbki.")
                 label_id = row.get("id")
-                if not isinstance(label_id, str) or not label_id.strip() or label_id in self.labels:
-                    raise ValueError("Nieprawidłowy lub powtórzony identyfikator etykiety.")
+                if (
+                    not isinstance(label_id, str)
+                    or not label_id.strip()
+                    or label_id in self.labels
+                ):
+                    raise ValueError(
+                        "Nieprawidłowy lub powtórzony identyfikator etykiety."
+                    )
                 name = self.validate_name(row.get("name"))
                 self.labels[label_id] = name
                 self.members_by_label[label_id] = set()
             for sha, label_id in assignments.items():
-                if sha in selected and isinstance(label_id, str) and label_id in self.labels:
+                if (
+                    sha in selected
+                    and isinstance(label_id, str)
+                    and label_id in self.labels
+                ):
                     self._assign(sha, label_id)
+
+        self.locked_label_ids = {
+            str(label_id)
+            for label_id in (locked_label_ids or ())
+            if str(label_id) in self.labels
+        }
 
     def validate_name(self, name, *, except_id=""):
         if not isinstance(name, str):
@@ -50,11 +85,15 @@ class SampleLabels:
         if not name:
             raise ValueError("Podaj nazwę etykiety.")
         if len(name) > MAX_LABEL_LENGTH:
-            raise ValueError(f"Nazwa etykiety może mieć najwyżej {MAX_LABEL_LENGTH} znaków.")
+            raise ValueError(
+                f"Nazwa etykiety może mieć najwyżej {MAX_LABEL_LENGTH} znaków."
+            )
         if any(ord(char) < 32 or ord(char) == 127 for char in name):
             raise ValueError("Nazwa etykiety musi mieścić się w jednym wierszu.")
-        if any(existing.casefold() == name.casefold() and label_id != except_id
-               for label_id, existing in self.labels.items()):
+        if any(
+            existing.casefold() == name.casefold() and label_id != except_id
+            for label_id, existing in self.labels.items()
+        ):
             raise ValueError("Etykieta o tej nazwie już istnieje.")
         return name
 
@@ -65,19 +104,57 @@ class SampleLabels:
         self.members_by_label[label_id] = set()
         return label_id
 
+    def is_label_locked(self, label_id):
+        return bool(label_id) and label_id in self.locked_label_ids
+
+    def is_sha_locked(self, sha):
+        if sha not in self.selected:
+            return False
+        label_id = self.assignments.get(sha, "")
+        return self.is_label_locked(label_id) if label_id else self.unlabeled_locked
+
+    def set_label_locked(self, label_id, locked):
+        if label_id not in self.labels:
+            raise ValueError("Etykieta już nie istnieje.")
+        if locked:
+            self.locked_label_ids.add(label_id)
+            if self.active_id == label_id:
+                self.active_id = ""
+        else:
+            self.locked_label_ids.discard(label_id)
+
+    def set_unlabeled_locked(self, locked):
+        self.unlabeled_locked = bool(locked)
+
     def rename(self, label_id, name):
         if label_id not in self.labels:
             raise ValueError("Etykieta już nie istnieje.")
+        if self.is_label_locked(label_id):
+            raise ValueError(
+                "Etykieta jest zablokowana. Najpierw odblokuj całą klasę."
+            )
         self.labels[label_id] = self.validate_name(name, except_id=label_id)
         return set(self.members_by_label[label_id])
 
     def delete(self, label_id):
+        if label_id not in self.labels:
+            return set()
+        if self.is_label_locked(label_id):
+            raise ValueError(
+                "Etykieta jest zablokowana. Najpierw odblokuj całą klasę."
+            )
         changed = set(self.members_by_label.get(label_id, ()))
+        if changed and self.unlabeled_locked:
+            raise ValueError(
+                "Grupa „Bez etykiety” jest zablokowana. "
+                "Odblokuj ją przed usunięciem etykiety."
+            )
         for sha in changed:
             self._assign(sha, "")
         self.labels.pop(label_id, None)
         self.members_by_label.pop(label_id, None)
         self.counts.pop(label_id, None)
+        self.locked_label_ids.discard(label_id)
         if self.active_id == label_id:
             self.active_id = ""
         return changed
@@ -85,6 +162,10 @@ class SampleLabels:
     def activate(self, label_id):
         if label_id and label_id not in self.labels:
             raise ValueError("Etykieta już nie istnieje.")
+        if label_id and self.is_label_locked(label_id):
+            raise ValueError(
+                "Etykieta jest zablokowana. Odblokuj ją przed aktywacją."
+            )
         self.active_id = label_id
 
     def _assign(self, sha, label_id):
@@ -101,25 +182,110 @@ class SampleLabels:
             self.counts[label_id] += 1
         return True
 
+    def can_assign(self, sha, label_id):
+        if sha not in self.selected:
+            return False
+        if label_id and label_id not in self.labels:
+            return False
+
+        previous = self.assignments.get(sha, "")
+        if previous == label_id:
+            return True
+
+        if previous:
+            if self.is_label_locked(previous):
+                return False
+        elif self.unlabeled_locked:
+            return False
+
+        if label_id:
+            return not self.is_label_locked(label_id)
+        return not self.unlabeled_locked
+
+    def blocked_for_assignment(self, shas, label_id):
+        blocked = set()
+        for sha in shas:
+            if sha not in self.selected:
+                continue
+            if self.assignments.get(sha, "") == label_id:
+                continue
+            if not self.can_assign(sha, label_id):
+                blocked.add(sha)
+        return blocked
+
     def assign(self, shas, label_id):
         if label_id and label_id not in self.labels:
             raise ValueError("Etykieta już nie istnieje.")
-        return {sha for sha in shas if sha in self.selected and self._assign(sha, label_id)}
+        changed = set()
+        for sha in shas:
+            if (
+                sha in self.selected
+                and self.can_assign(sha, label_id)
+                and self._assign(sha, label_id)
+            ):
+                changed.add(sha)
+        return changed
+
+    def _membership_would_change(self, sha, selected):
+        current = sha in self.selected
+        if selected:
+            if not current:
+                return True
+            return bool(
+                self.active_id
+                and self.assignments.get(sha, "") != self.active_id
+            )
+        return current
+
+    def can_set_membership(self, sha, selected):
+        current = sha in self.selected
+
+        if selected:
+            if current:
+                if self.active_id:
+                    return self.can_assign(sha, self.active_id)
+                return True
+
+            if self.active_id:
+                return not self.is_label_locked(self.active_id)
+            return not self.unlabeled_locked
+
+        if not current:
+            return True
+
+        label_id = self.assignments.get(sha, "")
+        if label_id:
+            return not self.is_label_locked(label_id)
+        return not self.unlabeled_locked
+
+    def blocked_for_membership(self, shas, selected):
+        return {
+            sha
+            for sha in shas
+            if self._membership_would_change(sha, selected)
+            and not self.can_set_membership(sha, selected)
+        }
 
     def set_membership(self, shas, selected):
         changed = set()
         for sha in shas:
+            if not self.can_set_membership(sha, selected):
+                continue
+
             if selected:
-                if sha not in self.selected:
+                newly_added = sha not in self.selected
+                if newly_added:
                     self.selected.add(sha)
                     changed.add(sha)
-                if self.active_id and self._assign(sha, self.active_id):
-                    changed.add(sha)
+
+                if self.active_id:
+                    if self._assign(sha, self.active_id):
+                        changed.add(sha)
             else:
                 if sha in self.selected:
                     self.selected.discard(sha)
                     changed.add(sha)
-                self._assign(sha, "")
+                    self._assign(sha, "")
         return changed
 
     def label_for(self, sha):
@@ -131,10 +297,20 @@ class SampleLabels:
 
     def payload(self, track_id, *, retained=None):
         retained = self.selected if retained is None else retained
-        return {"schema": LABELS_SCHEMA, "track_id": track_id,
-                "labels": [{"id": key, "name": value} for key, value in self.labels.items()],
-                "assignments": {sha: label_id for sha, label_id in self.assignments.items()
-                                if sha in retained}}
+        return {
+            "schema": LABELS_SCHEMA,
+            "track_id": track_id,
+            "labels": [
+                {"id": key, "name": value}
+                for key, value in self.labels.items()
+            ],
+            "assignments": {
+                sha: label_id
+                for sha, label_id in self.assignments.items()
+                if sha in retained
+            },
+        }
+
 
 
 
