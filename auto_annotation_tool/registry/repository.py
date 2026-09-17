@@ -1226,7 +1226,12 @@ class RegistryRepository:
                     SELECT COUNT(*)
                     FROM evaluation_track_members
                     WHERE track_id = ?
-                )
+                ),
+                    gt_format = NULL,
+                    gt_relative_path = NULL,
+                    gt_sha256 = NULL,
+                    object_count = 0,
+                    verified_at = NULL
                 WHERE track_id = ?
                 """,
                 (track_id, track_id),
@@ -1965,7 +1970,12 @@ class RegistryRepository:
                 UPDATE evaluation_tracks
                 SET member_count = (
                     SELECT COUNT(*) FROM evaluation_track_members WHERE track_id = ?
-                )
+                ),
+                    gt_format = NULL,
+                    gt_relative_path = NULL,
+                    gt_sha256 = NULL,
+                    object_count = 0,
+                    verified_at = NULL
                 WHERE track_id = ?
                 """,
                 (track_id, track_id),

@@ -24,7 +24,7 @@ oraz przy wejściu do kontekstu GT w Z2. Odrzucenie następuje przed tworzeniem
 roboczego XML, kopiowaniem GT lub otwarciem okna wyboru pliku.
 
 Istniejący zarejestrowany GT zachowuje ścieżkę edycji bez ponownego wyboru próby;
-plik musi istnieć i odpowiadać zapisanemu SHA. Sama ścieżka w rejestrze nie
+plik musi istnieć i odpowiadać zapisanemu SHA. XML musi też zawierać dokładnie aktualne obrazy, bez duplikatów nazw. Sama ścieżka w rejestrze nie
 wystarcza. Walidacja, znaki i pojazdy zachowują dotychczasowe warunki wejścia.
 
 Schemat wyboru próby, silnik audytu, rejestrowanie próby, kontrakt obrazów GT,
