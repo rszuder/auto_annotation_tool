@@ -237,8 +237,16 @@ class SampleLabelsRealWorkspaceTests(unittest.TestCase):
         label = ui.add_sample_label(host, "Noc")
         route.set_sample_selection(host, True, [0])
         expected = set(host._experiment_sample_selected_sha256)
+        persisted = prepare_sample_selection(case.fixture.service, case.fixture.track)
+        self.assertIsNotNone(persisted.get("sample_labels"))
+        self.assertEqual(set(persisted["sample_initial_selected_sha256"]), expected)
+        self.assertEqual(persisted["sample_active_label"], label)
+
         route.leave_sample_selection(host)
         self.assertEqual(host._experiment_gt_context, original_context)
+        # Simulate process/UI-session loss: no in-memory fallback.
+        host._sample_sessions = {}
+        context = prepare_sample_selection(case.fixture.service, case.fixture.track)
         self.assertTrue(route.enter_sample_selection(host, context))
         case.settle()
         self.assertEqual(host._experiment_sample_selected_sha256, expected)

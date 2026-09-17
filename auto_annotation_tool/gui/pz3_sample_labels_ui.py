@@ -15,7 +15,7 @@ def label_state(host):
 
 
 def _changed(host, shas, *, rebuild=False):
-    from .pz3_sample_route import refresh_sample_rows, refresh_sample_ui
+    from .pz3_sample_route import refresh_sample_rows, refresh_sample_ui, persist_sample_review_draft
     lookup = getattr(host, "_sample_actual_by_sha", None)
     if lookup is None:
         context = host._pz3_sample_selection_context
@@ -23,6 +23,7 @@ def _changed(host, shas, *, rebuild=False):
             context["sample_member_sha256"][ann.filename]: index
             for index, ann in enumerate(host.current_annotations)}
     refresh_sample_rows(host, [lookup[sha] for sha in shas if sha in lookup])
+    persist_sample_review_draft(host)
     panel = getattr(host, "_sample_labels_panel", None)
     if panel is not None and rebuild:
         panel.rebuild()
@@ -40,7 +41,8 @@ def add_sample_label(host, name):
 
 def activate_sample_label(host, label_id):
     label_state(host).activate(label_id)
-    from .pz3_sample_route import refresh_sample_ui
+    from .pz3_sample_route import refresh_sample_ui, persist_sample_review_draft
+    persist_sample_review_draft(host)
     refresh_sample_ui(host)
     # Space now acts on the image, rather than toggling the focused checkbox.
     host.preview_canvas.focus_set()
