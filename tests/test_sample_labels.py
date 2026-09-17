@@ -239,5 +239,46 @@ class SampleLabelPersistenceTests(unittest.TestCase):
         self.assertFalse(self.f.service.verify_integrity(self.f.track).ok)
 
 
+    def test_remove_members_prunes_orphan_sample_label_assignments(self):
+        self.commit()
+        labels_path = self.root / LABELS_FILE
+        before = json.loads(labels_path.read_text(encoding="utf-8"))
+        self.assertTrue(before["assignments"])
+
+        member = self.f.service.list_members(self.f.track)[0]
+        removed_sha = str(member["sha256"]).lower()
+        self.assertIn(removed_sha, before["assignments"])
+
+        self.f.service.remove_members(self.f.track, [member["member_index"]])
+
+        after = json.loads(labels_path.read_text(encoding="utf-8"))
+        current = {
+            str(row["sha256"]).lower()
+            for row in self.f.service.list_members(self.f.track)
+        }
+        self.assertNotIn(removed_sha, after["assignments"])
+        self.assertTrue(set(after["assignments"]).issubset(current))
+        self.assertEqual(after["labels"], before["labels"])
+
+
+    def test_seal_rejects_orphan_sample_label_assignment(self):
+        self.commit()
+        self.case.reaudit()
+        self.case.make_final_gt()
+        self.f.service.verify(self.f.track, manual_gt_complete=True)
+
+        labels_path = self.root / LABELS_FILE
+        payload = json.loads(labels_path.read_text(encoding="utf-8"))
+        payload["assignments"]["f" * 64] = self.night
+        labels_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(EvaluationTrackError, "etykiet"):
+            self.f.service.seal(self.f.track)
+
+
+
 if __name__ == "__main__":
     unittest.main()
