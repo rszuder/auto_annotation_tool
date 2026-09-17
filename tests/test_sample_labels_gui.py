@@ -207,6 +207,58 @@ class SampleLabelsGuiTests(unittest.TestCase):
         self.assertEqual(kwargs["sample_labels"]["assignments"], {"a": label})
         self.assertEqual(kwargs["active_label"], label)
 
+    def test_lock_button_freezes_whole_label_class_and_unlock_restores_editing(self):
+        host = self.host
+        night = ui.add_sample_label(host, "Noc")
+        ui.assign_sample_label(host, night, [0])
+        day = ui.add_sample_label(host, "Dzień")
+
+        ui.toggle_sample_label_lock(host, night)
+        state = ui.label_state(host)
+        self.assertTrue(state.is_label_locked(night))
+        self.assertEqual(
+            str(host._sample_labels_panel.rows[night][2]["state"]),
+            "disabled",
+        )
+        self.assertEqual(
+            host._sample_labels_panel.rows[night][3].cget("text"),
+            "🔒",
+        )
+
+        before = dict(state.assignments)
+        ui.assign_sample_label(host, day, [0, 2])
+        self.assertEqual(state.assignments["a"], night)
+        self.assertEqual(state.assignments["c"], day)
+        self.assertIn(
+            "Pominięto zablokowane: 1",
+            host._sample_lock_notice,
+        )
+
+        ui.toggle_sample_label_lock(host, night)
+        self.assertFalse(state.is_label_locked(night))
+        ui.assign_sample_label(host, day, [0])
+        self.assertEqual(state.assignments["a"], day)
+
+    def test_unlabeled_lock_blocks_membership_and_assignment_until_unlock(self):
+        host = self.host
+        day = ui.add_sample_label(host, "Dzień")
+        ui.toggle_unlabeled_lock(host)
+        state = ui.label_state(host)
+        self.assertTrue(state.unlabeled_locked)
+        self.assertEqual(
+            host._sample_labels_panel.unlabeled_lock.cget("text"),
+            "🔒",
+        )
+
+        ui.assign_sample_label(host, day, [2])
+        self.assertNotIn("c", state.assignments)
+        route.set_sample_selection(host, False, [2])
+        self.assertIn("c", state.selected)
+
+        ui.toggle_unlabeled_lock(host)
+        ui.assign_sample_label(host, day, [2])
+        self.assertEqual(state.assignments["c"], day)
+
 class SampleLabelsRealWorkspaceTests(unittest.TestCase):
     def test_leave_and_reopen_restores_labels_membership_and_active_label(self):
         real_support.GtModelSelectionTests.setUpClass()
@@ -242,6 +294,50 @@ class SampleLabelsRealWorkspaceTests(unittest.TestCase):
         self.assertEqual(ui.label_state(host).active_id, label)
         self.assertEqual(ui.label_state(host).counts[label], 1)
         self.assertEqual(ui.label_state(host).label_for(next(iter(expected))), "Noc")
+        route.leave_sample_selection(host)
+        self.assertEqual(case.callback_errors, [])
+
+    def test_leave_and_reopen_restores_locked_groups(self):
+        real_support.GtModelSelectionTests.setUpClass()
+
+        def close_root():
+            real_support.GtModelSelectionTests.tearDownClass()
+            real_support.GtModelSelectionTests.root = None
+            gc.collect()
+
+        self.addCleanup(close_root)
+        case = real_support.GtModelSelectionTests()
+        self.addCleanup(case.doCleanups)
+        case.setUp()
+        host = case.host
+
+        context = prepare_sample_selection(
+            case.fixture.service, case.fixture.track
+        )
+        self.assertTrue(route.enter_sample_selection(host, context))
+        case.settle()
+
+        label = ui.add_sample_label(host, "Noc")
+        route.set_sample_selection(host, True, [0])
+        ui.toggle_sample_label_lock(host, label)
+        ui.toggle_unlabeled_lock(host)
+
+        route.leave_sample_selection(host)
+        host._sample_sessions = {}
+
+        context = prepare_sample_selection(
+            case.fixture.service, case.fixture.track
+        )
+        self.assertEqual(
+            set(context["sample_locked_label_ids"]), {label}
+        )
+        self.assertTrue(context["sample_unlabeled_locked"])
+
+        self.assertTrue(route.enter_sample_selection(host, context))
+        case.settle()
+        state = ui.label_state(host)
+        self.assertTrue(state.is_label_locked(label))
+        self.assertTrue(state.unlabeled_locked)
         route.leave_sample_selection(host)
         self.assertEqual(case.callback_errors, [])
 

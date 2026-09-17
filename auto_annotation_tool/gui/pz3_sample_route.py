@@ -21,19 +21,31 @@ def sample_context(host):
 
 def persist_sample_review_draft(host):
     context = sample_context(host)
-    if not context or not context.get("workspace") or getattr(host, "is_processing", False):
+    if (
+        not context
+        or not context.get("workspace")
+        or getattr(host, "is_processing", False)
+    ):
         return False
+
     state = getattr(host, "_sample_label_state", None)
     if not isinstance(state, SampleLabels):
         state = label_state(host)
+
     try:
-        service = EvaluationTrackService(context.get("workspace") or CONFIG.WORKSPACE_DIR)
+        service = EvaluationTrackService(
+            context.get("workspace") or CONFIG.WORKSPACE_DIR
+        )
         save_sample_review_draft(
             service,
             context["track_id"],
-            selected_sha256=set(host._experiment_sample_selected_sha256),
+            selected_sha256=set(
+                host._experiment_sample_selected_sha256
+            ),
             sample_labels=state.payload(context["track_id"]),
             active_label=state.active_id,
+            locked_label_ids=state.locked_label_ids,
+            unlabeled_locked=state.unlabeled_locked,
             expected_member_sha256=context["sample_member_sha256"],
         )
         host._sample_draft_save_error = ""
@@ -41,6 +53,7 @@ def persist_sample_review_draft(host):
     except Exception as exc:
         host._sample_draft_save_error = str(exc)
         return False
+
 
 
 def sample_selected(host, ann=None):
@@ -74,13 +87,41 @@ def set_sample_selection(host, selected, actual_indices=None):
     context = sample_context(host)
     if not context or getattr(host, "is_processing", False):
         return
-    indices = host._get_selected_preview_actual_indices() if actual_indices is None else actual_indices
-    indices = [int(i) for i in indices if 0 <= int(i) < len(host.current_annotations)]
-    shas = [context["sample_member_sha256"].get(host.current_annotations[i].filename) for i in indices]
-    label_state(host).set_membership((sha for sha in shas if sha), selected)
+
+    indices = (
+        host._get_selected_preview_actual_indices()
+        if actual_indices is None
+        else actual_indices
+    )
+    indices = [
+        int(i)
+        for i in indices
+        if 0 <= int(i) < len(host.current_annotations)
+    ]
+    shas = [
+        context["sample_member_sha256"].get(
+            host.current_annotations[i].filename
+        )
+        for i in indices
+    ]
+    shas = [sha for sha in shas if sha]
+
+    state = label_state(host)
+    blocked = state.blocked_for_membership(shas, selected)
+    changed = state.set_membership(shas, selected)
+    host._sample_lock_notice = (
+        f"Zmieniono: {len(changed)} · "
+        f"Pominięto zablokowane: {len(blocked)}"
+        if blocked
+        else ""
+    )
+
     persist_sample_review_draft(host)
-    refresh_sample_rows(host, indices, membership_changed=True)
+    refresh_sample_rows(
+        host, indices, membership_changed=True
+    )
     refresh_sample_ui(host)
+
 
 
 def refresh_sample_rows(host, indices, *, membership_changed=False):
@@ -206,25 +247,57 @@ def refresh_sample_ui(host):
     context = sample_context(host)
     if not context:
         return
+
     label = getattr(host, "_sample_title_label", None)
     if label is not None and label.winfo_exists():
         state = label_state(host)
         active = state.labels.get(state.active_id, "")
-        active = (active[:23] + "…") if len(active) > 24 else active
+        active = active[:23] + "…" if len(active) > 24 else active
         active_text = f" · Aktywna: {active}" if active else ""
-        label.configure(text=f"Wybór próby · {context.get('name') or context['track_id']}\n"
-                             + sample_counter(host) + active_text)
+        lock_count = len(state.locked_label_ids) + int(
+            state.unlabeled_locked
+        )
+        lock_text = (
+            f" · Zamrożone grupy: {lock_count}"
+            if lock_count
+            else ""
+        )
+        label.configure(
+            text=(
+                f"Wybór próby · "
+                f"{context.get('name') or context['track_id']}\n"
+                + sample_counter(host)
+                + active_text
+                + lock_text
+            )
+        )
+
+    notice = str(getattr(host, "_sample_lock_notice", "") or "")
     summary = getattr(host, "preview_list_summary_var", None)
     if summary is not None:
-        summary.set("Surowe obrazy · " + sample_counter(host))
+        text = "Surowe obrazy · " + sample_counter(host)
+        if notice:
+            text += " · " + notice
+        summary.set(text)
+
     fullscreen = getattr(host, "_sample_fullscreen_button", None)
     if fullscreen is not None and fullscreen.winfo_exists():
-        fullscreen.configure(text="Wyjdź z pełnego ekranu" if getattr(host, "_preview_fullscreen_active", False)
-                             else "Pełny ekran (Enter)")
+        fullscreen.configure(
+            text=(
+                "Wyjdź z pełnego ekranu"
+                if getattr(
+                    host, "_preview_fullscreen_active", False
+                )
+                else "Pełny ekran (Enter)"
+            )
+        )
+
     labels = getattr(host, "_sample_labels_panel", None)
     if labels is not None:
         labels.refresh()
+
     host._place_preview_image_status_overlay(force_render=True)
+
 
 
 _SNAPSHOT_FIELDS = (
@@ -267,13 +340,18 @@ def enter_sample_selection(host, context):
         set(saved.get("selected", ())) if saved.get("members") == context["sample_member_sha256"]
         else set(context.get("sample_initial_selected_sha256", context.get("sample_committed_sha256", ())))
     )
-    saved_labels = saved.get("labels") if saved.get("members") == context["sample_member_sha256"] else context.get("sample_labels")
-    host._sample_label_state = SampleLabels(host._experiment_sample_selected_sha256, saved_labels,
-                                           track_id=context["track_id"])
     session_matches = saved.get("members") == context["sample_member_sha256"]
-    active_label = (saved.get("active_label", "") if session_matches
-                    else context.get("sample_active_label", ""))
-    if active_label in host._sample_label_state.labels:
+    saved_labels = (saved.get("labels") if session_matches else context.get("sample_labels"))
+    locked_label_ids = (saved.get("locked_label_ids", ()) if session_matches else context.get("sample_locked_label_ids", ()))
+    unlabeled_locked = (bool(saved.get("unlabeled_locked", False)) if session_matches else bool(context.get("sample_unlabeled_locked", False)))
+    host._sample_label_state = SampleLabels(
+        host._experiment_sample_selected_sha256, saved_labels,
+        track_id=context["track_id"],
+        locked_label_ids=locked_label_ids,
+        unlabeled_locked=unlabeled_locked,
+    )
+    active_label = (saved.get("active_label", "") if session_matches else context.get("sample_active_label", ""))
+    if active_label in host._sample_label_state.labels and not host._sample_label_state.is_label_locked(active_label):
         host._sample_label_state.activate(active_label)
     host._experiment_gt_context = {}
     host._experiment_gt_workflow_active = False
@@ -356,6 +434,7 @@ def enter_sample_selection(host, context):
     return True
 
 
+
 def leave_sample_selection(host):
     context = sample_context(host)
     if not context:
@@ -368,6 +447,8 @@ def leave_sample_selection(host):
         "selected": set(host._experiment_sample_selected_sha256),
         "labels": label_state(host).payload(context["track_id"]),
         "active_label": label_state(host).active_id,
+        "locked_label_ids": set(label_state(host).locked_label_ids),
+        "unlabeled_locked": label_state(host).unlabeled_locked,
     }
     host._sample_sessions = sessions
     host._cancel_preview_list_population()
@@ -410,6 +491,7 @@ def leave_sample_selection(host):
     host._refresh_preview_workspace_visibility()
     from .pz3_gt_route import refresh_experiment_gt_ui
     refresh_experiment_gt_ui(host)
+
 
 
 def _return_to_pz3(host, track_id, status):

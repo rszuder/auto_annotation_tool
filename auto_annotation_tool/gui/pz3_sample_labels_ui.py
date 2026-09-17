@@ -40,12 +40,16 @@ def add_sample_label(host, name):
 
 
 def activate_sample_label(host, label_id):
-    label_state(host).activate(label_id)
+    state = label_state(host)
+    try:
+        state.activate(label_id)
+    except ValueError:
+        return
     from .pz3_sample_route import refresh_sample_ui, persist_sample_review_draft
     persist_sample_review_draft(host)
     refresh_sample_ui(host)
-    # Space now acts on the image, rather than toggling the focused checkbox.
     host.preview_canvas.focus_set()
+
 
 
 def rename_sample_label(host, label_id, name):
@@ -61,10 +65,49 @@ def assign_sample_label(host, label_id, actual_indices=None):
     context = sample_context(host)
     if not context or getattr(host, "is_processing", False):
         return
-    indices = host._get_selected_preview_actual_indices() if actual_indices is None else actual_indices
-    shas = (context["sample_member_sha256"].get(host.current_annotations[int(i)].filename)
-            for i in indices if 0 <= int(i) < len(host.current_annotations))
-    _changed(host, label_state(host).assign(shas, label_id))
+
+    indices = (
+        host._get_selected_preview_actual_indices()
+        if actual_indices is None
+        else actual_indices
+    )
+    shas = [
+        context["sample_member_sha256"].get(
+            host.current_annotations[int(i)].filename
+        )
+        for i in indices
+        if 0 <= int(i) < len(host.current_annotations)
+    ]
+    shas = [sha for sha in shas if sha]
+
+    state = label_state(host)
+    blocked = state.blocked_for_assignment(shas, label_id)
+    changed = state.assign(shas, label_id)
+    _set_lock_notice(host, len(changed), len(blocked))
+    _changed(host, changed)
+
+
+
+def _set_lock_notice(host, changed, blocked):
+    host._sample_lock_notice = (
+        f"Zmieniono: {int(changed)} · Pominięto zablokowane: {int(blocked)}"
+        if blocked
+        else ""
+    )
+
+
+def toggle_sample_label_lock(host, label_id):
+    state = label_state(host)
+    state.set_label_locked(label_id, not state.is_label_locked(label_id))
+    _set_lock_notice(host, 0, 0)
+    _changed(host, (), rebuild=False)
+
+
+def toggle_unlabeled_lock(host):
+    state = label_state(host)
+    state.set_unlabeled_locked(not state.unlabeled_locked)
+    _set_lock_notice(host, 0, 0)
+    _changed(host, (), rebuild=False)
 
 
 class LabelNameDialog(simpledialog.Dialog):
@@ -105,50 +148,93 @@ class SampleLabelsPanel(ttk.Frame):
         super().__init__(parent, padding=(0, 4, 0, 6))
         self.host, self.rows = host, {}
         self.columnconfigure(0, weight=1)
+
         heading = ttk.Frame(self)
         heading.grid(row=0, column=0, sticky="ew", columnspan=2)
         heading.columnconfigure(0, weight=0)
-        ttk.Label(heading, text="Etykiety próbki · opcjonalne",
-                  font=("Segoe UI", 9, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
-        self.add_button = ttk.Button(heading, text="+ Dodaj etykietę", command=self.add,
-                                     width=0, padding=(6, 2))
+        ttk.Label(
+            heading,
+            text="Etykiety próbki · opcjonalne",
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.add_button = ttk.Button(
+            heading,
+            text="+ Dodaj etykietę",
+            command=self.add,
+            width=0,
+            padding=(6, 2),
+        )
         self.add_button.grid(row=1, column=0, sticky="w", pady=(4, 4))
-        self.active = ttk.Label(heading, text="", font=("Segoe UI", 8), anchor="e", width=1)
+        self.active = ttk.Label(
+            heading, text="", font=("Segoe UI", 8), anchor="e", width=1
+        )
         self.active.grid(row=1, column=1, sticky="ew", padx=(6, 0))
         heading.columnconfigure(1, weight=1)
+
         self.canvas = tk.Canvas(self, width=2, height=2, highlightthickness=0)
         self.canvas.grid(row=1, column=0, sticky="ew")
-        self.scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scroll = ttk.Scrollbar(
+            self, orient="vertical", command=self.canvas.yview
+        )
         self.canvas.configure(yscrollcommand=self.scroll.set)
         self.items = ttk.Frame(self.canvas)
         self.items.columnconfigure(0, weight=1)
-        self.window = self.canvas.create_window(0, 0, window=self.items, anchor="nw")
+        self.window = self.canvas.create_window(
+            0, 0, window=self.items, anchor="nw"
+        )
         self.canvas.bind("<Configure>", self._resize)
         self.items.bind("<Configure>", self._resize)
+
         self.unlabeled = ttk.Label(self, text="")
-        self.unlabeled.grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.unlabeled.grid(row=2, column=0, sticky="w", pady=(4, 0))
+        self.unlabeled_lock = ttk.Button(
+            self,
+            text="🔓",
+            width=2,
+            padding=0,
+            command=lambda: toggle_unlabeled_lock(self.host),
+        )
+        self.unlabeled_lock.grid(
+            row=2, column=1, sticky="e", padx=(4, 0), pady=(4, 0)
+        )
+
         self.menu = tk.Menu(self, tearoff=0)
         self.menu_label_id = ""
         self.menu.add_command(label="Zmień nazwę…", command=self.rename)
         self.menu.add_command(label="Usuń etykietę", command=self.delete)
+
         self.apply_theme()
         self.rebuild()
 
     def apply_theme(self):
         palette = get_runtime_palette(self.host)
         self.canvas.configure(background=palette["bg"])
-        ttk.Style(self).configure("SampleLabel.TCheckbutton", font=("Segoe UI", 9))
+        ttk.Style(self).configure(
+            "SampleLabel.TCheckbutton", font=("Segoe UI", 9)
+        )
 
     def _resize(self, event=None):
         width = max(1, self.canvas.winfo_width())
         self.canvas.itemconfigure(self.window, width=width)
-        row_height = max((check.winfo_reqheight() for _, _, check in self.rows.values()), default=24) + 4
-        self.canvas.configure(height=max(1, min(3, len(self.rows))) * row_height,
-                              scrollregion=(0, 0, width, self.items.winfo_reqheight()))
+        row_height = max(
+            (row[2].winfo_reqheight() for row in self.rows.values()),
+            default=24,
+        ) + 4
+        self.canvas.configure(
+            height=max(1, min(3, len(self.rows))) * row_height,
+            scrollregion=(0, 0, width, self.items.winfo_reqheight()),
+        )
         font = tkfont.Font(root=self, font=("Segoe UI", 9))
-        for label_id, (_, _, check) in self.rows.items():
+        for label_id, row in self.rows.items():
+            check = row[2]
             text = label_state(self.host).labels[label_id]
-            available = max(30, width - round(85 * float(self.tk.call("tk", "scaling")) / 1.333))
+            available = max(
+                30,
+                width
+                - round(
+                    115 * float(self.tk.call("tk", "scaling")) / 1.333
+                ),
+            )
             shown = text
             while len(shown) > 1 and font.measure(shown) > available:
                 shown = shown[:-2] + "…"
@@ -162,40 +248,93 @@ class SampleLabelsPanel(ttk.Frame):
         for child in self.items.winfo_children():
             child.destroy()
         self.rows = {}
+
         state = label_state(self.host)
-        for row, (label_id, name) in enumerate(state.labels.items()):
-            active, count = tk.BooleanVar(self, False), tk.StringVar(self, "0")
-            check = ttk.Checkbutton(self.items, text=name, variable=active, style="SampleLabel.TCheckbutton",
-                                    command=lambda key=label_id, var=active:
-                                    activate_sample_label(self.host, key if var.get() else ""))
-            check.grid(row=row, column=0, sticky="ew", pady=2)
-            number = ttk.Label(self.items, textvariable=count, width=5, anchor="e")
-            number.grid(row=row, column=1, padx=(4, 6))
-            more = ttk.Button(self.items, text="⋯", width=2, padding=0,
-                              command=lambda key=label_id, widget=check: self.popup(key, widget))
-            more.grid(row=row, column=2)
-            for widget in (check, number, more):
-                widget.bind("<Button-3>", lambda event, key=label_id: self.popup(key, event.widget), add="+")
+        for row_index, (label_id, name) in enumerate(state.labels.items()):
+            active = tk.BooleanVar(self, False)
+            count = tk.StringVar(self, "0")
+
+            check = ttk.Checkbutton(
+                self.items,
+                text=name,
+                variable=active,
+                style="SampleLabel.TCheckbutton",
+                command=lambda key=label_id, var=active:
+                    activate_sample_label(
+                        self.host, key if var.get() else ""
+                    ),
+            )
+            check.grid(row=row_index, column=0, sticky="ew", pady=2)
+
+            number = ttk.Label(
+                self.items, textvariable=count, width=5, anchor="e"
+            )
+            number.grid(row=row_index, column=1, padx=(4, 4))
+
+            lock = ttk.Button(
+                self.items,
+                text="🔓",
+                width=2,
+                padding=0,
+                command=lambda key=label_id:
+                    toggle_sample_label_lock(self.host, key),
+            )
+            lock.grid(row=row_index, column=2, padx=(0, 4))
+
+            more = ttk.Button(
+                self.items,
+                text="⋯",
+                width=2,
+                padding=0,
+                command=lambda key=label_id, widget=check:
+                    self.popup(key, widget),
+            )
+            more.grid(row=row_index, column=3)
+
+            for widget in (check, number, lock, more):
+                widget.bind(
+                    "<Button-3>",
+                    lambda event, key=label_id:
+                        self.popup(key, event.widget),
+                    add="+",
+                )
                 widget.bind("<MouseWheel>", self._wheel, add="+")
-            self.rows[label_id] = (active, count, check)
+
+            self.rows[label_id] = (active, count, check, lock, more)
+
         if self.rows:
             self.canvas.grid()
         else:
             self.canvas.grid_remove()
+
         if len(self.rows) > 3:
             self.scroll.grid(row=1, column=1, sticky="ns")
         else:
             self.scroll.grid_remove()
+
         self.refresh()
 
     def refresh(self):
         state = label_state(self.host)
-        for label_id, (active, count, _) in self.rows.items():
+        for label_id, row in self.rows.items():
+            active, count, check, lock, _more = row
+            locked = state.is_label_locked(label_id)
             active.set(state.active_id == label_id)
             count.set(str(state.counts[label_id]))
+            check.configure(state=tk.DISABLED if locked else tk.NORMAL)
+            lock.configure(text="🔒" if locked else "🔓")
+
         name = state.labels.get(state.active_id, "brak")
-        self.active.configure(text="Aktywna: " + (name[:21] + "…" if len(name) > 22 else name))
-        self.unlabeled.configure(text=f"Bez etykiety: {state.unlabeled_count}")
+        self.active.configure(
+            text="Aktywna: "
+            + (name[:21] + "…" if len(name) > 22 else name)
+        )
+        self.unlabeled.configure(
+            text=f"Bez etykiety: {state.unlabeled_count}"
+        )
+        self.unlabeled_lock.configure(
+            text="🔒" if state.unlabeled_locked else "🔓"
+        )
 
     def add(self):
         dialog = LabelNameDialog(self, label_state(self.host))
@@ -204,23 +343,49 @@ class SampleLabelsPanel(ttk.Frame):
 
     def popup(self, label_id, widget):
         self.menu_label_id = label_id
+        locked = label_state(self.host).is_label_locked(label_id)
+        item_state = tk.DISABLED if locked else tk.NORMAL
+        self.menu.entryconfigure("Zmień nazwę…", state=item_state)
+        self.menu.entryconfigure("Usuń etykietę", state=item_state)
         try:
-            self.menu.tk_popup(widget.winfo_rootx(), widget.winfo_rooty()+widget.winfo_height())
+            self.menu.tk_popup(
+                widget.winfo_rootx(),
+                widget.winfo_rooty() + widget.winfo_height(),
+            )
         finally:
             self.menu.grab_release()
         return "break"
 
     def rename(self):
-        dialog = LabelNameDialog(self, label_state(self.host), self.menu_label_id)
+        state = label_state(self.host)
+        if state.is_label_locked(self.menu_label_id):
+            return
+        dialog = LabelNameDialog(self, state, self.menu_label_id)
         if dialog.result is not None:
-            rename_sample_label(self.host, self.menu_label_id, dialog.result)
+            rename_sample_label(
+                self.host, self.menu_label_id, dialog.result
+            )
 
     def delete(self):
         state = label_state(self.host)
-        if state.counts[self.menu_label_id] and not messagebox.askyesno(
-            "Usunąć etykietę?", "Obrazy pozostaną w próbie i stracą tylko tę etykietę.", parent=self):
+        if state.is_label_locked(self.menu_label_id):
             return
-        delete_sample_label(self.host, self.menu_label_id)
+        if (
+            state.counts[self.menu_label_id]
+            and not messagebox.askyesno(
+                "Usunąć etykietę?",
+                "Obrazy pozostaną w próbie i stracą tylko tę etykietę.",
+                parent=self,
+            )
+        ):
+            return
+        try:
+            delete_sample_label(self.host, self.menu_label_id)
+        except ValueError as exc:
+            messagebox.showwarning(
+                "Etykiety próbki", str(exc), parent=self
+            )
+
 
 
 def build_label_menu(host, parent_menu):
@@ -230,16 +395,52 @@ def build_label_menu(host, parent_menu):
         menu.delete(0, tk.END)
         state = label_state(host)
         context = host._pz3_sample_selection_context
-        enabled = any(context["sample_member_sha256"].get(host.current_annotations[i].filename) in state.selected
-                      for i in host._get_selected_preview_actual_indices())
-        status = tk.NORMAL if enabled and not getattr(host, "is_processing", False) else tk.DISABLED
+        shas = [
+            context["sample_member_sha256"].get(
+                host.current_annotations[i].filename
+            )
+            for i in host._get_selected_preview_actual_indices()
+        ]
+        shas = [sha for sha in shas if sha and sha in state.selected]
+        processing = getattr(host, "is_processing", False)
+
         for label_id, name in state.labels.items():
-            menu.add_command(label=name, state=status,
-                             command=lambda key=label_id: assign_sample_label(host, key))
+            # Stan pozycji menu nie może zależeć od przypisań z chwili
+            # otwarcia menu. Blokady źródłowych grup egzekwuje model.
+            mutable = (
+                not processing
+                and not state.is_label_locked(label_id)
+                and bool(shas)
+            )
+            menu.add_command(
+                label=("🔒 " if state.is_label_locked(label_id) else "") + name,
+                state=tk.NORMAL if mutable else tk.DISABLED,
+                command=lambda key=label_id:
+                    assign_sample_label(host, key),
+            )
+
         if state.labels:
             menu.add_separator()
-        menu.add_command(label="Usuń etykietę", state=status,
-                         command=lambda: assign_sample_label(host, ""))
+
+        removable = (
+
+            not processing
+
+            and not state.unlabeled_locked
+
+            and bool(shas)
+
+        )
+        menu.add_command(
+            label=(
+                "🔒 Bez etykiety"
+                if state.unlabeled_locked
+                else "Usuń etykietę"
+            ),
+            state=tk.NORMAL if removable else tk.DISABLED,
+            command=lambda: assign_sample_label(host, ""),
+        )
+
     menu.configure(postcommand=refresh)
     parent_menu.add_cascade(label="Ustaw etykietę", menu=menu)
     return menu
