@@ -350,6 +350,10 @@ class EvaluationTrackService:
         from .sample_selection import commit_sample_selection
         return commit_sample_selection(self, track_id, **kwargs)
 
+    def save_sample_labels(self, track_id: str, **kwargs):
+        from .sample_labels import save_sample_labels
+        return save_sample_labels(self, track_id, **kwargs)
+
     def remove_members(
         self,
         track_id: str,
@@ -951,7 +955,7 @@ class EvaluationTrackService:
             if not candidate.is_file():
                 continue
             relative = candidate.relative_to(track_root).as_posix()
-            if (relative in {"participants.json", "participant_pool_audit_state.json", "sample_selection.json"}
+            if (relative in {"participants.json", "participant_pool_audit_state.json", "sample_selection.json", "sample_labels.json"}
                     or relative.startswith("audits/") or relative.startswith("gt_workflow/")
                     or relative.startswith("ground_truth/_invalidated_member_change/")):
                 if not self._is_within(candidate, track_root):
@@ -2325,6 +2329,9 @@ class EvaluationTrackService:
             payload["sample_selection"] = {
                 "path": selection_path.name, "sha256": self._sha256(selection_path),
             }
+        labels_path = track_root / "sample_labels.json"
+        if labels_path.is_file():
+            payload["sample_labels"] = {"path": labels_path.name, "sha256": self._sha256(labels_path)}
         if experiment_contract:
             payload["experiment_contract"] = dict(experiment_contract)
         elif manifest_path.exists():

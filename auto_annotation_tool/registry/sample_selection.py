@@ -11,6 +11,8 @@ from .experiment_workspace import experiment_workspace_for_track, active_z2_cont
 from .gt_preannotation import load_json
 from .participant_pool_audit import ParticipantPoolAuditService
 from .track_service import EvaluationTrackError
+from .sample_labels import LABELS_FILE, SampleLabels, load_sample_labels
+from .final_sample_policy import has_selected_sample
 
 SELECTION_FILE = "sample_selection.json"
 SELECTION_SCHEMA = "alpr.experiment_sample_selection.v1"
@@ -28,6 +30,12 @@ def prepare_sample_selection(service, track_id, *, progress=None):
     if not members or state.get("status") != "CURRENT" or not audit.load_participants(track_id):
         raise EvaluationTrackError("Najpierw zakończ audyt szerokiej puli względem uczestników.")
     track_root = service._track_root(track)
+    current_sha = {row["sha256"] for row in members}
+    previous = load_json(track_root / SELECTION_FILE)
+    previous_selected = previous.get("selected_member_sha256", [])
+    initial_selected = (current_sha.intersection(value for value in previous_selected if isinstance(value, str))
+                        if previous.get("schema") == SELECTION_SCHEMA and previous.get("track_id") == track_id
+                        and isinstance(previous_selected, list) else set())
     if progress:
         progress("Przygotowanie listy kandydatów", len(members), len(members))
     return {
@@ -38,11 +46,15 @@ def prepare_sample_selection(service, track_id, *, progress=None):
         "sample_image_paths": {row["original_name"]: str(track_root / row["track_relative_path"])
                                for row in members},
         "sample_audit_id": state.get("audit_id"),
+        "sample_labels": load_sample_labels(track_root, track_id, current_sha),
+        "sample_initial_selected_sha256": sorted(initial_selected),
+        "sample_committed_sha256": ([row["sha256"] for row in members]
+                                    if has_selected_sample(service.workspace, track, members) else []),
     }
 
 
 def commit_sample_selection(service, track_id, *, keep_sha256, expected_member_sha256,
-                            expected_audit_id, criteria_note="", progress=None):
+                            expected_audit_id, criteria_note="", progress=None, sample_labels=None):
     """Retain selected raw images without creating or publishing Ground Truth."""
     track = service.get_track(track_id)
     audit = ParticipantPoolAuditService(service.workspace, repository=service.repository)
@@ -56,6 +68,9 @@ def commit_sample_selection(service, track_id, *, keep_sha256, expected_member_s
     track_root = service._track_root(track)
     manifest_path = track_root / "track_manifest.json"
     original_manifest = service._read_json(manifest_path)
+    if sample_labels is None:
+        sample_labels = load_sample_labels(track_root, track_id, set(expected_member_sha256.values()))
+    labels = SampleLabels(keep, sample_labels, track_id=track_id)
     selection = {
         "schema": SELECTION_SCHEMA, "track_id": track_id,
         "method": "manual_visual_curation",
@@ -121,6 +136,16 @@ def commit_sample_selection(service, track_id, *, keep_sha256, expected_member_s
             sample_selection={"path": SELECTION_FILE,
                               "sha256": hashlib.sha256(selection_bytes).hexdigest()},
         )
+        # Use the same rollback boundary as membership and sample_selection.json.
+        labels_path = track_root / LABELS_FILE
+        if labels.labels:
+            labels_bytes = json_bytes(labels.payload(track_id))
+            replace_bytes(labels_path, labels_bytes)
+            manifest["sample_labels"] = {"path": LABELS_FILE,
+                                         "sha256": hashlib.sha256(labels_bytes).hexdigest()}
+        else:
+            stage_file(labels_path, "removed_labels")
+            manifest.pop("sample_labels", None)
         replace_bytes(manifest_path, json_bytes(manifest))
         active = active_z2_context_path(service.workspace)
         if load_json(active).get("track_id") == track_id:

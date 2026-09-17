@@ -29,21 +29,24 @@ class EvaluationTracksLayout:
         self.primary_action = ""
         self._has_track = False
         self.workflow_buttons = []
+        self._sample_selected = False
+        self._workflow_rows = None
         self._track_title = self.title_var.get()
         self._status_tones = ("muted", "muted", "muted", "muted")
 
-        # Przewijanie całego obszaru jest rezerwą dla małych okien / dużego DPI.
-        # Zwykle przewijają się tylko listy i zakładka szczegółów.
+        # Data can scroll in small windows; workflow actions stay below the viewport.
         self.viewport = ttk.Frame(panel.parent)
         self.viewport.pack(fill=tk.BOTH, expand=True)
         self.viewport.rowconfigure(0, weight=1)
         self.viewport.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(self.viewport, highlightthickness=0, width=1, height=1)
+        # Avoid Tk grid retaining a stale allocation for a sole 1x1 child
+        # when both the workflow and feedback are hidden by the draft form.
+        self.canvas = tk.Canvas(self.viewport, highlightthickness=0, width=2, height=2)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.vscroll = ttk.Scrollbar(self.viewport, orient=tk.VERTICAL, command=self.canvas.yview)
         self.hscroll = ttk.Scrollbar(self.viewport, orient=tk.HORIZONTAL, command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=self.vscroll.set, xscrollcommand=self.hscroll.set)
-        self.root = ttk.Frame(self.canvas, padding=12)
+        self.root = ttk.Frame(self.canvas, padding=(self.px(16), self.px(16), self.px(16), 0))
         self.window_id = self.canvas.create_window(0, 0, window=self.root, anchor="nw")
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(2, weight=1)
@@ -51,8 +54,8 @@ class EvaluationTracksLayout:
         self._build_header()
         self._build_form()
         self._build_body()
-        self.feedback_label = self._wrapped_label(self.root, textvariable=self.feedback_var)
-        self.feedback_label.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        self.feedback_label = self._wrapped_label(self.viewport, textvariable=self.feedback_var)
+        self.feedback_label.grid(row=3, column=0, sticky="ew", padx=self.px(16), pady=(0, self.px(12)))
         self._feedback_trace = panel.status_var.trace_add("write", self._sync_feedback)
         self._sync_feedback()
         self.canvas.bind("<Configure>", self._schedule_fit, add="+")
@@ -70,7 +73,7 @@ class EvaluationTracksLayout:
         return round(value * self.scale)
 
     def _wrapped_label(self, parent, **kwargs):
-        kwargs.setdefault("style", "PanelMuted.TLabel")
+        kwargs.setdefault("style", "PZ3.Muted.TLabel")
         label = ttk.Label(parent, width=1, wraplength=420, justify=tk.LEFT, **kwargs)
         def resize(event):
             width = max(1, event.width)
@@ -82,61 +85,61 @@ class EvaluationTracksLayout:
 
     def _build_header(self):
         header = ttk.Frame(self.root)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="Eksperymenty i tory referencyjne", font=("Segoe UI", 14, "bold")).grid(
+        ttk.Label(header, text="Eksperymenty i tory referencyjne", font=("Segoe UI", 12, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        self._wrapped_label(header, text="Wybierz tor, przygotuj materiał i GT, a następnie zweryfikuj i zapieczętuj.").grid(
+        self._wrapped_label(header, text="Wybierz istniejący tor lub przygotuj nowy eksperyment.").grid(
             row=1, column=0, sticky="ew", pady=(3, 0)
         )
-        ttk.Button(header, text="Odśwież", command=self.panel.refresh_tracks).grid(
-            row=0, column=1, rowspan=2, padx=(12, 6)
+        ttk.Button(header, text="Odśwież", command=self.panel.refresh_tracks, width=0, style="PZ3.Action.TButton").grid(
+            row=0, column=1, rowspan=2, padx=(12, 8)
         )
-        self.new_button = ttk.Button(header, text="+ Nowy tor", command=self.toggle_form)
+        self.new_button = ttk.Button(header, text="+ Nowy draft", command=self.toggle_form, width=0, style="PZ3.Action.TButton")
         self.new_button.grid(row=0, column=2, rowspan=2)
 
     def _build_form(self):
         panel = self.panel
-        self.form = ttk.LabelFrame(self.root, text="Nowy tor", padding=10)
+        self.form = ttk.Frame(self.root, padding=(0, 4, 0, 12))
         self.form.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         for column in range(4):
             self.form.columnconfigure(column, weight=2 if column == 0 else 1)
         fields = (
-            ("Nazwa toru", "name_entry", ttk.Entry, dict(textvariable=panel.name_var, width=24)),
+            ("Nazwa toru", "name_entry", ttk.Entry, dict(textvariable=panel.name_var, width=18)),
             ("Typ obiektów", "target_combo", ttk.Combobox, dict(textvariable=panel.target_var, values=panel.TARGETS, state="readonly", width=12)),
             ("Przeznaczenie", "purpose_combo", ttk.Combobox, dict(textvariable=panel.purpose_var, values=panel.PURPOSES, state="readonly", width=14)),
             ("Zakres", "scope_combo", ttk.Combobox, dict(textvariable=panel.scope_var, values=("global",), state="readonly", width=12)),
         )
         for column, (label, attr, widget_class, kwargs) in enumerate(fields):
             padding = (0, 12 if column < 3 else 0)
-            ttk.Label(self.form, text=label).grid(row=0, column=column, sticky="w", padx=padding, pady=(0, 4))
+            ttk.Label(self.form, text=label, style="PZ3.Muted.TLabel").grid(row=0, column=column, sticky="w", padx=padding, pady=(0, 4))
             widget = widget_class(self.form, **kwargs)
-            widget.grid(row=1, column=column, sticky="ew", padx=padding)
+            widget.grid(row=1, column=column, sticky="nsew", padx=padding)
             setattr(panel, attr, widget)
         panel.purpose_combo.bind("<<ComboboxSelected>>", lambda _event: panel._sync_reservation_policy(), add="+")
         panel.name_entry.bind("<Return>", lambda _event: panel.create_draft(), add="+")
         notes = ttk.Frame(self.form)
-        notes.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 0), padx=(0, 12))
+        notes.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(5, 0))
         notes.columnconfigure(0, weight=1)
         self._wrapped_label(notes, textvariable=panel.project_hint_var).grid(row=0, column=0, sticky="ew")
         self._wrapped_label(notes, textvariable=panel.reservation_var).grid(row=1, column=0, sticky="ew")
-        self.create_button = ttk.Button(self.form, text="Utwórz DRAFT", command=panel.create_draft, style="Accent.TButton")
-        self.create_button.grid(row=2, column=3, sticky="e", pady=(8, 0))
+        self.create_button = ttk.Button(self.form, text="Utwórz draft", command=panel.create_draft, style="PZ3.Primary.TButton", width=0)
+        self.create_button.grid(row=1, column=4, sticky="nsew", padx=(10, 0))
         self.form.grid_remove()
 
     def _build_body(self):
         panel = self.panel
         self.body = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
         self.body.grid(row=2, column=0, sticky="nsew")
-        self.left = ttk.LabelFrame(self.body, text="Tory", padding=8)
+        self.left = ttk.Frame(self.body, padding=(0, 0, 6, 0))
         self.left.columnconfigure(0, weight=1)
         self.left.rowconfigure(0, weight=1)
         self.body.add(self.left, weight=0)
         columns = ("name", "ver", "target", "purpose", "status", "members")
         panel.tree = ttk.Treeview(
             self.left, columns=columns, displaycolumns=("name", "status"),
-            show="headings", selectmode="browse", height=6,
+            show="headings", selectmode="browse", height=3, style="PZ3.Treeview",
         )
         for key, title, width in (
             ("name", "Nazwa", 145), ("ver", "Wersja", 58), ("target", "Typ", 100),
@@ -145,12 +148,13 @@ class EvaluationTracksLayout:
             panel.tree.heading(key, text=title)
             panel.tree.column(key, width=self.px(width), minwidth=self.px(95 if key == "name" else width), stretch=key == "name", anchor=tk.W if key == "name" else tk.CENTER)
         self._scrollable(self.left, panel.tree)
+        panel.tree.bind("<Configure>", self._fit_track_columns, add="+")
         panel.tree.bind("<<TreeviewSelect>>", panel._on_track_selected, add="+")
         self._wrapped_label(self.left, text="Wybierz tor, aby otworzyć jego obrazy i szczegóły.").grid(
             row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
 
-        self.right = ttk.Frame(self.body, padding=(12, 0, 0, 0))
+        self.right = ttk.Frame(self.body, padding=(10, 0, 0, 0))
         self.right.columnconfigure(0, weight=1)
         self.right.rowconfigure(2, weight=1)
         self.body.add(self.right, weight=1)
@@ -158,15 +162,17 @@ class EvaluationTracksLayout:
 
         self.notebook = ttk.Notebook(self.right)
         self.notebook.grid(row=2, column=0, sticky="nsew")
-        self.images_page = ttk.Frame(self.notebook, padding=8)
-        self.details_page = ttk.Frame(self.notebook, padding=8)
+        self.images_page = ttk.Frame(self.notebook, padding=6)
+        self.details_page = ttk.Frame(self.notebook, padding=6)
         self.manage_page = ttk.Frame(self.notebook, padding=10)
         for page, title, icon in ((self.images_page, "Obrazy toru", "images"), (self.details_page, "Szczegóły i GT", "checklist"), (self.manage_page, "Zarządzanie", "settings")):
             self.notebook.add(page, text=title, **notebook_tab_icon(self.notebook, icon))
             page.columnconfigure(0, weight=1)
             page.rowconfigure(0, weight=1)
 
-        panel.member_tree = ttk.Treeview(self.images_page, columns=("idx", "name", "source", "sha"), show="headings", selectmode="extended", height=5)
+        self.identifiers_var = tk.BooleanVar(self.root, False)
+        panel.member_tree = ttk.Treeview(self.images_page, columns=("idx", "name", "source", "sha"),
+                                        displaycolumns=("idx", "name"), show="headings", selectmode="extended", height=2, style="PZ3.Treeview")
         for key, title, width in (
             ("idx", "#", 32), ("name", "Plik", 84),
             ("source", "ID źródła", 110), ("sha", "SHA-256", 144),
@@ -179,18 +185,42 @@ class EvaluationTracksLayout:
         self._scrollable(self.images_page, panel.member_tree)
         panel.member_tree.bind("<Configure>", self._fit_member_columns, add="+")
         panel.member_tree.bind("<<TreeviewSelect>>", lambda _event: panel._refresh_remove_images_button_state(), add="+")
-        image_actions = ttk.Frame(self.images_page)
+        image_actions = self.image_actions = ttk.Frame(self.images_page)
         image_actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         image_actions.columnconfigure(0, weight=1)
-        self._wrapped_label(image_actions, textvariable=self.count_var).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self._button(image_actions, "btn_open_experiment_sources", "Katalog źródeł", panel.open_experiment_sources).grid(row=0, column=1, padx=(0, 6))
-        self._button(image_actions, "btn_remove_images", "Usuń zaznaczone", panel.remove_selected_images).grid(row=0, column=2)
+        self.image_count_label = self._wrapped_label(image_actions, textvariable=self.count_var)
+        self.image_count_label.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.identifiers_check = ttk.Checkbutton(image_actions, text="Identyfikatory", variable=self.identifiers_var,
+                        command=self._toggle_identifiers, padding=0)
+        self.identifiers_check.grid(row=0, column=1, padx=(0, 10))
+        self._button(image_actions, "btn_open_experiment_sources", "Katalog źródeł", panel.open_experiment_sources).grid(row=0, column=2, padx=(0, 6))
+        self._button(image_actions, "btn_remove_images", "Usuń zaznaczone", panel.remove_selected_images).grid(row=0, column=3)
+
+        image_actions.bind("<Configure>", self._fit_image_actions, add="+")
 
         panel.detail_text = tk.Text(self.details_page, width=1, height=6, wrap=tk.WORD, state=tk.DISABLED, font=("Segoe UI", 10), padx=10, pady=8, bd=0)
         self._scrollable(self.details_page, panel.detail_text, horizontal=False)
         self._build_management()
         self._build_workflow()
         self.notebook.bind("<<NotebookTabChanged>>", self._schedule_fit, add="+")
+
+    def _fit_image_actions(self, _event=None):
+        actions = self.image_actions
+        required = (self.px(100) + self.identifiers_check.winfo_reqwidth()
+                    + self.panel.btn_open_experiment_sources.winfo_reqwidth()
+                    + self.panel.btn_remove_images.winfo_reqwidth() + self.px(22))
+        narrow = actions.winfo_width() < required
+        if narrow == getattr(self, "_image_actions_narrow", None):
+            return
+        self._image_actions_narrow = narrow
+        self.image_count_label.grid_configure(columnspan=2 if narrow else 1,
+                                              pady=(0, 6) if narrow else 0)
+        self.identifiers_check.grid_configure(column=2 if narrow else 1,
+                                             columnspan=2 if narrow else 1,
+                                             sticky="e", padx=0 if narrow else (0, 10),
+                                             pady=(0, 6) if narrow else 0)
+        self.panel.btn_open_experiment_sources.grid_configure(row=1 if narrow else 0)
+        self.panel.btn_remove_images.grid_configure(row=1 if narrow else 0)
 
     def _build_track_header(self):
         self.track_header = ttk.Frame(self.right)
@@ -263,56 +293,137 @@ class EvaluationTracksLayout:
 
     def _build_workflow(self):
         panel = self.panel
-        self.workflow = ttk.Frame(self.root)
-        self.workflow.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.workflow = ttk.Frame(self.viewport)
+        self.workflow.grid(row=2, column=0, sticky="ew", padx=self.px(16), pady=(12, 12))
+        self.workflow.columnconfigure(0, weight=1)
+        ttk.Separator(self.workflow).grid(row=0, column=0, sticky="ew")
         self._wrapped_label(self.workflow, textvariable=self.next_step_var,
-                            style="TLabel", font=("Segoe UI", 10, "bold")).grid(
-            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 6))
+                            style="PZ3.Text.TLabel").grid(
+            row=1, column=0, sticky="ew", pady=(10, 10))
+        self.workflow_grid = ttk.Frame(self.workflow)
+        self.workflow_grid.grid(row=2, column=0, sticky="ew")
+        self.workflow_grid.columnconfigure((0, 2, 4), weight=1, uniform="pz3_steps")
+        self.workflow_grid.columnconfigure((1, 3), minsize=self.px(16))
+        self.workflow_groups = []
+        self.workflow_titles = []
         groups = (
-            ("1 · Przygotuj pulę", (
-                ("btn_participants", "Wybierz modele…", panel.select_participant_models),
-                ("btn_add_images", "Dodaj obrazy…", panel.add_images),
-                ("btn_audit_pool", "Sprawdź niezależność puli", panel.audit_current_pool),
+            ("01   Pula obrazów", (
+                ("btn_participants", "Modele…", panel.select_participant_models, 1, 0, 1),
+                ("btn_add_images", "Dodaj obrazy…", panel.add_images, 1, 1, 1),
+                ("btn_audit_pool", "Audyt niezależności", panel.audit_current_pool, 2, 0, 2),
             )),
-            ("2 · Przygotuj Ground Truth", (
-                ("btn_sample_selection", "Wybierz próbę…", panel.select_experiment_sample_in_z2),
-                ("btn_audit_sample", "Sprawdź finalną próbę", panel.audit_current_pool),
-                ("btn_prepare_z2", "Przygotuj Ground Truth", panel.prepare_ground_truth_in_z2),
-                ("btn_set_gt", "Wczytaj gotowy Ground Truth…", panel.set_ground_truth),
+            ("02   Próba i GT", (
+                ("btn_sample_selection", "Wybierz próbę…", panel.select_experiment_sample_in_z2, 1, 0, 2),
+                ("btn_audit_sample", "Audyt próby", panel.audit_current_pool, 1, 1, 1),
+                ("btn_prepare_z2", "Przygotuj GT", panel.prepare_ground_truth_in_z2, 2, 0, 1),
+                ("btn_set_gt", "Wczytaj GT…", panel.set_ground_truth, 2, 1, 1),
             )),
-            ("3 · Zatwierdź eksperyment", (
-                ("btn_verify", "Zweryfikuj eksperyment", panel.verify_track),
-                ("btn_seal", "Zapieczętuj eksperyment", panel.seal_track),
-                ("btn_compare", "Porównaj modele", panel.open_comparison),
+            ("03   Zatwierdzenie", (
+                ("btn_verify", "Zweryfikuj", panel.verify_track, 1, 0, 1),
+                ("btn_seal", "Zapieczętuj", panel.seal_track, 1, 1, 1),
+                ("btn_compare", "Porównaj modele", panel.open_comparison, 2, 0, 2),
             )),
         )
-        for column, (title, buttons) in enumerate(groups):
-            self.workflow.columnconfigure(column, weight=1, uniform="workflow")
-            group = ttk.LabelFrame(self.workflow, text=title, padding=8)
-            group.grid(row=1, column=column, sticky="nsew", padx=(0, 8 if column < 2 else 0))
-            group.columnconfigure(0, weight=1)
-            for row, (attr, label, command) in enumerate(buttons):
+        self._workflow_specs = groups
+        for index, (title, buttons) in enumerate(groups):
+            group = ttk.Frame(self.workflow_grid)
+            group.grid(row=0, column=index * 2, sticky="nsew")
+            group.columnconfigure((0, 2), weight=1, uniform=f"pz3_actions_{index}")
+            group.columnconfigure(1, minsize=self.px(6))
+            self.workflow_groups.append(group)
+            heading = ttk.Label(group, text=title, style="PZ3.Step.TLabel")
+            heading.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+            self.workflow_titles.append(heading)
+            for attr, label, command, row, column, span in buttons:
                 self.workflow_buttons.append(attr)
                 self._button(group, attr, label, command).grid(
-                    row=row, column=0, sticky="ew", pady=(0 if row == 0 else 6, 0))
-            if column == 0:
-                self._wrapped_label(group, textvariable=self.pool_summary_var).grid(
-                    row=5, column=0, sticky="ew", pady=(6, 0))
-                self._wrapped_label(group, text="Sprawdza, czy obrazy testowe nie pokrywają się z train/val wybranych modeli.").grid(
-                    row=6, column=0, sticky="ew", pady=(3, 0))
+                    row=row, column=column * 2, columnspan=3 if span == 2 else 1,
+                    sticky="nsew", pady=(0, 6) if row == 1 else 0)
+        self.pool_note = ttk.Label(self.workflow_groups[0], text="Wybrano finalną próbę",
+                                   style="PZ3.Muted.TLabel", anchor=tk.CENTER)
+        self.pool_note.grid(row=2, column=0, columnspan=3, sticky="nsew")
+        self.pool_note.grid_remove()
         panel.btn_audit_sample.grid_remove()
 
+    def _fit_workflow(self, available):
+        # Three columns on wide panels; aligned action rows when DPI/width
+        # would otherwise force the right-hand actions off screen.
+        panel = self.panel
+        gap = self.px(6)
+        half_buttons = ["btn_participants", "btn_add_images", "btn_prepare_z2",
+                        "btn_set_gt", "btn_verify", "btn_seal"]
+        if self._sample_selected:
+            half_buttons += ["btn_sample_selection", "btn_audit_sample"]
+        half_width = max(getattr(panel, name).winfo_reqwidth() for name in half_buttons)
+        full_width = max(panel.btn_audit_pool.winfo_reqwidth(),
+                         panel.btn_compare.winfo_reqwidth(),
+                         panel.btn_sample_selection.winfo_reqwidth())
+        rows = available < 3 * max(2 * half_width + gap, full_width) + self.px(32)
+        if rows == self._workflow_rows:
+            return
+        self._workflow_rows = rows
+        for column in range(5):
+            self.workflow_grid.columnconfigure(column, weight=0, minsize=0, uniform="")
+        if rows:
+            self.workflow_grid.columnconfigure(0, weight=1)
+        else:
+            self.workflow_grid.columnconfigure((0, 2, 4), weight=1, uniform="pz3_steps")
+            self.workflow_grid.columnconfigure((1, 3), minsize=self.px(16))
+        title_width = max(title.winfo_reqwidth() for title in self.workflow_titles)
+        for index, (_, specs) in enumerate(self._workflow_specs):
+            group = self.workflow_groups[index]
+            group.grid_configure(row=index if rows else 0, column=0 if rows else index*2,
+                                 pady=(0, self.px(6)) if rows and index < 2 else 0)
+            for column in range(9):
+                group.columnconfigure(column, weight=0, minsize=0, uniform="")
+            if rows:
+                group.columnconfigure(0, minsize=title_width)
+                group.columnconfigure(1, minsize=self.px(12))
+                group.columnconfigure((2, 4, 6, 8), weight=1, uniform=f"pz3_actions_{index}")
+                group.columnconfigure((3, 5, 7), minsize=gap)
+            else:
+                group.columnconfigure((0, 2), weight=1, uniform=f"pz3_actions_{index}")
+                group.columnconfigure(1, minsize=gap)
+            self.workflow_titles[index].grid_configure(
+                columnspan=1 if rows else 3, pady=0 if rows else (0, 8))
+            for button_index, (attr, _, _, row, column, span) in enumerate(specs):
+                if rows:
+                    target_column = 2 + 2*button_index
+                    target_span = 3 if index != 1 and button_index == 2 else 1
+                    if attr == "btn_sample_selection" and not self._sample_selected:
+                        target_span = 3
+                    getattr(panel, attr).grid_configure(row=0, column=target_column,
+                                                       columnspan=target_span, pady=0)
+                else:
+                    target_span = 3 if span == 2 else 1
+                    if attr == "btn_sample_selection" and self._sample_selected:
+                        target_span = 1
+                    getattr(panel, attr).grid_configure(
+                        row=row, column=column*2, columnspan=target_span,
+                        pady=(0, 6) if row == 1 else 0)
+        self.pool_note.grid_configure(row=0 if rows else 2, column=6 if rows else 0,
+                                      columnspan=3)
+        if self._sample_selected:
+            panel.btn_audit_pool.grid_remove()
+        else:
+            panel.btn_audit_sample.grid_remove()
+            self.pool_note.grid_remove()
+
     def refresh_primary_action(self):
+        if self._has_track and not self.form_open:
+            self.workflow.grid()
+        else:
+            self.workflow.grid_remove()
         for attr in self.workflow_buttons:
             button = getattr(self.panel, attr)
             active = (not self.form_open and attr == self.primary_action
                       and str(button.cget("state")) != "disabled")
-            button.configure(style="Accent.TButton" if active else "TButton")
-        self.new_button.configure(style="Accent.TButton" if not self._has_track and not self.form_open else "TButton")
-        self.create_button.configure(style="Accent.TButton" if self.form_open else "TButton")
+            button.configure(style="PZ3.Primary.TButton" if active else "PZ3.Action.TButton")
+        self.new_button.configure(style="PZ3.Primary.TButton" if not self._has_track and not self.form_open else "PZ3.Action.TButton")
+        self.create_button.configure(style="PZ3.Primary.TButton")
 
     def _button(self, parent, attr, text, command):
-        button = ttk.Button(parent, text=text, command=command)
+        button = ttk.Button(parent, text=text, command=command, width=0, style="PZ3.Action.TButton")
         setattr(self.panel, attr, button)
         return button
 
@@ -325,7 +436,13 @@ class EvaluationTracksLayout:
         if horizontal:
             xscroll = ttk.Scrollbar(parent, orient=tk.HORIZONTAL, command=widget.xview)
             xscroll.grid(row=1, column=0, sticky="ew")
-            widget.configure(xscrollcommand=xscroll.set)
+            def update_horizontal(first, last):
+                xscroll.set(first, last)
+                if float(first) <= 0.0 and float(last) >= 1.0:
+                    xscroll.grid_remove()
+                else:
+                    xscroll.grid()
+            widget.configure(xscrollcommand=update_horizontal)
 
     def toggle_form(self):
         self.show_form(not self.form_open)
@@ -338,13 +455,14 @@ class EvaluationTracksLayout:
             self.canvas.yview_moveto(0)
         else:
             self.form.grid_remove()
-        self.new_button.configure(text="Zwiń formularz" if visible else "+ Nowy tor")
+        self.new_button.configure(text="Zamknij formularz" if visible else "+ Nowy draft")
         self.refresh_primary_action()
         self._schedule_fit()
 
     def set_track(self, track=None, *, member_count=0, audit_state=None, readiness=None,
                   workflow=None, participant_count=0):
         self._has_track = bool(track)
+        self._workflow_rows = None
         if track:
             self._track_title = f"{track.get('name') or 'Bez nazwy'} · v{int(track.get('version') or 0)}"
             status = str(track.get("status") or "-").upper()
@@ -358,15 +476,21 @@ class EvaluationTracksLayout:
                 workflow = build_pz3_workflow_view_state(readiness, audit_state=audit_state)
             audit_label, audit_tone = workflow.audit_label, workflow.audit_tone
             self.primary_action = workflow.primary_action
+            self._sample_selected = workflow.sample_selected
+            self.panel.btn_participants.configure(text=f"Modele ({participant_count})\u2026")
             self.next_step_var.set(workflow.status_text)
             self.pool_summary_var.set(f"Modele: {participant_count} wybrane  ·  Obrazy: {member_count}")
-            self.panel.btn_audit_sample.configure(text=workflow.audit_button_label)
+            self.panel.btn_audit_sample.configure(text="Audyt próby")
             if workflow.sample_selected:
                 self.panel.btn_audit_pool.grid_remove()
                 self.panel.btn_audit_sample.grid()
+                self.panel.btn_sample_selection.grid_configure(columnspan=1)
+                self.pool_note.grid()
             else:
                 self.panel.btn_audit_pool.grid()
                 self.panel.btn_audit_sample.grid_remove()
+                self.panel.btn_sample_selection.grid_configure(columnspan=3)
+                self.pool_note.grid_remove()
             self.audit_var.set(f"Audyt: {audit_label}")
             gt_exists = readiness.gt_exists if readiness is not None else None
             gt_verified = readiness.gt_verified if readiness is not None else None
@@ -417,14 +541,31 @@ class EvaluationTracksLayout:
         self._schedule_fit()
 
     def _minimum_right_width(self):
-        return self.px(420)
+        return self.px(360)
 
-    def _fit_member_columns(self, event):
-        # Nazwa pliku ma ograniczoną szerokość. Hash zachowuje swoje miejsce,
+    def _toggle_identifiers(self):
+        columns = ("idx", "name", "source", "sha") if self.identifiers_var.get() else ("idx", "name")
+        self.panel.member_tree.configure(displaycolumns=columns)
+        self._fit_member_columns()
+
+    def _fit_track_columns(self, event=None):
+        tree = self.panel.tree
+        available = max(1, (event.width if event is not None else tree.winfo_width()) - 4)
+        status_width = self.px(72)
+        tree.column("status", width=status_width, minwidth=status_width, stretch=False)
+        tree.column("name", width=max(self.px(95), available-status_width), stretch=True)
+
+    def _fit_member_columns(self, event=None):
+        # W widoku identyfikatorów nazwa i hash mają ograniczoną szerokość,
         # a ID źródła otrzymuje resztę również po zwężeniu panelu.
         tree = self.panel.member_tree
-        available = max(1, event.width - 4)
+        available = max(1, (event.width if event is not None else tree.winfo_width()) - 4)
         index_width = self.px(32)
+        if not self.identifiers_var.get():
+            tree.column("idx", width=index_width, stretch=False)
+            tree.column("name", width=max(self.px(84), available - index_width), stretch=True)
+            return
+        tree.column("name", stretch=False)
         hash_width = self.px(144)
         remaining = available - index_width - hash_width
         name_width = max(self.px(84), min(self.px(160), round(remaining * 0.35)))
@@ -453,7 +594,12 @@ class EvaluationTracksLayout:
         self._fit_job = None
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
-        content_width = max(width, self.px(230) + self._minimum_right_width() + 32, self.workflow.winfo_reqwidth() + 24)
+        if self.workflow.winfo_manager():
+            self._fit_workflow(width - self.px(32))
+        action_width = self.workflow.winfo_reqwidth() if self.workflow.winfo_manager() else 0
+        form_width = self.form.winfo_reqwidth() if self.form_open else 0
+        content_width = max(width, self.px(190) + self._minimum_right_width() + self.px(32) + 6,
+                            action_width + self.px(32), form_width + self.px(32))
         # Ttk zapamiętuje początkowy rozmiar paneli. Aktualizujemy wysokość po
         # zawinięciu nagłówków, aby nie zachować pustego miejsca z pierwszego pomiaru.
         body_height = max(self.left.winfo_reqheight(), self.right.winfo_reqheight())
@@ -479,9 +625,9 @@ class EvaluationTracksLayout:
         width = self.body.winfo_width()
         if width <= 1:
             return
-        low = self.px(220)
+        low = self.px(180)
         high = max(low, width - self._minimum_right_width() - 6)
-        current = self._sash_user_position if self._sash_user_position is not None else self.px(280)
+        current = self._sash_user_position if self._sash_user_position is not None else self.px(248)
         position = max(low, min(current, high))
         if position != self.body.sashpos(0):
             self.body.sashpos(0, position)
@@ -506,7 +652,36 @@ class EvaluationTracksLayout:
 
     def apply_theme(self):
         palette = get_runtime_palette(self.panel.app)
-        self.canvas.configure(background=palette["panel"])
+        style = ttk.Style(self.root)
+        surface = palette["bg"]
+        for name, color in (("Text", palette["fg"]), ("Muted", palette["muted"]),
+                            ("Step", palette["fg"])):
+            style.configure(f"PZ3.{name}.TLabel", background=surface, foreground=color,
+                            font=("Segoe UI", 9, "bold") if name == "Step" else ("Segoe UI", 9),
+                            padding=0)
+        # All button states share geometry, including the filled primary action.
+        for name, primary in (("Action", False), ("Primary", True)):
+            key = f"PZ3.{name}.TButton"
+            fill = palette["accent"] if primary else palette["panel_alt"]
+            text = palette["accent_text"] if primary else palette["fg"]
+            outline = palette["accent"] if primary else palette["border"]
+            style.configure(key, background=fill, foreground=text,
+                            bordercolor=outline, lightcolor=outline, darkcolor=outline,
+                            borderwidth=1, relief="solid", anchor=tk.CENTER,
+                            font=("Segoe UI", 9), padding=(self.px(10), self.px(5)))
+            style.map(key,
+                      background=[("disabled", surface),
+                                  ("pressed", palette["accent_hover"] if primary else palette["selection_bg"]),
+                                  ("active", palette["accent_hover"] if primary else palette["button_hover"])],
+                      foreground=[("disabled", palette["muted"]), ("!disabled", text)],
+                      **{part: [("disabled", palette["panel_border"]),
+                                ("active", palette["accent"]), ("!active", outline)]
+                         for part in ("bordercolor", "lightcolor", "darkcolor")})
+        style.configure("PZ3.Treeview", rowheight=self.px(25), borderwidth=1, relief="solid")
+        style.configure("PZ3.Treeview.Heading", font=("Segoe UI", 9, "bold"),
+                        padding=(self.px(8), self.px(5)), borderwidth=1, relief="flat",
+                        background=palette["panel_alt"], foreground=palette["fg"])
+        self.canvas.configure(background=surface)
         self._paint_status_badges()
         self.panel.detail_text.configure(
             background=palette["field"], foreground=palette["fg"],

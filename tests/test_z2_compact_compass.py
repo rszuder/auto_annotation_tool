@@ -11,8 +11,10 @@ from auto_annotation_tool.gui import z2_legend_ui as legend
 @pytest.fixture
 def root():
     root = tk.Tk()
+    previous_scaling = root.tk.call("tk", "scaling")
     root.withdraw()
     yield root
+    root.tk.call("tk", "scaling", previous_scaling)
     root.destroy()
 
 

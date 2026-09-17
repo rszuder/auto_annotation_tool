@@ -1139,6 +1139,9 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
 def apply_theme(self):
     palette = getattr(self.app, "palette", {})
     panel_border = palette.get("panel_border", palette.get("border", "#3c3c3c"))
+    sample_labels = getattr(self, "_sample_labels_panel", None)
+    if sample_labels is not None:
+        sample_labels.apply_theme()
 
     for label_name in (
         "workflow_entry_title_lbl",
