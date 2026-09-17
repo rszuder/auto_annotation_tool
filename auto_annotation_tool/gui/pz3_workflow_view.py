@@ -1,7 +1,6 @@
 """Presentation-only guidance derived from the existing PZ3 lifecycle."""
 from dataclasses import dataclass
-import json
-from pathlib import Path
+from ..registry.final_sample_policy import has_selected_sample
 
 
 @dataclass(frozen=True)
@@ -13,24 +12,6 @@ class PZ3WorkflowViewState:
     status_text: str
     audit_button_label: str
     sample_selected: bool = False
-
-
-def has_selected_sample(workspace, track, members):
-    """Read one recorded selection; never scan images or alter the contract.
-
-    A subset retained by the subsequent audit is still a curated sample.
-    New images outside that selection require selecting the sample again.
-    """
-    try:
-        data = json.loads((Path(workspace) / track["relative_path"] /
-                           "sample_selection.json").read_text(encoding="utf-8"))
-        selected = set(data["selected_member_sha256"])
-        current = {row["sha256"] for row in members}
-        return (data.get("track_id") == track["track_id"]
-                and data.get("schema") == "alpr.experiment_sample_selection.v1"
-                and bool(current) and current.issubset(selected))
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
 
 
 def build_pz3_workflow_view_state(readiness, *, audit_state=None, sample_selected=False):

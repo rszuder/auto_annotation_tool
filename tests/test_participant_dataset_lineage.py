@@ -169,6 +169,7 @@ class ParticipantDatasetLineageTests(unittest.TestCase):
                 stack.enter_context(patch("dataclasses.asdict", legacy_asdict))
             self.f.audit.save_participants(self.f.track, ["M1", "M2"])
             self._current_audit()
+            self.f.select_and_reaudit()
             context = prepare_gt_workspace(self.f.service, self.f.track)
             path = Path(context["annotation_path"])
             tree = ET.parse(path)

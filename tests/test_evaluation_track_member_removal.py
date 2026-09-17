@@ -47,7 +47,7 @@ class EvaluationTrackMemberRemovalTests(unittest.TestCase):
             track_id = service.create_draft(
                 name="remove-gt-test",
                 target="plate",
-                purpose="ranking",
+                purpose="validation",  # Artifact invalidation; final sample gates have separate coverage.
             )
             source = workspace / "IMG_004.jpg"
             source.write_bytes(b"image-b")

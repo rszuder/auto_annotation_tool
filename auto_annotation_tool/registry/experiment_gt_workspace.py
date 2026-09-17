@@ -27,6 +27,8 @@ def prepare_gt_workspace(service, track_id, *, mode="manual", progress=None):
     track = service.get_track(track_id)
     if track["status"] != "DRAFT" or track["target"] != "plate":
         raise EvaluationTrackError("Edytor Z2 obsługuje robocze GT dla MT / tablic.")
+    from .final_sample_policy import assert_final_sample_ready_for_gt
+    assert_final_sample_ready_for_gt(service, track_id, track=track)
     audit = ParticipantPoolAuditService(service.workspace, repository=service.repository)
     audit.assert_track_audit_ready(track_id)
     members = service.list_members(track_id)

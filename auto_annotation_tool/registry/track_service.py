@@ -671,6 +671,8 @@ class EvaluationTrackService:
         gt_format: str = "cvat_xml",
     ) -> Path:
         track = self._require_status(track_id, STATUS_DRAFT)
+        from .final_sample_policy import assert_final_sample_ready_for_gt
+        assert_final_sample_ready_for_gt(self, track_id, track=track)
         source = Path(source_path)
         if not source.exists() or not source.is_file():
             raise EvaluationTrackError(f"Brak pliku GT: {source}")
