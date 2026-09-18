@@ -124,7 +124,8 @@ class SampleLabelsGuiTests(unittest.TestCase):
         self.assertEqual(state.counts[label], 1)
         self.assertEqual(state.unlabeled_count, 1)
         self.assertEqual(host._sample_labels_panel.rows[label][1].get(), "1")
-        self.assertEqual(host._sample_labels_panel.unlabeled.cget("text"), "Bez etykiety: 1")
+        self.assertEqual(host._sample_labels_panel.unlabeled.cget("text"), "Bez etykiety")
+        self.assertEqual(host._sample_labels_panel.unlabeled_count_var.get(), "1")
 
     def test_rename_and_delete_update_rows_without_changing_membership(self):
         host = self.host
@@ -258,6 +259,34 @@ class SampleLabelsGuiTests(unittest.TestCase):
         ui.toggle_unlabeled_lock(host)
         ui.assign_sample_label(host, day, [2])
         self.assertEqual(state.assignments["c"], day)
+
+    def test_unlabeled_row_is_first_class_and_lock_icon_opens_and_closes(self):
+        panel = self.host._sample_labels_panel
+        self.assertIs(panel.unlabeled.master, panel.items)
+        self.assertIs(panel.unlabeled_lock.master, panel.items)
+        self.assertEqual(panel.unlabeled_lock.cget("text"), "🔓")
+        ui.toggle_unlabeled_lock(self.host)
+        self.assertEqual(panel.unlabeled_lock.cget("text"), "🔒")
+        ui.toggle_unlabeled_lock(self.host)
+        self.assertEqual(panel.unlabeled_lock.cget("text"), "🔓")
+
+    def test_sort_by_label_includes_unlabeled_as_normal_group(self):
+        host = self.host
+        night = ui.add_sample_label(host, "Noc")
+        day = ui.add_sample_label(host, "Dzień")
+        ui.assign_sample_label(host, night, [0])
+        ui.assign_sample_label(host, day, [2])
+        # Test grupy „Bez etykiety”: wyłącz aktywną etykietę przed dodaniem obrazu.
+        ui.activate_sample_label(host, "")
+        route.set_sample_selection(host, True, [1])
+        host._sample_sort_var = tk.StringVar(self.root, "Etykieta A–Z")
+        names = [ann.filename for _i, ann in route.sample_list_entries(host)]
+        self.assertEqual(names, ["two.png", "three.png", "ONE.png"])
+        self.assertIn("Bez etykiety", route.sample_list_text(host, host.current_annotations[1]))
+        host._sample_sort_var.set("Etykieta Z–A")
+        names = [ann.filename for _i, ann in route.sample_list_entries(host)]
+        self.assertEqual(names, ["ONE.png", "three.png", "two.png"])
+
 
 class SampleLabelsRealWorkspaceTests(unittest.TestCase):
     def test_leave_and_reopen_restores_labels_membership_and_active_label(self):
