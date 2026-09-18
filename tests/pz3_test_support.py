@@ -1,4 +1,4 @@
-﻿"""Small isolated Workspace with real images and a real SQLite registry."""
+"""Small isolated Workspace with real images and a real SQLite registry."""
 from pathlib import Path
 import hashlib
 
@@ -54,6 +54,65 @@ class PZ3Fixture:
         paths = [root / row["track_relative_path"] for row in self.service.list_members(track_id)]
         report = self.audit.audit_paths(track_id, paths)
         self.audit.record_ingested_report(track_id, report, paths)
+
+
+    def mark_gt_review_complete(self, xml_path):
+        """Simulate completed manual GT review in a test fixture."""
+        import json
+        import xml.etree.ElementTree as ET
+
+        xml_path = Path(xml_path)
+        root = ET.parse(xml_path).getroot()
+
+        approved = set()
+        verified_empty = set()
+
+        for node in root.findall("image"):
+            name = str(
+                Path(
+                    str(node.get("name", "") or "").replace("\\", "/")
+                ).name
+                or ""
+            ).strip().lower()
+            if not name:
+                continue
+
+            has_plate = any(
+                str(poly.get("label", "") or "").strip().lower()
+                in {"plate", "license_plate", "numberplate"}
+                for poly in node.findall("polygon")
+            )
+
+            if has_plate:
+                approved.add(name)
+            else:
+                verified_empty.add(name)
+
+        manifest_path = xml_path.parent / "run_manifest.json"
+        payload = {}
+        if manifest_path.is_file():
+            payload = json.loads(
+                manifest_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(payload, dict):
+                payload = {}
+
+        payload["approved_filenames"] = sorted(approved)
+        payload["gt_verified_empty_filenames"] = sorted(verified_empty)
+
+        manifest_path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        return {
+            "approved_filenames": sorted(approved),
+            "gt_verified_empty_filenames": sorted(verified_empty),
+        }
 
     def image(self, name, seed=100, size=(192, 128)):
         path = self.sources / name

@@ -143,8 +143,8 @@ class EvaluationTracksLayout:
             show="headings", selectmode="browse", height=3, style="PZ3.Treeview",
         )
         for key, title, width in (
-            ("name", "Nazwa", 145), ("ver", "Wersja", 58), ("target", "Typ", 100),
-            ("purpose", "Cel", 115), ("status", "Status", 85), ("members", "Obrazy", 58),
+            ("name", "Nazwa toru", 230), ("ver", "Wersja", 58), ("target", "Typ", 100),
+            ("purpose", "Cel", 115), ("status", "Status", 96), ("members", "Obrazy", 58),
         ):
             panel.tree.heading(key, text=title)
             panel.tree.column(key, width=self.px(width), minwidth=self.px(95 if key == "name" else width), stretch=key == "name", anchor=tk.W if key == "name" else tk.CENTER)
@@ -175,8 +175,8 @@ class EvaluationTracksLayout:
         panel.member_tree = ttk.Treeview(self.images_page, columns=("idx", "name", "source", "sha"),
                                         displaycolumns=("idx", "name"), show="headings", selectmode="extended", height=2, style="PZ3.Treeview")
         for key, title, width in (
-            ("idx", "#", 32), ("name", "Plik", 84),
-            ("source", "ID źródła", 110), ("sha", "SHA-256", 144),
+            ("idx", "#", 46), ("name", "Plik obrazu", 300),
+            ("source", "ID źródła", 170), ("sha", "SHA-256", 165),
         ):
             panel.member_tree.heading(key, text=title)
             panel.member_tree.column(
@@ -561,7 +561,7 @@ class EvaluationTracksLayout:
         self._schedule_fit()
 
     def _minimum_right_width(self):
-        return self.px(360)
+        return self.px(520)
 
     def _toggle_identifiers(self):
         columns = ("idx", "name", "source", "sha") if self.identifiers_var.get() else ("idx", "name")
@@ -570,34 +570,63 @@ class EvaluationTracksLayout:
 
     def _fit_track_columns(self, event=None):
         tree = self.panel.tree
-        available = max(1, (event.width if event is not None else tree.winfo_width()) - 4)
-        status_width = self.px(72)
-        tree.column("status", width=status_width, minwidth=status_width, stretch=False)
-        tree.column("name", width=max(self.px(95), available-status_width), stretch=True)
+        available = max(
+            1,
+            (event.width if event is not None else tree.winfo_width()) - 4,
+        )
+        status_width = self.px(96)
+        name_min = self.px(210)
+        tree.column(
+            "status",
+            width=status_width,
+            minwidth=self.px(88),
+            stretch=False,
+        )
+        tree.column(
+            "name",
+            width=max(name_min, available - status_width),
+            minwidth=name_min,
+            stretch=True,
+        )
 
     def _fit_member_columns(self, event=None):
-        # W widoku identyfikatorów nazwa i hash mają ograniczoną szerokość,
-        # a ID źródła otrzymuje resztę również po zwężeniu panelu.
         tree = self.panel.member_tree
-        available = max(1, (event.width if event is not None else tree.winfo_width()) - 4)
-        index_width = self.px(32)
+        available = max(
+            1,
+            (event.width if event is not None else tree.winfo_width()) - 4,
+        )
+        index_width = self.px(46)
         if not self.identifiers_var.get():
-            tree.column("idx", width=index_width, stretch=False)
-            tree.column("name", width=max(self.px(84), available - index_width), stretch=True)
+            tree.column(
+                "idx",
+                width=index_width,
+                minwidth=index_width,
+                stretch=False,
+            )
+            tree.column(
+                "name",
+                width=max(self.px(300), available - index_width),
+                minwidth=self.px(260),
+                stretch=True,
+            )
             return
-        tree.column("name", stretch=False)
-        hash_width = self.px(144)
-        remaining = available - index_width - hash_width
-        name_width = max(self.px(84), min(self.px(160), round(remaining * 0.35)))
+
         widths = {
             "idx": index_width,
-            "name": name_width,
-            "source": max(self.px(110), remaining - name_width),
-            "sha": hash_width,
+            "name": self.px(220),
+            "source": max(
+                self.px(180),
+                available - self.px(46 + 220 + 170),
+            ),
+            "sha": self.px(170),
         }
         for key, width in widths.items():
-            if tree.column(key, "width") != width:
-                tree.column(key, width=width)
+            tree.column(
+                key,
+                width=width,
+                minwidth=width if key != "source" else self.px(180),
+                stretch=key == "source",
+            )
 
     def _schedule_fit(self, _event=None):
         if self._fit_job is None:
@@ -618,7 +647,7 @@ class EvaluationTracksLayout:
             self._fit_workflow(width - self.px(32))
         action_width = self.workflow.winfo_reqwidth() if self.workflow.winfo_manager() else 0
         form_width = self.form.winfo_reqwidth() if self.form_open else 0
-        content_width = max(width, self.px(190) + self._minimum_right_width() + self.px(32) + 6,
+        content_width = max(width, self.px(330) + self._minimum_right_width() + self.px(32) + 8,
                             action_width + self.px(32), form_width + self.px(32))
         # Ttk zapamiętuje początkowy rozmiar paneli. Aktualizujemy wysokość po
         # zawinięciu nagłówków, aby nie zachować pustego miejsca z pierwszego pomiaru.
@@ -645,10 +674,21 @@ class EvaluationTracksLayout:
         width = self.body.winfo_width()
         if width <= 1:
             return
-        low = self.px(180)
-        high = max(low, width - self._minimum_right_width() - 6)
-        current = self._sash_user_position if self._sash_user_position is not None else self.px(248)
-        position = max(low, min(current, high))
+        left_min = self.px(330)
+        right_min = self._minimum_right_width()
+        high = max(
+            left_min,
+            width - right_min - self.px(8),
+        )
+        current = (
+            self._sash_user_position
+            if self._sash_user_position is not None
+            else self.px(360)
+        )
+        position = max(
+            left_min,
+            min(current, high),
+        )
         if position != self.body.sashpos(0):
             self.body.sashpos(0, position)
 
@@ -699,11 +739,38 @@ class EvaluationTracksLayout:
                          for part in ("bordercolor", "lightcolor", "darkcolor")})
         style.configure("PZ3.Treeview", rowheight=self.px(25), borderwidth=1, relief="solid")
         style.configure("PZ3.Treeview.Heading", font=("Segoe UI", 9, "bold"),
-                        padding=(self.px(8), self.px(5)), borderwidth=1, relief="flat",
+                        padding=(self.px(10), self.px(6)), borderwidth=1, relief="raised",
                         background=palette["panel_alt"], foreground=palette["fg"])
         self.canvas.configure(background=surface)
         self._paint_status_badges()
         self.panel.detail_text.configure(
             background=palette["field"], foreground=palette["fg"],
             selectbackground=palette["selection_bg"], selectforeground=palette["selection_fg"],
+            tabs=(self.px(190),),
+        )
+        self.panel.detail_text.tag_configure(
+            "detail_section",
+            font=("Segoe UI", 10, "bold"),
+            foreground=palette["fg"],
+            background=palette["panel_alt"],
+            spacing1=self.px(8),
+            spacing3=self.px(6),
+            lmargin1=self.px(4),
+            lmargin2=self.px(4),
+        )
+        self.panel.detail_text.tag_configure(
+            "detail_key",
+            font=("Segoe UI", 9, "bold"),
+            foreground=palette["muted"],
+            lmargin1=self.px(8),
+            lmargin2=self.px(8),
+            spacing1=self.px(2),
+            spacing3=self.px(2),
+        )
+        self.panel.detail_text.tag_configure(
+            "detail_value",
+            font=("Segoe UI", 9),
+            foreground=palette["fg"],
+            spacing1=self.px(2),
+            spacing3=self.px(2),
         )

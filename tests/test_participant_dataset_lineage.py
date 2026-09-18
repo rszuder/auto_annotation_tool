@@ -176,6 +176,7 @@ class ParticipantDatasetLineageTests(unittest.TestCase):
             ET.SubElement(tree.getroot().find("image"), "polygon",
                           label="plate", points="10,10;80,10;80,40;10,40")
             tree.write(path, encoding="utf-8", xml_declaration=True)
+            self.f.mark_gt_review_complete(path)
             publish_working_gt(self.f.service, self.f.track, path)
             self.f.service.verify(self.f.track, manual_gt_complete=True)
             self.assertTrue(self.f.service.seal(self.f.track).ok)

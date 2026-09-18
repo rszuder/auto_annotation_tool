@@ -16,6 +16,85 @@ def working_gt_path(service, track_id):
     return paths.annotation_runs / "ground_truth" / "annotations.xml"
 
 
+
+GT_VERIFIED_EMPTY_FIELD = "gt_verified_empty_filenames"
+
+
+def _gt_normalized_name(value):
+    return str(
+        Path(str(value or "").replace("\\", "/")).name or ""
+    ).strip().lower()
+
+
+def get_gt_review_state(service, track_id, xml_path=None):
+    members = service.list_members(track_id)
+    canonical = (
+        Path(xml_path)
+        if xml_path is not None
+        else working_gt_path(service, track_id)
+    )
+    manifest = load_json(canonical.parent / "run_manifest.json")
+    approved = {
+        _gt_normalized_name(name)
+        for name in list(manifest.get("approved_filenames") or [])
+        if _gt_normalized_name(name)
+    }
+    verified_empty = {
+        _gt_normalized_name(name)
+        for name in list(manifest.get(GT_VERIFIED_EMPTY_FIELD) or [])
+        if _gt_normalized_name(name)
+    }
+
+    nodes = {}
+    if canonical.is_file():
+        root = ET.parse(canonical).getroot()
+        for node in root.findall("image"):
+            key = _gt_normalized_name(node.get("name", ""))
+            if key:
+                nodes[key] = node
+
+    positive_ready = []
+    negative_ready = []
+    pending = []
+    stale_negative = []
+
+    for member in members:
+        original_name = str(member.get("original_name") or "")
+        key = _gt_normalized_name(original_name)
+        node = nodes.get(key)
+        has_plate = bool(
+            node is not None and node.findall("polygon")
+        )
+        if has_plate and key in approved:
+            positive_ready.append(original_name)
+        elif (
+            (not has_plate)
+            and key in verified_empty
+            and node is not None
+        ):
+            negative_ready.append(original_name)
+        else:
+            pending.append(original_name)
+        if key in verified_empty and has_plate:
+            stale_negative.append(original_name)
+
+    ready_count = len(positive_ready) + len(negative_ready)
+    return {
+        "track_id": track_id,
+        "total": len(members),
+        "ready": ready_count,
+        "positive_ready": len(positive_ready),
+        "negative_ready": len(negative_ready),
+        "pending": len(pending),
+        "pending_names": pending,
+        "positive_names": positive_ready,
+        "negative_names": negative_ready,
+        "stale_negative_names": stale_negative,
+        "complete": bool(
+            len(members) > 0 and ready_count == len(members)
+        ),
+    }
+
 def prepare_gt_workspace(service, track_id, *, mode="manual", progress=None):
     from .track_service import EvaluationTrackError
     from .participant_pool_audit import ParticipantPoolAuditService
@@ -95,6 +174,15 @@ def prepare_gt_workspace(service, track_id, *, mode="manual", progress=None):
         tree.write(temporary, encoding="utf-8", xml_declaration=True)
         temporary.replace(xml)
 
+    verified_empty_current = {
+        _gt_normalized_name(name)
+        for name in list(manifest.get(GT_VERIFIED_EMPTY_FIELD) or [])
+        if _gt_normalized_name(name)
+    }
+    verified_empty_current &= {
+        _gt_normalized_name(name) for name in current_shas
+    }
+
     now = datetime.now(timezone.utc).isoformat()
     manifest.update(
         annotation_run_type=manifest.get("annotation_run_type", "manual_template"),
@@ -104,6 +192,7 @@ def prepare_gt_workspace(service, track_id, *, mode="manual", progress=None):
         experiment_bound=True, evaluation_track_id=track_id,
         training_dataset_export_allowed=False,
         experiment_member_sha256=current_shas,
+        gt_verified_empty_filenames=sorted(verified_empty_current),
     )
     save_json_atomic(manifest_path, manifest)
     context = activate_z2_experiment_context(service.workspace, track)
@@ -142,6 +231,19 @@ def merge_preannotation_working_copy(service, track_id, prediction_xml):
     names = [Path(node.get("name", "")).name for node in predicted]
     if len(names) != len(set(names)) or set(names) - set(existing):
         raise EvaluationTrackError("Wynik AUTO zawiera obrazy spoza przygotowanego GT lub duplikaty.")
+    predicted_with_plates = {
+        _gt_normalized_name(name)
+        for name, node in zip(names, predicted)
+        if node.findall("polygon")
+    }
+    verified_empty = {
+        _gt_normalized_name(name)
+        for name in list(manifest.get(GT_VERIFIED_EMPTY_FIELD) or [])
+        if _gt_normalized_name(name)
+    }
+    verified_empty.difference_update(predicted_with_plates)
+    manifest[GT_VERIFIED_EMPTY_FIELD] = sorted(verified_empty)
+
     for name, node in zip(names, predicted):
         previous = existing[name]
         index = list(root).index(previous)
@@ -181,6 +283,19 @@ def publish_working_gt(service, track_id, xml_path):
         )
     if names != {row["original_name"] for row in members}:
         raise EvaluationTrackError("Roboczy XML nie odpowiada bieżącej puli obrazów.")
+
+    # GT_REVIEW_GATE: membership próby jest stały; kompletność review nie.
+    review = get_gt_review_state(service, track_id, xml)
+    if not review["complete"]:
+        preview = ", ".join(review["pending_names"][:5])
+        if len(review["pending_names"]) > 5:
+            preview += f", … +{len(review['pending_names']) - 5}"
+        raise EvaluationTrackError(
+            "Ground Truth nie jest kompletne: "
+            f"gotowe {review['ready']}/{review['total']}, "
+            f"do sprawdzenia {review['pending']}. "
+            f"{('Przykłady: ' + preview) if preview else ''}"
+        )
     canonical = working_gt_path(service, track_id)
     if xml.resolve() != canonical.resolve():
         canonical.parent.mkdir(parents=True, exist_ok=True)

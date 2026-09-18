@@ -34,6 +34,7 @@ class PZ3ExperimentFlowTests(unittest.TestCase):
         image = tree.getroot().find("image")
         ET.SubElement(image, "polygon", label="plate", points="10,10;80,10;80,40;10,40")
         tree.write(path, encoding="utf-8", xml_declaration=True)
+        self.fixture.mark_gt_review_complete(path)
         return path
 
     def test_required_steps_and_current_after_ingest(self):

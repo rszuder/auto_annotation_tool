@@ -60,6 +60,7 @@ class RawSampleSelectionTests(unittest.TestCase):
         for node in tree.getroot().findall("image"):
             ET.SubElement(node, "polygon", label="plate", points="10,10;80,10;80,40;10,40")
         tree.write(xml, encoding="utf-8", xml_declaration=True)
+        self.f.mark_gt_review_complete(xml)
         publish_working_gt(self.service, self.track, xml)
         return xml
 
