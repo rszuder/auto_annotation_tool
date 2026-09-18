@@ -446,6 +446,7 @@ class EvaluationTracksPanel:
         self.current_track_id = track_id
         self._refresh_selected_details()
 
+
     def _refresh_selected_details(self) -> None:
         track_id = self.current_track_id
         if not track_id:
@@ -454,9 +455,7 @@ class EvaluationTracksPanel:
         try:
             track = self.service.get_track(track_id)
             members = self.service.list_members(track_id)
-            verification = self.service.get_verification(
-                track_id
-            )
+            verification = self.service.get_verification(track_id)
         except Exception as exc:
             self._show_error("Nie udało się odczytać toru", exc)
             return
@@ -476,74 +475,136 @@ class EvaluationTracksPanel:
         except Exception:
             experiment_paths = {}
 
-        lines = [
-            f"Nazwa: {track.get('name') or '-'}",
-            f"ID: {track_id}",
-            f"Wersja: v{int(track.get('version') or 0)}",
-            f"Target: {target_label(track.get('target'))}",
-            f"Cel: {purpose_label(track.get('purpose'))}",
-            f"Zakres: {track.get('scope') or '-'}",
-            f"Status: {status_label(track.get('status'))}",
-            f"Integralność: {integrity}",
-            f"Obrazy: {int(track.get('member_count') or 0)}",
-            (
-                "Modele uczestniczące: "
-                + ", ".join(
-                    item.model_id
-                    for item in self.participant_audit.load_participants(track_id)
-                )
-                or "Modele uczestniczące: -"
-            ),
-            f"Obiekty GT: {int(track.get('object_count') or 0)}",
-            f"GT: {track.get('gt_format') or '-'}",
-            f"Kompletność GT (ręczna): {'TAK' if bool(verification.get('manual_gt_complete')) else 'NIE'}",
-            f"Potwierdzenie GT: {verification.get('manual_gt_attested_at') or '-'}",
-            (
-                "Niezależne pozyskanie: "
-                + (
-                    "TAK"
-                    if independent_acquisition_attested(
-                        verification
-                    )
-                    else "NIE"
-                )
-            ),
-            f"Pula niezależna: {verification.get('acquisition_source_pool') or '-'}",
-            (
-                "Potwierdzenie niezależności: "
-                f"{verification.get('independent_acquisition_attested_at') or '-'}"
-            ),
-            f"Manifest: {_short_hash(track.get('manifest_sha256'))}",
-            f"Seal: {_short_hash(track.get('seal_sha256'))}",
-            f"Rezerwacja: {track.get('reservation_policy') or 'none'}",
-            f"Źródła eksperymentu: {experiment_paths.get('source_images') or '-'}",
-            f"Runy anotacji: {experiment_paths.get('annotation_runs') or '-'}",
-            f"Ścieżka toru: {track.get('relative_path') or '-'}",
-        ]
-        if track.get("parent_track_id"):
-            lines.append(f"Poprzednia wersja: {track.get('parent_track_id')}")
-
+        participants = self.participant_audit.load_participants(track_id)
         audit_state = self.participant_audit.get_track_audit_state(track_id)
         sample_summary = sample_review_summary(self.service, track_id, members)
+
+        identity_rows = [
+            ("Nazwa", track.get("name") or "-"),
+            ("ID toru", track_id),
+            ("Wersja", f"v{int(track.get('version') or 0)}"),
+            ("Typ obiektów", target_label(track.get("target"))),
+            ("Przeznaczenie", purpose_label(track.get("purpose"))),
+            ("Zakres", track.get("scope") or "-"),
+            ("Status", status_label(track.get("status"))),
+            ("Obrazy", int(track.get("member_count") or 0)),
+            (
+                "Modele uczestniczące",
+                ", ".join(item.model_id for item in participants) or "-",
+            ),
+        ]
+        if track.get("parent_track_id"):
+            identity_rows.append(
+                ("Poprzednia wersja", track.get("parent_track_id"))
+            )
+
+        sections = [
+            ("Tożsamość toru", identity_rows),
+            (
+                "Ground Truth",
+                [
+                    ("Format GT", track.get("gt_format") or "-"),
+                    ("Obiekty GT", int(track.get("object_count") or 0)),
+                    (
+                        "Kompletność ręczna",
+                        "TAK" if verification.get("manual_gt_complete") else "NIE",
+                    ),
+                    (
+                        "Potwierdzenie GT",
+                        verification.get("manual_gt_attested_at") or "-",
+                    ),
+                ],
+            ),
+        ]
+
         if sample_summary["status"] == "WORKING":
-            lines += [
-                "",
-                f"Próba robocza: {sample_summary['selected_count']} / {sample_summary['candidate_count']}",
-                f"Etykiety próbki: {sample_summary['label_count']} · opisane: {sample_summary['assigned_count']} · bez etykiety: {sample_summary['unlabeled_count']}",
+            sample_rows = [
+                (
+                    "Próba robocza",
+                    f"{sample_summary['selected_count']} / "
+                    f"{sample_summary['candidate_count']}",
+                ),
+                ("Liczba etykiet", sample_summary["label_count"]),
+                ("Opisane", sample_summary["assigned_count"]),
+                ("Bez etykiety", sample_summary["unlabeled_count"]),
             ]
             if sample_summary["labels"]:
-                lines.append(
-                    "Rozkład etykiet: "
-                    + ", ".join(f"{row['name']}: {row['count']}" for row in sample_summary["labels"])
+                sample_rows.append(
+                    (
+                        "Rozkład etykiet",
+                        ", ".join(
+                            f"{row['name']}: {row['count']}"
+                            for row in sample_summary["labels"]
+                        ),
+                    )
                 )
+            sections.append(("Próba", sample_rows))
         elif sample_summary["status"] == "FINALIZED":
-            lines += [
-                "",
-                f"Finalna próba: {sample_summary['selected_count']}",
-                f"Etykiety próbki: {sample_summary['label_count']} · opisane: {sample_summary['assigned_count']} · bez etykiety: {sample_summary['unlabeled_count']}",
+            sections.append(
+                (
+                    "Próba",
+                    [
+                        ("Finalna próba", sample_summary["selected_count"]),
+                        ("Liczba etykiet", sample_summary["label_count"]),
+                        ("Opisane", sample_summary["assigned_count"]),
+                        ("Bez etykiety", sample_summary["unlabeled_count"]),
+                    ],
+                )
+            )
+
+        sections.extend(
+            [
+                (
+                    "Niezależność i audyt",
+                    [
+                        ("Integralność", integrity),
+                        (
+                            "Niezależne pozyskanie",
+                            "TAK"
+                            if independent_acquisition_attested(verification)
+                            else "NIE",
+                        ),
+                        (
+                            "Pula niezależna",
+                            verification.get("acquisition_source_pool") or "-",
+                        ),
+                        (
+                            "Potwierdzenie niezależności",
+                            verification.get(
+                                "independent_acquisition_attested_at"
+                            )
+                            or "-",
+                        ),
+                        ("Stan audytu", format_audit_state(audit_state)),
+                    ],
+                ),
+                (
+                    "Pliki i integralność",
+                    [
+                        ("Manifest", _short_hash(track.get("manifest_sha256"))),
+                        ("Seal", _short_hash(track.get("seal_sha256"))),
+                        (
+                            "Polityka rezerwacji",
+                            track.get("reservation_policy") or "none",
+                        ),
+                        (
+                            "Źródła eksperymentu",
+                            experiment_paths.get("source_images") or "-",
+                        ),
+                        (
+                            "Runy anotacji",
+                            experiment_paths.get("annotation_runs") or "-",
+                        ),
+                        (
+                            "Ścieżka toru",
+                            track.get("relative_path") or "-",
+                        ),
+                    ],
+                ),
             ]
-        lines += ["", format_audit_state(audit_state)]
-        self._set_detail_text("\n".join(lines))
+        )
+        self._set_detail_sections(sections)
+
         self._current_readiness = self.service.get_preparation_state(track_id)
         finalized = has_selected_sample(self.workspace, track, members)
         self._workflow_view = build_pz3_workflow_view_state(
@@ -554,11 +615,15 @@ class EvaluationTracksPanel:
         )
         if getattr(self, "_layout", None) is not None:
             self._layout.set_track(
-                track, member_count=len(members), audit_state=audit_state,
-                readiness=self._current_readiness, workflow=self._workflow_view,
-                participant_count=len(self.participant_audit.load_participants(track_id)),
+                track,
+                member_count=len(members),
+                audit_state=audit_state,
+                readiness=self._current_readiness,
+                workflow=self._workflow_view,
+                participant_count=len(participants),
                 sample_summary=sample_summary,
             )
+
         for iid in self.member_tree.get_children():
             self.member_tree.delete(iid)
         for row in members:
@@ -573,10 +638,7 @@ class EvaluationTracksPanel:
                 ),
             )
 
-        self._apply_action_state(
-            track,
-            member_count=len(members),
-        )
+        self._apply_action_state(track, member_count=len(members))
         self._set_status(self._workflow_view.status_text)
 
     def _clear_selected_details(self) -> None:
@@ -1873,12 +1935,47 @@ class EvaluationTracksPanel:
             )
         return "Nieznany stan toru."
 
+
     def _set_detail_text(self, text: str) -> None:
+        detail = getattr(self, "detail_text", None)
+        if detail is None:
+            return
         try:
-            self.detail_text.configure(state=tk.NORMAL)
-            self.detail_text.delete("1.0", tk.END)
-            self.detail_text.insert("1.0", text)
-            self.detail_text.configure(state=tk.DISABLED)
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            detail.insert("1.0", str(text or ""), ("detail_value",))
+            detail.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def _set_detail_sections(self, sections) -> None:
+        detail = getattr(self, "detail_text", None)
+        if detail is None:
+            return
+        try:
+            detail.configure(state=tk.NORMAL)
+            detail.delete("1.0", tk.END)
+            for section_index, (title, rows) in enumerate(sections or ()):
+                if section_index:
+                    detail.insert(tk.END, "\n")
+                detail.insert(
+                    tk.END,
+                    f"  {title}  \n",
+                    ("detail_section",),
+                )
+                for key, value in rows:
+                    detail.insert(
+                        tk.END,
+                        f"{str(key)}\t",
+                        ("detail_key",),
+                    )
+                    detail.insert(
+                        tk.END,
+                        f"{str(value if value not in (None, '') else '-')}\n",
+                        ("detail_value",),
+                    )
+            detail.configure(state=tk.DISABLED)
+            detail.yview_moveto(0.0)
         except Exception:
             pass
 

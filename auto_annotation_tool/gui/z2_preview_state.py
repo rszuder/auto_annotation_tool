@@ -243,6 +243,7 @@ def _is_plate_detection_label(label) -> bool:
     return str(label or "").strip().lower() in CONFIG.PLATE_LABELS
 
 
+
 def _preview_list_item_text(
     self,
     ann,
@@ -254,36 +255,114 @@ def _preview_list_item_text(
     from .pz3_sample_route import sample_context
     if sample_context(self):
         from .pz3_sample_route import sample_list_text
-        return sample_list_text(self, ann, display_index)
-    cached_state = self._get_preview_list_render_state(ann)
+        return sample_list_text(
+            self,
+            ann,
+            display_index,
+        )
+
+    gt_negative = False
+    try:
+        from .pz3_gt_route import (
+            is_current_gt_verified_empty,
+        )
+        gt_negative = bool(
+            is_current_gt_verified_empty(
+                self,
+                ann,
+            )
+        )
+    except Exception:
+        gt_negative = False
+
+    cached_state = self._get_preview_list_render_state(
+        ann
+    )
     status_text = (
-        str(cached_state.get("status_text", "") or "")
-        if cached_state is not None
-        else ""
+        "BRAK TABLICY"
+        if gt_negative
+        else (
+            str(
+                cached_state.get(
+                    "status_text",
+                    "",
+                )
+                or ""
+            )
+            if cached_state is not None
+            else ""
+        )
     )
     if not status_text:
-        status_text = self._preview_annotation_status_tag(ann)
+        status_text = (
+            self._preview_annotation_status_tag(ann)
+        )
+
     if display_index is None:
         order_text = "--."
     else:
-        width = max(2, len(str(max(1, int(total_count or (display_index + 1))))))
-        order_text = f"{int(display_index) + 1:0{width}d}."
+        width = max(
+            2,
+            len(
+                str(
+                    max(
+                        1,
+                        int(
+                            total_count
+                            or (display_index + 1)
+                        ),
+                    )
+                )
+            ),
+        )
+        order_text = (
+            f"{int(display_index) + 1:0{width}d}."
+        )
+
     reused = (
         bool(cached_state.get("reused"))
         if cached_state is not None
-        else self._preview_annotation_is_reused_from_previous_manual(ann)
+        else self._preview_annotation_is_reused_from_previous_manual(
+            ann
+        )
     )
-    reuse_prefix = f"{self._campaign_reuse_manual_badge()} " if reused else ""
+    reuse_prefix = (
+        f"{self._campaign_reuse_manual_badge()} "
+        if reused
+        else ""
+    )
     if lightweight:
-        return f"{order_text} [{status_text}] {reuse_prefix}{ann.filename}"
-    quality = self._get_preview_annotation_quality_summary(ann)
+        return (
+            f"{order_text} [{status_text}] "
+            f"{reuse_prefix}{ann.filename}"
+        )
+
+    quality = (
+        self._get_preview_annotation_quality_summary(
+            ann
+        )
+    )
     metrics_prefix = ""
-    if int(quality.get("plate_count", 0) or 0) > 0:
-        metric_parts = [f"D{float(quality.get('min_confidence', 0.0) or 0.0):.2f}"]
-        if int(quality.get("fit_count", 0) or 0) > 0:
-            metric_parts.append(f"F{float(quality.get('min_fit_score', 0.0) or 0.0):.2f}")
-        metrics_prefix = f"{' '.join(metric_parts)} | "
-    return f"{order_text} [{status_text}] {reuse_prefix}{metrics_prefix}{ann.filename}"
+    if int(
+        quality.get("plate_count", 0) or 0
+    ) > 0:
+        metric_parts = [
+            f"D{float(quality.get('min_confidence', 0.0) or 0.0):.2f}"
+        ]
+        if int(
+            quality.get("fit_count", 0) or 0
+        ) > 0:
+            metric_parts.append(
+                f"F{float(quality.get('min_fit_score', 0.0) or 0.0):.2f}"
+            )
+        metrics_prefix = (
+            f"{' '.join(metric_parts)} | "
+        )
+
+    return (
+        f"{order_text} [{status_text}] "
+        f"{reuse_prefix}{metrics_prefix}{ann.filename}"
+    )
 
 
 def _preview_annotation_is_reused_from_previous_manual(self, ann) -> bool:
@@ -1319,21 +1398,67 @@ def _preview_list_color_for_bucket(self, bucket: str) -> str:
     return palette.get("error", "#c0392b")
 
 
-def _preview_list_effective_color_bucket(self, ann) -> str:
+
+def _preview_list_effective_color_bucket(
+    self,
+    ann,
+) -> str:
     from .pz3_sample_route import sample_context
     if sample_context(self):
         return "raw"
-    cached_state = self._get_preview_list_render_state(ann)
+
+    try:
+        from .pz3_gt_route import (
+            is_current_gt_verified_empty,
+        )
+        if is_current_gt_verified_empty(
+            self,
+            ann,
+        ):
+            return "approved"
+    except Exception:
+        pass
+
+    cached_state = (
+        self._get_preview_list_render_state(ann)
+    )
     if isinstance(cached_state, dict):
         if bool(cached_state.get("reused")):
             return "reused"
-        bucket = str(cached_state.get("bucket", "") or "").strip().lower()
-        return bucket if bucket in {"approved", "manual", "auto", "problem"} else "problem"
+        bucket = str(
+            cached_state.get("bucket", "") or ""
+        ).strip().lower()
+        return (
+            bucket
+            if bucket
+            in {
+                "approved",
+                "manual",
+                "auto",
+                "problem",
+            }
+            else "problem"
+        )
 
-    if self._preview_annotation_is_reused_from_previous_manual(ann):
+    if self._preview_annotation_is_reused_from_previous_manual(
+        ann
+    ):
         return "reused"
-    bucket = self._preview_annotation_sort_bucket(ann)
-    return bucket if bucket in {"approved", "manual", "auto", "problem"} else "problem"
+
+    bucket = self._preview_annotation_sort_bucket(
+        ann
+    )
+    return (
+        bucket
+        if bucket
+        in {
+            "approved",
+            "manual",
+            "auto",
+            "problem",
+        }
+        else "problem"
+    )
 
 
 def _preview_list_color_plan(self, entries: list[tuple[int, ImageAnnotation]]) -> tuple[str, str]:
@@ -1351,16 +1476,43 @@ def _preview_list_color_plan(self, entries: list[tuple[int, ImageAnnotation]]) -
     return dominant_bucket, _preview_list_color_for_bucket(self, dominant_bucket)
 
 
-def _preview_annotation_sort_bucket(self, ann) -> str:
-    cached_state = self._get_preview_list_render_state(ann)
-    if cached_state is not None:
-        return str(cached_state.get("bucket", "") or "problem")
 
-    if self._preview_annotation_is_explicitly_approved(ann):
+def _preview_annotation_sort_bucket(
+    self,
+    ann,
+) -> str:
+    try:
+        from .pz3_gt_route import (
+            is_current_gt_verified_empty,
+        )
+        if is_current_gt_verified_empty(
+            self,
+            ann,
+        ):
+            return "approved"
+    except Exception:
+        pass
+
+    cached_state = (
+        self._get_preview_list_render_state(ann)
+    )
+    if cached_state is not None:
+        return str(
+            cached_state.get("bucket", "")
+            or "problem"
+        )
+
+    if self._preview_annotation_is_explicitly_approved(
+        ann
+    ):
         return "approved"
-    if self._preview_annotation_is_manually_corrected(ann):
+    if self._preview_annotation_is_manually_corrected(
+        ann
+    ):
         return "manual"
-    if self._preview_annotation_has_auto_plate(ann):
+    if self._preview_annotation_has_auto_plate(
+        ann
+    ):
         return "auto"
     return "problem"
 
@@ -1899,6 +2051,7 @@ def _get_preview_focus_target(self) -> dict | None:
     return target
 
 
+
 def _mark_preview_image_dirty(
     self,
     ann,
@@ -1908,17 +2061,47 @@ def _mark_preview_image_dirty(
 ):
     if ann is None:
         return
+
+    try:
+        from .pz3_gt_route import (
+            sync_gt_empty_after_geometry_change,
+            refresh_experiment_gt_ui,
+        )
+        changed_negative = (
+            sync_gt_empty_after_geometry_change(
+                self,
+                ann,
+            )
+        )
+        if changed_negative:
+            refresh_experiment_gt_ui(self)
+    except Exception:
+        pass
+
     if invalidate_runtime:
         self._invalidate_preview_runtime_caches()
-    was_dirty = ann.filename in self._preview_dirty_images
+    was_dirty = (
+        ann.filename in self._preview_dirty_images
+    )
     self._preview_dirty_images.add(ann.filename)
+
     if refresh_list and not was_dirty:
-        self._refresh_preview_list(preserve_selection=True, render_current=False)
+        self._refresh_preview_list(
+            preserve_selection=True,
+            render_current=False,
+        )
     elif not was_dirty and refresh_row:
-        self._refresh_preview_list_row_for_actual_index(self.current_preview_index, refresh_summary=False)
-        self._update_preview_toolbar_state(refresh_summary=False)
+        self._refresh_preview_list_row_for_actual_index(
+            self.current_preview_index,
+            refresh_summary=False,
+        )
+        self._update_preview_toolbar_state(
+            refresh_summary=False
+        )
     elif not was_dirty:
-        self._update_preview_toolbar_state(refresh_summary=False)
+        self._update_preview_toolbar_state(
+            refresh_summary=False
+        )
 
 
 def _get_preview_history_image_key(self, ann=None) -> str:
