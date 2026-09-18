@@ -41,6 +41,10 @@ class RankingExperimentContext:
     track_reference_sha256: str
     independence_confirmed: bool
     participants: tuple[RankingExperimentParticipant, ...]
+    benchmark_id: str = ""
+    benchmark_fingerprint: str = ""
+    benchmark_subset_fingerprint: str = ""
+    benchmark_reuse: bool = False
 
     def participant_for_sha256(
         self,
@@ -99,16 +103,26 @@ class RankingExperimentBridge:
         mode: str = MODE_CONTROLLED,
         protocol_options: Mapping[str, Any] | None = None,
     ) -> RankingExperimentContext | None:
-        track = self._resolve_registered_track(
-            reference_path,
-            target=target,
+        resolved_protocol_options = dict(protocol_options or {})
+        benchmark_source_track_id = str(
+            resolved_protocol_options.get("benchmark_source_track_id") or ""
+        ).strip()
+        benchmark_reuse = bool(
+            resolved_protocol_options.get("benchmark_reuse")
         )
-        if track is None:
-            return None
-
-        resolved_protocol_options = dict(
-            protocol_options or {}
-        )
+        if benchmark_source_track_id:
+            track = dict(self.track_service.get_track(benchmark_source_track_id))
+            if _normalize_target(track.get("target")) != _normalize_target(target):
+                raise ExperimentGuardError(
+                    "Benchmark pochodzi z toru o innym target."
+                )
+        else:
+            track = self._resolve_registered_track(
+                reference_path,
+                target=target,
+            )
+            if track is None:
+                return None
         if (
             _normalize_target(target) == "plate"
             and str(mode or "").strip().lower() == MODE_CONTROLLED
@@ -128,7 +142,7 @@ class RankingExperimentBridge:
             import json
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             contract = manifest.get("experiment_contract")
-            if contract and contract.get("participants"):
+            if contract and contract.get("participants") and not benchmark_reuse:
                 frozen = {item["model_id"]: item["sha256"] for item in contract.get("participants", [])}
                 selected = {item.model_id: item.model_sha256 for item in participants}
                 if selected != frozen:
@@ -187,6 +201,10 @@ class RankingExperimentBridge:
             track_reference_sha256=plan.track_reference_sha256,
             independence_confirmed=plan.independence_confirmed,
             participants=frozen_participants,
+            benchmark_id=str(resolved_protocol_options.get("benchmark_id") or ""),
+            benchmark_fingerprint=str(resolved_protocol_options.get("benchmark_fingerprint") or ""),
+            benchmark_subset_fingerprint=str(resolved_protocol_options.get("benchmark_subset_fingerprint") or ""),
+            benchmark_reuse=benchmark_reuse,
         )
 
     def entry_metadata(
@@ -207,6 +225,9 @@ class RankingExperimentBridge:
             "protocol_sha256": context.protocol_sha256,
             "track_manifest_sha256": context.track_manifest_sha256,
             "independence_status": participant.independence_status,
+            "benchmark_id": context.benchmark_id,
+            "benchmark_fingerprint": context.benchmark_fingerprint,
+            "benchmark_subset_fingerprint": context.benchmark_subset_fingerprint,
         }
 
     def record_result(

@@ -40,6 +40,15 @@ from .reservation_service import (
     check_training_dataset_reservations,
 )
 from .schema import SCHEMA_VERSION
+from .evaluation_benchmark import (
+    BENCHMARK_SCHEMA,
+    benchmark_groups,
+    ensure_benchmark_for_track,
+    load_benchmark,
+    materialize_benchmark_subset,
+    resolve_benchmark_subset,
+    verify_benchmark,
+)
 from .track_service import (
     ControlledTrackReference,
     EvaluationTrackError,
@@ -48,6 +57,13 @@ from .track_service import (
 )
 
 __all__ = [
+    "BENCHMARK_SCHEMA",
+    "benchmark_groups",
+    "ensure_benchmark_for_track",
+    "load_benchmark",
+    "materialize_benchmark_subset",
+    "resolve_benchmark_subset",
+    "verify_benchmark",
     "RegistryDatabase",
     "RegistryRepository",
     "DatasetBundleWriteSummary",

@@ -49,17 +49,16 @@ class AnnotationComparator:
         self.diffs: List[AnnotationDiff] = []
         self._parse_cache: Dict[tuple[str, int, int], Dict[str, List[Tuple]]] = {}
     
-    def compare(self,
-                auto_xml_path: Path,
-                corrected_xml_path: Path) -> Dict:
-        """
-        Porównuje dwa pliki CVAT XML.
-        
-        Returns:
-            Statystyki porównania
-        """
+    def compare(
+        self,
+        auto_xml_path: Path,
+        corrected_xml_path: Path,
+        *,
+        image_names: set[str] | None = None,
+    ) -> Dict:
+        """Porównuje dwa pliki CVAT XML, opcjonalnie tylko dla wskazanych obrazów."""
         self.diffs = []
-        
+
         stats = {
             "total_images": 0,
             "total_auto_plates": 0,
@@ -71,24 +70,31 @@ class AnnotationComparator:
             "plates_removed": 0,
             "accuracy": 0.0,
             "precision": 0.0,
-            "recall": 0.0
+            "recall": 0.0,
+            "f1": 0.0,
         }
-        
-        # Parsuj
+
         auto_data = self._parse_cvat(auto_xml_path)
         corr_data = self._parse_cvat(corrected_xml_path)
-        
-        # Porównaj
+
         all_images = set(auto_data.keys()) | set(corr_data.keys())
+        if image_names is not None:
+            allowed = {
+                Path(str(name or "")).name
+                for name in image_names
+                if str(name or "").strip()
+            }
+            all_images = {
+                name for name in all_images
+                if Path(str(name or "")).name in allowed
+            }
         stats["total_images"] = len(all_images)
-        
+
         for img_name in all_images:
             auto = auto_data.get(img_name, [])
             corr = corr_data.get(img_name, [])
-            
             diff = self._compare_image(img_name, auto, corr)
             self.diffs.append(diff)
-            
             stats["total_auto_plates"] += diff.auto_plates
             stats["total_corrected_plates"] += diff.corrected_plates
             stats["plates_unchanged"] += diff.plates_unchanged
@@ -96,22 +102,23 @@ class AnnotationComparator:
             stats["plates_major_fix"] += diff.plates_major_fix
             stats["plates_added"] += diff.plates_added
             stats["plates_removed"] += diff.plates_removed
-        
-        # Oblicz metryki
+
         total_good = stats["plates_unchanged"] + stats["plates_minor_fix"]
         total_detected = stats["total_auto_plates"]
         total_real = stats["total_corrected_plates"]
-        
+
         if total_detected > 0:
             stats["precision"] = ((total_detected - stats["plates_removed"]) / total_detected) * 100
-        
         if total_real > 0:
             stats["recall"] = ((total_real - stats["plates_added"]) / total_real) * 100
             stats["accuracy"] = (total_good / total_real) * 100
-        
+
+        p = float(stats["precision"])
+        r = float(stats["recall"])
+        stats["f1"] = (2.0 * p * r / (p + r)) if (p + r) > 0 else 0.0
         logger.info(f"Porównano {len(all_images)} obrazów")
-        
         return stats
+
     
     def _parse_cvat(self, xml_path: Path) -> Dict[str, List[Tuple]]:
         """Parsuje CVAT XML → {image: [bbox, ...]}"""

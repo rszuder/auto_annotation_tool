@@ -598,6 +598,151 @@ def _get_preview_approved_filenames_base(self) -> set[str]:
     return approved
 
 
+PLATE_FRAME_APPROVAL_ATTR = "z2_frame_approved"
+
+
+def _preview_plate_frame_explicit_approval(det):
+    attributes = dict(getattr(det, "attributes", {}) or {})
+    raw = attributes.get(PLATE_FRAME_APPROVAL_ATTR)
+    if raw is None:
+        return None
+    value = str(raw or "").strip().lower()
+    if value in {"1", "true", "yes", "ok", "approved"}:
+        return True
+    if value in {"0", "false", "no", "nok", "rejected"}:
+        return False
+    return None
+
+
+def _preview_annotation_legacy_image_approved(self, ann, approved_names=None):
+    filename = str(getattr(ann, "filename", "") or "").strip().lower()
+    if not filename:
+        return False
+    try:
+        if bool(getattr(ann, "_approved_for_training", False)):
+            return True
+    except Exception:
+        pass
+    if approved_names is None:
+        approved_names = self._get_preview_approved_filenames_base()
+    return filename in set(approved_names or set())
+
+
+def _preview_plate_frame_is_approved(self, ann, det, approved_names=None):
+    explicit = _preview_plate_frame_explicit_approval(det)
+    if explicit is not None:
+        return bool(explicit)
+    return _preview_annotation_legacy_image_approved(
+        self, ann, approved_names=approved_names
+    )
+
+
+def _preview_annotation_plate_approval_summary(self, ann, approved_names=None):
+    try:
+        plates = list(self._get_plate_detections(ann) or [])
+    except Exception:
+        plates = []
+    legacy = _preview_annotation_legacy_image_approved(
+        self, ann, approved_names=approved_names
+    )
+    approved_count = 0
+    explicit_count = 0
+    for det in plates:
+        explicit = _preview_plate_frame_explicit_approval(det)
+        if explicit is not None:
+            explicit_count += 1
+        if bool(explicit) if explicit is not None else legacy:
+            approved_count += 1
+    total = len(plates)
+    return {
+        "total": total,
+        "approved": approved_count,
+        "pending": max(0, total - approved_count),
+        "explicit": explicit_count,
+        "legacy_image_approved": bool(legacy),
+        "all_approved": bool(total > 0 and approved_count == total),
+    }
+
+
+def _set_preview_plate_frame_approved(self, det, approved):
+    attributes = dict(getattr(det, "attributes", {}) or {})
+    target = "true" if bool(approved) else "false"
+    if str(attributes.get(PLATE_FRAME_APPROVAL_ATTR, "") or "").strip().lower() == target:
+        return False
+    attributes[PLATE_FRAME_APPROVAL_ATTR] = target
+    det.attributes = attributes
+    return True
+
+
+def _set_all_preview_plate_frames_approved(self, ann, approved):
+    changed = 0
+    try:
+        plates = list(self._get_plate_detections(ann) or [])
+    except Exception:
+        plates = []
+    for det in plates:
+        if _set_preview_plate_frame_approved(self, det, approved):
+            changed += 1
+    return changed
+
+
+def _materialize_legacy_plate_frame_approvals(self, ann, approved_names=None):
+    if not _preview_annotation_legacy_image_approved(
+        self, ann, approved_names=approved_names
+    ):
+        return 0
+    changed = 0
+    try:
+        plates = list(self._get_plate_detections(ann) or [])
+    except Exception:
+        plates = []
+    for det in plates:
+        if _preview_plate_frame_explicit_approval(det) is None:
+            if _set_preview_plate_frame_approved(self, det, True):
+                changed += 1
+    return changed
+
+
+def _reconcile_preview_approved_runtime_from_frames(self):
+    annotations = list(getattr(self, "current_annotations", []) or [])
+    legacy_names = set(self._get_preview_approved_filenames_base() or set())
+    derived = set()
+    for ann in annotations:
+        filename = str(getattr(ann, "filename", "") or "").strip().lower()
+        if not filename:
+            continue
+        if _preview_annotation_is_explicitly_approved(
+            self, ann, approved_names=legacy_names
+        ):
+            derived.add(filename)
+
+    before = {
+        str(name or "").strip().lower()
+        for name in set(getattr(self, "_preview_approved_filenames", set()) or set())
+        if str(name or "").strip()
+    }
+    self._preview_approved_filenames = set(derived)
+    if not self._is_free_mode_session_context():
+        self._campaign_pending_approved_filenames = set(derived)
+
+    for ann in annotations:
+        filename = str(getattr(ann, "filename", "") or "").strip().lower()
+        try:
+            setattr(ann, "_approved_for_training", bool(filename and filename in derived))
+        except Exception:
+            pass
+
+    if before != derived:
+        self._preview_approval_version = int(
+            getattr(self, "_preview_approval_version", 0) or 0
+        ) + 1
+    try:
+        self._invalidate_preview_runtime_caches()
+    except Exception:
+        pass
+    return set(derived)
+
+
 def _preview_annotation_can_be_approved_for_export(self, ann) -> bool:
     try:
         return len(self._get_plate_detections(ann)) > 0
@@ -606,30 +751,21 @@ def _preview_annotation_can_be_approved_for_export(self, ann) -> bool:
 
 
 def _get_preview_approved_filenames(self) -> set[str]:
-    approved = self._get_preview_approved_filenames_base()
-    hidden_project_approved = _get_campaign_hidden_project_approved_filenames_runtime(self)
+    legacy_names = set(self._get_preview_approved_filenames_base() or set())
     annotations = list(getattr(self, "current_annotations", []) or [])
-    if annotations:
-        exportable_names = {
-            str(getattr(ann, "filename", "") or "").strip().lower()
-            for ann in annotations
-            if self._preview_annotation_can_be_approved_for_export(ann)
-            and str(getattr(ann, "filename", "") or "").strip()
-        }
-        approved = {name for name in approved if name in exportable_names}
-
+    if not annotations:
+        return legacy_names
+    approved = set()
     for ann in annotations:
-        try:
-            if (
-                bool(getattr(ann, "_approved_for_training", False))
-                and self._preview_annotation_can_be_approved_for_export(ann)
-            ):
-                safe_name = str(getattr(ann, "filename", "") or "").strip().lower()
-                if safe_name and safe_name not in hidden_project_approved:
-                    approved.add(safe_name)
-        except Exception:
+        filename = str(getattr(ann, "filename", "") or "").strip().lower()
+        if not filename:
             continue
+        if self._preview_annotation_is_explicitly_approved(
+            ann, approved_names=legacy_names
+        ):
+            approved.add(filename)
     return approved
+
 
 
 def _sync_preview_approval_flags_from_current_sets(
@@ -641,15 +777,13 @@ def _sync_preview_approval_flags_from_current_sets(
     annotations = list(getattr(self, "current_annotations", []) or [])
     if not annotations:
         return False
-
-    approved_names = set(self._get_preview_approved_filenames_base() or set())
+    legacy_names = set(self._get_preview_approved_filenames_base() or set())
     changed = False
     for ann in annotations:
-        filename = str(getattr(ann, "filename", "") or "").strip().lower()
         approved = bool(
-            filename
-            and filename in approved_names
-            and self._preview_annotation_can_be_approved_for_export(ann)
+            self._preview_annotation_is_explicitly_approved(
+                ann, approved_names=legacy_names
+            )
         )
         try:
             if bool(getattr(ann, "_approved_for_training", False)) != approved:
@@ -657,10 +791,11 @@ def _sync_preview_approval_flags_from_current_sets(
                 changed = True
         except Exception:
             continue
-
     if refresh_list:
         try:
-            self._refresh_preview_list(preserve_selection=True, render_current=render_current)
+            self._refresh_preview_list(
+                preserve_selection=True, render_current=render_current
+            )
         except Exception:
             pass
         try:
@@ -671,8 +806,8 @@ def _sync_preview_approval_flags_from_current_sets(
             self._refresh_step2_action_states()
         except Exception:
             pass
-
     return changed
+
 
 
 def _filter_campaign_project_approved_annotations(
@@ -845,7 +980,9 @@ def _persist_preview_approved_filenames(self) -> bool:
         return False
 
 
-def _preview_annotation_is_explicitly_approved(self, ann, approved_names: set[str] | None = None) -> bool:
+def _preview_annotation_is_explicitly_approved(
+    self, ann, approved_names=None
+) -> bool:
     if not self._preview_annotation_can_be_approved_for_export(ann):
         return False
     filename = str(getattr(ann, "filename", "") or "").strip().lower()
@@ -853,14 +990,11 @@ def _preview_annotation_is_explicitly_approved(self, ann, approved_names: set[st
         return False
     if filename in _get_campaign_hidden_project_approved_filenames_runtime(self):
         return False
-    try:
-        if bool(getattr(ann, "_approved_for_training", False)):
-            return True
-    except Exception:
-        pass
-    if approved_names is None:
-        approved_names = self._get_preview_approved_filenames_base()
-    return filename in approved_names
+    summary = _preview_annotation_plate_approval_summary(
+        self, ann, approved_names=approved_names
+    )
+    return bool(summary.get("all_approved"))
+
 
 
 def _get_campaign_manual_touched_filenames(self) -> set[str]:

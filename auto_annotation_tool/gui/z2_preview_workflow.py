@@ -1016,6 +1016,7 @@ def _apply_preview_approval_fast(
     skipped_without_plate = 0
     approved_images_delta = 0
     approved_plates_delta = 0
+    frame_metadata_changed = 0
     changed_filenames: set[str] = set()
     changed_dirty_filenames: set[str] = set()
     selected_annotations: list[tuple[int, ImageAnnotation]] = []
@@ -1040,12 +1041,15 @@ def _apply_preview_approval_fast(
             continue
         can_export = bool(self._preview_annotation_can_be_approved_for_export(ann))
         was_approved = bool(
-            can_export
-            and (
-                filename in approved_names
-                or bool(getattr(ann, "_approved_for_training", False))
+            self._preview_annotation_is_explicitly_approved(
+                ann, approved_names=approved_names
             )
         )
+        if can_export:
+            changed_frames = self._set_all_preview_plate_frames_approved(ann, bool(approved))
+            if changed_frames:
+                frame_metadata_changed += int(changed_frames)
+                self._preview_dirty_images.add(str(getattr(ann, "filename", "") or ""))
         if approved and not can_export:
             skipped_without_plate += 1
             if was_approved or filename in approved_names:
@@ -1095,6 +1099,21 @@ def _apply_preview_approval_fast(
     self._preview_approved_filenames = set(approved_names)
     if not self._is_free_mode_session_context():
         self._campaign_pending_approved_filenames = set(approved_names)
+
+    if frame_metadata_changed:
+        try:
+            self._invalidate_preview_runtime_caches()
+        except Exception:
+            pass
+        try:
+            self._schedule_preview_autosave(
+                delay_ms=2200,
+                status_message="Zapisano status zatwierdzenia wszystkich ramek do annotations.xml.",
+                refresh_workflow=False,
+                refresh_export_sources=False,
+            )
+        except Exception:
+            pass
 
     approval_state_changed = bool(changed > 0 or cleaned_without_plate > 0)
     if approval_state_changed:
@@ -1211,6 +1230,7 @@ def _apply_preview_approval_fast(
     return True
 
 
+
 def _set_selected_preview_images_approved(
     self,
     approved: bool,
@@ -1306,6 +1326,7 @@ def _set_selected_preview_images_approved(
     approved_plates_delta = 0
     skipped_without_plate = 0
     cleaned_without_plate = 0
+    frame_metadata_changed = 0
     counted_delta_filenames: set[str] = set()
     approved_changed_filenames: set[str] = set()
     unapproved_changed_filenames: set[str] = set()
@@ -1321,7 +1342,13 @@ def _set_selected_preview_images_approved(
             self._preview_annotation_is_explicitly_approved(ann, approved_names=approved_names)
         )
         approval_before_by_filename.setdefault(filename, was_approved_for_counts)
-        if approved and not self._preview_annotation_can_be_approved_for_export(ann):
+        can_export = bool(self._preview_annotation_can_be_approved_for_export(ann))
+        if can_export:
+            changed_frames = self._set_all_preview_plate_frames_approved(ann, bool(approved))
+            if changed_frames:
+                frame_metadata_changed += int(changed_frames)
+                self._preview_dirty_images.add(str(getattr(ann, "filename", "") or ""))
+        if approved and not can_export:
             skipped_without_plate += 1
             if filename in approved_names:
                 approved_names.discard(filename)
@@ -1389,6 +1416,21 @@ def _set_selected_preview_images_approved(
     self._preview_approved_filenames = approved_names
     if not self._is_free_mode_session_context():
         self._campaign_pending_approved_filenames = set(approved_names)
+
+    if frame_metadata_changed:
+        try:
+            self._invalidate_preview_runtime_caches()
+        except Exception:
+            pass
+        try:
+            self._schedule_preview_autosave(
+                delay_ms=2200,
+                status_message="Zapisano status zatwierdzenia wszystkich ramek do annotations.xml.",
+                refresh_workflow=False,
+                refresh_export_sources=False,
+            )
+        except Exception:
+            pass
         self._campaign_auto_manual_overlay_bundle = campaign_overlay_bundle
     if changed > 0 or cleaned_without_plate > 0:
         self._preview_approval_version = int(getattr(self, "_preview_approval_version", 0) or 0) + 1
@@ -1714,6 +1756,7 @@ def _set_selected_preview_images_approved(
             )
         except Exception:
             pass
+
 
 def _rename_selected_preview_image_file(self):
     if not self._ensure_preview_is_editable_for_action():
@@ -3490,7 +3533,7 @@ def _update_preview_edit_status(
         self.preview_edit_status_var.set(
             f"{ann.filename} | tablica {plate_no}/{len(plates)}{dirty_note}. "
             f"Kliknij ramkę, aby ją wybrać. {drag_hint} "
-            f"{nav_hint} A przełącza tablice lokalnie, Spacja zatwierdza lub cofa zatwierdzenie zdjęcia, R kadruje aktywną ramkę, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz do okna podglądu, D uzbraja rysowanie nowej ramki, S uzbraja usuwanie ramki, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
+            f"{nav_hint} A przełącza tablice lokalnie, Spacja zatwierdza lub cofa aktywną ramkę; zdjęcie jest [OK] dopiero po zatwierdzeniu wszystkich ramek, R kadruje aktywną ramkę, R+LPM robi płynny zoom x2 do punktu, R+PPM cofa ten zoom, F dopasowuje cały obraz do okna podglądu, D uzbraja rysowanie nowej ramki, S uzbraja usuwanie ramki, Del usuwa zdjęcie, Ctrl+Z/Ctrl+Y cofają i ponawiają, Ctrl+S zapisuje poprawki, {super_hint} {fullscreen_hint}{vehicle_hint}"
             f"{self._preview_campaign_reuse_manual_note(ann, editable=True)}"
         )
 

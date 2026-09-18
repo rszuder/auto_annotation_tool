@@ -1259,37 +1259,9 @@ def _on_preview_toggle_image_approval_shortcut(self, event=None):
     if ann is None or self.current_preview_index is None:
         self._update_preview_edit_status("Najpierw wybierz zdjęcie do zatwierdzenia.")
         return "break"
-
-    try:
-        actual_index = int(self.current_preview_index)
-    except Exception:
-        self._update_preview_edit_status("Nie udało się ustalić bieżącego zdjęcia.")
-        return "break"
-
-    filename_key = str(getattr(ann, "filename", "") or "").strip().lower()
-    approved_lookup = {
-        str(name or "").strip().lower()
-        for name in set(getattr(self, "_preview_approved_filenames", set()) or set())
-        if str(name or "").strip()
-    }
-    if not self._is_free_mode_session_context():
-        approved_lookup.update(
-            str(name or "").strip().lower()
-            for name in set(getattr(self, "_campaign_pending_approved_filenames", set()) or set())
-            if str(name or "").strip()
-        )
-    currently_approved = bool(
-        filename_key
-        and (
-            bool(getattr(ann, "_approved_for_training", False))
-            or filename_key in approved_lookup
-        )
-        and self._preview_annotation_can_be_approved_for_export(ann)
-    )
-    next_approved = not currently_approved
-    if next_approved and not self._preview_annotation_can_be_approved_for_export(ann):
+    if not self._preview_annotation_can_be_approved_for_export(ann):
         self._update_preview_edit_status(
-            "Nie można zatwierdzić zdjęcia spacją: najpierw dodaj ramkę tablicy."
+            "Nie można zatwierdzić obrazu: najpierw dodaj ramkę tablicy."
         )
         try:
             self._update_preview_canvas_metrics_overlay(force_render=True)
@@ -1297,15 +1269,96 @@ def _on_preview_toggle_image_approval_shortcut(self, event=None):
             pass
         return "break"
 
-    self._set_selected_preview_images_approved(
-        next_approved,
-        actual_indices=[actual_index],
-        show_warning_modal=False,
-        persist_immediately=False,
-        refresh_export_sources=False,
-        schedule_followup_refresh=True,
+    plates = list(self._get_plate_detections(ann) or [])
+    if not plates:
+        self._update_preview_edit_status(
+            "Nie można zatwierdzić obrazu: najpierw dodaj ramkę tablicy."
+        )
+        return "break"
+
+    selected_idx = self._get_selected_plate_index_for_ann(ann)
+    if selected_idx is None:
+        if len(plates) == 1:
+            selected_idx = 0
+        else:
+            self._update_preview_edit_status(
+                "Obraz ma kilka tablic. Kliknij ramkę, którą chcesz zatwierdzić lub cofnąć, a potem naciśnij Spację."
+            )
+            return "break"
+    try:
+        selected_idx = int(selected_idx)
+    except Exception:
+        selected_idx = -1
+    if selected_idx < 0 or selected_idx >= len(plates):
+        self._update_preview_edit_status("Nie udało się ustalić aktywnej ramki tablicy.")
+        return "break"
+
+    approved_lookup = set(self._get_preview_approved_filenames_base() or set())
+    det = plates[selected_idx]
+    currently_approved = bool(
+        self._preview_plate_frame_is_approved(
+            ann, det, approved_names=approved_lookup
+        )
     )
+    next_approved = not currently_approved
+    try:
+        self._push_preview_history_snapshot(ann, lightweight_plate_edit=True)
+    except Exception:
+        pass
+    self._materialize_legacy_plate_frame_approvals(
+        ann, approved_names=approved_lookup
+    )
+    self._set_preview_plate_frame_approved(det, next_approved)
+    self._mark_preview_image_dirty(ann, refresh_list=False, refresh_row=False)
+    derived = self._reconcile_preview_approved_runtime_from_frames()
+    summary = self._preview_annotation_plate_approval_summary(
+        ann, approved_names=derived
+    )
+    try:
+        self._refresh_preview_list_row_for_actual_index(
+            int(self.current_preview_index), refresh_summary=False, lightweight=True
+        )
+    except Exception:
+        pass
+    try:
+        self._update_preview_toolbar_state(refresh_summary=True)
+    except Exception:
+        pass
+    try:
+        self._update_preview_approval_badge_fast(bool(summary.get("all_approved")))
+    except Exception:
+        pass
+    try:
+        self._refresh_preview_canvas_light()
+    except Exception:
+        pass
+    self._schedule_preview_autosave(
+        delay_ms=2200,
+        status_message="Zapisano status zatwierdzenia ramek do annotations.xml.",
+        refresh_workflow=False,
+        refresh_export_sources=False,
+    )
+    approved_count = int(summary.get("approved", 0) or 0)
+    total = int(summary.get("total", 0) or 0)
+    if bool(summary.get("all_approved")):
+        status = (
+            f"Ramka {selected_idx + 1}/{total}: OK. Wszystkie ramki są "
+            f"zatwierdzone ({approved_count}/{total}) — obraz ma status [OK]."
+        )
+    else:
+        action = "zatwierdzona" if next_approved else "cofnięta"
+        status = (
+            f"Ramka {selected_idx + 1}/{total}: {action}. "
+            f"Zatwierdzone ramki: {approved_count}/{total}. "
+            "Obraz pozostaje NIEZATWIERDZONY, dopóki wszystkie ramki nie będą OK."
+        )
+    self._update_preview_edit_status(status, refresh_toolbar=False, refresh_debug=False)
+    try:
+        self.preview_canvas.focus_set()
+    except Exception:
+        pass
     return "break"
+
 
 def _on_preview_enter_fullscreen_shortcut(self, event=None):
     if not self._preview_shortcuts_enabled(event, allow_when_fullscreen=True):

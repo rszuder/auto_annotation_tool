@@ -4623,6 +4623,11 @@ def _run_ranking_v2(self):
                                 if target == "char"
                                 else "CVAT comparator"
                             ),
+                            "benchmark_id": str((pz3_context or {}).get("benchmark_id") or ""),
+                            "benchmark_fingerprint": str((pz3_context or {}).get("benchmark_fingerprint") or ""),
+                            "benchmark_subset_fingerprint": str((pz3_context or {}).get("benchmark_subset_fingerprint") or ""),
+                            "benchmark_source_track_id": str((pz3_context or {}).get("benchmark_source_track_id") or ""),
+                            "benchmark_reuse": bool((pz3_context or {}).get("benchmark_reuse")),
                         },
                     )
                     if pz3_context and (
@@ -4965,6 +4970,28 @@ def _run_ranking_v2(self):
                             f"skipped={corner_stats.get('corner_skipped_pairs', 0)}."
                         )
                     stats.update(corner_stats)
+
+                if pz3_context and isinstance(pz3_context.get("benchmark"), dict):
+                    from ..ranking.benchmark_metrics import evaluate_benchmark_group_metrics
+                    grouped = evaluate_benchmark_group_metrics(
+                        temp_xml_path,
+                        gt_xml,
+                        pz3_context["benchmark"],
+                        selected_sha256=pz3_context.get("benchmark_selected_sha256"),
+                        require_prediction_pose_marker=bool(ranking_experiment is not None),
+                    )
+                    stats["benchmark_id"] = str(pz3_context.get("benchmark_id") or "")
+                    stats["benchmark_fingerprint"] = str(pz3_context.get("benchmark_fingerprint") or "")
+                    stats["benchmark_subset_fingerprint"] = str(pz3_context.get("benchmark_subset_fingerprint") or "")
+                    stats["benchmark_group_metrics"] = grouped
+                    for group in grouped.get("groups", []):
+                        self._append_ranking_log(
+                            f"  ↳ {group.get('label_name') or group.get('group_id')}: "
+                            f"n={int(group.get('sample_count', 0) or 0)} | "
+                            f"F1={float(group.get('f1', 0.0) or 0.0):.1f}% | "
+                            f"IoU≥0.8={float(group.get('accuracy', 0.0) or 0.0):.1f}% | "
+                            f"p95 E_corner={float(group.get('corner_error_p95', 0.0) or 0.0) * 100.0:.3f}% d_GT"
+                        )
                 persist_ranking_result(model_path, stats)
                 precision = float(stats.get("precision", 0) or 0)
                 recall = float(stats.get("recall", 0) or 0)

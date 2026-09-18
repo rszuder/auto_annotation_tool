@@ -1248,12 +1248,17 @@ def _build_preview_canvas_metrics_rows(
 
     dpi_text = str(image_metadata.get("dpi_text", "") or self._get_preview_image_dpi_text(ann))
     approved_now = bool(self._preview_annotation_is_explicitly_approved(ann))
+    approval_summary = self._preview_annotation_plate_approval_summary(ann)
     rows: list[tuple[str, str, str]] = [
         (
             "Status",
-            "Zatwierdzone [OK] | Spacja cofa"
+            "Zatwierdzone [OK] | wszystkie ramki OK"
             if approved_now
-            else "Niezatwierdzone | Spacja zatwierdza",
+            else (
+                f"Niezatwierdzone | ramki OK: "
+                f"{int(approval_summary.get('approved', 0) or 0)}/"
+                f"{int(approval_summary.get('total', 0) or 0)}"
+            ),
             "success" if approved_now else "error",
         ),
         ("Obraz", f"{image_width}x{image_height} px", "default"),
@@ -1298,7 +1303,17 @@ def _build_preview_canvas_metrics_rows(
     polygon_pct = (polygon_area / image_area) * 100.0 if polygon_area > 0.0 else 0.0
     polygon_to_bbox_ratio = (polygon_area / bbox_area) if bbox_area > 0.0 and polygon_area > 0.0 else 0.0
 
-    rows.append(("Tablica", f"{safe_idx + 1}/{len(plates)} | {bbox_width:.0f}x{bbox_height:.0f} px", "default"))
+    try:
+        frame_approved = bool(self._preview_plate_frame_is_approved(ann, det))
+    except Exception:
+        frame_approved = False
+    rows.append((
+        "Tablica",
+        f"{safe_idx + 1}/{len(plates)} | "
+        f"{'OK' if frame_approved else 'NOK'} | "
+        f"{bbox_width:.0f}x{bbox_height:.0f} px",
+        "success" if frame_approved else "warning",
+    ))
     rows.append(("Obrys detekcji", f"{bbox_area:.0f} px | {bbox_pct:.3f}% obrazu", "success"))
     if polygon_area > 0.0:
         rows.append(("Pow. tablicy", f"{polygon_area:.0f} px | {polygon_pct:.3f}% obrazu", "success"))
