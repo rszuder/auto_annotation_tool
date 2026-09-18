@@ -290,7 +290,7 @@ def build_preview_legend_sections(owner):
             "columns": 2,
             "items": [
                 {"tokens": ["A"], "modes": ["tap"], "label": "tablica +/-"},
-                {"tokens": ["Spacja"], "modes": ["tap"], "label": "OK/NOK"},
+                {"tokens": ["Spacja"], "modes": ["tap"], "label": "OK/NOK ramki"},
                 {"tokens": ["R"], "modes": ["tap"], "label": "kadr tablicy"},
             ],
         },

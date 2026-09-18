@@ -60,8 +60,103 @@ def validate_comparison_context(host, *, model_paths=None):
     return context
 
 
+def _resolve_model_paths(service, model_ids):
+    from ..registry import EvaluationTrackError
+
+    model_paths = []
+    for model_id in model_ids:
+        model = service.repository.get_model(str(model_id))
+        if model is None:
+            raise EvaluationTrackError(f"Nie znaleziono modelu: {model_id}")
+        expected_sha = str(model["sha256"] or "").strip().lower()
+        found = None
+        for row in service.repository.list_model_locations(str(model_id)):
+            row = dict(row)
+            candidates = []
+            if row.get("relative_path"):
+                candidates.append(service.workspace / row["relative_path"])
+            if row.get("external_path"):
+                candidates.append(Path(row["external_path"]))
+            for path in candidates:
+                if path.is_file() and service._sha256(path) == expected_sha:
+                    found = path
+                    break
+            if found is not None:
+                break
+        if found is None:
+            raise EvaluationTrackError(
+                f"Nie znaleziono checkpointu zgodnego z rejestrem: {model_id}."
+            )
+        model_paths.append(str(found))
+    return model_paths
+
+
+def resolve_benchmark_reuse(
+    service,
+    benchmark_id_or_track_id,
+    *,
+    model_ids,
+    selected_sha256=None,
+    label_ids=None,
+    include_unlabeled=False,
+):
+    """Jawne ponowne użycie GT/benchmarku z nowymi uczestnikami."""
+    from ..registry import EvaluationTrackError
+    from ..registry.evaluation_benchmark import (
+        ensure_benchmark_for_track,
+        load_benchmark,
+        materialize_benchmark_subset,
+        verify_benchmark,
+    )
+
+    raw = str(benchmark_id_or_track_id or "").strip()
+    if raw.startswith("BENCH-") or Path(raw).is_file():
+        benchmark = load_benchmark(service.workspace, raw)
+    else:
+        benchmark = ensure_benchmark_for_track(service, raw)
+    benchmark = verify_benchmark(service, benchmark)
+
+    clean_models = list(dict.fromkeys(
+        str(value or "").strip()
+        for value in model_ids
+        if str(value or "").strip()
+    ))
+    if len(clean_models) < 2:
+        raise EvaluationTrackError(
+            "Ponowne użycie benchmarku wymaga co najmniej dwóch modeli."
+        )
+
+    subset = materialize_benchmark_subset(
+        service,
+        benchmark,
+        selected_sha256=selected_sha256,
+        label_ids=label_ids,
+        include_unlabeled=include_unlabeled,
+    )
+    model_paths = _resolve_model_paths(service, clean_models)
+    return {
+        "track_id": str(benchmark["source_track_id"]),
+        "name": f"{benchmark.get('name') or benchmark['benchmark_id']} · reuse",
+        "target": benchmark["target"],
+        "reference_path": subset["reference_path"],
+        "model_paths": model_paths,
+        "model_ids": clean_models,
+        "benchmark": benchmark,
+        "benchmark_id": benchmark["benchmark_id"],
+        "benchmark_fingerprint": benchmark["fingerprint"],
+        "benchmark_subset_fingerprint": subset["subset_fingerprint"],
+        "benchmark_selected_sha256": subset["selected_sha256"],
+        "benchmark_source_track_id": str(benchmark["source_track_id"]),
+        "benchmark_reuse": True,
+    }
+
+
 def resolve_comparison(service, track_id):
     from ..registry import EvaluationTrackError
+    from ..registry.evaluation_benchmark import (
+        ensure_benchmark_for_track,
+        resolve_benchmark_subset,
+    )
     from ..registry.participant_pool_audit import ParticipantPoolAuditService
 
     track = service.get_track(track_id)
@@ -70,38 +165,36 @@ def resolve_comparison(service, track_id):
     integrity = service.verify_integrity(track_id)
     if not integrity.ok:
         raise EvaluationTrackError("Naruszona pieczęć toru: " + "; ".join(integrity.issues))
+
+    benchmark = ensure_benchmark_for_track(service, track_id)
+    subset = resolve_benchmark_subset(benchmark)
+
     participants = ParticipantPoolAuditService(
         service.workspace, repository=service.repository
     ).load_participants(track_id)
     if not participants:
         raise EvaluationTrackError("Tor nie zawiera zamrożonych uczestników porównania.")
-    model_paths = []
-    for participant in participants:
-        found = None
-        for row in service.repository.list_model_locations(participant.model_id):
-            row = dict(row)
-            candidates = []
-            if row.get("relative_path"):
-                candidates.append(service.workspace / row["relative_path"])
-            if row.get("external_path"):
-                candidates.append(Path(row["external_path"]))
-            for path in candidates:
-                if path.is_file() and service._sha256(path) == participant.sha256:
-                    found = path
-                    break
-            if found is not None:
-                break
-        if found is None:
-            raise EvaluationTrackError(
-                f"Nie znaleziono checkpointu zgodnego z pieczęcią: {participant.model_id}."
-            )
-        model_paths.append(str(found))
+
+    model_paths = _resolve_model_paths(
+        service,
+        [item.model_id for item in participants],
+    )
     return {
-        "track_id": track_id, "name": track["name"], "target": track["target"],
+        "track_id": track_id,
+        "name": track["name"],
+        "target": track["target"],
         "reference_path": str(service.workspace / track["relative_path"]),
         "model_paths": model_paths,
         "model_ids": [item.model_id for item in participants],
+        "benchmark": benchmark,
+        "benchmark_id": benchmark["benchmark_id"],
+        "benchmark_fingerprint": benchmark["fingerprint"],
+        "benchmark_subset_fingerprint": subset["subset_fingerprint"],
+        "benchmark_selected_sha256": subset["selected_sha256"],
+        "benchmark_source_track_id": track_id,
+        "benchmark_reuse": False,
     }
+
 
 
 def open_comparison(panel):

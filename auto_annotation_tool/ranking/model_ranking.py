@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 from ..config import CONFIG, logger
 
@@ -122,6 +122,10 @@ class ModelRankingEntry:
     independence_status: str = ""
     comparison_scope: str = ""
     comparison_project_id: str = ""
+    benchmark_id: str = ""
+    benchmark_fingerprint: str = ""
+    benchmark_subset_fingerprint: str = ""
+    benchmark_group_metrics: Dict = field(default_factory=dict)
     corner_metric_status: str = ""
     corner_error_count: int = 0
     corner_error_mean: float = 0.0
@@ -187,19 +191,25 @@ class ModelRanking:
             return str(Path(raw)).lower()
 
     @classmethod
-    def _entry_identity(cls, entry: ModelRankingEntry) -> tuple[str, str, str, str, str]:
+    def _entry_identity(cls, entry: ModelRankingEntry) -> tuple[str, str, str, str, str, str]:
         model_key = cls._path_key(getattr(entry, "model_path", ""))
         if not model_key:
             model_key = str(getattr(entry, "model_name", "") or "").strip().lower()
         reference_key = cls._path_key(getattr(entry, "reference_path", ""))
         if not reference_key:
             reference_key = str(getattr(entry, "reference_name", "") or "").strip().lower()
+        benchmark_key = (
+            str(getattr(entry, "benchmark_subset_fingerprint", "") or "").strip().lower()
+            or str(getattr(entry, "benchmark_fingerprint", "") or "").strip().lower()
+            or str(getattr(entry, "benchmark_id", "") or "").strip().lower()
+        )
         return (
             model_key,
             str(getattr(entry, "task_type", "") or "").strip().lower(),
             reference_key,
             str(getattr(entry, "split_name", "") or "").strip().lower(),
             str(getattr(entry, "comparison_scope", "") or "").strip().lower(),
+            benchmark_key,
         )
 
     @staticmethod
@@ -323,6 +333,10 @@ class ModelRanking:
             independence_status=str(experiment_payload.get("independence_status") or "").strip().upper(),
             comparison_scope=str(experiment_payload.get("comparison_scope") or "").strip(),
             comparison_project_id=str(experiment_payload.get("comparison_project_id") or "").strip(),
+            benchmark_id=str(experiment_payload.get("benchmark_id") or comparison_stats.get("benchmark_id") or "").strip(),
+            benchmark_fingerprint=str(experiment_payload.get("benchmark_fingerprint") or comparison_stats.get("benchmark_fingerprint") or "").strip().lower(),
+            benchmark_subset_fingerprint=str(experiment_payload.get("benchmark_subset_fingerprint") or comparison_stats.get("benchmark_subset_fingerprint") or "").strip().lower(),
+            benchmark_group_metrics=dict(comparison_stats.get("benchmark_group_metrics") or {}),
             corner_metric_status=str(comparison_stats.get("corner_metric_status", "") or "").strip(),
             corner_error_count=int(comparison_stats.get("corner_error_count", 0) or 0),
             corner_error_mean=float(comparison_stats.get("corner_error_mean", 0.0) or 0.0),

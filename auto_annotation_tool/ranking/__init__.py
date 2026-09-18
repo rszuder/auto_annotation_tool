@@ -10,6 +10,10 @@ from .corner_metrics import (
     corner_metric_protocol_descriptor,
     evaluate_pose_corner_metrics,
 )
+from .benchmark_metrics import (
+    BENCHMARK_GROUP_METRICS_SCHEMA,
+    evaluate_benchmark_group_metrics,
+)
 from .comparison_catalog import (
     ModelComparisonCandidate,
     ModelComparisonCatalog,
@@ -76,6 +80,8 @@ from .mobile_human_review import MobileHumanReview, MobileReviewSession, PlateTe
 from .mobile_mt_invocations import MtInvocationGroup
 
 __all__ = [
+    'BENCHMARK_GROUP_METRICS_SCHEMA',
+    'evaluate_benchmark_group_metrics',
     'AnnotationComparator',
     'AnnotationDiff',
     'CORNER_METRIC_SCHEMA',

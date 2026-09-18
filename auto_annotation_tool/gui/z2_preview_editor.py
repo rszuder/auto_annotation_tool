@@ -987,9 +987,13 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
                 width=0,
                 tags=("preview_overlay",)
             )
+        try:
+            frame_approved = bool(self._preview_plate_frame_is_approved(ann, det))
+        except Exception:
+            frame_approved = False
         if is_delete_candidate:
             outline = delete_color
-        elif image_approved:
+        elif frame_approved:
             outline = approved_plate_color
         else:
             outline = active_color if is_selected else plate_color
@@ -1011,6 +1015,7 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
             label_text = f"Det {float(getattr(det, 'confidence', 0.0) or 0.0):.2f}"
             if fit_score is not None:
                 label_text += f" | Fit {fit_score:.2f}"
+            label_text += " | OK" if frame_approved else " | NOK"
             label_id = canvas.create_text(
                 min_x + 6,
                 max(10, min_y - 7),
@@ -1362,7 +1367,7 @@ def _get_preview_bottom_hint_text(self) -> str:
         )
         base = (
             f"Tablica {plate_no}/{len(plates)} | W+LPM róg | A lokalnie | {nav_hint} | "
-            f"Spacja OK/NOK | R kadr | R+LPM zoom | R+PPM cofnij | F dopasuj | "
+            f"Spacja OK/NOK ramki | R kadr | R+LPM zoom | R+PPM cofnij | F dopasuj | "
             f"{super_hint} | D nowa ramka | S usuń ramkę | Del obraz | Ctrl+Z/Y historia | Ctrl+S zapis"
         )
 
@@ -2273,6 +2278,10 @@ def _finish_preview_vertex_drag(self, mark_dirty: bool = True):
     plate_idx = int(drag_state.get("plate_idx", -1))
     if 0 <= plate_idx < len(plate_detections):
         det = plate_detections[plate_idx]
+        if mark_dirty:
+            self._materialize_legacy_plate_frame_approvals(ann)
+            self._set_preview_plate_frame_approved(det, False)
+            self._reconcile_preview_approved_runtime_from_frames()
         current_polygon = self._detection_polygon(det)
         # Przy trzymanym W uzytkownik zwykle poprawia kilka naroznikow pod rzad.
         # Ciezsza normalizacja wraca po zakonczeniu serii, zeby kolejny chwyt
@@ -2381,6 +2390,7 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
         return False
 
     remaining_plates = self._get_plate_detections(ann)
+    self._reconcile_preview_approved_runtime_from_frames()
     if remaining_plates:
         self._set_selected_plate_index_for_ann(ann, min(int(plate_idx), len(remaining_plates) - 1))
         ann.status = AnnotationStatus.SUCCESS
@@ -2432,6 +2442,7 @@ def _commit_new_preview_polygon(self):
 
     self._push_preview_history_snapshot(ann, lightweight_plate_edit=True)
     had_plate_before = bool(self._get_plate_detections(ann))
+    self._materialize_legacy_plate_frame_approvals(ann)
     new_det = Detection(
         label="plate",
         confidence=1.0,
@@ -2441,7 +2452,9 @@ def _commit_new_preview_polygon(self):
     )
     new_det.attributes["manually_edited"] = "true"
     new_det.attributes["manual_source"] = "preview"
+    self._set_preview_plate_frame_approved(new_det, False)
     ann.detections.append(new_det)
+    self._reconcile_preview_approved_runtime_from_frames()
     try:
         count_cache = getattr(self, "_current_preview_plate_count_cache", None)
         if isinstance(count_cache, dict):

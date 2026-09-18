@@ -1056,6 +1056,24 @@ class AnnotationTab:
         return z2_manifest_runtime._get_campaign_hidden_project_approved_filenames_runtime(self, *args, **kwargs)
 
 
+    def _preview_plate_frame_is_approved(self, *args, **kwargs):
+        return z2_manifest_runtime._preview_plate_frame_is_approved(self, *args, **kwargs)
+
+    def _preview_annotation_plate_approval_summary(self, *args, **kwargs):
+        return z2_manifest_runtime._preview_annotation_plate_approval_summary(self, *args, **kwargs)
+
+    def _set_preview_plate_frame_approved(self, *args, **kwargs):
+        return z2_manifest_runtime._set_preview_plate_frame_approved(self, *args, **kwargs)
+
+    def _set_all_preview_plate_frames_approved(self, *args, **kwargs):
+        return z2_manifest_runtime._set_all_preview_plate_frames_approved(self, *args, **kwargs)
+
+    def _materialize_legacy_plate_frame_approvals(self, *args, **kwargs):
+        return z2_manifest_runtime._materialize_legacy_plate_frame_approvals(self, *args, **kwargs)
+
+    def _reconcile_preview_approved_runtime_from_frames(self, *args, **kwargs):
+        return z2_manifest_runtime._reconcile_preview_approved_runtime_from_frames(self, *args, **kwargs)
+
     def _preview_annotation_can_be_approved_for_export(self, *args, **kwargs):
         return z2_manifest_runtime._preview_annotation_can_be_approved_for_export(self, *args, **kwargs)
 

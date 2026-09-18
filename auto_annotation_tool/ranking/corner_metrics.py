@@ -61,6 +61,7 @@ def evaluate_pose_corner_metrics(
     *,
     match_iou_threshold: float = DEFAULT_CORNER_MATCH_IOU,
     require_prediction_pose_marker: bool = False,
+    allowed_image_names: set[str] | None = None,
 ) -> dict:
     """Policz błąd narożników na dopasowanych tablicach.
 
@@ -80,6 +81,16 @@ def evaluate_pose_corner_metrics(
     )
 
     image_names = sorted(set(predicted) | set(ground_truth))
+    if allowed_image_names is not None:
+        allowed = {
+            Path(str(name or "")).name
+            for name in allowed_image_names
+            if str(name or "").strip()
+        }
+        image_names = [
+            name for name in image_names
+            if Path(str(name or "")).name in allowed
+        ]
     values: list[float] = []
     matched_pairs = 0
     skipped_pairs = 0
