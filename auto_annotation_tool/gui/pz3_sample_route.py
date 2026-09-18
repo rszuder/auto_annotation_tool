@@ -125,13 +125,20 @@ def set_sample_selection(host, selected, actual_indices=None):
 
 
 def refresh_sample_rows(host, indices, *, membership_changed=False):
-    """Touch only affected Listbox rows; do not re-render the current image."""
+    """Touch only affected rows; label sorting may require reordering."""
     from bisect import bisect_left
     host._sample_selection_version = getattr(host, "_sample_selection_version", 0) + 1
     listbox = getattr(host, "preview_listbox", None)
     filter_var = getattr(host, "_sample_filter_var", None)
     if listbox is None or not indices:
         return
+
+    sort_var = getattr(host, "_sample_sort_var", None)
+    sort_mode = str(sort_var.get() or "") if sort_var is not None else "Kolejność źródłowa"
+    if sort_mode in {"Etykieta A–Z", "Etykieta Z–A"}:
+        refresh_sample_list(host)
+        return
+
     active, anchor = listbox.index(tk.ACTIVE), listbox.index(tk.ANCHOR)
     view = listbox.yview()
     mode = filter_var.get() if filter_var is not None else "Wszystkie"
@@ -155,7 +162,6 @@ def refresh_sample_rows(host, indices, *, membership_changed=False):
             active = mapping.get(previous[min(active, len(previous)-1)], min(active, max(0, len(visible)-1)))
             anchor = mapping.get(previous[min(anchor, len(previous)-1)], active)
     for index in set(indices):
-        # The general Z2 accessor copies its whole lookup; use the existing map.
         display = mapping.get(index) if isinstance(mapping, dict) else host._get_preview_display_index(index)
         if display is not None:
             selected = listbox.selection_includes(display)
@@ -195,17 +201,43 @@ def sample_list_entries(host):
     entries = list(enumerate(host.current_annotations))
     mode = host._sample_filter_var.get()
     if mode == "W próbie":
-        return [(i, ann) for i, ann in entries if sample_selected(host, ann)]
-    if mode == "Poza próbą":
-        return [(i, ann) for i, ann in entries if not sample_selected(host, ann)]
-    return entries
+        entries = [(i, ann) for i, ann in entries if sample_selected(host, ann)]
+    elif mode == "Poza próbą":
+        entries = [(i, ann) for i, ann in entries if not sample_selected(host, ann)]
+
+    sort_var = getattr(host, "_sample_sort_var", None)
+    sort_mode = str(sort_var.get() or "") if sort_var is not None else "Kolejność źródłowa"
+    if sort_mode not in {"Etykieta A–Z", "Etykieta Z–A"}:
+        return entries
+
+    state = getattr(host, "_sample_label_state", None)
+    context = sample_context(host)
+
+    def label_key(item):
+        index, ann = item
+        filename = str(getattr(ann, "filename", "") or "")
+        sha = context["sample_member_sha256"].get(filename) if context else None
+        label = state.label_for(sha) if state is not None else ""
+        return ((label or "Bez etykiety").casefold(), filename.casefold(), int(index))
+
+    selected_entries = [item for item in entries if sample_selected(host, item[1])]
+    outside_entries = [item for item in entries if not sample_selected(host, item[1])]
+    selected_entries.sort(key=label_key, reverse=(sort_mode == "Etykieta Z–A"))
+    outside_entries.sort(key=lambda item: (str(getattr(item[1], "filename", "") or "").casefold(), int(item[0])))
+    return selected_entries + outside_entries
 
 
 def sample_list_text(host, ann, display_index=None):
-    status = "W PRÓBIE" if sample_selected(host, ann) else "POZA PRÓBĄ"
+    selected = sample_selected(host, ann)
+    status = "W PRÓBIE" if selected else "POZA PRÓBĄ"
     state = getattr(host, "_sample_label_state", None)
     context = sample_context(host)
-    label = state.label_for(context["sample_member_sha256"].get(ann.filename)) if state else ""
+    if selected:
+        sha = context["sample_member_sha256"].get(ann.filename) if context else None
+        label = state.label_for(sha) if state else ""
+        label = label or "Bez etykiety"
+    else:
+        label = "—"
     label = label if len(label) <= 18 else label[:17] + "…"
     return f"{'[' + status + ']':<13} {label:<18} {ann.filename}"
 
@@ -254,23 +286,13 @@ def refresh_sample_ui(host):
         active = state.labels.get(state.active_id, "")
         active = active[:23] + "…" if len(active) > 24 else active
         active_text = f" · Aktywna: {active}" if active else ""
-        lock_count = len(state.locked_label_ids) + int(
-            state.unlabeled_locked
-        )
-        lock_text = (
-            f" · Zamrożone grupy: {lock_count}"
-            if lock_count
-            else ""
-        )
-        label.configure(
-            text=(
-                f"Wybór próby · "
-                f"{context.get('name') or context['track_id']}\n"
-                + sample_counter(host)
-                + active_text
-                + lock_text
-            )
-        )
+        lock_count = len(state.locked_label_ids) + int(state.unlabeled_locked)
+        lock_text = f" · Zamrożone grupy: {lock_count}" if lock_count else ""
+        label.configure(text=f"Wybór próby · {context.get('name') or context['track_id']}" + active_text + lock_text)
+
+    counter = getattr(host, "_sample_counter_label", None)
+    if counter is not None and counter.winfo_exists():
+        counter.configure(text=sample_counter(host))
 
     notice = str(getattr(host, "_sample_lock_notice", "") or "")
     summary = getattr(host, "preview_list_summary_var", None)
@@ -282,20 +304,11 @@ def refresh_sample_ui(host):
 
     fullscreen = getattr(host, "_sample_fullscreen_button", None)
     if fullscreen is not None and fullscreen.winfo_exists():
-        fullscreen.configure(
-            text=(
-                "Wyjdź z pełnego ekranu"
-                if getattr(
-                    host, "_preview_fullscreen_active", False
-                )
-                else "Pełny ekran (Enter)"
-            )
-        )
+        fullscreen.configure(text=("Wyjdź z pełnego ekranu" if getattr(host, "_preview_fullscreen_active", False) else "Pełny ekran (Enter)"))
 
     labels = getattr(host, "_sample_labels_panel", None)
     if labels is not None:
         labels.refresh()
-
     host._place_preview_image_status_overlay(force_render=True)
 
 
@@ -385,14 +398,20 @@ def enter_sample_selection(host, context):
     host.plate_dataset_images_var.set(context["source_dir"])
     host.plate_dataset_run_var.set("")
     host._sample_filter_var = tk.StringVar(host.frame, "Wszystkie")
+    host._sample_sort_var = tk.StringVar(host.frame, "Kolejność źródłowa")
     bar = host._sample_bar = ttk.Frame(host.frame, padding=(10, 8))
     siblings = host.frame.pack_slaves()
     bar.pack(side="top", fill="x", before=siblings[0] if siblings else None)
     bar.columnconfigure(0, weight=1)
-    host._sample_title_label = ttk.Label(bar, width=1, wraplength=300)
-    host._sample_title_label.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    host._sample_title_stack = ttk.Frame(bar)
+    host._sample_title_stack.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+    host._sample_title_stack.columnconfigure(0, weight=1)
+    host._sample_title_label = ttk.Label(host._sample_title_stack, width=1, wraplength=300, font=("Segoe UI", 9, "bold"))
+    host._sample_title_label.grid(row=0, column=0, sticky="ew")
     host._sample_title_label.bind("<Configure>", lambda event:
                                  host._sample_title_label.configure(wraplength=max(1, event.width)))
+    host._sample_counter_label = ttk.Label(host._sample_title_stack, text="", font=("Segoe UI", 13, "bold"), anchor="w")
+    host._sample_counter_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
     actions = ttk.Frame(bar)
     actions.grid(row=0, column=1, sticky="e")
     ttk.Button(actions, text="Zapisz roboczą próbę i wróć do PZ3",
@@ -404,7 +423,7 @@ def enter_sample_selection(host, context):
         stacked = event.width < actions.winfo_reqwidth() + int(240 * bar.tk.call("tk", "scaling") / 1.333)
         if stacked != host._sample_bar_stacked:
             host._sample_bar_stacked = stacked
-            host._sample_title_label.grid_configure(columnspan=2 if stacked else 1,
+            host._sample_title_stack.grid_configure(columnspan=2 if stacked else 1,
                                                     pady=(0, 6) if stacked else 0)
             actions.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
                                    columnspan=2 if stacked else 1)
@@ -417,10 +436,16 @@ def enter_sample_selection(host, context):
     select_filter.grid(row=0, column=0, sticky="w")
     select_filter.bind("<<ComboboxSelected>>",
                       lambda event: refresh_sample_list(host))
-    ttk.Button(filters, text="+ Do próby", command=lambda: set_sample_selection(host, True)).grid(row=0, column=1, padx=4)
-    ttk.Button(filters, text="− Z próby", command=lambda: set_sample_selection(host, False)).grid(row=0, column=2)
-    ttk.Label(filters, text=f"{'STAN':<13} {'ETYKIETA':<18} PLIK", font=("Consolas", 9)).grid(
-        row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+    ttk.Label(filters, text="Sortuj:").grid(row=0, column=1, padx=(8, 3))
+    select_sort = ttk.Combobox(
+        filters, textvariable=host._sample_sort_var, state="readonly",
+        values=("Kolejność źródłowa", "Etykieta A–Z", "Etykieta Z–A"), width=18)
+    select_sort.grid(row=0, column=2, sticky="w")
+    select_sort.bind("<<ComboboxSelected>>", lambda event: refresh_sample_list(host))
+    ttk.Button(filters, text="+ Do próby", command=lambda: set_sample_selection(host, True)).grid(row=0, column=3, padx=4)
+    ttk.Button(filters, text="− Z próby", command=lambda: set_sample_selection(host, False)).grid(row=0, column=4)
+    ttk.Label(filters, text=f"{'STAN':<13} {'ETYKIETA':<18} PLIK", font=("Consolas", 9, "bold")).grid(
+        row=1, column=0, columnspan=5, sticky="w", pady=(6, 0))
     host._sample_labels_panel = SampleLabelsPanel(host, host.preview_list_lf)
     host._sample_labels_panel.pack(fill="x", before=filters)
     menu = host.preview_list_context_menu = tk.Menu(host.preview_listbox, tearoff=0)
@@ -486,7 +511,11 @@ def leave_sample_selection(host):
     host._sample_pack_orders = {}
     for name, text in host._sample_previous_labels.items():
         getattr(host, name).configure(text=text)
-    host._sample_title_label = host._sample_fullscreen_button = None
+    host._sample_title_label = None
+    host._sample_counter_label = None
+    host._sample_title_stack = None
+    host._sample_fullscreen_button = None
+    host._sample_sort_var = None
     host._refresh_preview_list(preserve_selection=True, render_current=True)
     host._refresh_preview_workspace_visibility()
     from .pz3_gt_route import refresh_experiment_gt_ui

@@ -185,18 +185,10 @@ class SampleLabelsPanel(ttk.Frame):
         self.canvas.bind("<Configure>", self._resize)
         self.items.bind("<Configure>", self._resize)
 
-        self.unlabeled = ttk.Label(self, text="")
-        self.unlabeled.grid(row=2, column=0, sticky="w", pady=(4, 0))
-        self.unlabeled_lock = ttk.Button(
-            self,
-            text="🔓",
-            width=2,
-            padding=0,
-            command=lambda: toggle_unlabeled_lock(self.host),
-        )
-        self.unlabeled_lock.grid(
-            row=2, column=1, sticky="e", padx=(4, 0), pady=(4, 0)
-        )
+        self.unlabeled = None
+        self.unlabeled_count_var = tk.StringVar(self, "0")
+        self.unlabeled_count = None
+        self.unlabeled_lock = None
 
         self.menu = tk.Menu(self, tearoff=0)
         self.menu_label_id = ""
@@ -216,12 +208,13 @@ class SampleLabelsPanel(ttk.Frame):
     def _resize(self, event=None):
         width = max(1, self.canvas.winfo_width())
         self.canvas.itemconfigure(self.window, width=width)
-        row_height = max(
-            (row[2].winfo_reqheight() for row in self.rows.values()),
-            default=24,
-        ) + 4
+        widgets = [row[2] for row in self.rows.values()]
+        if getattr(self, "unlabeled", None) is not None:
+            widgets.append(self.unlabeled)
+        row_height = max((w.winfo_reqheight() for w in widgets), default=24) + 4
+        data_rows = len(self.rows) + 1
         self.canvas.configure(
-            height=max(1, min(3, len(self.rows))) * row_height,
+            height=(max(20, row_height - 2) + max(1, min(5, data_rows)) * row_height),
             scrollregion=(0, 0, width, self.items.winfo_reqheight()),
         )
         font = tkfont.Font(root=self, font=("Segoe UI", 9))
@@ -230,10 +223,7 @@ class SampleLabelsPanel(ttk.Frame):
             text = label_state(self.host).labels[label_id]
             available = max(
                 30,
-                width
-                - round(
-                    115 * float(self.tk.call("tk", "scaling")) / 1.333
-                ),
+                width - round(150 * float(self.tk.call("tk", "scaling")) / 1.333),
             )
             shown = text
             while len(shown) > 1 and font.measure(shown) > available:
@@ -249,8 +239,18 @@ class SampleLabelsPanel(ttk.Frame):
             child.destroy()
         self.rows = {}
 
+        ttk.Label(self.items, text="ETYKIETA", font=("Segoe UI", 8, "bold"), anchor="w").grid(
+            row=0, column=0, sticky="ew", padx=(2, 4), pady=(0, 2)
+        )
+        ttk.Label(self.items, text="LICZBA", font=("Segoe UI", 8, "bold"), anchor="e").grid(
+            row=0, column=1, sticky="e", padx=4, pady=(0, 2)
+        )
+        ttk.Label(self.items, text="BLOKADA", font=("Segoe UI", 8, "bold"), anchor="center").grid(
+            row=0, column=2, sticky="e", padx=(2, 4), pady=(0, 2)
+        )
+
         state = label_state(self.host)
-        for row_index, (label_id, name) in enumerate(state.labels.items()):
+        for row_index, (label_id, name) in enumerate(state.labels.items(), start=1):
             active = tk.BooleanVar(self, False)
             count = tk.StringVar(self, "0")
 
@@ -259,59 +259,65 @@ class SampleLabelsPanel(ttk.Frame):
                 text=name,
                 variable=active,
                 style="SampleLabel.TCheckbutton",
-                command=lambda key=label_id, var=active:
-                    activate_sample_label(
-                        self.host, key if var.get() else ""
-                    ),
+                command=lambda key=label_id, var=active: activate_sample_label(
+                    self.host, key if var.get() else ""
+                ),
             )
-            check.grid(row=row_index, column=0, sticky="ew", pady=2)
+            check.grid(row=row_index, column=0, sticky="ew", padx=(2, 4), pady=2)
 
-            number = ttk.Label(
-                self.items, textvariable=count, width=5, anchor="e"
-            )
-            number.grid(row=row_index, column=1, padx=(4, 4))
+            number = ttk.Label(self.items, textvariable=count, width=6, anchor="e")
+            number.grid(row=row_index, column=1, padx=4)
 
             lock = ttk.Button(
                 self.items,
                 text="🔓",
-                width=2,
+                width=3,
                 padding=0,
-                command=lambda key=label_id:
-                    toggle_sample_label_lock(self.host, key),
+                command=lambda key=label_id: toggle_sample_label_lock(self.host, key),
             )
-            lock.grid(row=row_index, column=2, padx=(0, 4))
+            lock.grid(row=row_index, column=2, padx=(2, 4))
 
             more = ttk.Button(
                 self.items,
                 text="⋯",
                 width=2,
                 padding=0,
-                command=lambda key=label_id, widget=check:
-                    self.popup(key, widget),
+                command=lambda key=label_id, widget=check: self.popup(key, widget),
             )
             more.grid(row=row_index, column=3)
 
             for widget in (check, number, lock, more):
                 widget.bind(
                     "<Button-3>",
-                    lambda event, key=label_id:
-                        self.popup(key, event.widget),
+                    lambda event, key=label_id: self.popup(key, event.widget),
                     add="+",
                 )
                 widget.bind("<MouseWheel>", self._wheel, add="+")
 
             self.rows[label_id] = (active, count, check, lock, more)
 
-        if self.rows:
-            self.canvas.grid()
-        else:
-            self.canvas.grid_remove()
+        unlabeled_row = len(self.rows) + 1
+        self.unlabeled = ttk.Label(self.items, text="Bez etykiety", anchor="w", font=("Segoe UI", 9))
+        self.unlabeled.grid(row=unlabeled_row, column=0, sticky="ew", padx=(24, 4), pady=2)
+        self.unlabeled_count_var = tk.StringVar(self, "0")
+        self.unlabeled_count = ttk.Label(self.items, textvariable=self.unlabeled_count_var, width=6, anchor="e")
+        self.unlabeled_count.grid(row=unlabeled_row, column=1, padx=4)
+        self.unlabeled_lock = ttk.Button(
+            self.items,
+            text="🔓",
+            width=3,
+            padding=0,
+            command=lambda: toggle_unlabeled_lock(self.host),
+        )
+        self.unlabeled_lock.grid(row=unlabeled_row, column=2, padx=(2, 4))
+        for widget in (self.unlabeled, self.unlabeled_count, self.unlabeled_lock):
+            widget.bind("<MouseWheel>", self._wheel, add="+")
 
-        if len(self.rows) > 3:
+        self.canvas.grid()
+        if len(self.rows) + 1 > 5:
             self.scroll.grid(row=1, column=1, sticky="ns")
         else:
             self.scroll.grid_remove()
-
         self.refresh()
 
     def refresh(self):
@@ -325,16 +331,9 @@ class SampleLabelsPanel(ttk.Frame):
             lock.configure(text="🔒" if locked else "🔓")
 
         name = state.labels.get(state.active_id, "brak")
-        self.active.configure(
-            text="Aktywna: "
-            + (name[:21] + "…" if len(name) > 22 else name)
-        )
-        self.unlabeled.configure(
-            text=f"Bez etykiety: {state.unlabeled_count}"
-        )
-        self.unlabeled_lock.configure(
-            text="🔒" if state.unlabeled_locked else "🔓"
-        )
+        self.active.configure(text="Aktywna: " + (name[:21] + "…" if len(name) > 22 else name))
+        self.unlabeled_count_var.set(str(state.unlabeled_count))
+        self.unlabeled_lock.configure(text="🔒" if state.unlabeled_locked else "🔓")
 
     def add(self):
         dialog = LabelNameDialog(self, label_state(self.host))
