@@ -345,6 +345,7 @@ def evaluate_character_model_on_benchmark(
     )
     stats["char_confidence"] = float(confidence)
     stats["char_iou"] = float(iou)
+    stats["split_name"] = "benchmark"
     if isinstance(benchmark, dict):
         stats["benchmark_group_metrics"] = _group_metrics(
             rows,
