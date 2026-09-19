@@ -947,6 +947,7 @@ class EvaluationTracksPanel:
             palette=get_runtime_palette(self.app),
             selected_ids=current,
             track_name=str(track.get("name") or track_id),
+            target=str(track.get("target") or ""),
             on_refresh=lambda: self._refresh_participant_model_registry(
                 str(track.get("target") or "")
             ),
