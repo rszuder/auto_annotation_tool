@@ -243,6 +243,22 @@ def participant_model_sort_key(
 
 
 
+
+def participant_architecture_context_label(item) -> str:
+    """Architektura + jawny target/task uczestnika."""
+    target = str(getattr(item, "target", "") or "").strip().lower()
+    task = str(getattr(item, "task_type", "") or "").strip().lower()
+
+    if not task:
+        if target == "plate":
+            task = "pose"
+        elif target in {"char", "vehicle"}:
+            task = "detect"
+
+    suffix = "/".join(value for value in (target, task) if value)
+    base = architecture_label(item)
+    return f"{base} · {suffix}" if suffix else base
+
 def participant_target_context(target: str | None) -> dict[str, str]:
     """Czytelny kontekst typu modeli dla selektora uczestników PZ3."""
     normalized = str(target or "").strip().lower()
@@ -256,6 +272,7 @@ def participant_target_context(target: str | None) -> dict[str, str]:
                 "dopuszczone przez katalog uczestników."
             ),
             "model_column": "Model znakowy",
+            "architecture_column": "Architektura · char/detect",
             "selection_label": "Wybrane modele MZ",
         }
     if normalized == "plate":
@@ -267,6 +284,7 @@ def participant_target_context(target: str | None) -> dict[str, str]:
                 "Lista poniżej zawiera modele targetu plate/MT."
             ),
             "model_column": "Model tablic",
+            "architecture_column": "Architektura · plate/pose",
             "selection_label": "Wybrane modele MT",
         }
     if normalized == "vehicle":
@@ -278,6 +296,7 @@ def participant_target_context(target: str | None) -> dict[str, str]:
                 "Lista poniżej zawiera modele targetu vehicle/MP."
             ),
             "model_column": "Model pojazdów",
+            "architecture_column": "Architektura · vehicle/detect",
             "selection_label": "Wybrane modele MP",
         }
     return {
@@ -287,6 +306,7 @@ def participant_target_context(target: str | None) -> dict[str, str]:
             "Lista modeli jest filtrowana zgodnie z targetem bieżącego toru."
         ),
         "model_column": "Model",
+        "architecture_column": "Architektura / typ",
         "selection_label": "Wybrane modele",
     }
 
@@ -389,7 +409,8 @@ class ParticipantSelectionDialog:
         for key, title, width in (
             ("sel", "W eksperymencie", 125),
             ("model", self.target_context["model_column"], 170),
-            ("arch", "Architektura", 100), ("origin", "Pochodzenie", 240),
+            ("arch", self.target_context["architecture_column"], 180),
+            ("origin", "Pochodzenie", 240),
             ("quality", "Jakość (mAP50–95)", 145), ("prov", "Historia", 150),
         ):
             self._column_titles[key] = title
@@ -672,7 +693,8 @@ class ParticipantSelectionDialog:
                 "", tk.END, iid=item.model_id,
                 values=(
                     ("☑" if item.model_id in self.selected else "☐") if participant_eligible(item) else "—",
-                    short_identifier(item.model_id, limit=27), architecture_label(item),
+                    short_identifier(item.model_id, limit=27),
+                    participant_architecture_context_label(item),
                     f"{short_identifier(item.run_id) or '—'}\n{short_identifier(item.dataset_id) or '—'}",
                     f"{quality_metric(item)[0]} {format_metric(quality_metric(item)[1])}",
                     provenance_badge(item)[0],
