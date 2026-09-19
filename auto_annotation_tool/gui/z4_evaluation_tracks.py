@@ -226,21 +226,10 @@ def independent_acquisition_attested(
 
 def independent_acquisition_attestation_prompt() -> str:
     return (
-        "Audyt puli sprawdza kolizje z train/val ocenianych modeli. "
-        "Starsze obrazy w puli lub w historii treningu mogą jednak nie mieć "
-        "pełnego rodowodu w rejestrze. Sam brak kolizji SHA nie potwierdza "
-        "wtedy niezależnego pochodzenia.\n\n"
-        "To oświadczenie uzupełnia brakujące informacje o pochodzeniu obrazów. "
-        "Potwierdź TAK wyłącznie wtedy, gdy wszystkie obrazy "
-        "tego toru pochodzą z nowej, niezależnie pozyskanej "
-        "puli, która nie była użyta w train ani val ocenianych "
-        "modeli.\n\n"
-        "Żaden obraz toru nie może być przeróbką, ponownym "
-        "eksportem, cropem, zmianą rozmiaru ani inną pochodną "
-        "obrazu treningowego lub walidacyjnego.\n\n"
-        "Oświadczenie zostanie zapisane w manifeście przed "
-        "zapieczętowaniem i stanie się częścią niezmiennego "
-        "odniesienia toru używanego przez eksperyment."
+        "Potwierdź, że obrazy tego toru pochodzą z niezależnej puli "
+        "i nie były używane w train/val ocenianych modeli.\n\n"
+        "Dotyczy to także ich przeróbek, cropów i ponownych eksportów. "
+        "To potwierdzenie uzupełnia audyt niezależności."
     )
 
 
@@ -1870,6 +1859,24 @@ class EvaluationTracksPanel:
         audit_sample = getattr(self, "btn_audit_sample", None)
         if audit_sample is not None:
             audit_sample.configure(state=tk.DISABLED)
+        compare_button = getattr(self, "btn_compare", None)
+        if compare_button is not None:
+            compare_label = "Porównaj modele"
+            if track and str(track.get("status") or "").upper() == STATUS_SEALED:
+                try:
+                    from .pz3_comparison import latest_completed_comparison
+                    if latest_completed_comparison(
+                        self.service,
+                        str(track.get("track_id") or ""),
+                    ):
+                        compare_label = "Wyniki eksperymentu"
+                except Exception:
+                    pass
+            try:
+                compare_button.configure(text=compare_label)
+            except Exception:
+                pass
+
         self._refresh_remove_images_button_state()
         layout = getattr(self, "_layout", None)
         if layout is not None:

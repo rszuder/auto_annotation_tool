@@ -12,6 +12,7 @@ from typing import List, Dict, Optional
 
 from ..config import CONFIG, logger, CVAT_IMPORT_INFO
 from ..data_models import Detection, ImageAnnotation
+from ..pose_corners import canonicalize_quad_tl_tr_br_bl
 
 
 class CVATExporter:
@@ -161,30 +162,55 @@ class CVATExporter:
             attr.text = f"{det.confidence:.3f}"
         self._add_detection_attributes(box, det, include_confidence=include_confidence)
     
+
     def _add_polygon(self, parent: ET.Element, det: Detection, include_confidence: bool):
-        """Dodaje <polygon>."""
+        """Dodaje <polygon> tablicy w kanonicznej kolejności TL, TR, BR, BL."""
         poly = ET.SubElement(parent, "polygon")
         poly.set("label", "plate")
-        manual_source = str(det.attributes.get("manual_source", "") or "").strip().lower()
-        manually_edited = str(det.attributes.get("manually_edited", "") or "").strip().lower() == "true"
-        poly.set("source", "manual" if manually_edited or manual_source else "auto")
+        manual_source = str(
+            det.attributes.get("manual_source", "") or ""
+        ).strip().lower()
+        manually_edited = (
+            str(
+                det.attributes.get("manually_edited", "") or ""
+            ).strip().lower()
+            == "true"
+        )
+        poly.set(
+            "source",
+            "manual" if manually_edited or manual_source else "auto",
+        )
         poly.set("occluded", "0")
         poly.set("z_order", "1")
-        
+
         if det.polygon and len(det.polygon) >= 4:
-            points_str = ";".join([f"{p[0]:.2f},{p[1]:.2f}" for p in det.polygon[:4]])
+            points = canonicalize_quad_tl_tr_br_bl(
+                det.polygon[:4]
+            )
+            points_str = ";".join(
+                f"{point[0]:.2f},{point[1]:.2f}"
+                for point in points
+            )
         else:
-            # Fallback z bbox
             x1, y1, x2, y2 = det.bbox
-            points_str = f"{x1:.2f},{y1:.2f};{x2:.2f},{y1:.2f};{x2:.2f},{y2:.2f};{x1:.2f},{y2:.2f}"
-        
+            points_str = (
+                f"{x1:.2f},{y1:.2f};"
+                f"{x2:.2f},{y1:.2f};"
+                f"{x2:.2f},{y2:.2f};"
+                f"{x1:.2f},{y2:.2f}"
+            )
+
         poly.set("points", points_str)
-        
+
         if include_confidence:
             attr = ET.SubElement(poly, "attribute")
             attr.set("name", "confidence")
             attr.text = f"{det.confidence:.3f}"
-        self._add_detection_attributes(poly, det, include_confidence=include_confidence)
+        self._add_detection_attributes(
+            poly,
+            det,
+            include_confidence=include_confidence,
+        )
 
     @staticmethod
     def _add_detection_attributes(parent: ET.Element, det: Detection, *, include_confidence: bool):

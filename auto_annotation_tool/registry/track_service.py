@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from ..config import CONFIG
 from ..pose_corners import (
     CORNER_ORDER_TL_TR_BR_BL,
+    canonicalize_quad_tl_tr_br_bl,
     is_canonical_quad_tl_tr_br_bl,
     parse_quad_points,
     quad_is_non_degenerate,
@@ -684,6 +685,87 @@ class EvaluationTrackService:
             verification=self.get_verification(track_id),
         )
 
+
+    def _normalize_plate_cvat_xml(self, xml_path: Path | str) -> dict[str, int]:
+        """Normalizuj finalne GT MT bez zmiany geometrii tablic."""
+        path = Path(xml_path)
+        try:
+            tree = ET.parse(path)
+        except (OSError, ET.ParseError) as exc:
+            raise EvaluationTrackError(
+                f"Nie można odczytać CVAT XML: {exc}"
+            ) from exc
+
+        root = tree.getroot()
+        changed = False
+        reordered = 0
+        removed_aux = 0
+
+        plate_labels = {
+            str(label or "").strip().lower()
+            for label in CONFIG.PLATE_LABELS
+            if str(label or "").strip()
+        }
+
+        for image_node in root.findall(".//image"):
+            for child in list(image_node):
+                tag = str(child.tag or "").strip().lower()
+                label = str(child.get("label", "") or "").strip().lower()
+
+                if tag == "box":
+                    if label not in plate_labels:
+                        image_node.remove(child)
+                        removed_aux += 1
+                        changed = True
+                    continue
+
+                if tag != "polygon":
+                    continue
+
+                if label not in plate_labels:
+                    image_node.remove(child)
+                    removed_aux += 1
+                    changed = True
+                    continue
+
+                points = parse_quad_points(
+                    str(child.get("points") or "")
+                )
+                if points is None:
+                    continue
+
+                canonical = canonicalize_quad_tl_tr_br_bl(points)
+                if not quad_is_non_degenerate(canonical):
+                    continue
+
+                if not is_canonical_quad_tl_tr_br_bl(points):
+                    reordered += 1
+                    changed = True
+
+                normalized = ";".join(
+                    f"{float(x):.2f},{float(y):.2f}"
+                    for x, y in canonical
+                )
+                if str(child.get("points") or "") != normalized:
+                    child.set("points", normalized)
+                    changed = True
+
+        if changed:
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            tree.write(
+                temporary,
+                encoding="utf-8",
+                xml_declaration=True,
+            )
+            temporary.replace(path)
+
+        return {
+            "changed": int(changed),
+            "reordered_polygons": int(reordered),
+            "removed_aux_shapes": int(removed_aux),
+        }
+
+
     def set_ground_truth(
         self,
         track_id: str,
@@ -709,12 +791,19 @@ class EvaluationTrackService:
         gt_dir.mkdir(parents=True, exist_ok=True)
         destination = gt_dir / ("annotations" + (source.suffix or ".xml"))
         shutil.copy2(source, destination)
+
         gt_sha = self._sha256(destination)
 
         old_relative = str(track["gt_relative_path"] or "").strip()
-        if old_relative and old_relative != self._workspace_relative(destination):
+        if (
+            old_relative
+            and old_relative != self._workspace_relative(destination)
+        ):
             old_path = self.workspace / old_relative
-            if old_path.exists() and self._is_within(old_path, track_root):
+            if (
+                old_path.exists()
+                and self._is_within(old_path, track_root)
+            ):
                 old_path.unlink(missing_ok=True)
 
         self.repository.update_evaluation_track(
@@ -732,7 +821,6 @@ class EvaluationTrackService:
                 destination,
             )
         except Exception:
-            # Metryka dodatkowa nie może unieważnić poprawnego FINAL GT.
             pass
 
         self._write_manifest(track_id)
