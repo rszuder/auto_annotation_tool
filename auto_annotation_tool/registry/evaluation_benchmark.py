@@ -108,8 +108,9 @@ def ensure_benchmark_for_track(service, track_id: str, *, name: str | None = Non
     track = dict(service.get_track(track_id))
     if str(track.get("status") or "").upper() != "SEALED":
         raise ValueError("Benchmark można opublikować wyłącznie z toru SEALED.")
-    if str(track.get("target") or "").lower() != "plate":
-        raise ValueError("Ta wersja benchmarku obsługuje tor plate/MT.")
+    target = str(track.get("target") or "").strip().lower()
+    if target not in {"plate", "char"}:
+        raise ValueError("Benchmark controlled obsługuje tory plate/MT oraz char/MZ.")
 
     integrity = service.verify_integrity(track_id)
     if not integrity.ok:
@@ -128,6 +129,10 @@ def ensure_benchmark_for_track(service, track_id: str, *, name: str | None = Non
     verification = dict(service.get_verification(track_id) or {})
     if not bool(verification.get("manual_gt_complete")):
         raise ValueError("Benchmark controlled wymaga ręcznego potwierdzenia kompletności GT.")
+    if target == "char" and not bool(verification.get("char_sequence_ready")):
+        raise ValueError(
+            "Benchmark controlled MZ wymaga zweryfikowanej sekwencji znaków GT."
+        )
 
     track_root = service._track_root(track)
     track_manifest_path = track_root / "track_manifest.json"
@@ -148,7 +153,7 @@ def ensure_benchmark_for_track(service, track_id: str, *, name: str | None = Non
         "schema": BENCHMARK_SCHEMA,
         "benchmark_id": "",
         "name": str(name or track.get("name") or track_id).strip(),
-        "target": "plate",
+        "target": target,
         "source_track_id": str(track_id),
         "source_track_version": int(track.get("version") or 0),
         "source_track_relative_path": str(track.get("relative_path") or ""),
@@ -165,7 +170,9 @@ def ensure_benchmark_for_track(service, track_id: str, *, name: str | None = Non
         "members": member_rows,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "manual_gt_complete": True,
-        "pose_corner_ready": bool(verification.get("pose_corner_ready", True)),
+        "pose_corner_ready": bool(verification.get("pose_corner_ready", False)),
+        "char_sequence_ready": bool(verification.get("char_sequence_ready", False)),
+        "char_sequence_count": int(verification.get("char_sequence_count", 0) or 0),
     }
     fingerprint = _sha256_bytes(_canonical_json(_fingerprint_core(payload)).encode("utf-8"))
     benchmark_id = "BENCH-" + fingerprint[:20].upper()

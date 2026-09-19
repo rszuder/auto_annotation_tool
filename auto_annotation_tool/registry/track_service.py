@@ -94,6 +94,8 @@ class ControlledTrackReference:
     member_sha256: tuple[str, ...]
     pose_corner_ready: bool
     pose_corner_order: str = ""
+    char_sequence_ready: bool = False
+    char_sequence_count: int = 0
     manual_gt_complete: bool = False
     manual_gt_attested_at: str = ""
     manual_gt_attestation_schema: str = ""
@@ -123,6 +125,8 @@ class ControlledTrackReference:
             "member_sha256": list(self.member_sha256),
             "pose_corner_ready": self.pose_corner_ready,
             "pose_corner_order": self.pose_corner_order,
+            "char_sequence_ready": self.char_sequence_ready,
+            "char_sequence_count": self.char_sequence_count,
             "manual_gt_complete": self.manual_gt_complete,
             "manual_gt_attested_at": self.manual_gt_attested_at,
             "manual_gt_attestation_schema": self.manual_gt_attestation_schema,
@@ -1036,6 +1040,10 @@ class EvaluationTrackService:
                 raise EvaluationTrackError("SEAL wymaga potwierdzenia pełnej ręcznej kontroli GT.")
             if str(track["target"]) == "plate" and not verification.get("pose_corner_ready"):
                 raise EvaluationTrackError("Eksperyment MT wymaga GT tablic z uporządkowanymi narożnikami.")
+            if str(track["target"]) == "char" and not verification.get("char_sequence_ready"):
+                raise EvaluationTrackError(
+                    "Eksperyment MZ wymaga GT znaków z jednoznaczną sekwencją dla każdego cropa."
+                )
         preparation = load_json(session_path(self._track_root(track)))
         experiment_contract = {
             "schema": "alpr.track_experiment_contract.v1",
@@ -1922,6 +1930,7 @@ class EvaluationTrackService:
         *,
         required_target: str | None = None,
         require_pose_corners: bool = False,
+        require_char_sequence: bool = False,
         require_manual_gt_complete: bool = False,
         require_independent_acquisition: bool = False,
     ) -> ControlledTrackReference:
@@ -1974,6 +1983,13 @@ class EvaluationTrackService:
                 "Tor nie ma zweryfikowanego GT z dokładnie "
                 "czterema narożnikami zapisanymi w kolejności "
                 "TL, TR, BR, BL."
+            )
+
+        char_sequence_ready = bool(verification.get("char_sequence_ready"))
+        char_sequence_count = int(verification.get("char_sequence_count", 0) or 0)
+        if require_char_sequence and (not char_sequence_ready or char_sequence_count <= 0):
+            raise EvaluationTrackError(
+                "Tor nie ma zweryfikowanego GT znaków z jednoznaczną sekwencją dla każdego cropa."
             )
 
         manual_gt_complete = bool(
@@ -2101,6 +2117,8 @@ class EvaluationTrackService:
             member_sha256=member_sha,
             pose_corner_ready=pose_corner_ready,
             pose_corner_order=pose_corner_order,
+            char_sequence_ready=char_sequence_ready,
+            char_sequence_count=char_sequence_count,
             manual_gt_complete=manual_gt_complete,
             manual_gt_attested_at=manual_gt_attested_at,
             manual_gt_attestation_schema=(
@@ -2279,6 +2297,23 @@ class EvaluationTrackService:
             and unordered_quad_polygon_count == 0
         )
 
+        char_sequence_ready = False
+        char_sequence_count = 0
+        char_gt_character_count = 0
+        if str(track["target"]) == "char":
+            try:
+                from ..ranking.character_benchmark_metrics import inspect_character_ground_truth
+                char_info = inspect_character_ground_truth(
+                    gt_path, expected_image_names=member_names
+                )
+            except Exception as exc:
+                raise EvaluationTrackError(
+                    "GT znaków nie spełnia kontraktu controlled MZ: " + str(exc)
+                ) from exc
+            char_sequence_ready = bool(char_info.get("char_sequence_ready"))
+            char_sequence_count = int(char_info.get("char_sequence_count", 0) or 0)
+            char_gt_character_count = int(char_info.get("char_gt_character_count", 0) or 0)
+
         return {
             "format": "cvat_xml",
             "member_count": len(members),
@@ -2305,6 +2340,9 @@ class EvaluationTrackService:
                 if pose_corner_ready
                 else ""
             ),
+            "char_sequence_ready": char_sequence_ready,
+            "char_sequence_count": char_sequence_count,
+            "char_gt_character_count": char_gt_character_count,
         }
 
     def _content_integrity(self, track_id: str) -> TrackIntegrityResult:

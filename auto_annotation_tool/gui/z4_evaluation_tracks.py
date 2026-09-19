@@ -1445,7 +1445,9 @@ class EvaluationTracksPanel:
             f"Obiekty GT: "
             f"{int(result.get('object_count') or 0)}, "
             f"pose_corner_ready="
-            f"{bool(result.get('pose_corner_ready'))}."
+            f"{bool(result.get('pose_corner_ready'))}; "
+            f"char_sequence_ready="
+            f"{bool(result.get('char_sequence_ready'))}."
         )
 
     def _participant_audit_seal_issue(
@@ -1835,7 +1837,12 @@ class EvaluationTracksPanel:
             (getattr(self, "btn_audit_pool", None), workflow.can_audit_pool),
             (getattr(self, "btn_sample_selection", None), workflow.can_edit_sample),
             (getattr(self, "btn_finalize_sample", None), workflow.can_finalize_sample),
-            (getattr(self, "btn_prepare_z2", None), workflow.can_prepare_gt),
+            (
+                getattr(self, "btn_prepare_z2", None),
+                workflow.can_prepare_gt
+                and bool(track)
+                and str(track.get("target") or "").strip().lower() == "plate",
+            ),
             (getattr(self, "btn_set_gt", None), workflow.can_set_gt),
             (getattr(self, "btn_verify", None), workflow.can_verify),
             (getattr(self, "btn_seal", None), workflow.can_seal),
@@ -1916,6 +1923,12 @@ class EvaluationTracksPanel:
                     "Program utworzy kontrolowaną pulę źródłową eksperymentu."
                 )
             if not str(track.get("gt_relative_path") or "").strip():
+                if str(track.get("target") or "").strip().lower() == "char":
+                    return (
+                        f"Ground Truth: pula zawiera {member_count} cropów tablic. "
+                        "Przygotuj GT znaków w Z3/PZ2, wyeksportuj CVAT XML "
+                        "i użyj w PZ3 „Wczytaj GT…”."
+                    )
                 return (
                     f"Ground Truth: pula zawiera {member_count} obrazów. "
                     "Użyj „Przygotuj GT w Z2”, a po zakończeniu wskaż "

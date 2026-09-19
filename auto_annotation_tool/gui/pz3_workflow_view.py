@@ -58,7 +58,10 @@ def build_pz3_workflow_view_state(
     draft = readiness.status == "DRAFT"
     locked_final = bool(sample_selected)
     no_gt = not readiness.gt_exists
-    requires_sample = readiness.target == "plate" and readiness.requires_audit
+    requires_sample = (
+        readiness.target in {"plate", "char"}
+        and readiness.requires_audit
+    )
 
     can_participants = draft and not locked_final and no_gt
     can_add_images = (
@@ -140,7 +143,12 @@ def build_pz3_workflow_view_state(
 
     if requires_sample:
         if sample_selected:
-            return view("PREPARE_GT", "btn_prepare_z2", "Finalna próba jest gotowa. Następny krok: przygotuj Ground Truth.")
+            if readiness.target == "plate":
+                return view("PREPARE_GT", "btn_prepare_z2", "Finalna próba jest gotowa. Następny krok: przygotuj Ground Truth.")
+            return view(
+                "PREPARE_GT", "btn_set_gt",
+                "Finalna próba MZ jest gotowa. Przygotuj CVAT XML znaków w Z3/PZ2 i wczytaj go jako Ground Truth.",
+            )
         if working:
             return view(
                 "EDIT_SAMPLE",

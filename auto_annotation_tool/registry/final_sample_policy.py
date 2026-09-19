@@ -9,7 +9,7 @@ def requires_final_sample_before_gt(track):
     track = dict(track or {})
     return (
         str(track.get("status") or "").upper() == "DRAFT"
-        and str(track.get("target") or "").lower() == "plate"
+        and str(track.get("target") or "").lower() in {"plate", "char"}
         and str(track.get("purpose") or "").lower() in {"ranking", "final_test"}
     )
 

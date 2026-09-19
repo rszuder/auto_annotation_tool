@@ -126,6 +126,16 @@ class ModelRankingEntry:
     benchmark_fingerprint: str = ""
     benchmark_subset_fingerprint: str = ""
     benchmark_group_metrics: Dict = field(default_factory=dict)
+    exact_match_pct: float = 0.0
+    cer: float = 0.0
+    sequence_count: int = 0
+    exact_match_count: int = 0
+    no_read_count: int = 0
+    correct_characters: int = 0
+    incorrect_characters: int = 0
+    missing_characters: int = 0
+    extra_characters: int = 0
+    character_confusion: List[Dict] = field(default_factory=list)
     corner_metric_status: str = ""
     corner_error_count: int = 0
     corner_error_mean: float = 0.0
@@ -149,7 +159,10 @@ class ModelRankingEntry:
 
     @property
     def ranking_score(self) -> float:
-        if str(self.metrics_source or "").strip().lower() == "yolo val":
+        source = str(self.metrics_source or "").strip().lower()
+        if source == "mz sequence benchmark":
+            return _percent_metric(self.exact_match_pct)
+        if source == "yolo val":
             return _percent_metric(self.map50_95)
         if _percent_metric(self.map50_95) > 0:
             return _percent_metric(self.map50_95)
@@ -337,6 +350,16 @@ class ModelRanking:
             benchmark_fingerprint=str(experiment_payload.get("benchmark_fingerprint") or comparison_stats.get("benchmark_fingerprint") or "").strip().lower(),
             benchmark_subset_fingerprint=str(experiment_payload.get("benchmark_subset_fingerprint") or comparison_stats.get("benchmark_subset_fingerprint") or "").strip().lower(),
             benchmark_group_metrics=dict(comparison_stats.get("benchmark_group_metrics") or {}),
+            exact_match_pct=float(comparison_stats.get("exact_match_pct", 0.0) or 0.0),
+            cer=float(comparison_stats.get("cer", 0.0) or 0.0),
+            sequence_count=int(comparison_stats.get("sequence_count", 0) or 0),
+            exact_match_count=int(comparison_stats.get("exact_match_count", 0) or 0),
+            no_read_count=int(comparison_stats.get("no_read_count", 0) or 0),
+            correct_characters=int(comparison_stats.get("correct_characters", 0) or 0),
+            incorrect_characters=int(comparison_stats.get("incorrect_characters", 0) or 0),
+            missing_characters=int(comparison_stats.get("missing_characters", 0) or 0),
+            extra_characters=int(comparison_stats.get("extra_characters", 0) or 0),
+            character_confusion=list(comparison_stats.get("character_confusion") or []),
             corner_metric_status=str(comparison_stats.get("corner_metric_status", "") or "").strip(),
             corner_error_count=int(comparison_stats.get("corner_error_count", 0) or 0),
             corner_error_mean=float(comparison_stats.get("corner_error_mean", 0.0) or 0.0),

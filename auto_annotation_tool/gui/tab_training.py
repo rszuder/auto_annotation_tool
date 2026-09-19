@@ -1670,6 +1670,81 @@ class TrainingTab:
             )
         ).strip()
         if self._get_ranking_task_target() == "char":
+            from .pz3_comparison import comparison_context
+            pz3_context = comparison_context(self)
+            if pz3_context:
+                result = {
+                    "ok": False,
+                    "selected_path": selected_raw,
+                    "reference_dir": "",
+                    "reference_name": "",
+                    "xml_path": "",
+                    "images_dir": "",
+                    "image_paths": [],
+                    "split_name": "benchmark",
+                    "image_count": 0,
+                    "message": "Kontrolowany tor MZ wymaga cropów tablic i CVAT XML znaków.",
+                }
+                if not selected_raw:
+                    return result
+                selected_path = Path(selected_raw)
+                if not selected_path.exists():
+                    result["message"] = f"Nie znaleziono toru MZ: {selected_path}"
+                    return result
+
+                gt_path = None
+                images_dir = selected_path / "images" if selected_path.is_dir() else None
+                reference_name = selected_path.name
+                manifest_path = selected_path / "track_manifest.json" if selected_path.is_dir() else None
+                if manifest_path is not None and manifest_path.is_file():
+                    try:
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        manifest = {}
+                    track_id = str(manifest.get("track_id") or "").strip()
+                    try:
+                        from ..registry import EvaluationTrackService
+                        track_service = EvaluationTrackService(CONFIG.WORKSPACE_DIR)
+                        track_row = track_service.get_track(track_id)
+                        integrity = track_service.verify_integrity(track_id)
+                    except Exception as exc:
+                        result["message"] = f"Nie udało się zweryfikować toru MZ: {exc}"
+                        return result
+                    if str(track_row.get("status") or "") != "SEALED" or not integrity.ok:
+                        result["message"] = "Kontrolowany ranking MZ wymaga toru SEALED z integralnością PASS."
+                        return result
+                    if str(track_row.get("target") or "").strip().lower() != "char":
+                        result["message"] = "Wybrany tor PZ3 nie jest torem MZ/char."
+                        return result
+                    gt_relative = str(track_row.get("gt_relative_path") or "").strip()
+                    gt_path = (
+                        Path(CONFIG.WORKSPACE_DIR) / gt_relative
+                        if gt_relative
+                        else selected_path / "ground_truth" / "annotations.xml"
+                    )
+                    reference_name = f"{track_row.get('name') or track_id} v{int(track_row.get('version') or 1)}"
+                elif selected_path.is_dir() and (selected_path / "annotations.xml").is_file():
+                    gt_path = selected_path / "annotations.xml"
+
+                try:
+                    image_paths = get_image_files(images_dir) if images_dir is not None else []
+                except Exception:
+                    image_paths = []
+                if gt_path is None or not gt_path.is_file() or not image_paths:
+                    result["message"] = "Tor MZ nie zawiera kompletnego CVAT GT i cropów tablic."
+                    return result
+                result.update({
+                    "ok": True,
+                    "reference_dir": str(selected_path.resolve()),
+                    "reference_name": reference_name,
+                    "xml_path": str(gt_path.resolve()),
+                    "images_dir": str(images_dir.resolve()),
+                    "image_paths": image_paths,
+                    "image_count": len(image_paths),
+                    "message": f"Gotowy kontrolowany tor MZ: {reference_name} | {len(image_paths)} cropów.",
+                })
+                return result
+
             split_name = self._get_ranking_split_name()
             result = {
                 "ok": False,
