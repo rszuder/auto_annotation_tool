@@ -242,6 +242,54 @@ def participant_model_sort_key(
     return _natural_sort_key(item.model_id)
 
 
+
+def participant_target_context(target: str | None) -> dict[str, str]:
+    """Czytelny kontekst typu modeli dla selektora uczestników PZ3."""
+    normalized = str(target or "").strip().lower()
+    if normalized == "char":
+        return {
+            "window_title": "Wybierz modele znakowe MZ",
+            "header": "MZ / modele znakowe (char · Detect)",
+            "description": (
+                "Ten eksperyment dotyczy rozpoznawania znaków tablicy. "
+                "Lista poniżej zawiera wyłącznie modele targetu char/MZ "
+                "dopuszczone przez katalog uczestników."
+            ),
+            "model_column": "Model znakowy",
+            "selection_label": "Wybrane modele MZ",
+        }
+    if normalized == "plate":
+        return {
+            "window_title": "Wybierz modele tablic MT",
+            "header": "MT / modele tablic (plate · Pose)",
+            "description": (
+                "Ten eksperyment dotyczy lokalizacji tablic i ich narożników. "
+                "Lista poniżej zawiera modele targetu plate/MT."
+            ),
+            "model_column": "Model tablic",
+            "selection_label": "Wybrane modele MT",
+        }
+    if normalized == "vehicle":
+        return {
+            "window_title": "Wybierz modele pojazdów MP",
+            "header": "MP / modele pojazdów (vehicle)",
+            "description": (
+                "Ten eksperyment dotyczy detekcji pojazdów. "
+                "Lista poniżej zawiera modele targetu vehicle/MP."
+            ),
+            "model_column": "Model pojazdów",
+            "selection_label": "Wybrane modele MP",
+        }
+    return {
+        "window_title": "Wybierz modele do eksperymentu",
+        "header": "Modele uczestniczące",
+        "description": (
+            "Lista modeli jest filtrowana zgodnie z targetem bieżącego toru."
+        ),
+        "model_column": "Model",
+        "selection_label": "Wybrane modele",
+    }
+
 class ParticipantSelectionDialog:
     def __init__(
         self,
@@ -250,6 +298,7 @@ class ParticipantSelectionDialog:
         models,
         selected_ids,
         track_name,
+        target="",
         on_refresh=None,
         on_register=None,
         on_unregister=None,
@@ -264,13 +313,14 @@ class ParticipantSelectionDialog:
         self.on_refresh = on_refresh
         self.on_register = on_register
         self.on_unregister = on_unregister
+        self.target_context = participant_target_context(target)
         self.registry_status = tk.StringVar(
             master=parent,
             value="",
         )
         self.window = tk.Toplevel(parent)
         self.selection_status = tk.StringVar(parent)
-        self.window.title("Wybierz modele do eksperymentu")
+        self.window.title(self.target_context["window_title"])
         self.window.geometry("1140x780")
         self.window.minsize(1000, 700)
         self.window.resizable(True, True)
@@ -285,13 +335,20 @@ class ParticipantSelectionDialog:
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(3, weight=1)
-        ttk.Label(root, text=f"Wybierz modele · {track_name}", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            root,
+            text=f"{self.target_context['header']} · {track_name}",
+            font=("Segoe UI", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
         description = ttk.Label(
             root,
             text=(
-                "Wybierz modele, które chcesz porównać w tym eksperymencie.\n"
-                "Kliknij model, aby zobaczyć jego szczegóły. Pochodzenie, dataset treningowy i metryki "
-                "pomagają zweryfikować właściwy model przed zatwierdzeniem."
+                self.target_context["description"]
+                + "\n"
+                + "Wybierz modele, które chcesz porównać w tym eksperymencie. "
+                "Kliknij model, aby zobaczyć jego szczegóły. Pochodzenie, "
+                "dataset treningowy i metryki pomagają zweryfikować właściwy "
+                "checkpoint przed zatwierdzeniem."
             ),
             wraplength=1080,
             justify=tk.LEFT,
@@ -330,7 +387,8 @@ class ParticipantSelectionDialog:
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended",
                                  style="ParticipantCatalog.Treeview", height=5)
         for key, title, width in (
-            ("sel", "W eksperymencie", 125), ("model", "Model", 170),
+            ("sel", "W eksperymencie", 125),
+            ("model", self.target_context["model_column"], 170),
             ("arch", "Architektura", 100), ("origin", "Pochodzenie", 240),
             ("quality", "Jakość (mAP50–95)", 145), ("prov", "Historia", 150),
         ):
@@ -406,7 +464,8 @@ class ParticipantSelectionDialog:
         if select_model_id and select_model_id in available:
             self.selected.add(select_model_id)
         self.selection_status.set(
-            f"Wybrane modele: {len(self.selected)} z {len(self.models)}"
+            f"{self.target_context['selection_label']}: "
+            f"{len(self.selected)} z {len(self.models)}"
         )
         self._populate()
 
@@ -620,7 +679,8 @@ class ParticipantSelectionDialog:
                 ),
             )
         self.selection_status.set(
-            f"Wybrane modele: {len(self.selected)} z {len(self.models)}"
+            f"{self.target_context['selection_label']}: "
+            f"{len(self.selected)} z {len(self.models)}"
         )
         self._refresh_sort_headings()
         self._update_selection_status()
