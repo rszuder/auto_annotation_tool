@@ -1548,6 +1548,15 @@ def _collect_current_ranking_report_context(self) -> dict:
                 "plates_added": int(getattr(entry, "plates_added", 0) or 0),
                 "plates_removed": int(getattr(entry, "plates_removed", 0) or 0),
                 "benchmark_group_metrics": dict(getattr(entry, "benchmark_group_metrics", {}) or {}),
+                "exact_match_pct": float(getattr(entry, "exact_match_pct", 0.0) or 0.0),
+                "cer": float(getattr(entry, "cer", 0.0) or 0.0),
+                "sequence_count": int(getattr(entry, "sequence_count", 0) or 0),
+                "exact_match_count": int(getattr(entry, "exact_match_count", 0) or 0),
+                "no_read_count": int(getattr(entry, "no_read_count", 0) or 0),
+                "correct_characters": int(getattr(entry, "correct_characters", 0) or 0),
+                "incorrect_characters": int(getattr(entry, "incorrect_characters", 0) or 0),
+                "missing_characters": int(getattr(entry, "missing_characters", 0) or 0),
+                "extra_characters": int(getattr(entry, "extra_characters", 0) or 0),
                 "corner_metric_status": str(getattr(entry, "corner_metric_status", "") or ""),
                 "corner_error_count": int(getattr(entry, "corner_error_count", 0) or 0),
                 "corner_error_mean": float(getattr(entry, "corner_error_mean", 0.0) or 0.0),
@@ -1618,6 +1627,13 @@ def _ranking_group_metric_rows(rows: list[dict]) -> list[dict]:
                     "recall": float(group.get("recall", 0.0) or 0.0),
                     "f1": float(group.get("f1", 0.0) or 0.0),
                     "accuracy": float(group.get("accuracy", 0.0) or 0.0),
+                    "exact_match_pct": float(group.get("exact_match_pct", 0.0) or 0.0),
+                    "cer": float(group.get("cer", 0.0) or 0.0),
+                    "no_read_count": int(group.get("no_read_count", 0) or 0),
+                    "correct_characters": int(group.get("correct_characters", 0) or 0),
+                    "incorrect_characters": int(group.get("incorrect_characters", 0) or 0),
+                    "missing_characters": int(group.get("missing_characters", 0) or 0),
+                    "extra_characters": int(group.get("extra_characters", 0) or 0),
                     "total_auto_plates": int(group.get("total_auto_plates", 0) or 0),
                     "total_corrected_plates": int(group.get("total_corrected_plates", 0) or 0),
                     "plates_unchanged": int(group.get("plates_unchanged", 0) or 0),
@@ -5292,10 +5308,14 @@ def _run_ranking_v2(self):
                                 else None
                             ),
                             "metrics_source": (
-                                "YOLO val"
+                                "MZ sequence benchmark"
+                                if target == "char" and pz3_context
+                                else "YOLO val"
                                 if target == "char"
                                 else "CVAT comparator"
                             ),
+                            "char_confidence": (0.25 if target == "char" and pz3_context else None),
+                            "char_iou": (0.45 if target == "char" and pz3_context else None),
                             "benchmark_id": str((pz3_context or {}).get("benchmark_id") or ""),
                             "benchmark_fingerprint": str((pz3_context or {}).get("benchmark_fingerprint") or ""),
                             "benchmark_subset_fingerprint": str((pz3_context or {}).get("benchmark_subset_fingerprint") or ""),
@@ -5391,6 +5411,96 @@ def _run_ranking_v2(self):
 
 
             if target == "char":
+                if not YOLO_AVAILABLE:
+                    self._append_ranking_log("Brak modułu YOLO - nie można uruchomić rankingu znaków.")
+                    self._ui(lambda: messagebox.showerror("Błąd", "Brak modułu YOLO."))
+                    return
+                YoloClass = get_yolo_class()
+                if YoloClass is None:
+                    self._append_ranking_log("Nie udało się załadować klasy YOLO.")
+                    self._ui(lambda: messagebox.showerror("Błąd", "Nie udało się załadować modułu YOLO."))
+                    return
+
+                if pz3_context:
+                    from ..ranking.character_benchmark_metrics import evaluate_character_model_on_benchmark
+                    gt_xml = Path(str(reference_info.get("xml_path") or "").strip())
+                    images = list(reference_info.get("image_paths") or [])
+                    if not gt_xml.is_file() or not images:
+                        self._ui(lambda: messagebox.showerror("Błąd", "Tor MZ nie zawiera kompletnego GT i cropów."))
+                        return
+
+                    total_models = len(models_to_test)
+                    for idx, model_path in enumerate(models_to_test):
+                        if not self.rank_is_running:
+                            cancelled = True
+                            break
+                        model_started_at = time.perf_counter()
+                        model_display = Path(model_path).name
+                        model = None
+                        try:
+                            model = YoloClass(str(model_path))
+                            def _progress(current, total, _name):
+                                pct = ((idx + current / max(1, total)) / max(1, total_models)) * 100.0
+                                self._ui(lambda value=pct: self.rank_progress_var.set(value))
+                            stats = evaluate_character_model_on_benchmark(
+                                model,
+                                images,
+                                gt_xml,
+                                benchmark=(pz3_context.get("benchmark") if isinstance(pz3_context.get("benchmark"), dict) else None),
+                                selected_sha256=pz3_context.get("benchmark_selected_sha256"),
+                                device=device,
+                                confidence=0.25,
+                                iou=0.45,
+                                progress=_progress,
+                            )
+                            stats["benchmark_id"] = str(pz3_context.get("benchmark_id") or "")
+                            stats["benchmark_fingerprint"] = str(pz3_context.get("benchmark_fingerprint") or "")
+                            stats["benchmark_subset_fingerprint"] = str(pz3_context.get("benchmark_subset_fingerprint") or "")
+                            persist_ranking_result(model_path, stats)
+                        except Exception as model_error:
+                            self._append_ranking_log(
+                                f"Pominięto {model_display}: kontrolowana ocena MZ nie powiodła się: {model_error}"
+                            )
+                            continue
+                        finally:
+                            try:
+                                del model
+                            except Exception:
+                                pass
+                            try:
+                                cleanup_gpu_memory()
+                            except Exception:
+                                pass
+                        self._append_ranking_log(
+                            f"Zakończono {model_display} | "
+                            f"Exact Match={float(stats.get('exact_match_pct', 0) or 0):.2f}% | "
+                            f"CER={float(stats.get('cer', 0) or 0) * 100.0:.3f}% | "
+                            f"F1 znaków={float(stats.get('f1', 0) or 0):.2f}% | "
+                            f"brak odczytu={int(stats.get('no_read_count', 0) or 0)} | "
+                            f"czas: {time.perf_counter() - model_started_at:.1f}s"
+                        )
+                        for group in (stats.get("benchmark_group_metrics") or {}).get("groups", []):
+                            self._append_ranking_log(
+                                f"  ↳ {group.get('label_name') or group.get('group_id')}: "
+                                f"n={int(group.get('sample_count', 0) or 0)} | "
+                                f"Exact={float(group.get('exact_match_pct', 0) or 0):.2f}% | "
+                                f"CER={float(group.get('cer', 0) or 0) * 100.0:.3f}%"
+                            )
+
+                    try:
+                        self.ranking_engine.flush()
+                        finalize_ranking_experiment(bool(cancelled or self.rank_cancel_requested))
+                        ranking_experiment = None
+                    except Exception as finish_error:
+                        self._ui(lambda err=str(finish_error): messagebox.showerror("Kontrolowany ranking MZ", err))
+                        return
+                    if not cancelled and not self.rank_cancel_requested:
+                        self._ui(lambda: self.rank_progress_var.set(100))
+                        self._ui(lambda: self._load_ranking())
+                        self._set_ranking_ui_state(status="Analiza MZ zakończona.", status_color="green")
+                    return
+
+            if target == "char" and not pz3_context:
                 if not YOLO_AVAILABLE:
                     self._append_ranking_log("Brak modułu YOLO - nie można uruchomić rankingu znaków.")
                     self._ui(lambda: messagebox.showerror("Błąd", "Brak modułu YOLO."))

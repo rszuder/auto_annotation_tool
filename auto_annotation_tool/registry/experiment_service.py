@@ -164,6 +164,9 @@ class ExperimentService:
                 clean_track_id,
                 required_target=clean_target,
                 require_pose_corners=require_pose_corners,
+                require_char_sequence=bool(
+                    clean_target == "char" and clean_mode == MODE_CONTROLLED
+                ),
                 require_manual_gt_complete=(
                     require_manual_gt_complete
                 ),
@@ -517,6 +520,8 @@ class ExperimentService:
                 "object_count": int(track_ref.object_count),
                 "pose_corner_ready": bool(track_ref.pose_corner_ready),
                 "pose_corner_order": str(track_ref.pose_corner_order or ""),
+                "char_sequence_ready": bool(track_ref.char_sequence_ready),
+                "char_sequence_count": int(track_ref.char_sequence_count or 0),
                 "manual_gt_complete": bool(track_ref.manual_gt_complete),
                 "manual_gt_attested_at": str(track_ref.manual_gt_attested_at or ""),
                 "manual_gt_attestation_schema": str(track_ref.manual_gt_attestation_schema or ""),
