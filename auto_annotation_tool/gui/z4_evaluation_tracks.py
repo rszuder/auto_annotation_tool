@@ -248,6 +248,24 @@ def _short_hash(value: str | None, length: int = 12) -> str:
     return raw[: max(4, int(length or 12))] if raw else "-"
 
 
+
+def participant_model_picker_initial_dir(target: str | None) -> Path:
+    """Katalog startowy selektora checkpointu zgodny z targetem PZ3."""
+    normalized = CONFIG.normalize_task_target(target)
+    preferred = Path(CONFIG.get_trained_models_dir(normalized))
+    if preferred.is_dir():
+        return preferred
+
+    try:
+        for candidate in CONFIG.get_model_search_dirs(normalized):
+            candidate = Path(candidate)
+            if candidate.is_dir():
+                return candidate
+    except Exception:
+        pass
+
+    return Path(CONFIG.DEFAULT_MODELS_DIR)
+
 class EvaluationTracksPanel:
     """Lekki panel PZ3. Cała logika trwałości pozostaje w registry/track_service."""
 
@@ -838,8 +856,10 @@ class EvaluationTracksPanel:
         track: Mapping[str, Any],
     ):
         target = str(track.get("target") or "").strip().lower()
+        initial_dir = participant_model_picker_initial_dir(target)
         path = filedialog.askopenfilename(
-            title="Wybierz istniejący checkpoint modelu",
+            title=f"Wybierz checkpoint · {target_label(target)}",
+            initialdir=str(initial_dir.resolve()),
             filetypes=[
                 ("PyTorch checkpoint", "*.pt"),
                 ("Wszystkie pliki", "*.*"),
