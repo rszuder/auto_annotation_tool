@@ -1494,7 +1494,7 @@ def _collect_current_ranking_report_context(self) -> dict:
             entry for entry in entries
             if normalize_path(getattr(entry, "reference_path", "")) == reference_key
         ]
-        if target == "char" and selected_split:
+        if target == "char" and selected_split and not pz3_context:
             entries = [
                 entry for entry in entries
                 if str(getattr(entry, "split_name", "") or "").strip() == selected_split
@@ -1557,6 +1557,7 @@ def _collect_current_ranking_report_context(self) -> dict:
                 "incorrect_characters": int(getattr(entry, "incorrect_characters", 0) or 0),
                 "missing_characters": int(getattr(entry, "missing_characters", 0) or 0),
                 "extra_characters": int(getattr(entry, "extra_characters", 0) or 0),
+                "character_confusion": list(getattr(entry, "character_confusion", []) or []),
                 "corner_metric_status": str(getattr(entry, "corner_metric_status", "") or ""),
                 "corner_error_count": int(getattr(entry, "corner_error_count", 0) or 0),
                 "corner_error_mean": float(getattr(entry, "corner_error_mean", 0.0) or 0.0),
@@ -2110,6 +2111,855 @@ def _ranking_report_plate_diffs_svg(rows: list[dict], *, title: str) -> str:
 
 
 
+
+def _ranking_cer_text(value) -> str:
+    try:
+        return f"{float(value or 0.0) * 100.0:.3f}%"
+    except Exception:
+        return "-"
+
+
+def _ranking_exact_text(value) -> str:
+    try:
+        return f"{float(value or 0.0):.2f}%"
+    except Exception:
+        return "-"
+
+
+def _ranking_character_confusion_rows(rows: list[dict]) -> list[dict]:
+    flattened = []
+    for model_row in list(rows or []):
+        for item in list(model_row.get("character_confusion") or []):
+            if not isinstance(item, dict):
+                continue
+            gt = str(item.get("ground_truth") or "").strip()
+            pred = str(item.get("prediction") or "").strip()
+            count = int(item.get("count", 0) or 0)
+            if not gt or not pred or count <= 0:
+                continue
+            flattened.append(
+                {
+                    "model": str(model_row.get("label") or "-"),
+                    "model_file": str(model_row.get("model_file") or "-"),
+                    "ground_truth": gt,
+                    "prediction": pred,
+                    "count": count,
+                }
+            )
+    flattened.sort(
+        key=lambda row: (
+            -int(row.get("count", 0) or 0),
+            str(row.get("model_file") or ""),
+            str(row.get("ground_truth") or ""),
+            str(row.get("prediction") or ""),
+        )
+    )
+    return flattened
+
+
+def _ranking_report_char_quality_svg(rows: list[dict], *, title: str) -> str:
+    width = 1180
+    row_height = 76
+    top = 92
+    left = 350
+    bar_width = 590
+    height = max(280, top + row_height * max(1, len(rows)) + 50)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#101820"/>',
+        f'<text x="24" y="36" fill="#f4f7f6" font-size="24" font-family="Segoe UI, Arial" font-weight="700">{_ranking_report_escape(title)}</text>',
+        '<text x="24" y="58" fill="#9fb0aa" font-size="13" font-family="Segoe UI, Arial">Exact Match: wyżej = lepiej. CER: niżej = lepiej.</text>',
+    ]
+    if not rows:
+        parts.append(
+            '<text x="24" y="118" fill="#f0b44c" font-size="18" font-family="Segoe UI, Arial">Brak wyników MZ.</text>'
+        )
+    for index, row in enumerate(rows):
+        y = top + index * row_height
+        label = textwrap.shorten(
+            str(row.get("label") or "-"),
+            width=42,
+            placeholder="...",
+        )
+        exact = max(
+            0.0,
+            min(100.0, float(row.get("exact_match_pct", 0.0) or 0.0)),
+        )
+        cer = max(0.0, float(row.get("cer", 0.0) or 0.0) * 100.0)
+        parts.extend(
+            [
+                f'<text x="24" y="{y + 20}" fill="#f4f7f6" font-size="14" font-family="Segoe UI, Arial">#{index + 1} {_ranking_report_escape(label)}</text>',
+                f'<rect x="{left}" y="{y + 5}" width="{bar_width}" height="20" rx="5" fill="#26343a"/>',
+                f'<rect x="{left}" y="{y + 5}" width="{bar_width * exact / 100.0:.1f}" height="20" rx="5" fill="#4aa3ff"/>',
+                f'<text x="{left + bar_width + 14}" y="{y + 20}" fill="#f4f7f6" font-size="12" font-family="Segoe UI, Arial">Exact {exact:.2f}%</text>',
+                f'<text x="{left}" y="{y + 50}" fill="#f0b44c" font-size="12" font-family="Segoe UI, Arial">CER {cer:.3f}% · brak odczytu {int(row.get("no_read_count", 0) or 0)}</text>',
+            ]
+        )
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _draw_ranking_char_quality_canvas(
+    canvas: tk.Canvas,
+    rows: list[dict],
+    palette: dict,
+):
+    canvas.delete("all")
+    width = max(int(canvas.winfo_width() or 0), 1020)
+    row_height = 72
+    top = 92
+    left = 340
+    right_pad = 180
+    bar_width = max(360, width - left - right_pad)
+    height = max(300, top + row_height * max(1, len(rows)) + 48)
+    bg = palette.get("panel", "#101820")
+    fg = palette.get("fg", "#f4f7f6")
+    muted = palette.get("muted", "#9fb0aa")
+    track = blend_hex_colors(
+        palette.get("panel_border", "#3c3c3c"),
+        bg,
+        0.42,
+    )
+    canvas.configure(bg=bg, scrollregion=(0, 0, width, height))
+    canvas.create_text(
+        24, 28,
+        text="Jakość odczytu MZ",
+        fill=fg,
+        font=("Segoe UI", 18, "bold"),
+        anchor=tk.W,
+    )
+    canvas.create_text(
+        24, 54,
+        text="Exact Match mierzy pełny numer rejestracyjny. CER opisuje błąd znakowy.",
+        fill=muted,
+        font=("Segoe UI", 9),
+        anchor=tk.W,
+    )
+    if not rows:
+        canvas.create_text(
+            24, 118,
+            text="Brak wyników MZ.",
+            fill=palette.get("warning", "#f0b44c"),
+            anchor=tk.W,
+        )
+        return
+    for index, row in enumerate(rows):
+        y = top + index * row_height
+        label = textwrap.shorten(
+            str(row.get("label") or "-"),
+            width=40,
+            placeholder="...",
+        )
+        exact = max(
+            0.0,
+            min(100.0, float(row.get("exact_match_pct", 0.0) or 0.0)),
+        )
+        cer = max(0.0, float(row.get("cer", 0.0) or 0.0) * 100.0)
+        canvas.create_text(
+            24, y + 20,
+            text=f"#{index + 1} {label}",
+            fill=fg,
+            font=("Segoe UI", 10),
+            anchor=tk.W,
+        )
+        canvas.create_rectangle(
+            left, y + 5,
+            left + bar_width, y + 25,
+            fill=track,
+            outline="",
+        )
+        canvas.create_rectangle(
+            left, y + 5,
+            left + (exact / 100.0) * bar_width, y + 25,
+            fill=palette.get("accent", "#4aa3ff"),
+            outline="",
+        )
+        canvas.create_text(
+            left + bar_width + 14,
+            y + 19,
+            text=f"Exact {exact:.2f}%",
+            fill=fg,
+            font=("Segoe UI", 9, "bold"),
+            anchor=tk.W,
+        )
+        canvas.create_text(
+            left, y + 48,
+            text=(
+                f"CER {cer:.3f}% · "
+                f"brak odczytu {int(row.get('no_read_count', 0) or 0)}"
+            ),
+            fill=palette.get("warning", "#f0b44c"),
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+        )
+
+
+def _ranking_char_report_markdown(context: dict) -> str:
+    generated = context.get("generated_at")
+    generated_text = (
+        generated.strftime("%Y-%m-%d %H:%M:%S")
+        if hasattr(generated, "strftime")
+        else "-"
+    )
+    rows = list(context.get("rows") or [])
+    controlled = context.get("analysis_mode") == "controlled"
+
+    lines = [
+        "# Eksperyment kontrolowany PZ3 — MZ"
+        if controlled
+        else "# Analiza modeli MZ",
+        "",
+        (
+            "**CONTROLLED / SEALED** — wyniki pochodzą z zamrożonego "
+            "toru, uczestników i Ground Truth."
+            if controlled
+            else
+            "**Analiza robocza** — wynik poza kontraktem controlled."
+        ),
+        "",
+        "## Kontekst testu",
+        "",
+        f"- Data raportu: {generated_text}",
+        f"- Tor: {context.get('reference_name') or '-'}",
+        f"- Ścieżka odniesienia: `{context.get('reference_path') or '-'}`",
+        f"- Liczba cropów tablic: {int(rows[0].get('sample', 0) or 0) if rows else 0}",
+        f"- Liczba modeli z wynikiem: {len(rows)}",
+        "",
+        "## Jak czytać wynik",
+        "",
+        "`Exact Match` oznacza odsetek cropów, dla których cały numer "
+        "rejestracyjny jest identyczny z GT. `CER` jest łącznym dystansem "
+        "edycyjnym podzielonym przez łączną liczbę znaków GT; niższy CER "
+        "oznacza mniej błędów znakowych. P/R/F1 opisują zgodność znaków po "
+        "deterministycznym wyrównaniu sekwencji.",
+        "",
+    ]
+
+    if controlled:
+        lines.extend(
+            [
+                "## Kontrakt PZ3",
+                "",
+                f"- Tor: {context.get('track_id') or '—'}",
+                "- Reference: SEALED",
+                "- Zamrożeni uczestnicy: "
+                + ", ".join(context.get("participant_ids") or []),
+                "",
+            ]
+        )
+        for row in rows:
+            lines.extend(
+                [
+                    f"- Model {row.get('model_id') or row.get('label')}: "
+                    f"SHA-256 `{row.get('model_sha256') or '—'}`",
+                    f"  Eksperyment: {row.get('experiment_id') or '—'}; "
+                    f"manifest: `{row.get('track_manifest_sha256') or '—'}`; "
+                    f"protokół: `{row.get('protocol_sha256') or '—'}`",
+                ]
+            )
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Metryki globalne",
+            "",
+            "| # | Model | Exact Match | CER | P znaków | R znaków | F1 znaków | Brak odczytu | n |",
+            "|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in rows:
+        lines.append(
+            f"| {int(row.get('rank', 0) or 0)} | "
+            f"{str(row.get('label') or '-').replace('|', '\\|')} | "
+            f"{_ranking_exact_text(row.get('exact_match_pct'))} | "
+            f"{_ranking_cer_text(row.get('cer'))} | "
+            f"{_ranking_report_percent_text(row.get('precision'))} | "
+            f"{_ranking_report_percent_text(row.get('recall'))} | "
+            f"{_ranking_report_percent_text(row.get('f1'))} | "
+            f"{int(row.get('no_read_count', 0) or 0)} | "
+            f"{int(row.get('sample', 0) or 0)} |"
+        )
+    lines.append("")
+
+    if len(rows) >= 2:
+        first, second = rows[0], rows[1]
+        exact_gap = (
+            float(first.get("exact_match_pct", 0.0) or 0.0)
+            - float(second.get("exact_match_pct", 0.0) or 0.0)
+        )
+        lines.extend(
+            [
+                "## Różnice między pierwszymi dwoma wynikami",
+                "",
+                f"- Exact Match: **{exact_gap:+.3f} p.p.** "
+                f"({_ranking_exact_text(first.get('exact_match_pct'))} vs "
+                f"{_ranking_exact_text(second.get('exact_match_pct'))}).",
+                f"- CER: **{_ranking_cer_text(first.get('cer'))}** vs "
+                f"**{_ranking_cer_text(second.get('cer'))}**.",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "## Struktura błędów znakowych",
+            "",
+            "| Model | Poprawne | Błędne | Brakujące | Nadmiarowe |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for row in rows:
+        lines.append(
+            f"| {str(row.get('label') or '-').replace('|', '\\|')} | "
+            f"{int(row.get('correct_characters', 0) or 0)} | "
+            f"{int(row.get('incorrect_characters', 0) or 0)} | "
+            f"{int(row.get('missing_characters', 0) or 0)} | "
+            f"{int(row.get('extra_characters', 0) or 0)} |"
+        )
+    lines.append("")
+
+    confusion = _ranking_character_confusion_rows(rows)
+    if confusion:
+        lines.extend(
+            [
+                "## Najczęstsze pomyłki znaków",
+                "",
+                "| Model | GT | Predykcja | Liczba |",
+                "|---|---|---|---:|",
+            ]
+        )
+        for row in confusion[:30]:
+            lines.append(
+                f"| {str(row.get('model_file') or row.get('model') or '-').replace('|', '\\|')} | "
+                f"{row.get('ground_truth') or '-'} | "
+                f"{row.get('prediction') or '-'} | "
+                f"{int(row.get('count', 0) or 0)} |"
+            )
+        lines.append("")
+
+    label_rows = _ranking_label_metric_rows(rows)
+    if label_rows:
+        lines.extend(
+            [
+                "## Metryki według etykiet próbki",
+                "",
+                "| Model | Etykieta | n | Exact Match | CER | P | R | F1 | Brak odczytu |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in label_rows:
+            lines.append(
+                f"| {str(row.get('model') or '-').replace('|', '\\|')} | "
+                f"{str(row.get('label_name') or '-').replace('|', '\\|')} | "
+                f"{int(row.get('sample_count', 0) or 0)} | "
+                f"{_ranking_exact_text(row.get('exact_match_pct'))} | "
+                f"{_ranking_cer_text(row.get('cer'))} | "
+                f"{_ranking_report_percent_text(row.get('precision'))} | "
+                f"{_ranking_report_percent_text(row.get('recall'))} | "
+                f"{_ranking_report_percent_text(row.get('f1'))} | "
+                f"{int(row.get('no_read_count', 0) or 0)} |"
+            )
+        lines.append("")
+
+    lines.extend(
+        [
+            "## Pliki wygenerowane z raportem",
+            "",
+            "- `ranking_results.csv` — globalne wyniki MZ.",
+            "- `ranking_label_metrics.csv` — wyniki model × etykieta.",
+            "- `ranking_character_confusion.csv` — pomyłki klas znaków.",
+            "- `ranking_score.svg` — ranking wg Exact Match.",
+            "- `ranking_metrics.svg` — P/R/F1 znaków.",
+            "- `ranking_char_quality.svg` — Exact Match i CER.",
+            "- `ranking_label_exact_match.svg` — Exact Match wg etykiet.",
+            "- `ranking_label_cer.svg` — CER wg etykiet.",
+            "- `ranking_label_f1.svg` — F1 wg etykiet.",
+            "",
+            "## Ograniczenia interpretacji",
+            "",
+            "Wynik dotyczy tego konkretnego zapieczętowanego zestawu cropów, "
+            "tego GT, progów inferencji i tych checkpointów MZ. Ocena MZ "
+            "nie obejmuje błędów wcześniejszego etapu MT/rektyfikacji, ponieważ "
+            "wejściem tego eksperymentu są gotowe cropy tablic.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _open_character_ranking_report_viewer(self, context: dict):
+    rows = list(context.get("rows") or [])
+    existing = getattr(self, "_ranking_report_viewer_modal", None)
+    try:
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+    except Exception:
+        pass
+
+    palette = getattr(self.app, "palette", {})
+    dialog = tk.Toplevel(getattr(self, "frame", None))
+    self._ranking_report_viewer_modal = dialog
+    dialog.title("Wyniki eksperymentu MZ")
+    dialog.configure(bg=palette.get("panel", "#252526"))
+    dialog.resizable(True, True)
+    try:
+        dialog.transient(self.frame.winfo_toplevel())
+    except Exception:
+        pass
+
+    def close_dialog():
+        self._ranking_report_viewer_modal = None
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+    dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+
+    shell = ttk.Frame(dialog, padding=12, style="Panel.TFrame")
+    shell.pack(fill=tk.BOTH, expand=True)
+    shell.grid_rowconfigure(2, weight=1)
+    shell.grid_columnconfigure(0, weight=1)
+
+    ttk.Label(
+        shell,
+        text="Wyniki eksperymentu MZ",
+        style="Panel.TLabel",
+        anchor=tk.W,
+    ).grid(row=0, column=0, sticky="ew")
+
+    subtitle = (
+        f"Tor: {context.get('reference_name') or '-'} | "
+        f"Modele: {len(rows)} | "
+        f"Cropy: {int(rows[0].get('sample', 0) or 0) if rows else 0}"
+    )
+    if len(rows) >= 2:
+        subtitle += (
+            f" | Exact Match: "
+            f"{_ranking_exact_text(rows[0].get('exact_match_pct'))} vs "
+            f"{_ranking_exact_text(rows[1].get('exact_match_pct'))} | "
+            f"CER: {_ranking_cer_text(rows[0].get('cer'))} vs "
+            f"{_ranking_cer_text(rows[1].get('cer'))}"
+        )
+    ttk.Label(
+        shell,
+        text=subtitle,
+        style="PanelMuted.TLabel",
+        anchor=tk.W,
+        justify=tk.LEFT,
+    ).grid(row=1, column=0, sticky="ew", pady=(3, 10))
+
+    notebook = ttk.Notebook(shell)
+    notebook.grid(row=2, column=0, sticky="nsew")
+
+    summary_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    models_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    labels_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    confusion_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    quality_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    ranking_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+
+    notebook.add(summary_tab, text="Podsumowanie", **notebook_tab_icon(notebook, "book"))
+    notebook.add(models_tab, text="Modele", **notebook_tab_icon(notebook, "dataset"))
+    if _ranking_label_metric_rows(rows):
+        notebook.add(labels_tab, text="Etykiety", **notebook_tab_icon(notebook, "annotation"))
+    notebook.add(confusion_tab, text="Pomyłki", **notebook_tab_icon(notebook, "annotation"))
+    notebook.add(quality_tab, text="Exact / CER", **notebook_tab_icon(notebook, "ranking"))
+    notebook.add(ranking_tab, text="Ranking", **notebook_tab_icon(notebook, "ranking"))
+
+    summary_tab.grid_rowconfigure(0, weight=1)
+    summary_tab.grid_columnconfigure(0, weight=1)
+    summary_text = tk.Text(
+        summary_tab,
+        wrap=tk.WORD,
+        bg=palette.get("input_bg", palette.get("panel_alt", "#1f1f1f")),
+        fg=palette.get("fg", "#f3f3f3"),
+        insertbackground=palette.get("fg", "#f3f3f3"),
+        relief=tk.FLAT,
+        borderwidth=0,
+        padx=10,
+        pady=10,
+        font=("Segoe UI", 10),
+    )
+    summary_scroll = WebSlimScrollbar(
+        summary_tab,
+        orient=tk.VERTICAL,
+        command=summary_text.yview,
+    )
+    summary_text.configure(yscrollcommand=summary_scroll.set)
+    summary_text.grid(row=0, column=0, sticky="nsew")
+    summary_scroll.grid(row=0, column=1, sticky="ns")
+    summary_text.insert("1.0", _ranking_char_report_markdown(context))
+    summary_text.configure(state=tk.DISABLED)
+
+    models_tab.grid_rowconfigure(0, weight=1)
+    models_tab.grid_columnconfigure(0, weight=1)
+    cols = (
+        "rank", "model", "exact", "cer", "p", "r", "f1",
+        "wrong", "missing", "extra", "no_read", "n",
+    )
+    titles = {
+        "rank": "#", "model": "Model", "exact": "Exact Match", "cer": "CER",
+        "p": "P znaków", "r": "R znaków", "f1": "F1 znaków",
+        "wrong": "Błędne", "missing": "Brakujące", "extra": "Nadmiarowe",
+        "no_read": "Brak odczytu", "n": "n",
+    }
+    tree = ttk.Treeview(models_tab, columns=cols, show="headings")
+    for col in cols:
+        tree.heading(col, text=titles[col])
+    tree.column("rank", width=45, anchor=tk.CENTER, stretch=False)
+    tree.column("model", width=350, minwidth=220, anchor=tk.W, stretch=True)
+    for col in ("exact", "cer", "p", "r", "f1"):
+        tree.column(col, width=96, anchor=tk.CENTER, stretch=False)
+    for col in ("wrong", "missing", "extra", "no_read", "n"):
+        tree.column(col, width=78, anchor=tk.CENTER, stretch=False)
+    for row in rows:
+        tree.insert(
+            "", tk.END,
+            values=(
+                int(row.get("rank", 0) or 0),
+                row.get("label", "-"),
+                _ranking_exact_text(row.get("exact_match_pct")),
+                _ranking_cer_text(row.get("cer")),
+                _ranking_report_percent_text(row.get("precision")),
+                _ranking_report_percent_text(row.get("recall")),
+                _ranking_report_percent_text(row.get("f1")),
+                int(row.get("incorrect_characters", 0) or 0),
+                int(row.get("missing_characters", 0) or 0),
+                int(row.get("extra_characters", 0) or 0),
+                int(row.get("no_read_count", 0) or 0),
+                int(row.get("sample", 0) or 0),
+            ),
+        )
+    my = WebSlimScrollbar(models_tab, orient=tk.VERTICAL, command=tree.yview)
+    mx = WebSlimScrollbar(models_tab, orient=tk.HORIZONTAL, command=tree.xview)
+    tree.configure(yscrollcommand=my.set, xscrollcommand=mx.set)
+    tree.grid(row=0, column=0, sticky="nsew")
+    my.grid(row=0, column=1, sticky="ns")
+    mx.grid(row=1, column=0, sticky="ew")
+
+    def build_chart_tab(tab, drawer):
+        tab.grid_rowconfigure(0, weight=1)
+        tab.grid_columnconfigure(0, weight=1)
+        canvas = tk.Canvas(tab, highlightthickness=0)
+        scroll = WebSlimScrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        canvas.bind("<Configure>", lambda _event, c=canvas, fn=drawer: fn(c), add="+")
+        dialog.after_idle(lambda c=canvas, fn=drawer: fn(c))
+
+    if _ranking_label_metric_rows(rows):
+        labels_tab.grid_rowconfigure(0, weight=1)
+        labels_tab.grid_columnconfigure(0, weight=1)
+        labels_nb = ttk.Notebook(labels_tab)
+        labels_nb.grid(row=0, column=0, sticky="nsew")
+        label_table = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        label_exact = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        label_cer = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        label_f1 = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        labels_nb.add(label_table, text="Tabela")
+        labels_nb.add(label_exact, text="Exact Match")
+        labels_nb.add(label_cer, text="CER")
+        labels_nb.add(label_f1, text="F1 znaków")
+
+        label_table.grid_rowconfigure(0, weight=1)
+        label_table.grid_columnconfigure(0, weight=1)
+        lcols = ("model", "label", "n", "exact", "cer", "p", "r", "f1", "no_read")
+        ltree = ttk.Treeview(label_table, columns=lcols, show="headings")
+        ltitles = {
+            "model": "Model", "label": "Etykieta", "n": "n",
+            "exact": "Exact Match", "cer": "CER", "p": "P", "r": "R",
+            "f1": "F1", "no_read": "Brak odczytu",
+        }
+        for col in lcols:
+            ltree.heading(col, text=ltitles[col])
+        ltree.column("model", width=250, minwidth=160, anchor=tk.W, stretch=True)
+        ltree.column("label", width=150, minwidth=110, anchor=tk.W, stretch=True)
+        for col in ("n", "exact", "cer", "p", "r", "f1", "no_read"):
+            ltree.column(col, width=88, anchor=tk.CENTER, stretch=False)
+        for row in _ranking_label_metric_rows(rows):
+            ltree.insert(
+                "", tk.END,
+                values=(
+                    row.get("model_file") or row.get("model"),
+                    row.get("label_name"),
+                    int(row.get("sample_count", 0) or 0),
+                    _ranking_exact_text(row.get("exact_match_pct")),
+                    _ranking_cer_text(row.get("cer")),
+                    _ranking_report_percent_text(row.get("precision")),
+                    _ranking_report_percent_text(row.get("recall")),
+                    _ranking_report_percent_text(row.get("f1")),
+                    int(row.get("no_read_count", 0) or 0),
+                ),
+            )
+        ly = WebSlimScrollbar(label_table, orient=tk.VERTICAL, command=ltree.yview)
+        lx = WebSlimScrollbar(label_table, orient=tk.HORIZONTAL, command=ltree.xview)
+        ltree.configure(yscrollcommand=ly.set, xscrollcommand=lx.set)
+        ltree.grid(row=0, column=0, sticky="nsew")
+        ly.grid(row=0, column=1, sticky="ns")
+        lx.grid(row=1, column=0, sticky="ew")
+
+        build_chart_tab(
+            label_exact,
+            lambda canvas: _draw_ranking_label_metric_canvas(
+                canvas, rows, palette,
+                metric_key="exact_match_pct",
+                metric_label="Exact Match",
+            ),
+        )
+        build_chart_tab(
+            label_cer,
+            lambda canvas: _draw_ranking_label_metric_canvas(
+                canvas, rows, palette,
+                metric_key="cer",
+                metric_label="CER (niżej = lepiej)",
+                corner_metric=True,
+            ),
+        )
+        build_chart_tab(
+            label_f1,
+            lambda canvas: _draw_ranking_label_metric_canvas(
+                canvas, rows, palette,
+                metric_key="f1",
+                metric_label="F1 znaków",
+            ),
+        )
+
+    confusion_tab.grid_rowconfigure(0, weight=1)
+    confusion_tab.grid_columnconfigure(0, weight=1)
+    ccols = ("model", "gt", "pred", "count")
+    ctree = ttk.Treeview(confusion_tab, columns=ccols, show="headings")
+    for col, title in {
+        "model": "Model", "gt": "GT", "pred": "Predykcja", "count": "Liczba",
+    }.items():
+        ctree.heading(col, text=title)
+    ctree.column("model", width=360, minwidth=220, anchor=tk.W, stretch=True)
+    ctree.column("gt", width=90, anchor=tk.CENTER, stretch=False)
+    ctree.column("pred", width=100, anchor=tk.CENTER, stretch=False)
+    ctree.column("count", width=90, anchor=tk.CENTER, stretch=False)
+    for row in _ranking_character_confusion_rows(rows):
+        ctree.insert(
+            "", tk.END,
+            values=(
+                row.get("model_file") or row.get("model"),
+                row.get("ground_truth"),
+                row.get("prediction"),
+                int(row.get("count", 0) or 0),
+            ),
+        )
+    cy = WebSlimScrollbar(confusion_tab, orient=tk.VERTICAL, command=ctree.yview)
+    ctree.configure(yscrollcommand=cy.set)
+    ctree.grid(row=0, column=0, sticky="nsew")
+    cy.grid(row=0, column=1, sticky="ns")
+
+    build_chart_tab(
+        quality_tab,
+        lambda canvas: _draw_ranking_char_quality_canvas(canvas, rows, palette),
+    )
+    build_chart_tab(
+        ranking_tab,
+        lambda canvas: _draw_ranking_score_canvas(canvas, rows, palette),
+    )
+
+    bottom = ttk.Frame(shell, style="Panel.TFrame")
+    bottom.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+    ttk.Button(
+        bottom,
+        text="[ RAPORT ] Eksportuj pełny pakiet",
+        command=self._export_ranking_analysis_report,
+    ).pack(side=tk.LEFT)
+    ttk.Button(bottom, text="Zamknij", command=close_dialog).pack(side=tk.RIGHT)
+
+    try:
+        dialog.update_idletasks()
+        root = self.frame.winfo_toplevel()
+        width = min(max(1180, int(root.winfo_width() * 0.92)), 1600)
+        height = min(max(760, int(root.winfo_height() * 0.88)), 1040)
+        x = int(root.winfo_rootx() + max(0, (root.winfo_width() - width) // 2))
+        y = int(root.winfo_rooty() + max(0, (root.winfo_height() - height) // 2))
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+    except Exception:
+        dialog.geometry("1240x800")
+    dialog.lift()
+    dialog.focus_force()
+
+
+def _export_character_ranking_analysis_report(self, context: dict, rows: list[dict]):
+    base_dir = Path(
+        getattr(
+            getattr(self, "ranking_engine", None),
+            "ranking_dir",
+            CONFIG.get_ranking_dir("char"),
+        )
+    )
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_dir = base_dir / "reports" / f"ranking_report_{timestamp}"
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    with (report_dir / "ranking_results.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(
+            [
+                "pozycja", "model", "plik_modelu",
+                "exact_match_pct", "cer",
+                "precyzja_znakow_pct", "czulosc_znakow_pct", "f1_znakow_pct",
+                "probka", "exact_match_count", "brak_odczytu",
+                "poprawne_znaki", "bledne_znaki",
+                "brakujace_znaki", "nadmiarowe_znaki",
+                "status_dowodu", "status_rejestru",
+                "tor", "zrodlo_metryk", "oceniono", "sciezka_modelu",
+            ]
+        )
+        for row in rows:
+            writer.writerow(
+                [
+                    row.get("rank", ""), row.get("label", ""),
+                    row.get("model_file", ""),
+                    f"{float(row.get('exact_match_pct', 0.0) or 0.0):.4f}",
+                    f"{float(row.get('cer', 0.0) or 0.0):.8f}",
+                    f"{float(row.get('precision', 0.0) or 0.0):.4f}",
+                    f"{float(row.get('recall', 0.0) or 0.0):.4f}",
+                    f"{float(row.get('f1', 0.0) or 0.0):.4f}",
+                    int(row.get("sample", 0) or 0),
+                    int(row.get("exact_match_count", 0) or 0),
+                    int(row.get("no_read_count", 0) or 0),
+                    int(row.get("correct_characters", 0) or 0),
+                    int(row.get("incorrect_characters", 0) or 0),
+                    int(row.get("missing_characters", 0) or 0),
+                    int(row.get("extra_characters", 0) or 0),
+                    row.get("evidence_label", ""),
+                    row.get("registry_experiment_status", ""),
+                    row.get("reference", ""),
+                    row.get("metrics_source", ""),
+                    row.get("evaluated_at", ""),
+                    row.get("model_path", ""),
+                ]
+            )
+
+    label_rows = _ranking_label_metric_rows(rows)
+    if label_rows:
+        with (report_dir / "ranking_label_metrics.csv").open(
+            "w", encoding="utf-8-sig", newline=""
+        ) as handle:
+            writer = csv.writer(handle, delimiter=";")
+            writer.writerow(
+                [
+                    "model", "plik_modelu", "group_id", "label_id",
+                    "etykieta", "probka", "exact_match_pct", "cer",
+                    "precyzja_znakow_pct", "czulosc_znakow_pct",
+                    "f1_znakow_pct", "brak_odczytu",
+                    "poprawne_znaki", "bledne_znaki",
+                    "brakujace_znaki", "nadmiarowe_znaki",
+                ]
+            )
+            for row in label_rows:
+                writer.writerow(
+                    [
+                        row.get("model", ""), row.get("model_file", ""),
+                        row.get("group_id", ""), row.get("label_id", ""),
+                        row.get("label_name", ""),
+                        int(row.get("sample_count", 0) or 0),
+                        f"{float(row.get('exact_match_pct', 0.0) or 0.0):.4f}",
+                        f"{float(row.get('cer', 0.0) or 0.0):.8f}",
+                        f"{float(row.get('precision', 0.0) or 0.0):.4f}",
+                        f"{float(row.get('recall', 0.0) or 0.0):.4f}",
+                        f"{float(row.get('f1', 0.0) or 0.0):.4f}",
+                        int(row.get("no_read_count", 0) or 0),
+                        int(row.get("correct_characters", 0) or 0),
+                        int(row.get("incorrect_characters", 0) or 0),
+                        int(row.get("missing_characters", 0) or 0),
+                        int(row.get("extra_characters", 0) or 0),
+                    ]
+                )
+
+    confusion = _ranking_character_confusion_rows(rows)
+    with (report_dir / "ranking_character_confusion.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as handle:
+        writer = csv.writer(handle, delimiter=";")
+        writer.writerow(
+            ["model", "plik_modelu", "ground_truth", "prediction", "count"]
+        )
+        for row in confusion:
+            writer.writerow(
+                [
+                    row.get("model", ""),
+                    row.get("model_file", ""),
+                    row.get("ground_truth", ""),
+                    row.get("prediction", ""),
+                    int(row.get("count", 0) or 0),
+                ]
+            )
+
+    (report_dir / "ranking_score.svg").write_text(
+        _ranking_report_bar_svg(
+            rows, title=f"{context['report_title']} — Exact Match"
+        ),
+        encoding="utf-8",
+    )
+    (report_dir / "ranking_metrics.svg").write_text(
+        _ranking_report_metrics_svg(
+            rows, title=f"{context['report_title']} — P/R/F1 znaków"
+        ),
+        encoding="utf-8",
+    )
+    (report_dir / "ranking_char_quality.svg").write_text(
+        _ranking_report_char_quality_svg(
+            rows, title=f"{context['report_title']} — Exact Match / CER"
+        ),
+        encoding="utf-8",
+    )
+
+    if label_rows:
+        (report_dir / "ranking_label_exact_match.svg").write_text(
+            _ranking_report_label_metric_svg(
+                rows,
+                title=f"{context['report_title']} — Exact Match wg etykiet",
+                metric_key="exact_match_pct",
+                metric_label="Exact Match",
+            ),
+            encoding="utf-8",
+        )
+        (report_dir / "ranking_label_cer.svg").write_text(
+            _ranking_report_label_metric_svg(
+                rows,
+                title=f"{context['report_title']} — CER wg etykiet",
+                metric_key="cer",
+                metric_label="CER (niżej = lepiej)",
+                corner_metric=True,
+            ),
+            encoding="utf-8",
+        )
+        (report_dir / "ranking_label_f1.svg").write_text(
+            _ranking_report_label_metric_svg(
+                rows,
+                title=f"{context['report_title']} — F1 znaków wg etykiet",
+                metric_key="f1",
+                metric_label="F1 znaków",
+            ),
+            encoding="utf-8",
+        )
+
+    (report_dir / "ranking_report.md").write_text(
+        _ranking_char_report_markdown(context),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        f"Zapisano pełny raport wyników eksperymentu MZ: {report_dir}"
+    )
+    if messagebox.askyesno(
+        "Raport wyników MZ",
+        f"Zapisano pełny raport:\n{report_dir}\n\nOtworzyć folder raportu?",
+    ):
+        try:
+            self._open_path(report_dir)
+        except Exception:
+            pass
+
 def _ranking_report_markdown(context: dict) -> str:
     generated = context.get("generated_at")
     generated_text = (
@@ -2120,6 +2970,8 @@ def _ranking_report_markdown(context: dict) -> str:
     rows = list(context.get("rows") or [])
     reference_info = dict(context.get("reference_info") or {})
     target = str(context.get("target") or "")
+    if target == "char":
+        return _ranking_char_report_markdown(context)
     controlled = context.get("analysis_mode") == "controlled"
     report_title = (
         "Eksperyment kontrolowany PZ3"
@@ -2590,6 +3442,8 @@ def _open_ranking_report_viewer(self):
             "Wyniki eksperymentu",
             "Brak zapisanych wyników dla bieżącego eksperymentu / źródła.",
         )
+    if str(context.get("target") or "") == "char":
+        return _open_character_ranking_report_viewer(self, context)
 
     existing = getattr(self, "_ranking_report_viewer_modal", None)
     try:
@@ -2927,6 +3781,21 @@ def _export_ranking_analysis_report(self):
             "Raport wyników",
             "Brak ocenionych modeli dla bieżącego eksperymentu / źródła.",
         )
+    if str(context.get("target") or "") == "char":
+        try:
+            return _export_character_ranking_analysis_report(
+                self,
+                context,
+                rows,
+            )
+        except Exception as exc:
+            logger.error(
+                f"Nie udało się zapisać raportu MZ: {exc}"
+            )
+            return messagebox.showerror(
+                "Raport wyników MZ",
+                f"Nie udało się zapisać raportu:\n{exc}",
+            )
 
     try:
         base_dir = Path(
