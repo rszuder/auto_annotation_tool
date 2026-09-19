@@ -1477,6 +1477,10 @@ def _collect_current_ranking_report_context(self) -> dict:
             if getattr(entry, "track_id", "") == pz3_context["track_id"]
             and getattr(entry, "model_id", "") in pz3_context["model_ids"]
             and getattr(entry, "experiment_mode", "") == "controlled"
+            and (
+                not str(pz3_context.get("completed_experiment_id") or "").strip()
+                or getattr(entry, "experiment_id", "") == pz3_context["completed_experiment_id"]
+            )
         ]
     entries = [
         entry for entry in ranking_entries
@@ -1543,6 +1547,7 @@ def _collect_current_ranking_report_context(self) -> dict:
                 "plates_major_fix": int(getattr(entry, "plates_major_fix", 0) or 0),
                 "plates_added": int(getattr(entry, "plates_added", 0) or 0),
                 "plates_removed": int(getattr(entry, "plates_removed", 0) or 0),
+                "benchmark_group_metrics": dict(getattr(entry, "benchmark_group_metrics", {}) or {}),
                 "corner_metric_status": str(getattr(entry, "corner_metric_status", "") or ""),
                 "corner_error_count": int(getattr(entry, "corner_error_count", 0) or 0),
                 "corner_error_mean": float(getattr(entry, "corner_error_mean", 0.0) or 0.0),
@@ -1579,6 +1584,377 @@ def _collect_current_ranking_report_context(self) -> dict:
         "participant_ids": role["participant_ids"],
     }
 
+
+
+def _ranking_group_metric_rows(rows: list[dict]) -> list[dict]:
+    """Flatten stored benchmark metrics into model × sample-group rows."""
+    flattened = []
+    for model_row in list(rows or []):
+        payload = model_row.get("benchmark_group_metrics")
+        if not isinstance(payload, dict):
+            continue
+        groups = payload.get("groups")
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            label_name = str(
+                group.get("label_name")
+                or group.get("group_id")
+                or "Bez etykiety"
+            ).strip() or "Bez etykiety"
+            flattened.append(
+                {
+                    "model_rank": int(model_row.get("rank", 0) or 0),
+                    "model": str(model_row.get("label") or "-"),
+                    "model_file": str(model_row.get("model_file") or "-"),
+                    "model_id": str(model_row.get("model_id") or ""),
+                    "group_id": str(group.get("group_id") or ""),
+                    "label_id": str(group.get("label_id") or ""),
+                    "label_name": label_name,
+                    "sample_count": int(group.get("sample_count", 0) or 0),
+                    "precision": float(group.get("precision", 0.0) or 0.0),
+                    "recall": float(group.get("recall", 0.0) or 0.0),
+                    "f1": float(group.get("f1", 0.0) or 0.0),
+                    "accuracy": float(group.get("accuracy", 0.0) or 0.0),
+                    "total_auto_plates": int(group.get("total_auto_plates", 0) or 0),
+                    "total_corrected_plates": int(group.get("total_corrected_plates", 0) or 0),
+                    "plates_unchanged": int(group.get("plates_unchanged", 0) or 0),
+                    "plates_minor_fix": int(group.get("plates_minor_fix", 0) or 0),
+                    "plates_major_fix": int(group.get("plates_major_fix", 0) or 0),
+                    "plates_added": int(group.get("plates_added", 0) or 0),
+                    "plates_removed": int(group.get("plates_removed", 0) or 0),
+                    "corner_metric_status": str(group.get("corner_metric_status") or ""),
+                    "corner_error_count": int(group.get("corner_error_count", 0) or 0),
+                    "corner_error_mean": float(group.get("corner_error_mean", 0.0) or 0.0),
+                    "corner_error_p50": float(group.get("corner_error_p50", 0.0) or 0.0),
+                    "corner_error_p90": float(group.get("corner_error_p90", 0.0) or 0.0),
+                    "corner_error_p95": float(group.get("corner_error_p95", 0.0) or 0.0),
+                    "corner_error_max": float(group.get("corner_error_max", 0.0) or 0.0),
+                    "corner_matched_pairs": int(group.get("corner_matched_pairs", 0) or 0),
+                    "corner_skipped_pairs": int(group.get("corner_skipped_pairs", 0) or 0),
+                }
+            )
+    return flattened
+
+
+def _ranking_label_metric_rows(rows: list[dict]) -> list[dict]:
+    """Groups shown in the label analysis; ALL is already represented globally."""
+    return [
+        row
+        for row in _ranking_group_metric_rows(rows)
+        if str(row.get("group_id") or "").strip().upper() != "ALL"
+    ]
+
+
+def _ranking_pp(a, b) -> float:
+    return abs(float(a or 0.0) - float(b or 0.0))
+
+
+def _ranking_relative_reduction(worse, better) -> float:
+    worse = float(worse or 0.0)
+    better = float(better or 0.0)
+    if worse <= 0.0:
+        return 0.0
+    return max(0.0, (1.0 - better / worse) * 100.0)
+
+
+def _ranking_report_corner_svg(rows: list[dict], *, title: str) -> str:
+    width = 1180
+    row_height = 82
+    top = 92
+    left = 330
+    total_width = 720
+    metrics = (
+        ("corner_error_mean", "mean"),
+        ("corner_error_p50", "p50"),
+        ("corner_error_p90", "p90"),
+        ("corner_error_p95", "p95"),
+        ("corner_error_max", "max"),
+    )
+    values = [
+        float(row.get(key, 0.0) or 0.0) * 100.0
+        for row in rows
+        for key, _ in metrics
+        if str(row.get("corner_metric_status") or "").upper() == "OK"
+    ]
+    scale_max = max(1.0, max(values or [1.0]) * 1.08)
+    metric_width = total_width / len(metrics)
+    height = max(280, top + row_height * max(1, len(rows)) + 50)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#101820"/>',
+        f'<text x="24" y="36" fill="#f4f7f6" font-size="24" font-family="Segoe UI, Arial" font-weight="700">{_ranking_report_escape(title)}</text>',
+        '<text x="24" y="58" fill="#9fb0aa" font-size="13" font-family="Segoe UI, Arial">E_corner jako procent przekątnej bbox GT. Niżej = lepiej.</text>',
+    ]
+    for index, row in enumerate(rows):
+        y = top + index * row_height
+        label = textwrap.shorten(str(row.get("label") or "-"), width=40, placeholder="...")
+        parts.append(
+            f'<text x="24" y="{y + 21}" fill="#f4f7f6" font-size="14" font-family="Segoe UI, Arial">#{index + 1} {_ranking_report_escape(label)}</text>'
+        )
+        if str(row.get("corner_metric_status") or "").upper() != "OK":
+            parts.append(
+                f'<text x="{left}" y="{y + 21}" fill="#f0b44c" font-size="13" font-family="Segoe UI, Arial">brak metryki narożników</text>'
+            )
+            continue
+        for metric_index, (key, metric_label) in enumerate(metrics):
+            x = left + metric_index * metric_width
+            value = max(0.0, float(row.get(key, 0.0) or 0.0) * 100.0)
+            height_value = 32.0 * min(1.0, value / scale_max)
+            base = y + 54
+            parts.extend(
+                [
+                    f'<text x="{x + 5}" y="{y + 13}" fill="#9fb0aa" font-size="11" font-family="Segoe UI, Arial">{metric_label}</text>',
+                    f'<rect x="{x + 5}" y="{base - 32}" width="{metric_width - 14:.1f}" height="32" rx="4" fill="#26343a"/>',
+                    f'<rect x="{x + 5}" y="{base - height_value:.1f}" width="{metric_width - 14:.1f}" height="{height_value:.1f}" rx="4" fill="#4aa3ff"/>',
+                    f'<text x="{x + 5}" y="{base + 16}" fill="#f4f7f6" font-size="11" font-family="Segoe UI, Arial">{value:.3f}%</text>',
+                ]
+            )
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _ranking_report_label_metric_svg(
+    rows: list[dict],
+    *,
+    title: str,
+    metric_key: str,
+    metric_label: str,
+    corner_metric: bool = False,
+) -> str:
+    label_rows = _ranking_label_metric_rows(rows)
+    width = 1180
+    row_height = 38
+    top = 82
+    left = 430
+    bar_width = 590
+    values = []
+    for row in label_rows:
+        raw = float(row.get(metric_key, 0.0) or 0.0)
+        values.append(raw * 100.0 if corner_metric else raw)
+    scale_max = (
+        max(1.0, max(values or [1.0]) * 1.08)
+        if corner_metric
+        else 100.0
+    )
+    height = max(250, top + row_height * max(1, len(label_rows)) + 45)
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#101820"/>',
+        f'<text x="24" y="36" fill="#f4f7f6" font-size="24" font-family="Segoe UI, Arial" font-weight="700">{_ranking_report_escape(title)}</text>',
+        f'<text x="24" y="58" fill="#9fb0aa" font-size="13" font-family="Segoe UI, Arial">{_ranking_report_escape(metric_label)} według etykiety próbki i modelu.</text>',
+    ]
+    if not label_rows:
+        parts.append(
+            '<text x="24" y="115" fill="#f0b44c" font-size="18" font-family="Segoe UI, Arial">Brak zapisanych metryk etykiet.</text>'
+        )
+    for index, row in enumerate(label_rows):
+        y = top + index * row_height
+        group = textwrap.shorten(str(row.get("label_name") or "-"), width=21, placeholder="...")
+        model = textwrap.shorten(str(row.get("model_file") or row.get("model") or "-"), width=27, placeholder="...")
+        raw = float(row.get(metric_key, 0.0) or 0.0)
+        value = raw * 100.0 if corner_metric else raw
+        length = max(0.0, min(scale_max, value)) / scale_max * bar_width
+        parts.extend(
+            [
+                f'<text x="24" y="{y + 18}" fill="#f4f7f6" font-size="12" font-family="Segoe UI, Arial">{_ranking_report_escape(group)} · {_ranking_report_escape(model)} · n={int(row.get("sample_count", 0) or 0)}</text>',
+                f'<rect x="{left}" y="{y + 5}" width="{bar_width}" height="18" rx="6" fill="#26343a"/>',
+                f'<rect x="{left}" y="{y + 5}" width="{length:.1f}" height="18" rx="6" fill="#4aa3ff"/>',
+                f'<text x="{left + bar_width + 15}" y="{y + 19}" fill="#f4f7f6" font-size="12" font-family="Segoe UI, Arial">{value:.3f}%</text>',
+            ]
+        )
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def _draw_ranking_corner_canvas(canvas: tk.Canvas, rows: list[dict], palette: dict):
+    canvas.delete("all")
+    width = max(int(canvas.winfo_width() or 0), 1060)
+    row_height = 80
+    top = 90
+    left = 330
+    right = 90
+    metrics = (
+        ("corner_error_mean", "mean"),
+        ("corner_error_p50", "p50"),
+        ("corner_error_p90", "p90"),
+        ("corner_error_p95", "p95"),
+        ("corner_error_max", "max"),
+    )
+    values = [
+        float(row.get(key, 0.0) or 0.0) * 100.0
+        for row in rows
+        for key, _ in metrics
+        if str(row.get("corner_metric_status") or "").upper() == "OK"
+    ]
+    scale_max = max(1.0, max(values or [1.0]) * 1.08)
+    metric_width = max(90, int((width - left - right) / len(metrics)))
+    height = max(320, top + row_height * max(1, len(rows)) + 50)
+    bg = palette.get("panel", "#101820")
+    fg = palette.get("fg", "#f4f7f6")
+    muted = palette.get("muted", "#9fb0aa")
+    track = blend_hex_colors(
+        palette.get("panel_border", "#3c3c3c"),
+        bg,
+        0.42,
+    )
+    canvas.configure(bg=bg, scrollregion=(0, 0, width, height))
+    canvas.create_text(
+        24, 28,
+        text="Narożniki — rozkład E_corner",
+        fill=fg,
+        font=("Segoe UI", 18, "bold"),
+        anchor=tk.W,
+    )
+    canvas.create_text(
+        24, 54,
+        text="mean / p50 / p90 / p95 / max. Niższa wartość oznacza lepszą lokalizację narożników.",
+        fill=muted,
+        font=("Segoe UI", 9),
+        anchor=tk.W,
+    )
+    for index, row in enumerate(rows):
+        y = top + index * row_height
+        label = textwrap.shorten(str(row.get("label") or "-"), width=40, placeholder="...")
+        canvas.create_text(
+            24, y + 22,
+            text=f"#{index + 1} {label}",
+            fill=fg,
+            font=("Segoe UI", 10),
+            anchor=tk.W,
+        )
+        if str(row.get("corner_metric_status") or "").upper() != "OK":
+            canvas.create_text(
+                left, y + 22,
+                text="brak metryki",
+                fill=palette.get("warning", "#f0b44c"),
+                anchor=tk.W,
+            )
+            continue
+        for metric_index, (key, metric_label) in enumerate(metrics):
+            x = left + metric_index * metric_width
+            value = max(0.0, float(row.get(key, 0.0) or 0.0) * 100.0)
+            bar_h = 30.0 * min(1.0, value / scale_max)
+            canvas.create_text(
+                x, y + 10,
+                text=metric_label,
+                fill=muted,
+                font=("Segoe UI", 8, "bold"),
+                anchor=tk.W,
+            )
+            canvas.create_rectangle(
+                x, y + 22,
+                x + metric_width - 12, y + 52,
+                fill=track,
+                outline="",
+            )
+            canvas.create_rectangle(
+                x, y + 52 - bar_h,
+                x + metric_width - 12, y + 52,
+                fill=palette.get("accent", "#4aa3ff"),
+                outline="",
+            )
+            canvas.create_text(
+                x, y + 68,
+                text=f"{value:.3f}%",
+                fill=fg,
+                font=("Segoe UI", 8),
+                anchor=tk.W,
+            )
+
+
+def _draw_ranking_label_metric_canvas(
+    canvas: tk.Canvas,
+    rows: list[dict],
+    palette: dict,
+    *,
+    metric_key: str,
+    metric_label: str,
+    corner_metric: bool = False,
+):
+    canvas.delete("all")
+    label_rows = _ranking_label_metric_rows(rows)
+    width = max(int(canvas.winfo_width() or 0), 1120)
+    row_height = 40
+    top = 84
+    left = 430
+    bar_width = max(300, width - left - 190)
+    values = []
+    for row in label_rows:
+        raw = float(row.get(metric_key, 0.0) or 0.0)
+        values.append(raw * 100.0 if corner_metric else raw)
+    scale_max = (
+        max(1.0, max(values or [1.0]) * 1.08)
+        if corner_metric
+        else 100.0
+    )
+    height = max(310, top + row_height * max(1, len(label_rows)) + 45)
+    bg = palette.get("panel", "#101820")
+    fg = palette.get("fg", "#f4f7f6")
+    muted = palette.get("muted", "#9fb0aa")
+    track = blend_hex_colors(
+        palette.get("panel_border", "#3c3c3c"),
+        bg,
+        0.42,
+    )
+    canvas.configure(bg=bg, scrollregion=(0, 0, width, height))
+    canvas.create_text(
+        24, 28,
+        text=f"Etykiety próbki — {metric_label}",
+        fill=fg,
+        font=("Segoe UI", 18, "bold"),
+        anchor=tk.W,
+    )
+    canvas.create_text(
+        24, 54,
+        text="Porównanie warunków opisanych etykietami próbki. Etykiety nie zmieniają głównego wyniku.",
+        fill=muted,
+        font=("Segoe UI", 9),
+        anchor=tk.W,
+    )
+    if not label_rows:
+        canvas.create_text(
+            24, 116,
+            text="Brak zapisanych metryk etykiet dla tego porównania.",
+            fill=palette.get("warning", "#f0b44c"),
+            anchor=tk.W,
+        )
+        return
+    for index, row in enumerate(label_rows):
+        y = top + index * row_height
+        group = textwrap.shorten(str(row.get("label_name") or "-"), width=21, placeholder="...")
+        model = textwrap.shorten(str(row.get("model_file") or row.get("model") or "-"), width=27, placeholder="...")
+        raw = float(row.get(metric_key, 0.0) or 0.0)
+        value = raw * 100.0 if corner_metric else raw
+        length = max(0.0, min(scale_max, value)) / scale_max * bar_width
+        canvas.create_text(
+            24, y + 19,
+            text=f"{group} · {model} · n={int(row.get('sample_count', 0) or 0)}",
+            fill=fg,
+            font=("Segoe UI", 9),
+            anchor=tk.W,
+        )
+        canvas.create_rectangle(
+            left, y + 7,
+            left + bar_width, y + 24,
+            fill=track,
+            outline="",
+        )
+        canvas.create_rectangle(
+            left, y + 7,
+            left + length, y + 24,
+            fill=palette.get("accent", "#4aa3ff"),
+            outline="",
+        )
+        canvas.create_text(
+            left + bar_width + 12, y + 18,
+            text=f"{value:.3f}%",
+            fill=fg,
+            font=("Segoe UI", 8),
+            anchor=tk.W,
+        )
 
 def _ranking_report_bar_svg(rows: list[dict], *, title: str) -> str:
     top_rows = rows[:12]
@@ -1717,27 +2093,39 @@ def _ranking_report_plate_diffs_svg(rows: list[dict], *, title: str) -> str:
     return "\n".join(parts)
 
 
+
 def _ranking_report_markdown(context: dict) -> str:
     generated = context.get("generated_at")
-    generated_text = generated.strftime("%Y-%m-%d %H:%M:%S") if hasattr(generated, "strftime") else "-"
+    generated_text = (
+        generated.strftime("%Y-%m-%d %H:%M:%S")
+        if hasattr(generated, "strftime")
+        else "-"
+    )
     rows = list(context.get("rows") or [])
     reference_info = dict(context.get("reference_info") or {})
-    winner = rows[0] if rows else None
     target = str(context.get("target") or "")
-    method_score = (
-        "mAP50-95 z walidacji YOLO"
-        if target == "char"
-        else "ocena rankingowa oparta o zgodność detekcji z anotacją odniesienia"
-    )
     controlled = context.get("analysis_mode") == "controlled"
-    report_title = "Eksperyment kontrolowany PZ3" if controlled else "Analiza robocza"
-    source_label = "Tor eksperymentu" if controlled else "Źródło analizy roboczej"
+    report_title = (
+        "Eksperyment kontrolowany PZ3"
+        if controlled
+        else "Analiza robocza"
+    )
+    source_label = (
+        "Tor eksperymentu"
+        if controlled
+        else "Źródło analizy roboczej"
+    )
+
     lines = [
-        f"# {report_title} — raport modeli",
+        f"# {report_title} — wyniki i analiza",
         "",
-        ("**CONTROLLED / SEALED** — porównanie uruchomione z zamrożonego kontekstu PZ3."
-         if controlled else
-         "**Analiza robocza** — wyniki eksploracyjne lub historyczne. Ten raport nie stanowi nowego kontrolowanego eksperymentu PZ3."),
+        (
+            "**CONTROLLED / SEALED** — wyniki zapisane z zamrożonego "
+            "kontekstu PZ3."
+            if controlled
+            else
+            "**Analiza robocza** — wynik eksploracyjny / historyczny."
+        ),
         "",
         "## Kontekst testu",
         "",
@@ -1747,127 +2135,240 @@ def _ranking_report_markdown(context: dict) -> str:
         f"- {source_label}: {context.get('reference_name') or '-'}",
         f"- Ścieżka odniesienia: `{context.get('reference_path') or reference_info.get('selected_path') or '-'}`",
         f"- Split: {context.get('split') or '-'}",
-        f"- Liczba obrazów w teście: {int(reference_info.get('image_count', 0) or 0)}",
-        f"- Liczba modeli w zakresie: {int(context.get('participant_count', 0) or 0)}",
+        f"- Liczba obrazów w teście: {int(reference_info.get('image_count', 0) or (rows[0].get('sample', 0) if rows else 0))}",
         f"- Liczba modeli z wynikiem: {len(rows)}",
         f"- Liczba modeli czekających na test: {int(context.get('pending_count', 0) or 0)}",
         "",
-        "## Metoda wyłaniania zwycięzcy",
-        "",
-        "Porównanie dotyczy jednego typu modeli, wybranego zakresu i wspólnego materiału odniesienia. Wyniki należy interpretować w tym konkretnym kontekście.",
-        "",
-        f"Modele są sortowane malejąco według pola `Ocena`. W tym raporcie ocena oznacza: {method_score}. Metryki `Precyzja`, `Czułość`, `F1`, `mAP50` i `mAP50-95` są metrykami pomocniczymi, które pozwalają opisać, dlaczego dany model wygrał albo przegrał.",
-        "",
-        "Najwyższa ocena dotyczy wybranego materiału i metody. Program nie ustawia modelu projektowego automatycznie; ostateczny wybór pozostaje jawną decyzją użytkownika.",
-        "",
-        "## Definicje metryk",
-        "",
-        "- Precyzja opisuje, jaka część wykryć modelu była trafna.",
-        "- Czułość opisuje, jaka część obiektów z toru odniesienia została wykryta.",
-        "- F1 jest średnią harmoniczną precyzji i czułości: `F1 = 2 * P * C / (P + C)`.",
-        "- mAP50 i mAP50-95 pochodzą z walidacji YOLO, jeśli ranking dotyczy modelu z datasetem YOLO.",
-        "- Dla modeli tablic porównanie z zapisanym XML opiera się o dopasowanie ramek przez IoU; szczegółowe liczniki różnic są zapisane w CSV.",
-        "",
     ]
+
     if controlled:
-        lines.extend([
-            "## Kontrakt PZ3", "",
-            f"- Tor: {context.get('track_id') or '—'}",
-            "- Reference: SEALED",
-            "- Zamrożeni uczestnicy: " + ", ".join(context.get("participant_ids") or []),
-            "",
-        ])
-        for row in rows:
-            lines.extend([
-                f"- Model {row.get('model_id') or row.get('label')}: SHA-256 `{row.get('model_sha256') or '—'}`",
-                f"  Eksperyment: {row.get('experiment_id') or '—'}; "
-                f"manifest toru: `{row.get('track_manifest_sha256') or '—'}`; "
-                f"protokół: `{row.get('protocol_sha256') or '—'}`",
-            ])
-        lines.append("")
-    if target == "plate":
         lines.extend(
             [
-                "## Analiza zgodności tablic",
+                "## Kontrakt PZ3",
                 "",
-                "Dla modelu tablic raport zapisuje dodatkowy rozkład pracy korekcyjnej: ramki bez zmian, ramki wymagające małej poprawki, ramki wymagające dużej poprawki, brakujące tablice oraz wykrycia nadmiarowe. Ten rozkład jest ważny, bo dwa modele mogą mieć podobną ocenę końcową, ale generować zupełnie inny koszt ręcznej korekty.",
-                "",
-                "Dla kontrolowanego eksperymentu MT raportuje się również błąd narożników `E_corner = (1/4) * sum_i(||pred_i - gt_i||_2 / d_GT)`. Punkty mają stałą kolejność `TL, TR, BR, BL` i nie są permutowane. `d_GT` jest przekątną prostokątnej obwiedni polygonu Ground Truth. Niższa wartość oznacza lepszą lokalizację narożników.",
+                f"- Tor: {context.get('track_id') or '—'}",
+                "- Reference: SEALED",
+                "- Zamrożeni uczestnicy: "
+                + ", ".join(context.get("participant_ids") or []),
                 "",
             ]
         )
+        for row in rows:
+            lines.extend(
+                [
+                    f"- Model {row.get('model_id') or row.get('label')}: "
+                    f"SHA-256 `{row.get('model_sha256') or '—'}`",
+                    f"  Eksperyment: {row.get('experiment_id') or '—'}; "
+                    f"manifest toru: `{row.get('track_manifest_sha256') or '—'}`; "
+                    f"protokół: `{row.get('protocol_sha256') or '—'}`",
+                ]
+            )
+        lines.append("")
+
     lines.extend(
         [
-            "## Wynik",
+            "## Jak czytać wynik",
+            "",
+            "Dla modeli MT nie traktujemy jednej liczby jako pełnego opisu jakości. "
+            "F1 opisuje kompromis precyzja–czułość, `IoU≥0.8` pokazuje odsetek "
+            "GT z dopasowaniem co najmniej 0.8, a `E_corner` opisuje dokładność "
+            "czterech narożników w kolejności `TL, TR, BR, BL`.",
+            "",
+            "Pole `Ocena` pozostaje bieżącą metryką sortowania rankingu. "
+            "Nie zastępuje analizy narożników, rozkładu błędów ani warunków opisanych etykietami.",
             "",
         ]
     )
-    if winner:
+
+    if rows:
+        leader = rows[0]
         lines.extend(
             [
-                f"- Zwycięzca: **{winner.get('label') or '-'}**",
-                f"- Ocena: **{_ranking_report_percent_text(winner.get('score'))}**",
-                f"- Precyzja / czułość: {_ranking_report_percent_text(winner.get('precision'))} / {_ranking_report_percent_text(winner.get('recall'))}",
-                f"- Źródło metryk: {winner.get('metrics_source') or '-'}",
-                f"- Status dowodu: {winner.get('evidence_label') or 'NIEZNANY'}",
+                "## Podsumowanie globalne",
+                "",
+                f"- Lider wg bieżącej metryki rankingowej: **{leader.get('label') or '-'}** "
+                f"({_ranking_report_percent_text(leader.get('score'))}).",
             ]
         )
-    else:
-        lines.append("- Brak wyników dla wybranego źródła i zakresu.")
+        if len(rows) >= 2:
+            second = rows[1]
+            f1_gap = _ranking_pp(leader.get("f1"), second.get("f1"))
+            p_gap = float(leader.get("precision", 0.0) or 0.0) - float(second.get("precision", 0.0) or 0.0)
+            r_gap = float(leader.get("recall", 0.0) or 0.0) - float(second.get("recall", 0.0) or 0.0)
+            acc_gap = float(leader.get("accuracy", 0.0) or 0.0) - float(second.get("accuracy", 0.0) or 0.0)
+            lines.extend(
+                [
+                    f"- Różnica F1 między #1 i #2: **{f1_gap:.4f} p.p.** "
+                    f"({_ranking_report_percent_text(leader.get('f1'))} vs "
+                    f"{_ranking_report_percent_text(second.get('f1'))}).",
+                    f"- Różnica precyzji (#1 − #2): **{p_gap:+.4f} p.p.**; "
+                    f"różnica czułości: **{r_gap:+.4f} p.p.**.",
+                    f"- `IoU≥0.8` (#1 − #2): **{acc_gap:+.4f} p.p.** "
+                    f"({_ranking_report_percent_text(leader.get('accuracy'))} vs "
+                    f"{_ranking_report_percent_text(second.get('accuracy'))}).",
+                ]
+            )
+        lines.append("")
+
     lines.extend(
         [
+            "## Metryki globalne",
             "",
-            "## Tabela wyników",
-            "",
-            "| # | Model | Zakres | Dowód | Ocena | Precyzja | Czułość | F1 | mAP50 | mAP50-95 | E_corner mean | E_corner p95 | Próbka | Oceniono |",
-            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| # | Model | P | R | F1 | IoU≥0.8 | E_corner mean | p50 | p90 | p95 | max | n |",
+            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for row in rows:
         lines.append(
-            "| {rank} | {label} | {scope} | {evidence} | {score} | {precision} | {recall} | {f1} | {map50} | {map50_95} | {corner_mean} | {corner_p95} | {sample} | {evaluated_at} |".format(
+            "| {rank} | {model} | {p} | {r} | {f1} | {acc} | {mean} | {p50} | {p90} | {p95} | {maxv} | {n} |".format(
                 rank=int(row.get("rank", 0) or 0),
-                label=str(row.get("label") or "-").replace("|", "\\|"),
-                scope=str(row.get("scope") or "-"),
-                evidence=str(row.get("evidence_label") or "NIEZNANY"),
-                score=_ranking_report_percent_text(row.get("score")),
-                precision=_ranking_report_percent_text(row.get("precision")),
-                recall=_ranking_report_percent_text(row.get("recall")),
+                model=str(row.get("label") or "-").replace("|", "\\|"),
+                p=_ranking_report_percent_text(row.get("precision")),
+                r=_ranking_report_percent_text(row.get("recall")),
                 f1=_ranking_report_percent_text(row.get("f1")),
-                map50=_ranking_report_percent_text(row.get("map50")),
-                map50_95=_ranking_report_percent_text(row.get("map50_95")),
-                corner_mean=_ranking_corner_metric_text(
-                    row.get("corner_error_mean"),
-                    row.get("corner_metric_status"),
-                ),
-                corner_p95=_ranking_corner_metric_text(
-                    row.get("corner_error_p95"),
-                    row.get("corner_metric_status"),
-                ),
-                sample=int(row.get("sample", 0) or 0),
-                evaluated_at=str(row.get("evaluated_at") or "-"),
+                acc=_ranking_report_percent_text(row.get("accuracy")),
+                mean=_ranking_corner_metric_text(row.get("corner_error_mean"), row.get("corner_metric_status")),
+                p50=_ranking_corner_metric_text(row.get("corner_error_p50"), row.get("corner_metric_status")),
+                p90=_ranking_corner_metric_text(row.get("corner_error_p90"), row.get("corner_metric_status")),
+                p95=_ranking_corner_metric_text(row.get("corner_error_p95"), row.get("corner_metric_status")),
+                maxv=_ranking_corner_metric_text(row.get("corner_error_max"), row.get("corner_metric_status")),
+                n=int(row.get("sample", 0) or 0),
             )
         )
+
+    if target == "plate" and len(rows) >= 2:
+        first, second = rows[0], rows[1]
+        if (
+            str(first.get("corner_metric_status") or "").upper() == "OK"
+            and str(second.get("corner_metric_status") or "").upper() == "OK"
+        ):
+            mean_better, mean_worse = (
+                (first, second)
+                if float(first.get("corner_error_mean", 0.0) or 0.0)
+                <= float(second.get("corner_error_mean", 0.0) or 0.0)
+                else (second, first)
+            )
+            p95_better, p95_worse = (
+                (first, second)
+                if float(first.get("corner_error_p95", 0.0) or 0.0)
+                <= float(second.get("corner_error_p95", 0.0) or 0.0)
+                else (second, first)
+            )
+            lines.extend(
+                [
+                    "",
+                    "## Analiza narożników",
+                    "",
+                    f"- Niższy średni `E_corner`: **{mean_better.get('label')}** — "
+                    f"{_ranking_corner_metric_text(mean_better.get('corner_error_mean'), 'OK')} "
+                    f"vs {_ranking_corner_metric_text(mean_worse.get('corner_error_mean'), 'OK')} "
+                    f"(redukcja względna "
+                    f"{_ranking_relative_reduction(mean_worse.get('corner_error_mean'), mean_better.get('corner_error_mean')):.1f}%).",
+                    f"- Niższy p95 `E_corner`: **{p95_better.get('label')}** — "
+                    f"{_ranking_corner_metric_text(p95_better.get('corner_error_p95'), 'OK')} "
+                    f"vs {_ranking_corner_metric_text(p95_worse.get('corner_error_p95'), 'OK')} "
+                    f"(redukcja względna "
+                    f"{_ranking_relative_reduction(p95_worse.get('corner_error_p95'), p95_better.get('corner_error_p95')):.1f}%).",
+                ]
+            )
+            for row in rows:
+                p90 = float(row.get("corner_error_p90", 0.0) or 0.0)
+                p95 = float(row.get("corner_error_p95", 0.0) or 0.0)
+                if p90 > 0.0 and p95 / p90 >= 2.0:
+                    lines.append(
+                        f"- **{row.get('label')}** ma wyraźny skok między p90 i p95 "
+                        f"({_ranking_corner_metric_text(p90, 'OK')} → "
+                        f"{_ranking_corner_metric_text(p95, 'OK')}), co wskazuje na "
+                        "małą grupę przypadków z dużo większym błędem narożników."
+                    )
+            lines.append("")
+
+    if target == "plate":
+        lines.extend(
+            [
+                "## Koszt korekty detekcji",
+                "",
+                "| Model | Bez zmian | Małe poprawki | Duże poprawki | Brakujące (FN) | Nadmiarowe (FP) |",
+                "|---|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in rows:
+            lines.append(
+                f"| {str(row.get('label') or '-').replace('|', '\\|')} | "
+                f"{int(row.get('plates_unchanged', 0) or 0)} | "
+                f"{int(row.get('plates_minor_fix', 0) or 0)} | "
+                f"{int(row.get('plates_major_fix', 0) or 0)} | "
+                f"{int(row.get('plates_added', 0) or 0)} | "
+                f"{int(row.get('plates_removed', 0) or 0)} |"
+            )
+        lines.append("")
+
+    label_rows = _ranking_label_metric_rows(rows)
+    if label_rows:
+        lines.extend(
+            [
+                "## Metryki według etykiet próbki",
+                "",
+                "Etykiety są metadanymi analitycznymi próbki. Nie zmieniają GT ani "
+                "głównej mechaniki rankingu; pokazują, w jakich warunkach modele zachowują się różnie.",
+                "",
+                "| Model | Etykieta | n | P | R | F1 | IoU≥0.8 | E_corner mean | p50 | p90 | p95 | max |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in label_rows:
+            lines.append(
+                "| {model} | {label} | {n} | {p} | {r} | {f1} | {acc} | {mean} | {p50} | {p90} | {p95} | {maxv} |".format(
+                    model=str(row.get("model") or "-").replace("|", "\\|"),
+                    label=str(row.get("label_name") or "-").replace("|", "\\|"),
+                    n=int(row.get("sample_count", 0) or 0),
+                    p=_ranking_report_percent_text(row.get("precision")),
+                    r=_ranking_report_percent_text(row.get("recall")),
+                    f1=_ranking_report_percent_text(row.get("f1")),
+                    acc=_ranking_report_percent_text(row.get("accuracy")),
+                    mean=_ranking_corner_metric_text(row.get("corner_error_mean"), row.get("corner_metric_status")),
+                    p50=_ranking_corner_metric_text(row.get("corner_error_p50"), row.get("corner_metric_status")),
+                    p90=_ranking_corner_metric_text(row.get("corner_error_p90"), row.get("corner_metric_status")),
+                    p95=_ranking_corner_metric_text(row.get("corner_error_p95"), row.get("corner_metric_status")),
+                    maxv=_ranking_corner_metric_text(row.get("corner_error_max"), row.get("corner_metric_status")),
+                )
+            )
+        lines.append("")
+
     lines.extend(
         [
-            "",
             "## Pliki wygenerowane z raportem",
             "",
-            "- `ranking_results.csv` - dane tabelaryczne do dalszej analizy.",
-            "- `ranking_score.svg` - wykres oceny rankingowej.",
-            "- `ranking_metrics.svg` - wykres metryk pomocniczych.",
-            "",
+            "- `ranking_results.csv` — globalne wyniki modeli.",
+            "- `ranking_score.svg` — bieżąca metryka rankingowa.",
+            "- `ranking_metrics.svg` — P/R/F1 lub mAP.",
         ]
     )
     if target == "plate":
-        lines.append("- `ranking_plate_diffs.svg` - wykres zgodności i rodzaju korekt dla modeli tablic.")
+        lines.extend(
+            [
+                "- `ranking_plate_diffs.svg` — rozkład korekt detekcji.",
+                "- `ranking_corner_metrics.svg` — mean/p50/p90/p95/max E_corner.",
+            ]
+        )
+    if label_rows:
+        lines.extend(
+            [
+                "- `ranking_label_metrics.csv` — pełne metryki model × etykieta.",
+                "- `ranking_label_f1.svg` — F1 według etykiet.",
+                "- `ranking_label_accuracy.svg` — IoU≥0.8 według etykiet.",
+                "- `ranking_label_corner_p95.svg` — p95 E_corner według etykiet.",
+            ]
+        )
+
     lines.extend(
         [
             "",
             "## Ograniczenia interpretacji",
             "",
-            "Wyniki dotyczą wskazanego materiału odniesienia. Zmiana źródła, splitu lub zakresu modeli wymaga osobnej analizy i raportu. Formalny eksperyment rozpoczyna się wyłącznie w PZ3 po SEAL.",
-            "Wpis oznaczony jako LEGACY, WORKING, REGISTERED LEGACY, NIEKOMPLETNY, OSIEROCONY albo NIEZGODNY może pozostać w rankingu historycznym, ale nie jest finalnym dowodem eksperymentu controlled. Taki status nie jest automatycznie podnoszony na podstawie podobieństwa ścieżek ani metryk.",
+            "Wyniki obowiązują dla tego konkretnego, zapieczętowanego materiału "
+            "odniesienia i tego zestawu modeli. Etykiety służą do analizy przekrojowej "
+            "i nie zmieniają Ground Truth.",
             "",
         ]
     )
@@ -2054,18 +2555,24 @@ def _draw_ranking_plate_diffs_canvas(canvas: tk.Canvas, rows: list[dict], palett
         canvas.create_text(left + bar_width + 16, y + 23, text=f"{total} ramek", fill=fg, font=("Segoe UI", 9, "bold"), anchor=tk.W)
 
 
+
 def _open_ranking_report_viewer(self):
     try:
         context = _collect_current_ranking_report_context(self)
     except Exception as exc:
-        logger.error(f"Nie udało się przygotować przeglądarki raportu rankingu: {exc}")
-        return messagebox.showerror("Przegląd raportu", f"Nie udało się przygotować raportu:\n{exc}")
+        logger.error(
+            f"Nie udało się przygotować przeglądarki wyników: {exc}"
+        )
+        return messagebox.showerror(
+            "Wyniki eksperymentu",
+            f"Nie udało się przygotować wyników:\n{exc}",
+        )
 
     rows = list(context.get("rows") or [])
     if not rows:
         return messagebox.showinfo(
-            "Przegląd raportu",
-            "Brak ocenionych modeli dla bieżącego źródła i zakresu. Uruchom analizę roboczą albo porównanie z kontekstu PZ3.",
+            "Wyniki eksperymentu",
+            "Brak zapisanych wyników dla bieżącego eksperymentu / źródła.",
         )
 
     existing = getattr(self, "_ranking_report_viewer_modal", None)
@@ -2078,7 +2585,12 @@ def _open_ranking_report_viewer(self):
     palette = getattr(self.app, "palette", {})
     dialog = tk.Toplevel(getattr(self, "frame", None))
     self._ranking_report_viewer_modal = dialog
-    dialog.title(f"Raport · {context['report_title']}")
+    controlled = str(context.get("analysis_mode") or "") == "controlled"
+    dialog.title(
+        f"Wyniki eksperymentu · {context['report_title']}"
+        if controlled
+        else f"Raport · {context['report_title']}"
+    )
     dialog.configure(bg=palette.get("panel", "#252526"))
     dialog.resizable(True, True)
     try:
@@ -2087,10 +2599,7 @@ def _open_ranking_report_viewer(self):
         pass
 
     def close_dialog():
-        try:
-            self._ranking_report_viewer_modal = None
-        except Exception:
-            pass
+        self._ranking_report_viewer_modal = None
         try:
             dialog.destroy()
         except Exception:
@@ -2108,15 +2617,10 @@ def _open_ranking_report_viewer(self):
         if delta:
             return -1 if delta > 0 else 1
         button = int(getattr(event, "num", 0) or 0)
-        if button == 4:
-            return -1
-        if button == 5:
-            return 1
-        return 0
+        return -1 if button == 4 else 1 if button == 5 else 0
 
     def _bind_local_mousewheel(widget, scroll_target=None):
         target_widget = scroll_target or widget
-
         def _on_wheel(event):
             units = _wheel_units(event)
             if units:
@@ -2125,37 +2629,34 @@ def _open_ranking_report_viewer(self):
                 except Exception:
                     pass
             return "break"
-
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             try:
                 widget.bind(sequence, _on_wheel)
             except Exception:
                 pass
-        return _on_wheel
 
-    def _consume_modal_wheel(_event=None):
-        return "break"
-
-    for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-        try:
-            dialog.bind(sequence, _consume_modal_wheel)
-        except Exception:
-            pass
-
-    winner = rows[0]
     ttk.Label(
         shell,
-        text=context["report_title"],
+        text=("Wyniki eksperymentu" if controlled else context["report_title"]),
         style="Panel.TLabel",
         anchor=tk.W,
     ).grid(row=0, column=0, sticky="ew")
+
+    first = rows[0]
+    subtitle = (
+        f"Tor: {context.get('reference_name') or '-'} | "
+        f"Modele: {len(rows)} | "
+        f"Próbka: {int(first.get('sample', 0) or 0)} obrazów"
+    )
+    if len(rows) >= 2:
+        subtitle += (
+            f" | F1: {_ranking_report_percent_text(first.get('f1'))} vs "
+            f"{_ranking_report_percent_text(rows[1].get('f1'))} "
+            f"(Δ {_ranking_pp(first.get('f1'), rows[1].get('f1')):.4f} p.p.)"
+        )
     ttk.Label(
         shell,
-        text=(
-            f"Tor: {context.get('reference_name') or '-'} | "
-            f"Zakres: {context.get('scope_label') or '-'} | "
-            f"Wygrywa: {winner.get('label') or '-'} ({_ranking_report_percent_text(winner.get('score'))})"
-        ),
+        text=subtitle,
         style="PanelMuted.TLabel",
         anchor=tk.W,
         justify=tk.LEFT,
@@ -2164,22 +2665,26 @@ def _open_ranking_report_viewer(self):
     notebook = ttk.Notebook(shell)
     notebook.grid(row=2, column=0, sticky="nsew")
 
-    method_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
-    results_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
-    score_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
-    metrics_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
-    plate_diffs_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
-    notebook.add(method_tab, text="Metoda", **notebook_tab_icon(notebook, "book"))
-    notebook.add(results_tab, text="Tabela wyników", **notebook_tab_icon(notebook, "dataset"))
-    notebook.add(score_tab, text="Wykres oceny", **notebook_tab_icon(notebook, "ranking"))
-    notebook.add(metrics_tab, text="Metryki", **notebook_tab_icon(notebook, "settings"))
-    if str(context.get("target") or "") == "plate":
-        notebook.add(plate_diffs_tab, text="Analiza tablic", **notebook_tab_icon(notebook, "annotation"))
+    summary_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    models_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    labels_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    corners_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    diffs_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
+    ranking_tab = ttk.Frame(notebook, padding=8, style="Panel.TFrame")
 
-    method_tab.grid_rowconfigure(0, weight=1)
-    method_tab.grid_columnconfigure(0, weight=1)
-    text = tk.Text(
-        method_tab,
+    notebook.add(summary_tab, text="Podsumowanie", **notebook_tab_icon(notebook, "book"))
+    notebook.add(models_tab, text="Modele", **notebook_tab_icon(notebook, "dataset"))
+    if _ranking_label_metric_rows(rows):
+        notebook.add(labels_tab, text="Etykiety", **notebook_tab_icon(notebook, "annotation"))
+    if str(context.get("target") or "") == "plate":
+        notebook.add(corners_tab, text="Narożniki", **notebook_tab_icon(notebook, "settings"))
+        notebook.add(diffs_tab, text="Korekty", **notebook_tab_icon(notebook, "annotation"))
+    notebook.add(ranking_tab, text="Ranking", **notebook_tab_icon(notebook, "ranking"))
+
+    summary_tab.grid_rowconfigure(0, weight=1)
+    summary_tab.grid_columnconfigure(0, weight=1)
+    summary_text = tk.Text(
+        summary_tab,
         wrap=tk.WORD,
         bg=palette.get("input_bg", palette.get("panel_alt", "#1f1f1f")),
         fg=palette.get("fg", "#f3f3f3"),
@@ -2190,196 +2695,261 @@ def _open_ranking_report_viewer(self):
         pady=10,
         font=("Segoe UI", 10),
     )
-    method_scroll = WebSlimScrollbar(method_tab, orient=tk.VERTICAL, command=text.yview)
-    text.configure(yscrollcommand=method_scroll.set)
-    text.grid(row=0, column=0, sticky="nsew")
-    method_scroll.grid(row=0, column=1, sticky="ns")
-    text.insert("1.0", _ranking_report_markdown(context))
-    text.configure(state=tk.DISABLED)
-    _bind_local_mousewheel(text)
-    _bind_local_mousewheel(method_tab, text)
+    summary_scroll = WebSlimScrollbar(
+        summary_tab,
+        orient=tk.VERTICAL,
+        command=summary_text.yview,
+    )
+    summary_text.configure(yscrollcommand=summary_scroll.set)
+    summary_text.grid(row=0, column=0, sticky="nsew")
+    summary_scroll.grid(row=0, column=1, sticky="ns")
+    summary_text.insert("1.0", _ranking_report_markdown(context))
+    summary_text.configure(state=tk.DISABLED)
+    _bind_local_mousewheel(summary_text, summary_text)
 
-    results_tab.grid_rowconfigure(0, weight=1)
-    results_tab.grid_columnconfigure(0, weight=1)
-    cols = ("rank", "model", "scope", "score", "precision", "recall", "f1", "map50_95", "sample", "evaluated")
-    headings = {
-        "rank": "#",
-        "model": "Model",
-        "scope": "Zakres",
-        "score": "Ocena",
-        "precision": "Precyzja",
-        "recall": "Czułość",
-        "f1": "F1",
-        "map50_95": "mAP50-95",
-        "sample": "Próbka",
-        "evaluated": "Oceniono",
+    models_tab.grid_rowconfigure(0, weight=1)
+    models_tab.grid_columnconfigure(0, weight=1)
+    model_cols = (
+        "rank", "model", "precision", "recall", "f1", "accuracy",
+        "mean", "p50", "p90", "p95", "max", "sample"
+    )
+    model_headings = {
+        "rank": "#", "model": "Model", "precision": "P", "recall": "R",
+        "f1": "F1", "accuracy": "IoU≥0.8", "mean": "mean", "p50": "p50",
+        "p90": "p90", "p95": "p95", "max": "max", "sample": "n",
     }
-    tree = ttk.Treeview(results_tab, columns=cols, show="headings")
-    for col in cols:
-        tree.heading(col, text=headings.get(col, col))
-    tree.column("rank", width=58, anchor=tk.CENTER, stretch=False)
-    tree.column("model", width=420, minwidth=260, anchor=tk.W, stretch=True)
-    tree.column("scope", width=82, anchor=tk.CENTER, stretch=False)
-    tree.column("score", width=90, anchor=tk.CENTER, stretch=False)
-    tree.column("precision", width=90, anchor=tk.CENTER, stretch=False)
-    tree.column("recall", width=90, anchor=tk.CENTER, stretch=False)
-    tree.column("f1", width=80, anchor=tk.CENTER, stretch=False)
-    tree.column("map50_95", width=92, anchor=tk.CENTER, stretch=False)
-    tree.column("sample", width=82, anchor=tk.CENTER, stretch=False)
-    tree.column("evaluated", width=148, anchor=tk.CENTER, stretch=False)
-    try:
-        tree.tag_configure("winner", background=blend_hex_colors(palette.get("success", "#2ecc71"), palette.get("panel", "#252526"), 0.84))
-    except Exception:
-        pass
+    model_tree = ttk.Treeview(models_tab, columns=model_cols, show="headings")
+    for col in model_cols:
+        model_tree.heading(col, text=model_headings[col])
+    model_tree.column("rank", width=48, anchor=tk.CENTER, stretch=False)
+    model_tree.column("model", width=360, minwidth=240, anchor=tk.W, stretch=True)
+    for col in ("precision", "recall", "f1", "accuracy"):
+        model_tree.column(col, width=85, anchor=tk.CENTER, stretch=False)
+    for col in ("mean", "p50", "p90", "p95", "max"):
+        model_tree.column(col, width=96, anchor=tk.CENTER, stretch=False)
+    model_tree.column("sample", width=55, anchor=tk.CENTER, stretch=False)
     for row in rows:
-        tree.insert(
+        model_tree.insert(
             "",
             tk.END,
             values=(
-                "WYGRANY" if int(row.get("rank", 0) or 0) == 1 else f"#{row.get('rank')}",
+                int(row.get("rank", 0) or 0),
                 row.get("label", "-"),
-                row.get("scope", "-"),
-                _ranking_report_percent_text(row.get("score")),
                 _ranking_report_percent_text(row.get("precision")),
                 _ranking_report_percent_text(row.get("recall")),
                 _ranking_report_percent_text(row.get("f1")),
-                _ranking_report_percent_text(row.get("map50_95")),
-                row.get("sample", 0),
-                row.get("evaluated_at", "-"),
+                _ranking_report_percent_text(row.get("accuracy")),
+                _ranking_corner_metric_text(row.get("corner_error_mean"), row.get("corner_metric_status")),
+                _ranking_corner_metric_text(row.get("corner_error_p50"), row.get("corner_metric_status")),
+                _ranking_corner_metric_text(row.get("corner_error_p90"), row.get("corner_metric_status")),
+                _ranking_corner_metric_text(row.get("corner_error_p95"), row.get("corner_metric_status")),
+                _ranking_corner_metric_text(row.get("corner_error_max"), row.get("corner_metric_status")),
+                int(row.get("sample", 0) or 0),
             ),
-            tags=("winner",) if int(row.get("rank", 0) or 0) == 1 else (),
         )
-    yscroll = WebSlimScrollbar(results_tab, orient=tk.VERTICAL, command=tree.yview)
-    xscroll = WebSlimScrollbar(results_tab, orient=tk.HORIZONTAL, command=tree.xview)
-    tree.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
-    tree.grid(row=0, column=0, sticky="nsew")
-    yscroll.grid(row=0, column=1, sticky="ns")
-    xscroll.grid(row=1, column=0, sticky="ew")
-    _bind_local_mousewheel(tree)
-    _bind_local_mousewheel(results_tab, tree)
+    model_y = WebSlimScrollbar(models_tab, orient=tk.VERTICAL, command=model_tree.yview)
+    model_x = WebSlimScrollbar(models_tab, orient=tk.HORIZONTAL, command=model_tree.xview)
+    model_tree.configure(yscrollcommand=model_y.set, xscrollcommand=model_x.set)
+    model_tree.grid(row=0, column=0, sticky="nsew")
+    model_y.grid(row=0, column=1, sticky="ns")
+    model_x.grid(row=1, column=0, sticky="ew")
+    _bind_local_mousewheel(model_tree, model_tree)
 
-    chart_specs = [
-        (score_tab, _draw_ranking_score_canvas),
-        (metrics_tab, _draw_ranking_metrics_canvas),
-    ]
-    if str(context.get("target") or "") == "plate":
-        chart_specs.append((plate_diffs_tab, _draw_ranking_plate_diffs_canvas))
-
-    for tab, drawer in chart_specs:
+    def _build_chart_tab(tab, drawer):
         tab.grid_rowconfigure(0, weight=1)
         tab.grid_columnconfigure(0, weight=1)
         canvas = tk.Canvas(tab, highlightthickness=0)
-        chart_scroll = WebSlimScrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.configure(yscrollcommand=chart_scroll.set)
+        scroll = WebSlimScrollbar(tab, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
         canvas.grid(row=0, column=0, sticky="nsew")
-        chart_scroll.grid(row=0, column=1, sticky="ns")
-        _bind_local_mousewheel(canvas)
-        _bind_local_mousewheel(tab, canvas)
+        scroll.grid(row=0, column=1, sticky="ns")
+        _bind_local_mousewheel(canvas, canvas)
         canvas.bind(
             "<Configure>",
-            lambda _event, c=canvas, fn=drawer: fn(c, rows, palette),
+            lambda _event, c=canvas, fn=drawer: fn(c),
             add="+",
         )
-        try:
-            dialog.after_idle(lambda c=canvas, fn=drawer: fn(c, rows, palette))
-        except Exception:
-            pass
+        dialog.after_idle(lambda c=canvas, fn=drawer: fn(c))
+
+    if _ranking_label_metric_rows(rows):
+        labels_tab.grid_rowconfigure(0, weight=1)
+        labels_tab.grid_columnconfigure(0, weight=1)
+        labels_nb = ttk.Notebook(labels_tab)
+        labels_nb.grid(row=0, column=0, sticky="nsew")
+        label_table_tab = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        label_f1_tab = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        label_acc_tab = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        label_corner_tab = ttk.Frame(labels_nb, padding=6, style="Panel.TFrame")
+        labels_nb.add(label_table_tab, text="Tabela")
+        labels_nb.add(label_f1_tab, text="F1")
+        labels_nb.add(label_acc_tab, text="IoU≥0.8")
+        labels_nb.add(label_corner_tab, text="p95 E_corner")
+
+        label_table_tab.grid_rowconfigure(0, weight=1)
+        label_table_tab.grid_columnconfigure(0, weight=1)
+        label_cols = ("model", "label", "n", "p", "r", "f1", "acc", "mean", "p95")
+        label_tree = ttk.Treeview(label_table_tab, columns=label_cols, show="headings")
+        label_titles = {
+            "model": "Model", "label": "Etykieta", "n": "n", "p": "P", "r": "R",
+            "f1": "F1", "acc": "IoU≥0.8", "mean": "E_corner mean", "p95": "E_corner p95",
+        }
+        for col in label_cols:
+            label_tree.heading(col, text=label_titles[col])
+        label_tree.column("model", width=280, minwidth=180, anchor=tk.W, stretch=True)
+        label_tree.column("label", width=160, minwidth=120, anchor=tk.W, stretch=True)
+        label_tree.column("n", width=55, anchor=tk.CENTER, stretch=False)
+        for col in ("p", "r", "f1", "acc"):
+            label_tree.column(col, width=82, anchor=tk.CENTER, stretch=False)
+        for col in ("mean", "p95"):
+            label_tree.column(col, width=112, anchor=tk.CENTER, stretch=False)
+        for row in _ranking_label_metric_rows(rows):
+            label_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row.get("model_file") or row.get("model"),
+                    row.get("label_name"),
+                    row.get("sample_count", 0),
+                    _ranking_report_percent_text(row.get("precision")),
+                    _ranking_report_percent_text(row.get("recall")),
+                    _ranking_report_percent_text(row.get("f1")),
+                    _ranking_report_percent_text(row.get("accuracy")),
+                    _ranking_corner_metric_text(row.get("corner_error_mean"), row.get("corner_metric_status")),
+                    _ranking_corner_metric_text(row.get("corner_error_p95"), row.get("corner_metric_status")),
+                ),
+            )
+        ly = WebSlimScrollbar(label_table_tab, orient=tk.VERTICAL, command=label_tree.yview)
+        lx = WebSlimScrollbar(label_table_tab, orient=tk.HORIZONTAL, command=label_tree.xview)
+        label_tree.configure(yscrollcommand=ly.set, xscrollcommand=lx.set)
+        label_tree.grid(row=0, column=0, sticky="nsew")
+        ly.grid(row=0, column=1, sticky="ns")
+        lx.grid(row=1, column=0, sticky="ew")
+        _bind_local_mousewheel(label_tree, label_tree)
+
+        _build_chart_tab(
+            label_f1_tab,
+            lambda canvas: _draw_ranking_label_metric_canvas(
+                canvas, rows, palette,
+                metric_key="f1", metric_label="F1",
+            ),
+        )
+        _build_chart_tab(
+            label_acc_tab,
+            lambda canvas: _draw_ranking_label_metric_canvas(
+                canvas, rows, palette,
+                metric_key="accuracy", metric_label="IoU≥0.8",
+            ),
+        )
+        _build_chart_tab(
+            label_corner_tab,
+            lambda canvas: _draw_ranking_label_metric_canvas(
+                canvas, rows, palette,
+                metric_key="corner_error_p95",
+                metric_label="p95 E_corner",
+                corner_metric=True,
+            ),
+        )
+
+    if str(context.get("target") or "") == "plate":
+        _build_chart_tab(
+            corners_tab,
+            lambda canvas: _draw_ranking_corner_canvas(canvas, rows, palette),
+        )
+        _build_chart_tab(
+            diffs_tab,
+            lambda canvas: _draw_ranking_plate_diffs_canvas(canvas, rows, palette),
+        )
+
+    _build_chart_tab(
+        ranking_tab,
+        lambda canvas: _draw_ranking_score_canvas(canvas, rows, palette),
+    )
 
     bottom = ttk.Frame(shell, style="Panel.TFrame")
     bottom.grid(row=3, column=0, sticky="ew", pady=(10, 0))
     ttk.Button(
         bottom,
-        text="[ RAPORT ] Eksportuj pakiet",
+        text="[ RAPORT ] Eksportuj pełny pakiet",
         command=self._export_ranking_analysis_report,
     ).pack(side=tk.LEFT)
-    ttk.Button(bottom, text="Zamknij", command=close_dialog).pack(side=tk.RIGHT)
+    ttk.Button(
+        bottom,
+        text="Zamknij",
+        command=close_dialog,
+    ).pack(side=tk.RIGHT)
 
     try:
         dialog.update_idletasks()
         root = self.frame.winfo_toplevel()
-        width = min(max(1120, int(root.winfo_width() * 0.9)), 1500)
-        height = min(max(720, int(root.winfo_height() * 0.84)), 980)
+        width = min(max(1200, int(root.winfo_width() * 0.92)), 1600)
+        height = min(max(780, int(root.winfo_height() * 0.88)), 1040)
         x = int(root.winfo_rootx() + max(0, (root.winfo_width() - width) // 2))
         y = int(root.winfo_rooty() + max(0, (root.winfo_height() - height) // 2))
         dialog.geometry(f"{width}x{height}+{x}+{y}")
     except Exception:
-        dialog.geometry("1180x760")
-    try:
-        dialog.lift()
-        dialog.focus_force()
-    except Exception:
-        pass
+        dialog.geometry("1260x820")
+    dialog.lift()
+    dialog.focus_force()
+
 
 
 def _export_ranking_analysis_report(self):
     try:
         context = _collect_current_ranking_report_context(self)
     except Exception as exc:
-        logger.error(f"Nie udało się przygotować danych raportu rankingu: {exc}")
-        return messagebox.showerror("Raport analizy modeli", f"Nie udało się przygotować danych raportu:\n{exc}")
+        logger.error(
+            f"Nie udało się przygotować danych raportu rankingu: {exc}"
+        )
+        return messagebox.showerror(
+            "Raport wyników",
+            f"Nie udało się przygotować danych raportu:\n{exc}",
+        )
 
     rows = list(context.get("rows") or [])
     if not rows:
         return messagebox.showinfo(
-            "Raport analizy modeli",
-            "Brak ocenionych modeli dla bieżącego źródła i zakresu. Uruchom analizę roboczą albo porównanie z kontekstu PZ3.",
+            "Raport wyników",
+            "Brak ocenionych modeli dla bieżącego eksperymentu / źródła.",
         )
 
     try:
-        base_dir = Path(getattr(getattr(self, "ranking_engine", None), "ranking_dir", CONFIG.get_ranking_dir(context.get("target"))))
+        base_dir = Path(
+            getattr(
+                getattr(self, "ranking_engine", None),
+                "ranking_dir",
+                CONFIG.get_ranking_dir(context.get("target")),
+            )
+        )
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         report_dir = base_dir / "reports" / f"ranking_report_{timestamp}"
         report_dir.mkdir(parents=True, exist_ok=True)
 
-        csv_path = report_dir / "ranking_results.csv"
-        with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+        with (report_dir / "ranking_results.csv").open(
+            "w", encoding="utf-8-sig", newline=""
+        ) as handle:
             writer = csv.writer(handle, delimiter=";")
             writer.writerow(
                 [
-                    "pozycja",
-                    "model",
-                    "plik_modelu",
-                    "zakres",
-                    "status_dowodu",
-                    "status_rejestru",
-                    "ocena_pct",
-                    "precyzja_pct",
-                    "czulosc_pct",
-                    "f1_pct",
-                    "dokladnosc_pct",
-                    "map50_pct",
-                    "map50_95_pct",
-                    "probka",
-                    "wykrycia_modelu",
-                    "anotacje_odniesienia",
-                    "bez_zmian",
-                    "male_poprawki",
-                    "duze_poprawki",
-                    "dodane_w_odniesieniu",
-                    "usuniete_z_modelu",
-                    "corner_status",
-                    "corner_count",
-                    "corner_mean_norm",
-                    "corner_p50_norm",
-                    "corner_p90_norm",
-                    "corner_p95_norm",
-                    "corner_max_norm",
-                    "corner_matched_pairs",
-                    "corner_skipped_pairs",
-                    "tor",
-                    "split",
-                    "zrodlo_metryk",
-                    "oceniono",
+                    "pozycja", "model", "plik_modelu", "zakres",
+                    "status_dowodu", "status_rejestru", "ocena_pct",
+                    "precyzja_pct", "czulosc_pct", "f1_pct",
+                    "dokladnosc_iou_0_8_pct", "map50_pct", "map50_95_pct",
+                    "probka", "wykrycia_modelu", "anotacje_odniesienia",
+                    "bez_zmian", "male_poprawki", "duze_poprawki",
+                    "brakujace_fn", "nadmiarowe_fp",
+                    "corner_status", "corner_count",
+                    "corner_mean_norm", "corner_p50_norm", "corner_p90_norm",
+                    "corner_p95_norm", "corner_max_norm",
+                    "corner_matched_pairs", "corner_skipped_pairs",
+                    "tor", "split", "zrodlo_metryk", "oceniono",
                     "sciezka_modelu",
                 ]
             )
             for row in rows:
                 writer.writerow(
                     [
-                        row.get("rank", ""),
-                        row.get("label", ""),
-                        row.get("model_file", ""),
-                        row.get("scope", ""),
+                        row.get("rank", ""), row.get("label", ""),
+                        row.get("model_file", ""), row.get("scope", ""),
                         row.get("evidence_label", ""),
                         row.get("registry_experiment_status", ""),
                         f"{float(row.get('score', 0) or 0):.4f}",
@@ -2406,43 +2976,144 @@ def _export_ranking_analysis_report(self):
                         f"{float(row.get('corner_error_max', 0.0) or 0.0):.8f}",
                         row.get("corner_matched_pairs", 0),
                         row.get("corner_skipped_pairs", 0),
-                        row.get("reference", ""),
-                        row.get("split", ""),
+                        row.get("reference", ""), row.get("split", ""),
                         row.get("metrics_source", ""),
                         row.get("evaluated_at", ""),
                         row.get("model_path", ""),
                     ]
                 )
 
+        label_rows = _ranking_label_metric_rows(rows)
+        if label_rows:
+            with (report_dir / "ranking_label_metrics.csv").open(
+                "w", encoding="utf-8-sig", newline=""
+            ) as handle:
+                writer = csv.writer(handle, delimiter=";")
+                writer.writerow(
+                    [
+                        "model", "plik_modelu", "group_id", "label_id",
+                        "etykieta", "probka", "precyzja_pct", "czulosc_pct",
+                        "f1_pct", "dokladnosc_iou_0_8_pct",
+                        "wykrycia_modelu", "anotacje_odniesienia",
+                        "bez_zmian", "male_poprawki", "duze_poprawki",
+                        "brakujace_fn", "nadmiarowe_fp",
+                        "corner_status", "corner_count",
+                        "corner_mean_norm", "corner_p50_norm",
+                        "corner_p90_norm", "corner_p95_norm",
+                        "corner_max_norm", "corner_matched_pairs",
+                        "corner_skipped_pairs",
+                    ]
+                )
+                for row in label_rows:
+                    writer.writerow(
+                        [
+                            row.get("model", ""), row.get("model_file", ""),
+                            row.get("group_id", ""), row.get("label_id", ""),
+                            row.get("label_name", ""), row.get("sample_count", 0),
+                            f"{float(row.get('precision', 0) or 0):.4f}",
+                            f"{float(row.get('recall', 0) or 0):.4f}",
+                            f"{float(row.get('f1', 0) or 0):.4f}",
+                            f"{float(row.get('accuracy', 0) or 0):.4f}",
+                            row.get("total_auto_plates", 0),
+                            row.get("total_corrected_plates", 0),
+                            row.get("plates_unchanged", 0),
+                            row.get("plates_minor_fix", 0),
+                            row.get("plates_major_fix", 0),
+                            row.get("plates_added", 0),
+                            row.get("plates_removed", 0),
+                            row.get("corner_metric_status", ""),
+                            row.get("corner_error_count", 0),
+                            f"{float(row.get('corner_error_mean', 0.0) or 0.0):.8f}",
+                            f"{float(row.get('corner_error_p50', 0.0) or 0.0):.8f}",
+                            f"{float(row.get('corner_error_p90', 0.0) or 0.0):.8f}",
+                            f"{float(row.get('corner_error_p95', 0.0) or 0.0):.8f}",
+                            f"{float(row.get('corner_error_max', 0.0) or 0.0):.8f}",
+                            row.get("corner_matched_pairs", 0),
+                            row.get("corner_skipped_pairs", 0),
+                        ]
+                    )
+
         (report_dir / "ranking_score.svg").write_text(
-            _ranking_report_bar_svg(rows, title=f"{context['report_title']} — ocena"),
+            _ranking_report_bar_svg(
+                rows, title=f"{context['report_title']} — ranking"
+            ),
             encoding="utf-8",
         )
         (report_dir / "ranking_metrics.svg").write_text(
-            _ranking_report_metrics_svg(rows, title=f"{context['report_title']} — metryki pomocnicze"),
+            _ranking_report_metrics_svg(
+                rows, title=f"{context['report_title']} — metryki detekcji"
+            ),
             encoding="utf-8",
         )
+
         if str(context.get("target") or "") == "plate":
             (report_dir / "ranking_plate_diffs.svg").write_text(
-                _ranking_report_plate_diffs_svg(rows, title=f"{context['report_title']} — zgodność detekcji"),
+                _ranking_report_plate_diffs_svg(
+                    rows, title=f"{context['report_title']} — korekty"
+                ),
                 encoding="utf-8",
             )
+            (report_dir / "ranking_corner_metrics.svg").write_text(
+                _ranking_report_corner_svg(
+                    rows, title=f"{context['report_title']} — E_corner"
+                ),
+                encoding="utf-8",
+            )
+
+        if label_rows:
+            (report_dir / "ranking_label_f1.svg").write_text(
+                _ranking_report_label_metric_svg(
+                    rows,
+                    title=f"{context['report_title']} — F1 wg etykiet",
+                    metric_key="f1",
+                    metric_label="F1",
+                ),
+                encoding="utf-8",
+            )
+            (report_dir / "ranking_label_accuracy.svg").write_text(
+                _ranking_report_label_metric_svg(
+                    rows,
+                    title=f"{context['report_title']} — IoU≥0.8 wg etykiet",
+                    metric_key="accuracy",
+                    metric_label="IoU≥0.8",
+                ),
+                encoding="utf-8",
+            )
+            (report_dir / "ranking_label_corner_p95.svg").write_text(
+                _ranking_report_label_metric_svg(
+                    rows,
+                    title=f"{context['report_title']} — p95 E_corner wg etykiet",
+                    metric_key="corner_error_p95",
+                    metric_label="p95 E_corner (niżej = lepiej)",
+                    corner_metric=True,
+                ),
+                encoding="utf-8",
+            )
+
         (report_dir / "ranking_report.md").write_text(
             _ranking_report_markdown(context),
             encoding="utf-8",
         )
-        logger.info(f"Zapisano raport rankingu modeli: {report_dir}")
+
+        logger.info(
+            f"Zapisano pełny raport wyników eksperymentu: {report_dir}"
+        )
         if messagebox.askyesno(
-            "Raport analizy modeli",
-            f"Zapisano raport: {context['report_title']}\n{report_dir}\n\nOtworzyć folder raportu?",
+            "Raport wyników",
+            f"Zapisano pełny raport:\n{report_dir}\n\nOtworzyć folder raportu?",
         ):
             try:
                 self._open_path(report_dir)
             except Exception:
                 pass
     except Exception as exc:
-        logger.error(f"Nie udało się zapisać raportu rankingu: {exc}")
-        return messagebox.showerror("Raport analizy modeli", f"Nie udało się zapisać raportu:\n{exc}")
+        logger.error(
+            f"Nie udało się zapisać raportu wyników: {exc}"
+        )
+        return messagebox.showerror(
+            "Raport wyników",
+            f"Nie udało się zapisać raportu:\n{exc}",
+        )
 
 
 def _count_ranking_dataset_splits(yaml_path: Path) -> dict[str, int]:
@@ -3959,6 +4630,8 @@ def _build_ranking_panel_v2(self, parent):
 def _open_ranking_results_modal(self):
     from .pz3_comparison import comparison_context, clear_pz3_comparison_context
     pz3_context = comparison_context(self)
+    if pz3_context and pz3_context.get("comparison_completed"):
+        return _open_ranking_report_viewer(self)
     existing = getattr(self, "_ranking_results_modal", None)
     try:
         if existing is not None and existing.winfo_exists():

@@ -197,6 +197,100 @@ def resolve_comparison(service, track_id):
 
 
 
+
+def latest_completed_comparison(service, track_id):
+    """Find the newest completed controlled comparison for this sealed track."""
+    clean_track_id = str(track_id or "").strip()
+    if not clean_track_id:
+        return None
+    try:
+        track = service.get_track(clean_track_id)
+        target = str(track.get("target") or "").strip().lower()
+    except Exception:
+        return None
+
+    try:
+        from ..registry.participant_pool_audit import ParticipantPoolAuditService
+        frozen = {
+            str(item.model_id)
+            for item in ParticipantPoolAuditService(
+                service.workspace,
+                repository=service.repository,
+            ).load_participants(clean_track_id)
+        }
+    except Exception:
+        frozen = set()
+
+    try:
+        bundles = service.repository.list_experiment_result_bundles(
+            target=target or None
+        )
+    except Exception:
+        return None
+
+    grouped = {}
+    for raw in bundles:
+        row = dict(raw)
+        if str(row.get("track_id") or "") != clean_track_id:
+            continue
+        if str(row.get("experiment_mode") or "").strip().lower() != "controlled":
+            continue
+        if str(row.get("experiment_status") or "").strip().upper() != "COMPLETED":
+            continue
+        experiment_id = str(row.get("experiment_id") or "").strip()
+        if not experiment_id:
+            continue
+        info = grouped.setdefault(
+            experiment_id,
+            {
+                "experiment_id": experiment_id,
+                "model_ids": set(),
+                "latest_result_at": "",
+            },
+        )
+        info["model_ids"].add(str(row.get("model_id") or ""))
+        info["latest_result_at"] = max(
+            str(info.get("latest_result_at") or ""),
+            str(row.get("result_created_at") or ""),
+        )
+
+    candidates = []
+    for experiment_id, info in grouped.items():
+        if frozen and info["model_ids"] != frozen:
+            continue
+        try:
+            experiment_row = service.repository.get_experiment(experiment_id)
+            experiment = dict(experiment_row) if experiment_row is not None else {}
+        except Exception:
+            experiment = {}
+        if str(experiment.get("status") or "").upper() != "COMPLETED":
+            continue
+        info.update(
+            {
+                "name": str(experiment.get("name") or ""),
+                "status": "COMPLETED",
+                "finished_at": str(experiment.get("finished_at") or ""),
+                "participant_count": len(frozen or info["model_ids"]),
+                "result_count": len(info["model_ids"]),
+            }
+        )
+        candidates.append(info)
+
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda row: (
+            str(row.get("finished_at") or ""),
+            str(row.get("latest_result_at") or ""),
+            str(row.get("experiment_id") or ""),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
+
+
+
+
 def open_comparison(panel):
     from . import z4_analysis_ranking
 
@@ -208,23 +302,66 @@ def open_comparison(panel):
             getattr(panel.host, "rank_is_running", False)
             or getattr(panel.host, "rank_cancel_requested", False) is True
         ):
-            raise RuntimeError("Poczekaj na zakończenie bieżącego porównania lub anulowania.")
+            raise RuntimeError(
+                "Poczekaj na zakończenie bieżącego porównania lub anulowania."
+            )
+
         context = resolve_comparison(panel.service, track_id)
+
+        # Informacja o wcześniejszym zakończonym eksperymencie jest
+        # rozszerzeniem UX, a nie warunkiem wejścia do porównania.
+        # Jej odczyt nie może blokować podstawowego flow.
+        completed = None
+        try:
+            completed = latest_completed_comparison(
+                panel.service,
+                track_id,
+            )
+        except Exception:
+            completed = None
+
         host = panel.host
         host._ensure_step4_train_tab_built()
+
+        if completed:
+            context["comparison_completed"] = True
+            context["completed_experiment_id"] = completed["experiment_id"]
+            context["completed_at"] = completed.get("finished_at", "")
+
         host._pz3_comparison_context = context
         host.rank_scope_var.set("Globalne")
         host.rank_data_dir.set(context["reference_path"])
         host._ensure_plate_ranking_engine()
         host._refresh_ranking_reference_ui()
         host._refresh_ranking_start_state()
+        host._load_ranking()
+
         close = getattr(host, "_ranking_results_modal_close", None)
-        if callable(close) and getattr(host, "_ranking_results_modal", None) is not None:
+        if (
+            callable(close)
+            and getattr(host, "_ranking_results_modal", None) is not None
+        ):
             close()
+
+        # Stabilny punkt wejścia: zawsze results modal.
+        # Dla completed sam modal deleguje do pełnego widoku wyników.
         z4_analysis_ranking._open_ranking_results_modal(host)
-        panel._set_status(
-            f"Porównanie: {context['name']} · uczestników: {len(context['model_ids'])}. "
-            "Użyj „Uruchom porównanie”."
-        )
+
+        if completed:
+            panel._set_status(
+                f"Wyniki eksperymentu: {context['name']} · "
+                f"uczestników: "
+                f"{completed.get('participant_count', len(context['model_ids']))} · "
+                "status: COMPLETED."
+            )
+        else:
+            panel._set_status(
+                f"Porównanie: {context['name']} · "
+                f"uczestników: {len(context['model_ids'])}. "
+                "Użyj „Uruchom porównanie”."
+            )
     except Exception as exc:
-        panel._show_error("Nie udało się przygotować porównania", exc)
+        panel._show_error(
+            "Nie udało się otworzyć porównania / wyników",
+            exc,
+        )
