@@ -338,6 +338,187 @@ def _resolve_preview_expected_text_for_crop(self, data: dict | None = None, char
         "resolution": resolution,
     }
 
+RAW_VALIDATION_SCHEMA = "alpr.pz2.raw_validation.v1"
+
+
+def _raw_validation_edit_distance(left: str, right: str) -> int:
+    left = str(left or "")
+    right = str(right or "")
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, start=1):
+        current = [i]
+        for j, right_char in enumerate(right, start=1):
+            cost = 0 if left_char == right_char else 1
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + cost,
+                )
+            )
+        previous = current
+    return int(previous[-1])
+
+
+def _build_raw_detection_validation(
+    self,
+    data: dict | None,
+    chars,
+) -> dict:
+    source_data = data if isinstance(data, dict) else {}
+    source_chars = list(chars or []) if isinstance(chars, list) else []
+
+    try:
+        candidate_text = str(
+            self._characters_to_text(
+                source_chars,
+                data=source_data,
+            )
+            or ""
+        ).strip().upper()
+    except TypeError:
+        candidate_text = str(
+            self._characters_to_text(source_chars) or ""
+        ).strip().upper()
+    except Exception:
+        candidate_text = ""
+
+    try:
+        uses_gt_contract = bool(
+            self._preview_uses_plate_gt_contract(source_data)
+        )
+    except Exception:
+        uses_gt_contract = False
+
+    try:
+        ground_truth_text = str(
+            self._get_preview_ground_truth_text(source_data)
+            or ""
+        ).strip().upper()
+    except Exception:
+        ground_truth_text = ""
+
+    expected_source = "ground_truth" if uses_gt_contract else "legacy"
+    if uses_gt_contract:
+        expected_texts = [ground_truth_text] if ground_truth_text else []
+    else:
+        try:
+            expected_texts = [
+                str(value or "").strip().upper()
+                for value in (
+                    self._get_preview_expected_texts(source_data)
+                    or []
+                )
+                if str(value or "").strip()
+            ]
+        except Exception:
+            expected_texts = []
+
+    target_text = ""
+    if uses_gt_contract:
+        target_text = ground_truth_text
+    elif len(expected_texts) == 1:
+        target_text = expected_texts[0]
+
+    detected_count = int(len(source_chars))
+    exportable_count = 0
+    for rec in source_chars:
+        try:
+            if self._is_exportable_character_record(rec):
+                exportable_count += 1
+        except Exception:
+            pass
+
+    try:
+        layout_conflict = bool(
+            self._preview_layout_separator_conflicts_with_chars(
+                source_data,
+                source_chars,
+            )
+        )
+    except Exception:
+        layout_conflict = False
+
+    reasons: list[str] = []
+    if not source_chars:
+        reasons.append("no_detection")
+    if exportable_count != detected_count:
+        reasons.append("invalid_character_or_box")
+    if layout_conflict:
+        reasons.append("layout_conflict")
+
+    if uses_gt_contract and not ground_truth_text:
+        reasons.append("missing_ground_truth")
+    elif not target_text and len(expected_texts) > 1:
+        reasons.append("ambiguous_reference")
+    elif target_text:
+        expected_count = len(target_text)
+        if detected_count < expected_count:
+            reasons.append("missing_boxes")
+        elif detected_count > expected_count:
+            reasons.append("extra_boxes")
+        if candidate_text != target_text:
+            reasons.append("text_mismatch")
+
+    exact_text_match = bool(
+        target_text
+        and candidate_text == target_text
+    )
+    exact_count_match = bool(
+        target_text
+        and detected_count == len(target_text)
+    )
+    geometry_ok = bool(
+        detected_count > 0
+        and exportable_count == detected_count
+        and not layout_conflict
+    )
+    perfect = bool(
+        target_text
+        and exact_text_match
+        and exact_count_match
+        and geometry_ok
+    )
+
+    if target_text:
+        edit_distance = _raw_validation_edit_distance(
+            candidate_text,
+            target_text,
+        )
+        cer = float(edit_distance) / float(
+            max(1, len(target_text))
+        )
+    else:
+        edit_distance = None
+        cer = None
+
+    return {
+        "schema": RAW_VALIDATION_SCHEMA,
+        "raw_contract": "gt_blind.v1",
+        "status": "perfect" if perfect else "needs_fix",
+        "reason_codes": list(dict.fromkeys(reasons)),
+        "expected_source": expected_source,
+        "ground_truth_text": target_text or None,
+        "prediction_text": candidate_text,
+        "expected_char_count": len(target_text) if target_text else 0,
+        "detected_char_count": detected_count,
+        "exportable_char_count": int(exportable_count),
+        "exact_text_match": bool(exact_text_match),
+        "exact_count_match": bool(exact_count_match),
+        "geometry_ok": bool(geometry_ok),
+        "layout_conflict": bool(layout_conflict),
+        "edit_distance": edit_distance,
+        "cer": round(float(cer), 8) if cer is not None else None,
+    }
+
+
 def _derive_preview_status_from_data(self, data: dict | None, chars) -> str:
     base_status = self._derive_preview_status_from_characters(chars)
     if base_status != "perfect":
@@ -392,6 +573,18 @@ def _recalculate_preview_statuses_in_metadata(self, metadata: dict | None):
             data=raw_data,
         )
         raw_data["characters"] = chars
+
+        raw_detection = raw_data.get("raw_detection")
+        if isinstance(raw_detection, dict):
+            raw_chars = raw_detection.get("characters", [])
+            if isinstance(raw_chars, list):
+                raw_data["raw_validation"] = (
+                    self._build_raw_detection_validation(
+                        raw_data,
+                        raw_chars,
+                    )
+                )
+
         if not chars:
             raw_data["status"] = "needs_fix"
             continue

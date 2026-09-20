@@ -38,6 +38,7 @@ OCR_DETECTION_METHODS = {
     DetectionMethod.YOLO_OCR,
 }
 YOLO_BOX_RECALL_CONFIDENCE = 0.00001
+RAW_DETECTION_SCHEMA = "alpr.pz2.raw_detection.v1"
 
 
 def _method_uses_yolo(method: DetectionMethod) -> bool:
@@ -879,28 +880,13 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     continue
 
                 source_image = local_meta[pid].get("source_image", "") or ""
-                try:
-                    true_texts = self._get_preview_expected_texts(local_meta[pid])
-                except Exception:
-                    true_texts = []
-                try:
-                    uses_plate_gt_contract = bool(
-                        self._preview_uses_plate_gt_contract(local_meta[pid])
-                    )
-                except Exception:
-                    uses_plate_gt_contract = False
-                if not true_texts and not uses_plate_gt_contract:
-                    true_texts = self._get_true_texts_from_filename(source_image)
 
+                # RAW inference contract: no GT/reference may influence
+                # detector input, expected count, recall or source selection.
+                true_texts = []
+                expected_char_count = 0
                 try:
-                    expected_resolution = self._resolve_preview_expected_text_for_crop(local_meta[pid], [])
-                except Exception:
-                    expected_resolution = {}
-                expected_char_count = int(expected_resolution.get("target_length", 0) or 0) if bool(
-                    expected_resolution.get("count_resolved", False)
-                ) else 0
-                try:
-                    detector.expected_character_count = int(expected_char_count)
+                    detector.expected_character_count = 0
                 except Exception:
                     pass
 
@@ -1128,6 +1114,48 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     fusion_details=fusion_details,
                     data=local_meta[pid],
                 )
+
+                # Snapshot automatic output before any manual preserve/merge.
+                try:
+                    raw_prediction_text = str(
+                        self._characters_to_text(
+                            c_clean,
+                            data=local_meta[pid],
+                        )
+                        or ""
+                    ).strip().upper()
+                except TypeError:
+                    raw_prediction_text = str(
+                        self._characters_to_text(c_clean) or ""
+                    ).strip().upper()
+                except Exception:
+                    raw_prediction_text = ""
+
+                raw_fusion_details = (
+                    copy.deepcopy(fusion_details)
+                    if isinstance(fusion_details, dict)
+                    else {}
+                )
+                raw_fusion_details["raw_contract"] = "gt_blind.v1"
+
+                local_meta[pid]["raw_detection"] = {
+                    "schema": RAW_DETECTION_SCHEMA,
+                    "contract": "gt_blind.v1",
+                    "detection_method": str(
+                        getattr(method, "value", method) or ""
+                    ),
+                    "prediction_text": raw_prediction_text,
+                    "characters": copy.deepcopy(c_clean),
+                    "fusion_strategy": str(fusion_strategy or ""),
+                    "fusion_details": raw_fusion_details,
+                }
+                local_meta[pid]["raw_validation"] = (
+                    self._build_raw_detection_validation(
+                        local_meta[pid],
+                        c_clean,
+                    )
+                )
+
                 yolo_clean = self._serialize_character_records(
                     getattr(detector, "last_yolo_detections", []),
                     data=local_meta[pid],
@@ -1234,9 +1262,9 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         final_chars = c_clean
                         final_strategy = str(fusion_strategy or "")
 
-                # Ostateczny guard GT musi działać już po merge/preserve,
-                # żeby stare manuale albo perfect-preserve nie przywracały
-                # nadmiarowych boxów do finalnego metadata.
+                # Compatibility call retained for legacy plumbing.
+                # In gt_blind.v1 true_texts is always empty here, therefore
+                # this guard is a no-op and cannot trim to GT.
                 final_chars, fusion_details = self._apply_final_truth_count_guard(
                     final_chars,
                     true_texts,

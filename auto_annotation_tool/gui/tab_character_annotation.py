@@ -1264,6 +1264,7 @@ class CharacterAnnotationTab:
     _get_preview_filename_expected_texts = z3_preview_metadata_runtime._get_preview_filename_expected_texts
     _get_preview_expected_texts = z3_preview_metadata_runtime._get_preview_expected_texts
     _resolve_preview_expected_text_for_crop = z3_preview_metadata_runtime._resolve_preview_expected_text_for_crop
+    _build_raw_detection_validation = z3_preview_metadata_runtime._build_raw_detection_validation
     _derive_preview_status_from_data = z3_preview_metadata_runtime._derive_preview_status_from_data
     _get_preview_live_status = z3_preview_metadata_runtime._get_preview_live_status
 
