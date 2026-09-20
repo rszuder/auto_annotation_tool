@@ -12,7 +12,10 @@ from types import SimpleNamespace
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from ..project_cache import PROJECT_CACHE
-from ..plate_ground_truth import normalize_plate_ground_truth_text
+from ..plate_ground_truth import (
+    ensure_plate_detection_contract,
+    normalize_plate_ground_truth_text,
+)
 
 
 def normalize_xml_image_relpath(raw_name: str) -> str:
@@ -957,69 +960,25 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
     )
     ordered_plates = [detection for _, detection in ordered_pairs]
 
-    # Nowy kontrakt: GT należy do konkretnego polygonu Z2.
-    # Parser nazwy pozostaje wyłącznie jako zgodność wsteczna dla starych danych,
-    # które nie mają ground_truth_text.
-    contract_flags = []
-    for detection in ordered_plates:
-        attrs = dict(getattr(detection, "attributes", {}) or {})
-        gt_text = normalize_plate_ground_truth_text(
-            attrs.get("ground_truth_text")
-        )
-        contract_flags.append(
-            bool(
-                gt_text
-                or str(attrs.get("plate_annotation_id") or "").strip()
-                or str(attrs.get("ground_truth_source") or "").strip()
-            )
-        )
-
-    needs_legacy_filename_gt = bool(
-        ordered_plates and not all(contract_flags)
-    )
-    expected_tokens = (
-        host._extract_source_plate_tokens_from_filename(image_name)
-        if needs_legacy_filename_gt
-        else []
-    )
-    has_direct_mapping = bool(
-        len(expected_tokens) == 1 and len(ordered_plates) == 1
-    )
-    expected_tokens_json = (
-        json.dumps(expected_tokens, ensure_ascii=False)
-        if expected_tokens
-        else "[]"
-    )
-
+    # Bieżący workflow PZ1 nie wyprowadza już GT z nazwy pliku.
+    # Każdy polygon dostaje trwałą tożsamość kontraktu GT. Brak GT oznacza
+    # po prostu brak GT i musi zostać uzupełniony w Z2.
     for sorted_index, detection in enumerate(ordered_plates):
-        attributes = dict(getattr(detection, "attributes", {}) or {})
+        attributes = ensure_plate_detection_contract(detection)
         attributes["source_plate_index"] = str(sorted_index)
         attributes["source_plate_count"] = str(len(ordered_plates))
 
         gt_text = normalize_plate_ground_truth_text(
             attributes.get("ground_truth_text")
         )
-        uses_gt_contract = bool(
-            gt_text
-            or str(attributes.get("plate_annotation_id") or "").strip()
-            or str(attributes.get("ground_truth_source") or "").strip()
-        )
-        if uses_gt_contract:
-            if gt_text:
-                attributes["ground_truth_text"] = gt_text
-                attributes.setdefault("ground_truth_source", "manual_z2")
-            attributes.pop("source_expected_text", None)
-            attributes.pop("source_expected_texts", None)
-            attributes.pop("source_expected_text_source", None)
-        else:
-            attributes["source_expected_texts"] = expected_tokens_json
-            if has_direct_mapping:
-                attributes["source_expected_text"] = expected_tokens[sorted_index]
-                attributes["source_expected_text_source"] = "filename_order"
-            elif expected_tokens:
-                attributes.pop("source_expected_text", None)
-                attributes["source_expected_text_source"] = "ambiguous_filename_tokens"
+        if gt_text:
+            attributes["ground_truth_text"] = gt_text
+            attributes.setdefault("ground_truth_source", "manual_z2")
 
+        # Usuwamy historyczne heurystyki filename-derived z nowego cropa.
+        attributes.pop("source_expected_text", None)
+        attributes.pop("source_expected_texts", None)
+        attributes.pop("source_expected_text_source", None)
         detection.attributes = attributes
 
     return ordered_plates

@@ -257,6 +257,48 @@ def _resolve_preview_expected_text_for_crop(self, data: dict | None = None, char
     except Exception:
         candidate_text = ""
 
+    if uses_gt_contract:
+        ground_truth_text = self._get_preview_ground_truth_text(source_data)
+        if not ground_truth_text:
+            return {
+                "candidate_text": candidate_text,
+                "expected_texts": [],
+                "expected_lengths": [],
+                "matched_text": "",
+                "target_text": "",
+                "target_length": 0,
+                "target_lengths": [],
+                "text_resolved": False,
+                "count_resolved": False,
+                "ambiguous": False,
+                "expected_source": "ground_truth",
+                "resolution": "missing_ground_truth",
+            }
+
+        matched_text = (
+            ground_truth_text
+            if candidate_text and candidate_text == ground_truth_text
+            else ""
+        )
+        return {
+            "candidate_text": candidate_text,
+            "expected_texts": [ground_truth_text],
+            "expected_lengths": [len(ground_truth_text)],
+            "matched_text": matched_text,
+            "target_text": ground_truth_text,
+            "target_length": len(ground_truth_text),
+            "target_lengths": [len(ground_truth_text)],
+            "text_resolved": bool(matched_text),
+            "count_resolved": True,
+            "ambiguous": False,
+            "expected_source": "ground_truth",
+            "resolution": (
+                "ground_truth_exact"
+                if matched_text
+                else "ground_truth_expected"
+            ),
+        }
+
     expected_lengths = sorted({len(text) for text in expected_texts if text})
     matched_text = candidate_text if candidate_text and candidate_text in expected_texts else ""
     target_text = ""

@@ -229,6 +229,12 @@ class PlateGenerator:
                     'layout_source': 'plate_aspect',
                     'plate_attributes': attributes,
                 }
+
+                # Nowy crop PZ1 nie niesie historycznych pól filename-derived.
+                if source_annotation_id:
+                    self.metadata[plate_id].pop('source_expected_text', None)
+                    self.metadata[plate_id].pop('source_expected_texts', None)
+                    self.metadata[plate_id].pop('source_expected_text_source', None)
                 
                 plate_detection.plate_id = plate_id
                 plate_detection.plate_path = str(plate_path)

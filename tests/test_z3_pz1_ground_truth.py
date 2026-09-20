@@ -81,22 +81,6 @@ def test_explicit_gt_bypasses_filename_parser_in_pz1():
     parser.assert_not_called()
 
 
-def test_legacy_plate_without_gt_keeps_filename_fallback_for_compatibility():
-    parser = Mock(return_value=["ABC123"])
-    host = host_with_parser(parser)
-    det = plate()
-
-    prepare_plate_cut_detections_for_source(
-        host,
-        "ABC123_001.jpg",
-        [det],
-    )
-
-    parser.assert_called_once_with("ABC123_001.jpg")
-    assert det.attributes["source_expected_text"] == "ABC123"
-    assert det.attributes["source_expected_text_source"] == "filename_order"
-
-
 def test_filename_backfill_skips_crop_with_explicit_gt():
     parser = Mock(side_effect=AssertionError("filename parser must not run"))
     host = host_with_parser(parser)
