@@ -31,6 +31,7 @@ from . import z2_workflow_methods
 from . import z2_canvas_overlays
 from . import z2_canvas_interaction
 from . import z2_plate_gt_inline
+from . import z2_gt_pack_runtime
 from .z2_main_widgets import create_annotation_widgets
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
 from .z2_canvas_metrics_ui import (
@@ -413,6 +414,30 @@ def _load_current_preview_selection(
             "select",
             f"idx={self.current_preview_index if self.current_preview_index is not None else '-'} file={getattr(ann, 'filename', '-')}"
         )
+
+    try:
+        gt_restore = z2_gt_pack_runtime.restore_gt_for_annotation(self, ann)
+    except Exception as exc:
+        gt_restore = {
+            "changed": False,
+            "conflicts": [],
+            "error": str(exc),
+        }
+
+    if bool(gt_restore.get("changed")):
+        try:
+            self._mark_preview_image_dirty(ann, refresh_list=False)
+        except Exception:
+            pass
+
+    if gt_restore.get("conflicts"):
+        try:
+            self._push_preview_debug_event(
+                "gt-pack",
+                f"conflicts={len(gt_restore.get('conflicts') or [])}",
+            )
+        except Exception:
+            pass
 
     self._render_preview_image(
         ann,

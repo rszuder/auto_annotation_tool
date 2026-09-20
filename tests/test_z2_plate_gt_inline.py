@@ -137,3 +137,31 @@ def test_canvas_viewport_bounds_include_scroll_origin():
         680.0,
     )
 
+def test_inline_xml_success_does_not_rollback_when_pack_sync_is_queued(monkeypatch):
+    host = host_for()
+    ann = SimpleNamespace(filename="image.jpg")
+    det = plate()
+
+    monkeypatch.setattr(
+        inline.z2_gt_pack_runtime,
+        "sync_plate_gt_after_xml_save",
+        Mock(
+            return_value={
+                "ok": False,
+                "enabled": True,
+                "queued": True,
+            }
+        ),
+    )
+
+    ok, normalized = inline.save_inline_plate_gt_value(
+        host,
+        ann,
+        det,
+        "ABC123",
+    )
+
+    assert ok is True
+    assert normalized == "ABC123"
+    assert det.attributes[GROUND_TRUTH_TEXT_ATTR] == "ABC123"
+

@@ -10,6 +10,7 @@ from ..plate_ground_truth import (
     get_plate_ground_truth,
     set_plate_ground_truth,
 )
+from . import z2_gt_pack_runtime
 from .web_slim_scrollbar import blend_hex_colors
 
 
@@ -226,6 +227,30 @@ def save_inline_plate_gt_value(
         except Exception:
             pass
         return False, get_plate_ground_truth(previous_attributes)
+
+    try:
+        pack_sync = z2_gt_pack_runtime.sync_plate_gt_after_xml_save(
+            host, ann, det, normalized
+        )
+    except Exception as exc:
+        pack_sync = {
+            "ok": False,
+            "enabled": True,
+            "queued": True,
+            "error": str(exc),
+        }
+
+    if (
+        isinstance(pack_sync, dict)
+        and pack_sync.get("enabled")
+        and not pack_sync.get("ok")
+    ):
+        try:
+            host._update_preview_edit_status(
+                "GT zapisano w annotations.xml; synchronizacja z GT Pack oczekuje na ponowienie."
+            )
+        except Exception:
+            pass
 
     if refresh_gate:
         try:
