@@ -63,6 +63,69 @@ def read_xml_image_names(xml_path: Path) -> list[str]:
     return list(dict.fromkeys(names))
 
 
+def _stable_sha256_text(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def build_plate_source_geometry_hash(
+    image_name: str,
+    detection,
+) -> str:
+    attributes = dict(getattr(detection, "attributes", {}) or {})
+    plate_id = str(attributes.get("plate_annotation_id") or "").strip()
+    points = list(getattr(detection, "polygon", None) or [])
+    if not points:
+        try:
+            x1, y1, x2, y2 = [
+                float(value)
+                for value in list(getattr(detection, "bbox", []) or [])[:4]
+            ]
+            points = [
+                (x1, y1),
+                (x2, y1),
+                (x2, y2),
+                (x1, y2),
+            ]
+        except Exception:
+            points = []
+
+    geometry = ";".join(
+        f"{float(x):.6f},{float(y):.6f}"
+        for x, y in points[:4]
+    )
+    core = "|".join(
+        (
+            normalize_xml_image_relpath(image_name),
+            plate_id,
+            geometry,
+        )
+    )
+    return _stable_sha256_text(core)
+
+
+def build_plate_source_gt_hash(
+    image_name: str,
+    attributes: dict,
+) -> str:
+    attrs = dict(attributes or {})
+    plate_id = str(attrs.get("plate_annotation_id") or "").strip()
+    gt_text = normalize_plate_ground_truth_text(
+        attrs.get("ground_truth_text")
+    )
+    gt_source = str(
+        attrs.get("ground_truth_source") or ""
+    ).strip()
+    core = "|".join(
+        (
+            normalize_xml_image_relpath(image_name),
+            plate_id,
+            gt_text,
+            gt_source,
+        )
+    )
+    return _stable_sha256_text(core)
+
+
 def count_xml_plate_cut_targets(xml_path: Path) -> dict:
     tree = ET.parse(xml_path)
     image_elements = {
@@ -73,10 +136,12 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
     plate_count = 0
     images_with_plates = 0
     geometry_parts: list[str] = []
+    gt_parts: list[str] = []
 
     for raw_image_name, image_el in image_elements.items():
         image_plate_count = 0
         image_geometry_parts: list[str] = []
+        image_gt_parts: list[str] = []
         for poly in image_el.findall(".//polygon[@label='plate']"):
             try:
                 points = [
@@ -86,22 +151,57 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
                 ]
             except Exception:
                 continue
-            if len(points) >= 4:
-                image_plate_count += 1
-                image_geometry_parts.append(
-                    ";".join(f"{float(x):.3f},{float(y):.3f}" for x, y in points[:4])
+            if len(points) < 4:
+                continue
+
+            image_plate_count += 1
+            geometry_key = ";".join(
+                f"{float(x):.3f},{float(y):.3f}"
+                for x, y in points[:4]
+            )
+            image_geometry_parts.append(geometry_key)
+
+            _confidence, attributes = read_xml_plate_attributes(poly)
+            plate_id = str(
+                attributes.get("plate_annotation_id") or ""
+            ).strip()
+            gt_text = normalize_plate_ground_truth_text(
+                attributes.get("ground_truth_text")
+            )
+            gt_source = str(
+                attributes.get("ground_truth_source") or ""
+            ).strip()
+
+            identity_key = plate_id or f"geom:{geometry_key}"
+            image_gt_parts.append(
+                "|".join(
+                    (
+                        identity_key,
+                        gt_text,
+                        gt_source,
+                    )
                 )
+            )
 
         if image_plate_count > 0:
             images_with_plates += 1
             plate_count += image_plate_count
+            image_name = normalize_xml_image_relpath(raw_image_name)
             geometry_parts.append(
                 "|".join(
                     (
-                        normalize_xml_image_relpath(raw_image_name),
+                        image_name,
                         str(image_el.get("width") or ""),
                         str(image_el.get("height") or ""),
-                        "#".join(image_geometry_parts),
+                        "#".join(sorted(image_geometry_parts)),
+                    )
+                )
+            )
+            gt_parts.append(
+                "|".join(
+                    (
+                        image_name,
+                        "#".join(sorted(image_gt_parts)),
                     )
                 )
             )
@@ -110,8 +210,15 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
         "plate_count": int(plate_count),
         "images_with_plates": int(images_with_plates),
         "xml_images_total": int(len(image_elements)),
-        "xml_plate_geometry_hash": hashlib.sha1("\n".join(geometry_parts).encode("utf-8")).hexdigest()
+        "xml_plate_geometry_hash": hashlib.sha1(
+            "\n".join(sorted(geometry_parts)).encode("utf-8")
+        ).hexdigest()
         if geometry_parts
+        else "",
+        "xml_plate_gt_hash": hashlib.sha256(
+            "\n".join(sorted(gt_parts)).encode("utf-8")
+        ).hexdigest()
+        if gt_parts
         else "",
     }
 
@@ -164,6 +271,7 @@ def current_extract_source_signature(host: "CharacterAnnotationTab") -> dict:
         "xml_images_with_plates": 0,
         "xml_images_total": 0,
         "xml_plate_geometry_hash": "",
+        "xml_plate_gt_hash": "",
     }
     if not xml_path_raw:
         return signature
@@ -198,6 +306,7 @@ def current_extract_source_signature(host: "CharacterAnnotationTab") -> dict:
             "xml_images_with_plates": int(counts.get("images_with_plates", 0) or 0),
             "xml_images_total": int(counts.get("xml_images_total", 0) or 0),
             "xml_plate_geometry_hash": str(counts.get("xml_plate_geometry_hash") or "").strip(),
+            "xml_plate_gt_hash": str(counts.get("xml_plate_gt_hash") or "").strip(),
         }
         signature.update(counted)
         try:
@@ -230,7 +339,24 @@ def extract_manifest_matches_current_source(
     current_signature = current_extract_source_signature(host)
     saved_hash = str(source.get("xml_plate_geometry_hash") or "").strip()
     current_hash = str(current_signature.get("xml_plate_geometry_hash") or "").strip()
-    geometry_hash_matches = bool(saved_hash and current_hash and saved_hash == current_hash)
+    geometry_hash_matches = bool(
+        saved_hash
+        and current_hash
+        and saved_hash == current_hash
+    )
+
+    saved_gt_hash = str(source.get("xml_plate_gt_hash") or "").strip()
+    current_gt_hash = str(
+        current_signature.get("xml_plate_gt_hash") or ""
+    ).strip()
+    gt_hash_matches = bool(
+        saved_gt_hash
+        and current_gt_hash
+        and saved_gt_hash == current_gt_hash
+    )
+
+    if saved_gt_hash and current_gt_hash and not gt_hash_matches:
+        return False
 
     def _saved_current_int_match(key: str) -> bool:
         saved_value = int(source.get(key, 0) or 0)
@@ -244,7 +370,16 @@ def extract_manifest_matches_current_source(
         and _saved_current_int_match("xml_images_with_plates")
         and _saved_current_int_match("xml_images_total")
     )
-    source_semantics_match = bool(geometry_hash_matches or legacy_signature_matches)
+    source_semantics_match = bool(
+        (
+            geometry_hash_matches
+            and (
+                gt_hash_matches
+                or not (saved_gt_hash and current_gt_hash)
+            )
+        )
+        or legacy_signature_matches
+    )
 
     for key in ("images_dir", "xml_path", "annotation_run_dir"):
         saved_value = str(source.get(key) or "").strip()
@@ -974,6 +1109,15 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
         if gt_text:
             attributes["ground_truth_text"] = gt_text
             attributes.setdefault("ground_truth_source", "manual_z2")
+
+        attributes["source_geometry_hash"] = build_plate_source_geometry_hash(
+            image_name,
+            detection,
+        )
+        attributes["source_gt_hash"] = build_plate_source_gt_hash(
+            image_name,
+            attributes,
+        )
 
         # Usuwamy historyczne heurystyki filename-derived z nowego cropa.
         attributes.pop("source_expected_text", None)

@@ -13,6 +13,7 @@ from ..config import logger, CV2_AVAILABLE, cv2
 from ..rectification import PlateRectifier
 from ..data_models import ImageAnnotation, Detection
 from ..plate_ground_truth import normalize_plate_ground_truth_text
+from ..gt_pack import fingerprint_image
 
 
 class PlateGenerator:
@@ -73,6 +74,15 @@ class PlateGenerator:
             if source_image is None:
                 logger.error(f"Nie można załadować: {source_image_path}")
                 return []
+
+            source_identity = {}
+            try:
+                source_identity = fingerprint_image(source_image_path)
+            except Exception as exc:
+                logger.debug(
+                    f"Nie udało się wyliczyć identity obrazu źródłowego "
+                    f"{source_image_path}: {exc}"
+                )
             
             results = []
             plates = annotation.plates
@@ -200,10 +210,32 @@ class PlateGenerator:
                 source_annotation_id = str(
                     attributes.get("plate_annotation_id") or ""
                 ).strip()
+                source_geometry_hash = str(
+                    attributes.get("source_geometry_hash") or ""
+                ).strip()
+                source_gt_hash = str(
+                    attributes.get("source_gt_hash") or ""
+                ).strip()
+                source_geometry_revision_id = str(
+                    attributes.get("source_geometry_revision_id")
+                    or attributes.get("geometry_revision_id")
+                    or ""
+                ).strip()
+                source_gt_revision_id = str(
+                    attributes.get("source_gt_revision_id")
+                    or attributes.get("ground_truth_revision_id")
+                    or ""
+                ).strip()
                 
                 self.metadata[plate_id] = {
                     'source_image': str(source_image_path),
                     'source_image_name': source_image_path.name,
+                    'source_image_id': str(
+                        source_identity.get("image_id") or ""
+                    ).strip() or None,
+                    'source_file_sha256': str(
+                        source_identity.get("source_file_sha256") or ""
+                    ).strip() or None,
                     'source_bbox': [float(x) for x in plate_detection.bbox],
                     'source_polygon': (
                         [[float(px), float(py)] for px, py in list(plate_detection.polygon or [])[:4]]
@@ -213,6 +245,12 @@ class PlateGenerator:
                     'source_plate_index': source_plate_index,
                     'source_plate_count': source_plate_count,
                     'source_annotation_id': source_annotation_id or None,
+                    'source_geometry_hash': source_geometry_hash or None,
+                    'source_gt_hash': source_gt_hash or None,
+                    'source_geometry_revision_id': (
+                        source_geometry_revision_id or None
+                    ),
+                    'source_gt_revision_id': source_gt_revision_id or None,
                     'ground_truth_text': ground_truth_text or None,
                     'ground_truth_source': ground_truth_source or None,
                     'source_expected_text': source_expected_text or None,
