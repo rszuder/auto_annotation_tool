@@ -36,7 +36,9 @@ _SIDE_CAR_NAMES = (
 )
 _DATASET_MANIFEST_NAMES = (
     "training_variant_manifest.json",
+    "mz_training_variant_manifest.json",
     "dataset_manifest.json",
+    "metadata_manifest.json",
     "augmentation_manifest.json",
     "stage_manifest.json",
     "manifest.json",
@@ -258,6 +260,7 @@ def build_dataset_training_provenance(
     data_yaml_sha = _file_sha256(yaml_path)
     manifests = _dataset_manifest_refs(root)
     manifest_sha = _json_sha256(manifests) if manifests else ""
+    semantic_manifest = _dataset_semantic_manifest_summary(root)
     split_sha = ""
     split_file_count = 0
     if include_content_fingerprint:
@@ -292,6 +295,30 @@ def build_dataset_training_provenance(
             "offline_augmentation_train_added": int(augmentation_meta.get("offline_augmentation_train_added", 0) or 0),
             "split_seed": augmentation_meta.get("split_seed"),
             "manifests": manifests,
+            "source_manifest_name": str(
+                semantic_manifest.get("source_manifest_name") or ""
+            ),
+            "source_sample_provenance_schema": str(
+                semantic_manifest.get(
+                    "source_sample_provenance_schema"
+                )
+                or ""
+            ),
+            "source_sample_provenance_counts": dict(
+                semantic_manifest.get(
+                    "source_sample_provenance_counts"
+                )
+                or {}
+            ),
+            "source_raw_benchmark": dict(
+                semantic_manifest.get("source_raw_benchmark") or {}
+            ),
+            "source_gt_contract_fingerprint_sha256": str(
+                semantic_manifest.get(
+                    "source_gt_contract_fingerprint_sha256"
+                )
+                or ""
+            ),
             "local_path_hint": str(root),
             "data_yaml": str(yaml_path) if yaml_path.exists() else "",
             "dataset_id_strategy": "composite_v2",
@@ -1227,6 +1254,60 @@ def _count_images_in_source(source: Path) -> int:
             return 0
         return count
     return 0
+
+
+def _dataset_semantic_manifest_summary(root: Path) -> dict[str, Any]:
+    for name in ("metadata_manifest.json", "manifest.json"):
+        path = root / name
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, Mapping):
+            continue
+
+        provenance_schema = str(
+            payload.get("provenance_schema") or ""
+        ).strip()
+        provenance_counts = payload.get("provenance_counts")
+        raw_benchmark = payload.get("raw_benchmark")
+        if (
+            not provenance_schema
+            and not isinstance(provenance_counts, Mapping)
+            and not isinstance(raw_benchmark, Mapping)
+        ):
+            continue
+
+        benchmark = (
+            dict(raw_benchmark)
+            if isinstance(raw_benchmark, Mapping)
+            else {}
+        )
+        return {
+            "source_manifest_name": name,
+            "source_sample_provenance_schema": provenance_schema,
+            "source_sample_provenance_counts": (
+                {
+                    str(key): int(value or 0)
+                    for key, value in dict(provenance_counts or {}).items()
+                }
+                if isinstance(provenance_counts, Mapping)
+                else {}
+            ),
+            "source_raw_benchmark": benchmark,
+            "source_gt_contract_fingerprint_sha256": str(
+                benchmark.get("gt_contract_fingerprint_sha256") or ""
+            ).strip(),
+        }
+    return {
+        "source_manifest_name": "",
+        "source_sample_provenance_schema": "",
+        "source_sample_provenance_counts": {},
+        "source_raw_benchmark": {},
+        "source_gt_contract_fingerprint_sha256": "",
+    }
 
 
 def _dataset_manifest_refs(root: Path) -> list[dict[str, Any]]:

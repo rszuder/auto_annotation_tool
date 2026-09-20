@@ -675,6 +675,7 @@ def run_yolo_gold_export(
             )
             return
         export_entries = []
+        benchmark_plate_records = []
 
         for plate_entry in plate_entries:
             pid = str(plate_entry.get("pid", "") or "")
@@ -741,6 +742,7 @@ def run_yolo_gold_export(
                     "characters": exported_chars_meta,
                 }
             )
+            benchmark_plate_records.append(data)
 
         copied = len(export_entries)
         if copied == 0:
@@ -918,6 +920,11 @@ def run_yolo_gold_export(
                 manifest_items
             )
         )
+        raw_benchmark = (
+            z3_dataset_provenance.build_gt_blind_raw_benchmark(
+                benchmark_plate_records
+            )
+        )
 
         host._atomic_write_json(
             yolo_out / "metadata_manifest.json",
@@ -926,6 +933,7 @@ def run_yolo_gold_export(
                 "created_at": timestamp,
                 "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
                 "provenance_counts": provenance_counts,
+                "raw_benchmark": raw_benchmark,
                 "split_enabled": bool(split_enabled),
                 "selected_strategies": sorted(selected_buckets),
                 "selected_sources": sorted(selected_sources),
@@ -1246,6 +1254,7 @@ def run_char_classification_export(
 
         char_entries = []
         skipped_chars = 0
+        benchmark_plate_records = []
 
         for plate_entry in plate_entries:
             data = plate_entry.get("data", {})
@@ -1262,6 +1271,7 @@ def run_char_classification_export(
             if img is None:
                 continue
 
+            plate_char_start = len(char_entries)
             for idx, rec in enumerate(list(data.get("characters", []) or [])):
                 if not isinstance(rec, dict):
                     skipped_chars += 1
@@ -1313,6 +1323,9 @@ def run_char_classification_export(
                         "layout": layout_meta,
                     }
                 )
+
+            if len(char_entries) > plate_char_start:
+                benchmark_plate_records.append(data)
 
         if not char_entries:
             msg = (
@@ -1393,11 +1406,17 @@ def run_char_classification_export(
                 manifest_items
             )
         )
+        raw_benchmark = (
+            z3_dataset_provenance.build_gt_blind_raw_benchmark(
+                benchmark_plate_records
+            )
+        )
         manifest = {
             "dataset_type": "char_classification",
             "created_at": timestamp,
             "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
             "provenance_counts": provenance_counts,
+            "raw_benchmark": raw_benchmark,
             "selected_strategies": sorted(selected_buckets),
             "selected_sources": sorted(selected_sources),
             "split_enabled": bool(split_enabled),

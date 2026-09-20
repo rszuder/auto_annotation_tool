@@ -283,3 +283,230 @@ def summarize_dataset_provenance(items) -> dict[str, int]:
         for key, value in counts.items()
         if int(value) > 0
     }
+
+RAW_BENCHMARK_SCHEMA = "alpr.pz2.raw_benchmark.v1"
+
+
+def _canonical_json_sha256(value) -> str:
+    import hashlib
+    import json
+
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _edit_distance(left: str, right: str) -> int:
+    left = str(left or "")
+    right = str(right or "")
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, start=1):
+        current = [i]
+        for j, right_char in enumerate(right, start=1):
+            cost = 0 if left_char == right_char else 1
+            current.append(
+                min(
+                    previous[j] + 1,
+                    current[j - 1] + 1,
+                    previous[j - 1] + cost,
+                )
+            )
+        previous = current
+    return int(previous[-1])
+
+
+def build_gt_blind_raw_benchmark(records) -> dict:
+    """Aggregate exact-plate and corpus CER from gt_blind.v1 RAW only.
+
+    ``records`` may contain preview metadata dictionaries directly or
+    Gold-export candidate dictionaries with the preview record in ``data``.
+    """
+    source_records = list(records or [])
+    total_records = 0
+    gt_blind_records = 0
+    evaluable_records = 0
+    exact_plate_count = 0
+    exact_text_count = 0
+    total_gt_characters = 0
+    total_edit_distance = 0
+    missing_ground_truth_count = 0
+    excluded_non_blind_count = 0
+    invalid_validation_count = 0
+    gt_contract_rows = []
+    hashed_gt_count = 0
+
+    for item in source_records:
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else item
+        if not isinstance(data, dict):
+            continue
+
+        total_records += 1
+        raw = data.get("raw_detection")
+        validation = data.get("raw_validation")
+        if (
+            not isinstance(raw, dict)
+            or str(raw.get("contract") or "").strip() != "gt_blind.v1"
+        ):
+            excluded_non_blind_count += 1
+            continue
+
+        gt_blind_records += 1
+        if not isinstance(validation, dict):
+            invalid_validation_count += 1
+            continue
+        if str(validation.get("raw_contract") or "").strip() not in {
+            "",
+            "gt_blind.v1",
+        }:
+            invalid_validation_count += 1
+            continue
+        if str(validation.get("expected_source") or "").strip() != "ground_truth":
+            invalid_validation_count += 1
+            continue
+
+        gt_text = str(validation.get("ground_truth_text") or "").strip().upper()
+        if not gt_text:
+            missing_ground_truth_count += 1
+            continue
+
+        prediction_text = str(
+            validation.get("prediction_text")
+            or raw.get("prediction_text")
+            or ""
+        ).strip().upper()
+
+        try:
+            edit_distance = int(validation.get("edit_distance"))
+        except Exception:
+            edit_distance = _edit_distance(prediction_text, gt_text)
+
+        evaluable_records += 1
+        total_gt_characters += len(gt_text)
+        total_edit_distance += max(0, edit_distance)
+
+        text_exact = bool(
+            validation.get("exact_text_match")
+            and prediction_text == gt_text
+        )
+        if text_exact:
+            exact_text_count += 1
+
+        plate_exact = bool(
+            str(validation.get("status") or "").strip().lower() == "perfect"
+            and text_exact
+            and bool(validation.get("exact_count_match"))
+            and bool(validation.get("geometry_ok"))
+        )
+        if plate_exact:
+            exact_plate_count += 1
+
+        source_gt_hash = str(data.get("source_gt_hash") or "").strip()
+        if source_gt_hash:
+            hashed_gt_count += 1
+
+        gt_contract_rows.append(
+            {
+                "source_image_id": str(
+                    data.get("source_image_id") or ""
+                ).strip(),
+                "source_annotation_id": str(
+                    data.get("source_annotation_id")
+                    or data.get("plate_annotation_id")
+                    or ""
+                ).strip(),
+                "source_gt_hash": source_gt_hash,
+                "source_gt_revision_id": str(
+                    data.get("source_gt_revision_id") or ""
+                ).strip(),
+                "ground_truth_text": gt_text,
+            }
+        )
+
+    if evaluable_records > 0:
+        exact_plate_rate = (
+            float(exact_plate_count) / float(evaluable_records)
+        )
+        exact_text_rate = (
+            float(exact_text_count) / float(evaluable_records)
+        )
+    else:
+        exact_plate_rate = None
+        exact_text_rate = None
+
+    cer = (
+        float(total_edit_distance) / float(total_gt_characters)
+        if total_gt_characters > 0
+        else None
+    )
+
+    gt_contract_rows = sorted(
+        gt_contract_rows,
+        key=lambda row: (
+            row["source_image_id"],
+            row["source_annotation_id"],
+            row["source_gt_hash"],
+            row["source_gt_revision_id"],
+            row["ground_truth_text"],
+        ),
+    )
+    gt_contract_fingerprint = (
+        _canonical_json_sha256(gt_contract_rows)
+        if gt_contract_rows
+        else ""
+    )
+
+    if evaluable_records <= 0:
+        gt_hash_coverage = "none"
+    elif hashed_gt_count >= evaluable_records:
+        gt_hash_coverage = "full"
+    elif hashed_gt_count > 0:
+        gt_hash_coverage = "partial"
+    else:
+        gt_hash_coverage = "text_only"
+
+    return {
+        "schema": RAW_BENCHMARK_SCHEMA,
+        "raw_contract": "gt_blind.v1",
+        "metric_policy": "exact_plate_and_corpus_cer.v1",
+        "total_input_plates": int(total_records),
+        "gt_blind_plates": int(gt_blind_records),
+        "evaluable_plates": int(evaluable_records),
+        "exact_plate_count": int(exact_plate_count),
+        "exact_plate_rate": (
+            round(float(exact_plate_rate), 8)
+            if exact_plate_rate is not None
+            else None
+        ),
+        "exact_text_count": int(exact_text_count),
+        "exact_text_rate": (
+            round(float(exact_text_rate), 8)
+            if exact_text_rate is not None
+            else None
+        ),
+        "gt_characters": int(total_gt_characters),
+        "edit_distance_total": int(total_edit_distance),
+        "cer": (
+            round(float(cer), 8)
+            if cer is not None
+            else None
+        ),
+        "missing_ground_truth_count": int(missing_ground_truth_count),
+        "excluded_non_blind_count": int(excluded_non_blind_count),
+        "invalid_validation_count": int(invalid_validation_count),
+        "gt_hash_coverage": gt_hash_coverage,
+        "gt_hash_count": int(hashed_gt_count),
+        "gt_contract_fingerprint_sha256": gt_contract_fingerprint,
+    }
