@@ -1,0 +1,480 @@
+"GT-assisted correction layer for Z3/PZ2."
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+
+from ..plate_ground_truth import normalize_plate_ground_truth_text
+
+
+GT_ASSIST_SCHEMA = "alpr.pz2.gt_assist.v1"
+GT_ASSIST_SOURCE = "gt_assisted"
+GT_ASSIST_CONFIRMED_SOURCE = "gt_assist_confirmed"
+
+
+def _canonical_raw_fingerprint(raw_detection: dict | None) -> str:
+    raw = raw_detection if isinstance(raw_detection, dict) else {}
+    characters = raw.get("characters", [])
+    if not isinstance(characters, list):
+        characters = []
+
+    prepared = []
+    for record in characters:
+        if not isinstance(record, dict):
+            continue
+        bbox = record.get("bbox", [])
+        if isinstance(bbox, (list, tuple)):
+            safe_bbox = []
+            for value in list(bbox)[:4]:
+                try:
+                    safe_bbox.append(round(float(value), 6))
+                except Exception:
+                    safe_bbox.append(0.0)
+        else:
+            safe_bbox = []
+        prepared.append(
+            {
+                "character": str(record.get("character", "") or ""),
+                "bbox": safe_bbox,
+                "confidence": round(
+                    float(record.get("confidence", 0.0) or 0.0),
+                    6,
+                ),
+                "method": str(record.get("method", "") or ""),
+            }
+        )
+
+    core = {
+        "contract": str(raw.get("contract", "") or ""),
+        "prediction_text": str(
+            raw.get("prediction_text", "") or ""
+        ).strip().upper(),
+        "characters": prepared,
+    }
+    payload = json.dumps(
+        core,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _characters_text(host, records, data=None) -> str:
+    try:
+        return str(
+            host._characters_to_text(records, data=data)
+            or ""
+        ).strip().upper()
+    except TypeError:
+        try:
+            return str(
+                host._characters_to_text(records) or ""
+            ).strip().upper()
+        except Exception:
+            return ""
+    except Exception:
+        return ""
+
+
+def _serialize(host, records, data=None) -> list[dict]:
+    try:
+        return list(
+            host._serialize_character_records(
+                records,
+                fusion_strategy="gt_assist",
+                fusion_details={
+                    "source": GT_ASSIST_SOURCE,
+                },
+                data=data,
+            )
+            or []
+        )
+    except Exception:
+        result = []
+        for record in list(records or []):
+            if isinstance(record, dict):
+                result.append(copy.deepcopy(record))
+        return result
+
+
+def build_gt_assist_suggestion(host, data: dict | None) -> dict:
+    source_data = data if isinstance(data, dict) else {}
+    raw_detection = source_data.get("raw_detection")
+    if not isinstance(raw_detection, dict):
+        return {
+            "schema": GT_ASSIST_SCHEMA,
+            "status": "unavailable",
+            "reason": "missing_raw_detection",
+            "operations": [],
+        }
+
+    raw_contract = str(
+        raw_detection.get("contract") or ""
+    ).strip()
+    if raw_contract != "gt_blind.v1":
+        return {
+            "schema": GT_ASSIST_SCHEMA,
+            "status": "unavailable",
+            "reason": "raw_not_gt_blind",
+            "source_raw_contract": raw_contract,
+            "operations": [],
+        }
+
+    raw_chars = raw_detection.get("characters", [])
+    if not isinstance(raw_chars, list):
+        raw_chars = []
+    raw_chars = copy.deepcopy(raw_chars)
+
+    gt_text = normalize_plate_ground_truth_text(
+        source_data.get("ground_truth_text")
+    )
+    if not gt_text:
+        try:
+            gt_text = normalize_plate_ground_truth_text(
+                host._get_preview_ground_truth_text(source_data)
+            )
+        except Exception:
+            gt_text = ""
+
+    raw_text = _characters_text(
+        host,
+        raw_chars,
+        data=source_data,
+    )
+    raw_fingerprint = _canonical_raw_fingerprint(raw_detection)
+
+    base = {
+        "schema": GT_ASSIST_SCHEMA,
+        "source": GT_ASSIST_SOURCE,
+        "source_raw_contract": raw_contract,
+        "source_raw_fingerprint": raw_fingerprint,
+        "source_gt_hash": str(
+            source_data.get("source_gt_hash") or ""
+        ).strip() or None,
+        "source_raw_prediction_text": raw_text,
+        "ground_truth_text": gt_text or None,
+        "operations": [],
+        "accepted": False,
+    }
+
+    if not gt_text:
+        return {
+            **base,
+            "status": "unavailable",
+            "reason": "missing_ground_truth",
+            "suggestion_text": raw_text,
+            "characters": raw_chars,
+        }
+
+    if raw_text == gt_text and len(raw_chars) == len(gt_text):
+        return {
+            **base,
+            "status": "not_needed",
+            "reason": "raw_exact",
+            "suggestion_text": raw_text,
+            "characters": raw_chars,
+            "exact_text_match": True,
+            "exact_count_match": True,
+        }
+
+    current = copy.deepcopy(raw_chars)
+    operations: list[dict] = []
+
+    if len(current) > len(gt_text):
+        try:
+            fitted, details = host._fit_detection_count_to_truths(
+                current,
+                [gt_text],
+            )
+        except Exception:
+            fitted, details = current, None
+        if (
+            isinstance(details, dict)
+            and int(details.get("trimmed_extra_boxes", 0) or 0) > 0
+        ):
+            current = copy.deepcopy(list(fitted or []))
+            operations.append(
+                {
+                    "type": "trim_extra_boxes",
+                    "details": copy.deepcopy(details),
+                }
+            )
+
+    yolo_candidates = (
+        source_data.get("yolo_nms_detections")
+        or source_data.get("yolo_detections")
+        or source_data.get("yolo_raw_detections")
+        or []
+    )
+    if not isinstance(yolo_candidates, list):
+        yolo_candidates = []
+
+    current_text = _characters_text(
+        host,
+        current,
+        data=source_data,
+    )
+
+    if (
+        current_text != gt_text
+        and yolo_candidates
+        and len(yolo_candidates) >= len(gt_text)
+    ):
+        try:
+            yolo_fitted, yolo_details = (
+                host._fit_detection_count_to_truths(
+                    yolo_candidates,
+                    [gt_text],
+                )
+            )
+        except Exception:
+            yolo_fitted, yolo_details = yolo_candidates, None
+
+        yolo_fitted = list(yolo_fitted or [])
+        yolo_text = _characters_text(
+            host,
+            yolo_fitted,
+            data=source_data,
+        )
+        if (
+            len(yolo_fitted) == len(gt_text)
+            and yolo_text == gt_text
+        ):
+            current = copy.deepcopy(yolo_fitted)
+            operations.append(
+                {
+                    "type": "select_yolo_gt_match",
+                    "details": copy.deepcopy(
+                        yolo_details
+                        if isinstance(yolo_details, dict)
+                        else {}
+                    ),
+                }
+            )
+            current_text = yolo_text
+
+    if (
+        current_text != gt_text
+        and len(current) == len(gt_text)
+        and yolo_candidates
+    ):
+        try:
+            repaired, repair_details = (
+                host._repair_ocr_with_yolo_boxes(
+                    current,
+                    yolo_candidates,
+                    [gt_text],
+                    max_mismatch_count=len(gt_text),
+                )
+            )
+        except Exception:
+            repaired, repair_details = None, None
+
+        if repaired:
+            repaired_text = _characters_text(
+                host,
+                repaired,
+                data=source_data,
+            )
+            if repaired_text == gt_text:
+                current = list(repaired)
+                operations.append(
+                    {
+                        "type": "repair_symbols_with_yolo",
+                        "details": copy.deepcopy(
+                            repair_details
+                            if isinstance(repair_details, dict)
+                            else {}
+                        ),
+                    }
+                )
+                current_text = repaired_text
+
+    serialized = _serialize(
+        host,
+        current,
+        data=source_data,
+    )
+    suggestion_text = _characters_text(
+        host,
+        serialized,
+        data=source_data,
+    )
+    exact_text_match = bool(suggestion_text == gt_text)
+    exact_count_match = bool(
+        len(serialized) == len(gt_text)
+    )
+
+    if operations:
+        status = "suggested"
+        reason = (
+            "exact_gt_assisted"
+            if exact_text_match and exact_count_match
+            else "partial_gt_assist"
+        )
+    else:
+        status = "no_suggestion"
+        reason = "no_safe_gt_assist"
+
+    return {
+        **base,
+        "status": status,
+        "reason": reason,
+        "operations": operations,
+        "suggestion_text": suggestion_text,
+        "characters": serialized,
+        "exact_text_match": exact_text_match,
+        "exact_count_match": exact_count_match,
+    }
+
+
+def store_gt_assist_suggestion(
+    host,
+    data: dict | None,
+) -> dict:
+    if not isinstance(data, dict):
+        return {
+            "schema": GT_ASSIST_SCHEMA,
+            "status": "unavailable",
+            "reason": "invalid_metadata",
+            "operations": [],
+        }
+    suggestion = build_gt_assist_suggestion(host, data)
+    data["gt_assist"] = copy.deepcopy(suggestion)
+    return suggestion
+
+
+def gt_assist_is_current(
+    host,
+    data: dict | None,
+) -> tuple[bool, str]:
+    if not isinstance(data, dict):
+        return False, "invalid_metadata"
+
+    assist = data.get("gt_assist")
+    raw = data.get("raw_detection")
+    if not isinstance(assist, dict):
+        return False, "missing_gt_assist"
+    if not isinstance(raw, dict):
+        return False, "missing_raw_detection"
+
+    expected_raw = str(
+        assist.get("source_raw_fingerprint") or ""
+    ).strip()
+    current_raw = _canonical_raw_fingerprint(raw)
+    if not expected_raw or expected_raw != current_raw:
+        return False, "stale_raw_detection"
+
+    expected_gt = normalize_plate_ground_truth_text(
+        assist.get("ground_truth_text")
+    )
+    current_gt = normalize_plate_ground_truth_text(
+        data.get("ground_truth_text")
+    )
+    if not current_gt:
+        try:
+            current_gt = normalize_plate_ground_truth_text(
+                host._get_preview_ground_truth_text(data)
+            )
+        except Exception:
+            current_gt = ""
+
+    if expected_gt != current_gt:
+        return False, "stale_ground_truth"
+
+    expected_gt_hash = str(
+        assist.get("source_gt_hash") or ""
+    ).strip()
+    current_gt_hash = str(
+        data.get("source_gt_hash") or ""
+    ).strip()
+    if (
+        expected_gt_hash
+        and current_gt_hash
+        and expected_gt_hash != current_gt_hash
+    ):
+        return False, "stale_gt_hash"
+
+    return True, "current"
+
+
+def accept_gt_assist_suggestion(
+    host,
+    data: dict | None,
+) -> dict:
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "invalid_metadata"}
+
+    assist = data.get("gt_assist")
+    if not isinstance(assist, dict):
+        return {"ok": False, "reason": "missing_gt_assist"}
+    if str(assist.get("status") or "") != "suggested":
+        return {"ok": False, "reason": "no_pending_suggestion"}
+
+    current, reason = gt_assist_is_current(host, data)
+    if not current:
+        return {"ok": False, "reason": reason}
+
+    suggestion_chars = assist.get("characters", [])
+    if not isinstance(suggestion_chars, list):
+        return {"ok": False, "reason": "invalid_suggestion"}
+
+    accepted = copy.deepcopy(suggestion_chars)
+    for record in accepted:
+        if isinstance(record, dict):
+            record["correction_source"] = (
+                GT_ASSIST_CONFIRMED_SOURCE
+            )
+
+    accepted = _serialize(
+        host,
+        accepted,
+        data=data,
+    )
+    data["characters"] = accepted
+    data["correction_source"] = GT_ASSIST_CONFIRMED_SOURCE
+    data["review_source"] = GT_ASSIST_CONFIRMED_SOURCE
+
+    assist["accepted"] = True
+    assist["status"] = "accepted"
+    assist["accepted_text"] = _characters_text(
+        host,
+        accepted,
+        data=data,
+    )
+    data["gt_assist"] = assist
+
+    try:
+        data["status"] = host._derive_preview_status_from_data(
+            dict(data),
+            accepted,
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "reason": "accepted",
+        "characters": accepted,
+        "text": assist.get("accepted_text", ""),
+        "status": str(data.get("status") or ""),
+    }
+
+
+def reject_gt_assist_suggestion(
+    host,
+    data: dict | None,
+) -> dict:
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "invalid_metadata"}
+    assist = data.get("gt_assist")
+    if not isinstance(assist, dict):
+        return {"ok": False, "reason": "missing_gt_assist"}
+
+    assist["accepted"] = False
+    assist["status"] = "rejected"
+    data["gt_assist"] = assist
+    return {"ok": True, "reason": "rejected"}
