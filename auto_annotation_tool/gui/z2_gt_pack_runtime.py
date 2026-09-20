@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from ..campaign_manager import CAMPAIGN
-from ..config import logger
+from ..config import SESSION, logger
 from ..gt_pack import ALPRGTPack, fingerprint_image, normalize_polygon
 from ..plate_ground_truth import (
     GROUND_TRUTH_SOURCE_MANUAL_Z2,
@@ -20,6 +20,8 @@ from ..plate_ground_truth import (
 
 PRODUCER = "auto_annotation_tool.desktop.z2"
 OUTBOX_SCHEMA = "alpr.gt.sync_outbox.v1"
+MOUNTS_SCHEMA = "alpr.gt.mounts.v1"
+PROJECT_REF_PREFIX = "project://"
 
 
 def _safe_path(value):
@@ -36,38 +38,271 @@ def _path_key(path):
         return str(path or "").replace("\\", "/").strip().lower()
 
 
-def get_working_gt_pack_path(host, *, create_parent=False):
-    explicit = _safe_path(getattr(host, "_z2_gt_working_pack_path", None))
-    if explicit is not None:
-        if create_parent:
-            explicit.parent.mkdir(parents=True, exist_ok=True)
-        return explicit
 
+def _active_project_root() -> Path | None:
     try:
-        project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
-        project_root = CAMPAIGN.get_active_project_root_dir() if project_name else None
+        name = str(CAMPAIGN.get_active_project_name() or "").strip()
+        root = CAMPAIGN.get_active_project_root_dir() if name else None
     except Exception:
-        project_root = None
+        root = None
+    return Path(root) if root is not None else None
 
+
+def _mount_config_path(project_root: Path) -> Path:
+    return (
+        Path(project_root)
+        / "_campaign_state"
+        / "ground_truth"
+        / "mounts.json"
+    )
+
+
+def _encode_mount_path(
+    path: Path | str | None,
+    project_root: Path | None,
+) -> str:
+    if path is None or not str(path).strip():
+        return ""
+    value = Path(path)
+    if project_root is not None:
+        try:
+            relative = value.resolve().relative_to(project_root.resolve())
+            return PROJECT_REF_PREFIX + relative.as_posix()
+        except Exception:
+            pass
+    try:
+        return str(value.resolve())
+    except Exception:
+        return str(value)
+
+
+def _decode_mount_path(
+    value,
+    project_root: Path | None,
+) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.startswith(PROJECT_REF_PREFIX):
+        if project_root is None:
+            return None
+        relative = raw[len(PROJECT_REF_PREFIX):].lstrip("/\\")
+        return Path(project_root) / Path(relative)
+    return Path(raw)
+
+
+def _default_project_working_pack(
+    project_root: Path | None,
+) -> Path | None:
     if project_root is None:
         return None
-
-    path = (
+    return (
         Path(project_root)
         / "_campaign_state"
         / "ground_truth"
         / "current_work.alprgt"
     )
-    if create_parent:
+
+
+def _load_mount_payload(host) -> dict:
+    project_root = _active_project_root()
+    if project_root is not None:
+        path = _mount_config_path(project_root)
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+        else:
+            payload = {}
+    else:
+        try:
+            payload = (
+                SESSION.get("annotation", "gt_pack_mounts", {})
+                if SESSION
+                else {}
+            )
+        except Exception:
+            payload = {}
+
+    if not isinstance(payload, dict):
+        payload = {}
+    if payload.get("schema") not in (None, "", MOUNTS_SCHEMA):
+        payload = {}
+
+    source_values = payload.get("source_paths", [])
+    if not isinstance(source_values, list):
+        source_values = []
+    working_value = payload.get("working_path", "")
+
+    sources = []
+    seen = set()
+    for raw in source_values:
+        path = _decode_mount_path(raw, project_root)
+        if path is None:
+            continue
+        key = _path_key(path)
+        if key and key not in seen:
+            seen.add(key)
+            sources.append(path)
+
+    working = _decode_mount_path(working_value, project_root)
+    if working is None:
+        working = _default_project_working_pack(project_root)
+
+    return {
+        "schema": MOUNTS_SCHEMA,
+        "source_paths": sources,
+        "working_path": working,
+    }
+
+
+def _persist_mount_payload(host) -> None:
+    project_root = _active_project_root()
+    sources = [
+        Path(path)
+        for path in list(
+            getattr(host, "_z2_gt_pack_source_paths", []) or []
+        )
+        if str(path or "").strip()
+    ]
+    working_raw = str(
+        getattr(host, "_z2_gt_working_pack_path", "") or ""
+    ).strip()
+    working = Path(working_raw) if working_raw else None
+
+    payload = {
+        "schema": MOUNTS_SCHEMA,
+        "source_paths": [
+            _encode_mount_path(path, project_root)
+            for path in sources
+        ],
+        "working_path": _encode_mount_path(
+            working,
+            project_root,
+        ),
+    }
+
+    if project_root is not None:
+        path = _mount_config_path(project_root)
         path.parent.mkdir(parents=True, exist_ok=True)
-    host._z2_gt_working_pack_path = str(path)
-    return path
+        temp = path.with_name(f".{path.name}.tmp")
+        temp.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temp, path)
+        return
+
+    try:
+        if SESSION:
+            SESSION.set("annotation", "gt_pack_mounts", payload)
+            SESSION.save_session()
+    except Exception as exc:
+        logger.debug("Nie udało się zapisać mountów GT Pack: %s", exc)
 
 
-def get_mounted_gt_pack_paths(host):
+def _ensure_mount_config_loaded(host) -> None:
+    """Load persisted mounts once without clobbering explicit runtime config.
+
+    Tests, import flows and future callers may deliberately inject
+    ``_z2_gt_pack_source_paths`` / ``_z2_gt_working_pack_path`` before the
+    persistence layer is touched. A non-empty runtime value is authoritative
+    for that host instance. ``set_gt_pack_mounts()`` marks even an intentionally
+    empty configuration as loaded, so an explicit "disable all" remains
+    distinguishable from a fresh host that should read persisted settings.
+    """
+    if bool(getattr(host, "_z2_gt_mount_config_loaded", False)):
+        return
+
     raw_sources = getattr(host, "_z2_gt_pack_source_paths", None)
-    values = list(raw_sources or []) if isinstance(raw_sources, (list, tuple, set)) else ([raw_sources] if raw_sources else [])
-    working = get_working_gt_pack_path(host, create_parent=False)
+    raw_working = getattr(host, "_z2_gt_working_pack_path", None)
+
+    if isinstance(raw_sources, (list, tuple, set)):
+        explicit_sources = [
+            str(Path(value))
+            for value in raw_sources
+            if str(value or "").strip()
+        ]
+    elif str(raw_sources or "").strip():
+        explicit_sources = [str(Path(raw_sources))]
+    else:
+        explicit_sources = []
+
+    explicit_working = str(raw_working or "").strip()
+
+    if explicit_sources or explicit_working:
+        host._z2_gt_pack_source_paths = explicit_sources
+        host._z2_gt_working_pack_path = (
+            str(Path(explicit_working))
+            if explicit_working
+            else ""
+        )
+        host._z2_gt_mount_config_loaded = True
+        return
+
+    payload = _load_mount_payload(host)
+    host._z2_gt_pack_source_paths = [
+        str(path)
+        for path in payload.get("source_paths", [])
+    ]
+    working = payload.get("working_path")
+    host._z2_gt_working_pack_path = (
+        str(working) if working is not None else ""
+    )
+    host._z2_gt_mount_config_loaded = True
+
+def get_configured_source_pack_paths(host) -> list[Path]:
+    _ensure_mount_config_loaded(host)
+    result = []
+    seen = set()
+    for raw in list(
+        getattr(host, "_z2_gt_pack_source_paths", []) or []
+    ):
+        path = _safe_path(raw)
+        if path is None:
+            continue
+        key = _path_key(path)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def get_working_gt_pack_path(
+    host,
+    *,
+    create_parent: bool = False,
+) -> Path | None:
+    _ensure_mount_config_loaded(host)
+
+    explicit = _safe_path(
+        getattr(host, "_z2_gt_working_pack_path", None)
+    )
+    if explicit is None:
+        explicit = _default_project_working_pack(
+            _active_project_root()
+        )
+        if explicit is not None:
+            host._z2_gt_working_pack_path = str(explicit)
+
+    if explicit is not None and create_parent:
+        explicit.parent.mkdir(parents=True, exist_ok=True)
+    return explicit
+
+def get_mounted_gt_pack_paths(host) -> list[Path]:
+    _ensure_mount_config_loaded(host)
+    values = list(get_configured_source_pack_paths(host))
+
+    working = get_working_gt_pack_path(
+        host,
+        create_parent=False,
+    )
     if working is not None:
         values.append(working)
 
@@ -85,8 +320,13 @@ def get_mounted_gt_pack_paths(host):
             result.append(path)
     return result
 
-
-def set_gt_pack_mounts(host, *, source_paths=None, working_path=None):
+def set_gt_pack_mounts(
+    host,
+    *,
+    source_paths=None,
+    working_path=None,
+    persist: bool = True,
+) -> None:
     host._z2_gt_pack_source_paths = [
         str(Path(path))
         for path in list(source_paths or [])
@@ -96,6 +336,74 @@ def set_gt_pack_mounts(host, *, source_paths=None, working_path=None):
         str(Path(working_path))
         if str(working_path or "").strip()
         else ""
+    )
+    host._z2_gt_mount_config_loaded = True
+    if persist:
+        _persist_mount_payload(host)
+
+
+def get_gt_pack_status(host) -> dict:
+    _ensure_mount_config_loaded(host)
+    sources = get_configured_source_pack_paths(host)
+    working = get_working_gt_pack_path(
+        host,
+        create_parent=False,
+    )
+
+    try:
+        pending_count = len(
+            dict(_load_outbox(host).get("items", {}) or {})
+        )
+    except Exception:
+        pending_count = 0
+
+    report = dict(
+        getattr(host, "_z2_gt_last_restore_report", {}) or {}
+    )
+    conflict_count = len(
+        list(report.get("conflicts", []) or [])
+    )
+
+    enabled = bool(sources or working is not None)
+    if conflict_count > 0:
+        tone = "conflict"
+        text = f"PACK C{conflict_count}"
+    elif pending_count > 0:
+        tone = "pending"
+        text = f"PACK !{pending_count}"
+    elif enabled:
+        tone = "ok"
+        text = "PACK OK"
+    else:
+        tone = "off"
+        text = "PACK OFF"
+
+    return {
+        "enabled": enabled,
+        "source_count": len(sources),
+        "working_path": str(working or ""),
+        "pending_count": int(pending_count),
+        "conflict_count": int(conflict_count),
+        "tone": tone,
+        "text": text,
+    }
+
+
+def is_gt_pack_status_hit(
+    host,
+    canvas_x: float,
+    canvas_y: float,
+) -> bool:
+    bbox = getattr(host, "_z2_gt_pack_status_bbox", None)
+    if not (isinstance(bbox, tuple) and len(bbox) == 4):
+        return False
+    try:
+        x1, y1, x2, y2 = [float(v) for v in bbox]
+    except Exception:
+        return False
+    return (
+        x1 <= float(canvas_x) <= x2
+        and y1 <= float(canvas_y) <= y2
     )
 
 
