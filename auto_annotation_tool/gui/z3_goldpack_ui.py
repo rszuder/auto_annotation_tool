@@ -11,6 +11,7 @@ import tkinter as tk
 import uuid
 from pathlib import Path
 from .z3_metadata_cache import read_preview_metadata
+from . import z3_dataset_provenance
 
 import cv2
 
@@ -230,6 +231,14 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
             selected_strategy_counts[strategy_bucket] += 1
             if source_bucket in selected_source_counts:
                 selected_source_counts[source_bucket] += 1
+            provenance = (
+                z3_dataset_provenance.classify_plate_dataset_provenance(
+                    host,
+                    data,
+                    meta_path=meta,
+                    source_bucket=source_bucket,
+                )
+            )
             plate_entries.append(
                 {
                     "pid": str(pid),
@@ -238,6 +247,7 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
                     "img_src": img_src,
                     "strategy_bucket": strategy_bucket,
                     "source_bucket": source_bucket,
+                    "provenance": provenance,
                 }
             )
 
@@ -672,6 +682,9 @@ def run_yolo_gold_export(
             data = plate_entry.get("data", {})
             strategy_bucket = str(plate_entry.get("strategy_bucket", "") or "")
             source_bucket = str(plate_entry.get("source_bucket", "") or "")
+            provenance = dict(
+                plate_entry.get("provenance", {}) or {}
+            )
             layout_meta = host._build_plate_layout_export_metadata(data)
             img = cv2.imread(str(img_src))
             if img is None:
@@ -702,6 +715,10 @@ def run_yolo_gold_export(
                         "reading_col": int(c.get("reading_col", 0) or 0),
                         "reading_index": int(c.get("reading_index", 0) or 0),
                         "source_tag": str(host._get_character_source_tag(c, data=data) or ""),
+                        "provenance_category": str(
+                            provenance.get("category")
+                            or z3_dataset_provenance.LEGACY_UNTRACKED
+                        ),
                         "confidence": float(c.get("confidence", 0.0) or 0.0),
                     }
                 )
@@ -719,6 +736,7 @@ def run_yolo_gold_export(
                     "source_pid": pid,
                     "source_image": str(data.get("source_image", "") or ""),
                     **acquisition_provenance(data),
+                    "provenance": provenance,
                     "layout": layout_meta,
                     "characters": exported_chars_meta,
                 }
@@ -877,6 +895,7 @@ def run_yolo_gold_export(
                     ),
                     "strategy_bucket": str(item.get("strategy_bucket", "")),
                     "source_bucket": str(item.get("source_bucket", "")),
+                    "provenance": dict(item.get("provenance", {}) or {}),
                     "layout": layout_meta,
                     "characters": list(item.get("characters", []) or []),
                 }
@@ -894,11 +913,19 @@ def run_yolo_gold_export(
             else "brak danych"
         )
 
+        provenance_counts = (
+            z3_dataset_provenance.summarize_dataset_provenance(
+                manifest_items
+            )
+        )
+
         host._atomic_write_json(
             yolo_out / "metadata_manifest.json",
             {
                 "dataset_type": "char_yolo_detect",
                 "created_at": timestamp,
+                "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
+                "provenance_counts": provenance_counts,
                 "split_enabled": bool(split_enabled),
                 "selected_strategies": sorted(selected_buckets),
                 "selected_sources": sorted(selected_sources),
@@ -1226,6 +1253,9 @@ def run_char_classification_export(
             pid = str(plate_entry.get("pid", "") or "")
             strategy_bucket = str(plate_entry.get("strategy_bucket", "") or "")
             source_bucket = str(plate_entry.get("source_bucket", "") or "")
+            provenance = dict(
+                plate_entry.get("provenance", {}) or {}
+            )
             layout_meta = host._build_plate_layout_export_metadata(data)
 
             img = cv2.imread(str(img_src))
@@ -1270,6 +1300,11 @@ def run_char_classification_export(
                         "source_tag": str(source_tag or ""),
                         "source_bucket": source_bucket,
                         "source_kind": str(host._get_character_source_kind(rec, data=data)),
+                        "provenance": dict(provenance),
+                        "provenance_category": str(
+                            provenance.get("category")
+                            or z3_dataset_provenance.LEGACY_UNTRACKED
+                        ),
                         "confidence": confidence,
                         "bbox": [float(v) for v in (rec.get("bbox", []) or [])[:4]],
                         "reading_row": int(rec.get("reading_row", 0) or 0),
@@ -1326,6 +1361,11 @@ def run_char_classification_export(
                         "source_tag": str(item["source_tag"]),
                         "source_bucket": str(item["source_bucket"]),
                         "source_kind": str(item["source_kind"]),
+                        "provenance": dict(item.get("provenance", {}) or {}),
+                        "provenance_category": str(
+                            item.get("provenance_category")
+                            or z3_dataset_provenance.LEGACY_UNTRACKED
+                        ),
                         "confidence": float(item["confidence"]),
                         "bbox": list(item["bbox"]),
                         "reading_row": int(item.get("reading_row", 0) or 0),
@@ -1348,9 +1388,16 @@ def run_char_classification_export(
             layout_meta = item.get("layout", {}) if isinstance(item.get("layout", {}), dict) else {}
             layout_label = str(layout_meta.get("plate_layout_label", "?") or "?")
             layout_counts[layout_label] = int(layout_counts.get(layout_label, 0) or 0) + 1
+        provenance_counts = (
+            z3_dataset_provenance.summarize_dataset_provenance(
+                manifest_items
+            )
+        )
         manifest = {
             "dataset_type": "char_classification",
             "created_at": timestamp,
+            "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
+            "provenance_counts": provenance_counts,
             "selected_strategies": sorted(selected_buckets),
             "selected_sources": sorted(selected_sources),
             "split_enabled": bool(split_enabled),
