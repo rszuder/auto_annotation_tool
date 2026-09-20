@@ -18,6 +18,7 @@ from .help_manager import HELP
 from .lazy_notebook_tab import _LazyNotebookTab
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .z3_extraction_sources import read_xml_plate_attributes
 
 
 def _is_live_widget(widget) -> bool:
@@ -2275,11 +2276,13 @@ def run_extraction(host) -> None:
                 for poly in img_el.findall(".//polygon[@label='plate']"):
                     pts = [tuple(map(float, p.split(","))) for p in poly.get("points", "").split(";")]
                     if len(pts) >= 4:
+                        confidence, attributes = read_xml_plate_attributes(poly)
                         plates.append(
                             Detection(
-                                "plate", 1.0,
+                                "plate", confidence,
                                 (min(x for x, y in pts), min(y for x, y in pts), max(x for x, y in pts), max(y for x, y in pts)),
-                                polygon=pts
+                                polygon=pts,
+                                attributes=attributes,
                             )
                         )
 

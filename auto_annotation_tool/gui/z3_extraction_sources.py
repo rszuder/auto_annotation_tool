@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from ..project_cache import PROJECT_CACHE
+from ..plate_ground_truth import normalize_plate_ground_truth_text
 
 
 def normalize_xml_image_relpath(raw_name: str) -> str:
@@ -26,6 +27,25 @@ def normalize_xml_image_relpath(raw_name: str) -> str:
 def xml_relpath_to_path(rel_path: str) -> Path:
     parts = [part for part in PurePosixPath(rel_path).parts if part not in ("", ".")]
     return Path(*parts) if parts else Path()
+
+
+def read_xml_plate_attributes(poly_element) -> tuple[float, dict[str, str]]:
+    """Read CVAT polygon attributes without losing GT/annotation identity."""
+    confidence = 1.0
+    attributes: dict[str, str] = {}
+    for attr_el in poly_element.findall("attribute"):
+        name = str(attr_el.get("name", "") or "").strip()
+        value = str(attr_el.text or "").strip()
+        if not name:
+            continue
+        if name == "confidence":
+            try:
+                confidence = float(value)
+            except (TypeError, ValueError):
+                confidence = 1.0
+            continue
+        attributes[name] = value
+    return confidence, attributes
 
 
 def read_xml_image_names(xml_path: Path) -> list[str]:
@@ -936,21 +956,57 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
         key=host._plate_cut_reading_order_key,
     )
     ordered_plates = [detection for _, detection in ordered_pairs]
-    expected_tokens = host._extract_source_plate_tokens_from_filename(image_name)
-    has_direct_mapping = bool(len(expected_tokens) == 1 and len(ordered_plates) == 1)
-    expected_tokens_json = json.dumps(expected_tokens, ensure_ascii=False) if expected_tokens else "[]"
+
+    # Nowy kontrakt: GT należy do konkretnego polygonu Z2.
+    # Parser nazwy pozostaje wyłącznie jako zgodność wsteczna dla starych danych,
+    # które nie mają ground_truth_text.
+    explicit_gt_flags = []
+    for detection in ordered_plates:
+        attrs = dict(getattr(detection, "attributes", {}) or {})
+        explicit_gt_flags.append(
+            bool(normalize_plate_ground_truth_text(attrs.get("ground_truth_text")))
+        )
+
+    needs_legacy_filename_gt = bool(
+        ordered_plates and not all(explicit_gt_flags)
+    )
+    expected_tokens = (
+        host._extract_source_plate_tokens_from_filename(image_name)
+        if needs_legacy_filename_gt
+        else []
+    )
+    has_direct_mapping = bool(
+        len(expected_tokens) == 1 and len(ordered_plates) == 1
+    )
+    expected_tokens_json = (
+        json.dumps(expected_tokens, ensure_ascii=False)
+        if expected_tokens
+        else "[]"
+    )
 
     for sorted_index, detection in enumerate(ordered_plates):
         attributes = dict(getattr(detection, "attributes", {}) or {})
         attributes["source_plate_index"] = str(sorted_index)
         attributes["source_plate_count"] = str(len(ordered_plates))
-        attributes["source_expected_texts"] = expected_tokens_json
-        if has_direct_mapping:
-            attributes["source_expected_text"] = expected_tokens[sorted_index]
-            attributes["source_expected_text_source"] = "filename_order"
-        elif expected_tokens:
+
+        gt_text = normalize_plate_ground_truth_text(
+            attributes.get("ground_truth_text")
+        )
+        if gt_text:
+            attributes["ground_truth_text"] = gt_text
+            attributes.setdefault("ground_truth_source", "manual_z2")
             attributes.pop("source_expected_text", None)
-            attributes["source_expected_text_source"] = "ambiguous_filename_tokens"
+            attributes.pop("source_expected_texts", None)
+            attributes.pop("source_expected_text_source", None)
+        else:
+            attributes["source_expected_texts"] = expected_tokens_json
+            if has_direct_mapping:
+                attributes["source_expected_text"] = expected_tokens[sorted_index]
+                attributes["source_expected_text_source"] = "filename_order"
+            elif expected_tokens:
+                attributes.pop("source_expected_text", None)
+                attributes["source_expected_text_source"] = "ambiguous_filename_tokens"
+
         detection.attributes = attributes
 
     return ordered_plates
@@ -966,6 +1022,13 @@ def backfill_preview_expected_texts_from_sources(host, metadata_map: dict) -> bo
         if not isinstance(data, dict):
             continue
         if data.get("source_expected_text_source") == "mobile_crop_human_review":
+            continue
+        attrs = data.get("plate_attributes")
+        explicit_gt = normalize_plate_ground_truth_text(
+            data.get("ground_truth_text")
+            or (attrs.get("ground_truth_text") if isinstance(attrs, dict) else "")
+        )
+        if explicit_gt:
             continue
         source_image = str(
             data.get("source_image")

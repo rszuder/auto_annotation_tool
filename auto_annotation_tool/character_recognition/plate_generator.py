@@ -12,6 +12,7 @@ import numpy as np
 from ..config import logger, CV2_AVAILABLE, cv2
 from ..rectification import PlateRectifier
 from ..data_models import ImageAnnotation, Detection
+from ..plate_ground_truth import normalize_plate_ground_truth_text
 
 
 class PlateGenerator:
@@ -190,6 +191,15 @@ class PlateGenerator:
                 source_expected_texts = self._safe_json_list(attributes.get("source_expected_texts"))
                 source_plate_index = self._safe_int(attributes.get("source_plate_index"), plate_idx)
                 source_plate_count = self._safe_int(attributes.get("source_plate_count"), len(plates))
+                ground_truth_text = normalize_plate_ground_truth_text(
+                    attributes.get("ground_truth_text")
+                )
+                ground_truth_source = str(
+                    attributes.get("ground_truth_source") or ""
+                ).strip()
+                source_annotation_id = str(
+                    attributes.get("plate_annotation_id") or ""
+                ).strip()
                 
                 self.metadata[plate_id] = {
                     'source_image': str(source_image_path),
@@ -202,6 +212,9 @@ class PlateGenerator:
                     'is_square': bool(is_square),  # Zapisujemy typ, może się przydać do YOLO
                     'source_plate_index': source_plate_index,
                     'source_plate_count': source_plate_count,
+                    'source_annotation_id': source_annotation_id or None,
+                    'ground_truth_text': ground_truth_text or None,
+                    'ground_truth_source': ground_truth_source or None,
                     'source_expected_text': source_expected_text or None,
                     'source_expected_texts': source_expected_texts,
                     'source_expected_text_source': str(
