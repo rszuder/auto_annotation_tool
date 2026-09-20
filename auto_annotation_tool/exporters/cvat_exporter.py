@@ -12,6 +12,7 @@ from typing import List, Dict, Optional
 
 from ..config import CONFIG, logger, CVAT_IMPORT_INFO
 from ..data_models import Detection, ImageAnnotation
+from ..plate_ground_truth import ensure_plate_detection_contract
 
 
 class CVATExporter:
@@ -163,6 +164,7 @@ class CVATExporter:
     
     def _add_polygon(self, parent: ET.Element, det: Detection, include_confidence: bool):
         """Dodaje <polygon>."""
+        ensure_plate_detection_contract(det)
         poly = ET.SubElement(parent, "polygon")
         poly.set("label", "plate")
         manual_source = str(det.attributes.get("manual_source", "") or "").strip().lower()
