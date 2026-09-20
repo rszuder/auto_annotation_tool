@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import tkinter as tk
 
 from ..plate_ground_truth import normalize_plate_ground_truth_text
 
@@ -478,3 +479,342 @@ def reject_gt_assist_suggestion(
     assist["status"] = "rejected"
     data["gt_assist"] = assist
     return {"ok": True, "reason": "rejected"}
+
+def get_gt_assist_presentation(
+    host,
+    data: dict | None = None,
+) -> dict:
+    source_data = data
+    if source_data is None:
+        try:
+            source_data = host._get_preview_active_data(
+                create=False
+            )
+        except Exception:
+            source_data = None
+
+    if not isinstance(source_data, dict):
+        return {
+            "text": "GT Assist: brak aktywnej tablicy",
+            "tone": "muted",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "none",
+        }
+
+    assist = source_data.get("gt_assist")
+    if not isinstance(assist, dict):
+        return {
+            "text": "GT Assist: brak sugestii",
+            "tone": "muted",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "none",
+        }
+
+    status = str(assist.get("status") or "").strip().lower()
+    raw_text = str(
+        assist.get("source_raw_prediction_text") or ""
+    ).strip()
+    suggestion_text = str(
+        assist.get("suggestion_text") or ""
+    ).strip()
+    reason = str(assist.get("reason") or "").strip()
+
+    if status == "suggested":
+        current, current_reason = gt_assist_is_current(
+            host,
+            source_data,
+        )
+        if current:
+            return {
+                "text": (
+                    f"GT Assist: {raw_text or '—'} → "
+                    f"{suggestion_text or '—'}"
+                ),
+                "tone": "warning",
+                "can_accept": True,
+                "can_reject": True,
+                "status": "suggested",
+            }
+        return {
+            "text": (
+                "GT Assist: sugestia nieaktualna "
+                f"({current_reason})"
+            ),
+            "tone": "warning",
+            "can_accept": False,
+            "can_reject": True,
+            "status": "stale",
+        }
+
+    if status == "accepted":
+        return {
+            "text": (
+                "GT Assist: zastosowany"
+                + (
+                    f" → {assist.get('accepted_text')}"
+                    if str(assist.get("accepted_text") or "").strip()
+                    else ""
+                )
+            ),
+            "tone": "success",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "accepted",
+        }
+
+    if status == "rejected":
+        return {
+            "text": "GT Assist: odrzucony",
+            "tone": "muted",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "rejected",
+        }
+
+    if status == "not_needed":
+        return {
+            "text": "GT Assist: RAW zgodny z GT",
+            "tone": "success",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "not_needed",
+        }
+
+    if status == "no_suggestion":
+        return {
+            "text": "GT Assist: brak bezpiecznej korekty",
+            "tone": "muted",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "no_suggestion",
+        }
+
+    if status == "unavailable":
+        unavailable_text = "GT Assist: niedostępny"
+        if reason:
+            unavailable_text += f" ({reason})"
+        return {
+            "text": unavailable_text,
+            "tone": "muted",
+            "can_accept": False,
+            "can_reject": False,
+            "status": "unavailable",
+        }
+
+    return {
+        "text": f"GT Assist: {status or 'brak'}",
+        "tone": "muted",
+        "can_accept": False,
+        "can_reject": False,
+        "status": status or "none",
+    }
+
+
+def refresh_gt_assist_controls(host) -> dict:
+    presentation = get_gt_assist_presentation(host)
+
+    busy = bool(
+        getattr(host, "fast_test_running", False)
+        or getattr(host, "is_processing", False)
+    )
+    accept_enabled = bool(
+        presentation.get("can_accept")
+        and not busy
+    )
+    reject_enabled = bool(
+        presentation.get("can_reject")
+        and not busy
+    )
+
+    accept_btn = getattr(
+        host,
+        "btn_gt_assist_apply",
+        None,
+    )
+    reject_btn = getattr(
+        host,
+        "btn_gt_assist_reject",
+        None,
+    )
+    status_lbl = getattr(
+        host,
+        "gt_assist_status_lbl",
+        None,
+    )
+
+    for widget, enabled in (
+        (accept_btn, accept_enabled),
+        (reject_btn, reject_enabled),
+    ):
+        if widget is None:
+            continue
+        try:
+            widget.configure(
+                state=(tk.NORMAL if enabled else tk.DISABLED)
+            )
+        except Exception:
+            pass
+
+    if status_lbl is not None:
+        text = str(presentation.get("text") or "")
+        tone = str(presentation.get("tone") or "muted")
+        try:
+            setter = getattr(
+                host,
+                "_set_inline_status_label_state",
+                None,
+            )
+            if callable(setter):
+                setter(
+                    status_lbl,
+                    text=text,
+                    tone=tone,
+                    emphasis=False,
+                )
+            else:
+                status_lbl.configure(text=text)
+        except Exception:
+            pass
+
+    return presentation
+
+
+def _persist_gt_assist_review_change(
+    host,
+    *,
+    plate_id: str,
+    message: str,
+    tone: str,
+) -> None:
+    try:
+        host._persist_preview_metadata(
+            success_message=None,
+            refresh_list=False,
+            sync_access=False,
+        )
+    except Exception:
+        pass
+
+    try:
+        host._refresh_preview_listbox_row(plate_id)
+    except Exception:
+        pass
+
+    try:
+        host._on_preview_select(None)
+    except Exception:
+        pass
+
+    try:
+        host._update_preview_edit_status(
+            message,
+            tone=tone,
+        )
+    except TypeError:
+        try:
+            host._update_preview_edit_status(message)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        refresh_gt_assist_controls(host)
+    except Exception:
+        pass
+
+
+def apply_active_gt_assist(host) -> dict:
+    try:
+        data = host._get_preview_active_data(
+            create=False
+        )
+    except Exception:
+        data = None
+
+    plate_id = str(
+        getattr(host, "_preview_active_pid", "")
+        or ""
+    ).strip()
+
+    if not isinstance(data, dict) or not plate_id:
+        return {
+            "ok": False,
+            "reason": "missing_active_plate",
+        }
+
+    try:
+        host._push_preview_history_snapshot(plate_id)
+    except Exception:
+        pass
+
+    result = accept_gt_assist_suggestion(
+        host,
+        data,
+    )
+
+    if not result.get("ok"):
+        try:
+            host._update_preview_edit_status(
+                "Nie można zastosować GT Assist: "
+                + str(result.get("reason") or "nieznany powód"),
+                tone="warning",
+            )
+        except Exception:
+            pass
+        refresh_gt_assist_controls(host)
+        return result
+
+    _persist_gt_assist_review_change(
+        host,
+        plate_id=plate_id,
+        message=(
+            "Zastosowano GT Assist jako jawnie "
+            "potwierdzoną korektę review."
+        ),
+        tone="success",
+    )
+    return result
+
+
+def reject_active_gt_assist(host) -> dict:
+    try:
+        data = host._get_preview_active_data(
+            create=False
+        )
+    except Exception:
+        data = None
+
+    plate_id = str(
+        getattr(host, "_preview_active_pid", "")
+        or ""
+    ).strip()
+
+    if not isinstance(data, dict) or not plate_id:
+        return {
+            "ok": False,
+            "reason": "missing_active_plate",
+        }
+
+    try:
+        host._push_preview_history_snapshot(plate_id)
+    except Exception:
+        pass
+
+    result = reject_gt_assist_suggestion(
+        host,
+        data,
+    )
+    if not result.get("ok"):
+        refresh_gt_assist_controls(host)
+        return result
+
+    _persist_gt_assist_review_change(
+        host,
+        plate_id=plate_id,
+        message="Odrzucono sugestię GT Assist.",
+        tone="muted",
+    )
+    return result

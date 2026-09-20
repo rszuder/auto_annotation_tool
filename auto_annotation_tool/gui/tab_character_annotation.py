@@ -1271,6 +1271,10 @@ class CharacterAnnotationTab:
     _gt_assist_is_current = z3_gt_assist_runtime.gt_assist_is_current
     _accept_gt_assist_suggestion = z3_gt_assist_runtime.accept_gt_assist_suggestion
     _reject_gt_assist_suggestion = z3_gt_assist_runtime.reject_gt_assist_suggestion
+    _get_gt_assist_presentation = z3_gt_assist_runtime.get_gt_assist_presentation
+    _refresh_gt_assist_controls = z3_gt_assist_runtime.refresh_gt_assist_controls
+    _apply_active_gt_assist = z3_gt_assist_runtime.apply_active_gt_assist
+    _reject_active_gt_assist = z3_gt_assist_runtime.reject_active_gt_assist
     _derive_preview_status_from_data = z3_preview_metadata_runtime._derive_preview_status_from_data
     _get_preview_live_status = z3_preview_metadata_runtime._get_preview_live_status
 

@@ -121,6 +121,10 @@ def refresh_detection_review_controls(host) -> None:
             widget.config(state=(tk.NORMAL if can_use else tk.DISABLED))
         except Exception:
             pass
+    try:
+        self._refresh_gt_assist_controls()
+    except Exception:
+        pass
 
 
 def undo_last_detection_result(host) -> None:

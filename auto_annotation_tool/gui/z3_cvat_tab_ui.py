@@ -166,6 +166,10 @@ def refresh_preview_bound_action_states(host) -> None:
                 tone="warning",
                 emphasis=False,
             )
+    try:
+        host._refresh_gt_assist_controls()
+    except Exception:
+        pass
 
 
 def run_cvat_export(host) -> None:

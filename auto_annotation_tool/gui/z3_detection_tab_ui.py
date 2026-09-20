@@ -2829,8 +2829,74 @@ def build_detection_tab(
         style="WorkflowCard.TButton",
     )
     self.btn_undo_detection_result.pack(side=tk.LEFT)
-    self.btn_undo_detection_result.configure(padding=detection_action_button_padding, width=16, state=tk.DISABLED)
+    self.btn_undo_detection_result.configure(
+        padding=detection_action_button_padding,
+        width=16,
+        state=tk.DISABLED,
+    )
     self.btn_confirm_detection_result = None
+
+    self.gt_assist_actions_frame = ttk.Frame(
+        self.btn_run_detection_frame,
+    )
+    self.gt_assist_actions_frame.pack(
+        side=tk.LEFT,
+        anchor=tk.CENTER,
+        padx=(8, 0),
+    )
+
+    self.btn_gt_assist_apply = ttk.Button(
+        self.gt_assist_actions_frame,
+        text="Zastosuj GT Assist",
+        command=self._apply_active_gt_assist,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_gt_assist_apply.pack(side=tk.LEFT)
+    self.btn_gt_assist_apply.configure(
+        padding=detection_action_button_padding,
+        width=18,
+        state=tk.DISABLED,
+    )
+
+    self.btn_gt_assist_reject = ttk.Button(
+        self.gt_assist_actions_frame,
+        text="Odrzuć",
+        command=self._reject_active_gt_assist,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_gt_assist_reject.pack(
+        side=tk.LEFT,
+        padx=(5, 0),
+    )
+    self.btn_gt_assist_reject.configure(
+        padding=detection_action_button_padding,
+        width=9,
+        state=tk.DISABLED,
+    )
+
+    self.gt_assist_status_lbl = tk.Label(
+        self.gt_assist_actions_frame,
+        text="GT Assist: brak sugestii",
+        anchor="w",
+        justify="left",
+        font=("Segoe UI", 8),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.gt_assist_status_lbl.pack(
+        side=tk.LEFT,
+        padx=(7, 0),
+    )
+    self.gt_assist_status_lbl._inline_status_font = (
+        "Segoe UI",
+        8,
+    )
+    self._set_inline_status_label_state(
+        self.gt_assist_status_lbl,
+        text="GT Assist: brak sugestii",
+        tone="muted",
+        emphasis=False,
+    )
 
     self.detect_run_status_frame = ttk.Frame(self.detect_actions_row)
     self.detect_run_status_frame.grid_rowconfigure(0, weight=0)
@@ -2913,6 +2979,7 @@ def build_detection_tab(
     self._refresh_last_detection_status_label()
     self._refresh_detection_refiner_guard_label()
     self._refresh_detection_review_controls()
+    self._refresh_gt_assist_controls()
 
     self.test_progress_row = tk.Frame(
         self.detect_run_status_frame,
