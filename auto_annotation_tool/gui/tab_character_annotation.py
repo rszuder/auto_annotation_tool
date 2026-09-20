@@ -50,6 +50,7 @@ from . import z3_init_runtime
 from . import z3_navigation_runtime
 from . import z3_preview_typing_runtime
 from . import z3_preview_metadata_runtime
+from . import z3_gt_assist_runtime
 from . import z3_plate_layout_runtime
 from . import z3_character_geometry
 from . import z3_preview_editor_runtime
@@ -1265,6 +1266,11 @@ class CharacterAnnotationTab:
     _get_preview_expected_texts = z3_preview_metadata_runtime._get_preview_expected_texts
     _resolve_preview_expected_text_for_crop = z3_preview_metadata_runtime._resolve_preview_expected_text_for_crop
     _build_raw_detection_validation = z3_preview_metadata_runtime._build_raw_detection_validation
+    _build_gt_assist_suggestion = z3_gt_assist_runtime.build_gt_assist_suggestion
+    _store_gt_assist_suggestion = z3_gt_assist_runtime.store_gt_assist_suggestion
+    _gt_assist_is_current = z3_gt_assist_runtime.gt_assist_is_current
+    _accept_gt_assist_suggestion = z3_gt_assist_runtime.accept_gt_assist_suggestion
+    _reject_gt_assist_suggestion = z3_gt_assist_runtime.reject_gt_assist_suggestion
     _derive_preview_status_from_data = z3_preview_metadata_runtime._derive_preview_status_from_data
     _get_preview_live_status = z3_preview_metadata_runtime._get_preview_live_status
 

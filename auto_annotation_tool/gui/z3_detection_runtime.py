@@ -1283,6 +1283,22 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 local_meta[pid]["yolo_detections"] = yolo_clean
                 local_meta[pid]["yolo_nms_detections"] = yolo_nms_clean
                 local_meta[pid]["yolo_raw_detections"] = yolo_raw_clean
+
+                try:
+                    local_meta[pid]["gt_assist"] = (
+                        self._build_gt_assist_suggestion(
+                            local_meta[pid],
+                        )
+                    )
+                except Exception as exc:
+                    local_meta[pid]["gt_assist"] = {
+                        "schema": "alpr.pz2.gt_assist.v1",
+                        "status": "unavailable",
+                        "reason": "assist_exception",
+                        "error": str(exc),
+                        "operations": [],
+                    }
+
                 local_meta[pid]["fusion_strategy"] = str(final_strategy or "")
                 if isinstance(fusion_details, dict) and fusion_details:
                     local_meta[pid]["fusion_details"] = fusion_details
