@@ -90,6 +90,7 @@ from .z2_shared_ui import (
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
+from .z2_gt_readiness import build_char_gt_readiness
 from .zoomable_canvas import ZoomableCanvas
 from .z2_panel_workflow import (
     _refresh_free_mode_workflow_ui,
@@ -605,6 +606,36 @@ def _force_render_campaign_graph_t06_right_panel(
     ready = bool(snapshot.get("ready"))
     total_images = int(snapshot.get("total_images", 0) or 0)
     total_plates = int(snapshot.get("total_plates", 0) or 0)
+
+    try:
+        gt_state = dict(
+            build_char_gt_readiness(
+                self,
+                run_dir=run_dir,
+                force_parse_xml=False,
+            )
+            or {}
+        )
+    except Exception:
+        gt_state = {}
+    gt_count = int(gt_state.get("gt_plates", 0) or 0)
+    gt_missing = max(
+        int(gt_state.get("missing_gt", 0) or 0),
+        max(0, int(total_plates or 0) - int(gt_count or 0)),
+    )
+    gt_ready = bool(
+        int(total_plates or 0) > 0
+        and int(gt_count or 0) >= int(total_plates or 0)
+        and int(gt_missing or 0) == 0
+    )
+    ready = bool(ready and gt_ready)
+    rows.append(
+        (
+            "GT numerów tablic",
+            f"{gt_count}/{total_plates}",
+            "success" if gt_ready else "warning",
+        )
+    )
     missing_plates = max(0, int(required_plates or 0) - int(total_plates or 0))
     try:
         quality_info = CONFIG.describe_yolo_pose_dataset_quality(max(0, total_plates))
@@ -815,6 +846,9 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         approval_context = dict(self._get_campaign_step2_approval_context() or {})
     except Exception:
         approval_context = {}
+    approval_iteration_target = str(
+        approval_context.get("iteration_target") or ""
+    ).strip().lower()
     run_dir = approval_context.get("run_dir")
     xml_exists = bool(run_dir and (Path(run_dir) / "annotations.xml").exists())
 
@@ -883,6 +917,15 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         }
     missing_plates = max(0, int(required_plates) - int(effective_approved_plates))
     ready = bool(gate_state.get("ready", missing_plates <= 0 and xml_exists))
+
+    gt_count = int(gate_state.get("gt_plates", 0) or 0)
+    gt_total = int(
+        gate_state.get("gt_total_plates", effective_approved_plates)
+        or 0
+    )
+    gt_ready = bool(gate_state.get("gt_ready", True))
+    if approval_iteration_target == "char":
+        ready = bool(ready and gt_ready)
     if gate_id == "T02":
         ready = bool(missing_plates <= 0)
     tone = "success" if ready else "warning"
@@ -1014,6 +1057,15 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
                 "success" if xml_exists else "warning",
             ),
         ]
+
+    if approval_iteration_target == "char":
+        rows.append(
+            (
+                "GT numerów tablic",
+                f"{gt_count}/{gt_total}",
+                "success" if gt_ready else "warning",
+            )
+        )
 
     try:
         self.approve_btn_row.configure(text=f" {display_gate_title} ")
@@ -1515,6 +1567,46 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             and not self.is_processing
         )
     )
+    char_gt_readiness = {}
+    if project_active and approval_iteration_target == "char":
+        try:
+            char_gt_readiness = dict(
+                build_char_gt_readiness(
+                    self,
+                    run_dir=approval_run_dir,
+                    force_parse_xml=False,
+                )
+                or {}
+            )
+        except Exception:
+            char_gt_readiness = {}
+
+        gt_count = int(char_gt_readiness.get("gt_plates", 0) or 0)
+        expected_gt_total = max(
+            int(char_display_plates or 0),
+            int(cumulative_char_approved_plates or 0),
+        )
+        gt_missing = max(
+            int(char_gt_readiness.get("missing_gt", 0) or 0),
+            max(0, int(expected_gt_total) - int(gt_count)),
+        )
+        char_gt_readiness.update(
+            {
+                "expected_total_plates": int(expected_gt_total),
+                "gt_plates": int(gt_count),
+                "missing_gt": int(gt_missing),
+                "ready": bool(
+                    int(expected_gt_total) > 0
+                    and int(gt_count) >= int(expected_gt_total)
+                    and int(gt_missing) == 0
+                ),
+            }
+        )
+        approve_ready = bool(
+            approve_ready
+            and char_gt_readiness.get("ready")
+        )
+
     approval_action = ""
     if approve_ready:
         if (
@@ -1970,6 +2062,26 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 quality_next_tone,
             ),
         ]
+        gt_expected_total = int(
+            char_gt_readiness.get(
+                "expected_total_plates",
+                gate_current_plates,
+            )
+            or 0
+        )
+        gt_count = int(
+            char_gt_readiness.get("gt_plates", 0) or 0
+        )
+        gt_ready = bool(
+            char_gt_readiness.get("ready", False)
+        )
+        approve_hint_table_rows.append(
+            (
+                "GT numerów tablic",
+                f"{gt_count}/{gt_expected_total}",
+                "success" if gt_ready else "warning",
+            )
+        )
     elif project_active and approval_iteration_target == "char" and (current_step >= 3 or repair_mode):
         if graph_gate_is_t06:
             approve_context_text = (
@@ -3489,6 +3601,52 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
                 and int(cumulative_char_approved_plates or 0) >= int(min_char_approval_plates)
             )
         _approval_mark("approved_counts")
+
+        if approval_iteration_target == "char":
+            try:
+                char_gt_state = dict(
+                    build_char_gt_readiness(
+                        self,
+                        run_dir=staging_run,
+                        force_parse_xml=False,
+                    )
+                    or {}
+                )
+            except Exception:
+                char_gt_state = {}
+
+            gt_count = int(char_gt_state.get("gt_plates", 0) or 0)
+            gt_total = max(
+                int(char_gt_state.get("total_plates", 0) or 0),
+                int(cumulative_char_approved_plates or 0),
+            )
+            gt_missing = max(
+                int(char_gt_state.get("missing_gt", 0) or 0),
+                max(0, int(gt_total) - int(gt_count)),
+            )
+            if gt_total > 0 and gt_missing > 0:
+                self._refresh_step2_action_states()
+                missing_images = list(
+                    char_gt_state.get("missing_images", []) or []
+                )
+                examples = ", ".join(missing_images[:4])
+                examples_line = (
+                    f"\nPrzykładowe obrazy: {examples}."
+                    if examples
+                    else ""
+                )
+                return messagebox.showwarning(
+                    "Brakuje GT tablic",
+                    (
+                        "Tor znaków wymaga numeru GT dla każdej "
+                        "zatwierdzonej tablicy.\n\n"
+                        f"GT kompletne: {gt_count}/{gt_total}.\n"
+                        f"Brak GT: {gt_missing}."
+                        f"{examples_line}\n\n"
+                        "Wróć do Z2, wybierz brakujące ramki tablic "
+                        "i wpisz ich numery w polu „GT tablicy”."
+                    ),
+                )
 
         if approval_total_plates <= 0 and not (
             (approval_iteration_target == "plate" and cumulative_plate_gate_ready)

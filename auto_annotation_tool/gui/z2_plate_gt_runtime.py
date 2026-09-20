@@ -162,6 +162,14 @@ def commit_plate_gt_editor(host, event=None):
 
     refresh_plate_gt_editor(host)
     try:
+        host._z2_graph_right_panel_render_signature = None
+    except Exception:
+        pass
+    try:
+        host._refresh_step2_action_states(lightweight=False)
+    except Exception:
+        pass
+    try:
         host._refresh_preview_canvas()
     except Exception:
         pass

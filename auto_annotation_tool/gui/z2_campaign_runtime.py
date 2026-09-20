@@ -89,6 +89,7 @@ from .z2_shared_ui import (
     refresh_workflow_route_cards as dispatch_refresh_workflow_route_cards,
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
+from .z2_gt_readiness import build_char_gt_readiness
 from .zoomable_canvas import ZoomableCanvas
 from .z2_restore_workflow import (
     _restore_preview_from_annotation_run,
@@ -3687,6 +3688,34 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
 
     effective_images = max(0, int(project_approved_images or 0) + int(run_ok_images or 0))
     effective_plates = max(0, int(project_approved_plates or 0) + int(run_ok_plates or 0))
+
+    char_gt_state = {}
+    if iteration_target == "char":
+        try:
+            char_gt_state = dict(
+                build_char_gt_readiness(
+                    self,
+                    run_dir=approval_run_dir,
+                    force_parse_xml=False,
+                )
+                or {}
+            )
+        except Exception:
+            char_gt_state = {}
+    char_gt_count = int(char_gt_state.get("gt_plates", 0) or 0)
+    char_gt_missing = max(
+        int(char_gt_state.get("missing_gt", 0) or 0),
+        max(0, int(effective_plates or 0) - int(char_gt_count or 0)),
+    )
+    char_gt_ready = bool(
+        iteration_target != "char"
+        or (
+            int(effective_plates or 0) > 0
+            and int(char_gt_count or 0) >= int(effective_plates or 0)
+            and int(char_gt_missing or 0) == 0
+        )
+    )
+
     xml_required = bool(int(current_iteration_num or 0) <= 1)
     xml_missing = bool(xml_required and not approval_xml_exists)
     if iteration_target == "char":
@@ -3695,6 +3724,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         ready = bool(
             int(effective_plates or 0) >= int(min_char_plates)
             and not xml_missing
+            and char_gt_ready
             and not bool(getattr(self, "is_processing", False))
         )
     else:
@@ -3746,6 +3776,15 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
             else "Do otwarcia bramki brakuje pliku anotacji XML."
         )
         detail = "Utwórz XML anotacji tablic w Z2."
+        tone = "warning"
+    elif iteration_target == "char" and char_gt_missing > 0:
+        message = (
+            f"Brakuje GT dla {char_gt_missing} zatwierdzonych tablic."
+        )
+        detail = (
+            f"GT kompletne: {char_gt_count}/{effective_plates}. "
+            "W Z2 wybierz każdą brakującą tablicę i wpisz jej numer GT."
+        )
         tone = "warning"
     elif iteration_target == "char":
         noun = "tablicy" if missing_to_open == 1 else "tablic"
@@ -3822,6 +3861,10 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         "required_plates": int(min_char_plates if iteration_target == "char" else min_plate_plates),
         "missing_images": int(missing_images or 0),
         "missing_plates": int(missing_plates or 0),
+        "gt_plates": int(char_gt_count or 0),
+        "gt_total_plates": int(effective_plates or 0) if iteration_target == "char" else 0,
+        "missing_gt": int(char_gt_missing or 0) if iteration_target == "char" else 0,
+        "gt_ready": bool(char_gt_ready),
         "missing_to_open": int(missing_to_open or 0),
         "missing_focus_label": missing_focus_label,
         "missing_focus_row_label": missing_focus_row_label,
