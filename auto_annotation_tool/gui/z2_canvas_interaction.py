@@ -29,7 +29,7 @@ from .zoomable_canvas import ZoomableCanvas
 from .section_header_label import SectionHeaderLabel
 from . import z2_workflow_methods
 from . import z2_canvas_overlays
-from . import z2_plate_gt_runtime
+from . import z2_plate_gt_inline
 from .z2_main_widgets import create_annotation_widgets
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
 from .z2_canvas_metrics_ui import (
@@ -238,7 +238,7 @@ def _compute_preview_plate_focus_view_state(self, polygon: list[tuple[float, flo
 def _refresh_preview_plate_context_overlays(self) -> None:
     """Refresh lightweight fullscreen overlays after changing image/plate context."""
     try:
-        z2_plate_gt_runtime.refresh_plate_gt_editor(self)
+        z2_plate_gt_inline.refresh_inline_plate_gt_editors(self)
     except Exception:
         pass
     try:
@@ -750,6 +750,15 @@ def _event_has_control_modifier(event=None) -> bool:
         return False
 
 def _preview_shortcuts_enabled(self, event=None, allow_when_fullscreen: bool = False) -> bool:
+    target_widget = getattr(event, "widget", None)
+    if target_widget is None:
+        try:
+            target_widget = self.frame.focus_get()
+        except Exception:
+            target_widget = None
+    if bool(getattr(target_widget, "_z2_inline_gt_entry", False)):
+        return False
+
     if allow_when_fullscreen and bool(getattr(self, "_preview_fullscreen_active", False)):
         return True
 
@@ -1915,6 +1924,27 @@ def _set_preview_fullscreen(self, active: bool):
             self._place_preview_legend_overlay(refresh=True)
             self._place_preview_overlay_dock(force_render=True)
             self._place_preview_campaign_gate_overlay(force_render=True)
+        except Exception:
+            pass
+
+        # Fullscreen zmienia geometrię canvasu już po wcześniejszym
+        # renderze overlay. Odtwórz GT po finalnym resize.
+        try:
+            self._refresh_preview_canvas(refresh_chrome=False)
+        except Exception:
+            pass
+        try:
+            z2_plate_gt_inline.refresh_gt_overlay_after_layout(self)
+        except Exception:
+            pass
+
+        # Na Windows po callbacku przejścia potrafi przyjść jeszcze
+        # jeden Configure/resize. Drugi redraw jest tani i idempotentny.
+        try:
+            self.frame.after(
+                90,
+                lambda: z2_plate_gt_inline.refresh_gt_overlay_after_layout(self),
+            )
         except Exception:
             pass
 

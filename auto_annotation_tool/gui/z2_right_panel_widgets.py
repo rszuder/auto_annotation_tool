@@ -8,7 +8,6 @@ import tkinter as tk
 from tkinter import ttk
 
 from .z2_shared_ui import get_campaign_return_to_graph_copy
-from . import z2_plate_gt_runtime
 
 
 def build_annotation_right_panel(
@@ -33,82 +32,12 @@ def build_annotation_right_panel(
     right_scroll_shell.pack(fill=tk.BOTH, expand=True)
     self.right_scroll_shell = right_scroll_shell
     return_copy = get_campaign_return_to_graph_copy(self)
-    # GT jest przypisane do konkretnego polygonu tablicy, nigdy do nazwy pliku.
-    self.plate_gt_var = tk.StringVar(value="")
-    self.plate_gt_context_var = tk.StringVar(value="Brak wybranej ramki tablicy.")
-    self._plate_gt_editor_syncing = False
-
-    self.plate_gt_frame = ttk.LabelFrame(
-        right_scroll_shell,
-        text=" GT tablicy ",
-        padding=10,
-    )
-    self.plate_gt_frame.pack(fill=tk.X, padx=8, pady=(8, 4))
-
-    self.plate_gt_context_lbl = tk.Label(
-        self.plate_gt_frame,
-        textvariable=self.plate_gt_context_var,
-        anchor="w",
-        justify=tk.LEFT,
-        wraplength=300,
-        bd=0,
-        highlightthickness=0,
-    )
-    self.plate_gt_context_lbl.pack(fill=tk.X, pady=(0, 6))
-    self._set_inline_label_state(
-        self.plate_gt_context_lbl,
-        tone="muted",
-        emphasis=False,
-    )
-
-    self.plate_gt_entry = ttk.Entry(
-        self.plate_gt_frame,
-        textvariable=self.plate_gt_var,
-    )
-    self.plate_gt_entry.pack(fill=tk.X)
-    self.plate_gt_entry.bind(
-        "<Return>",
-        lambda event: z2_plate_gt_runtime.commit_plate_gt_editor(self, event),
-        add="+",
-    )
-
-    self.plate_gt_hint_lbl = tk.Label(
-        self.plate_gt_frame,
-        text="Numer GT dotyczy wyłącznie zaznaczonej ramki. Enter lub „Zapisz GT” zapisuje go do annotations.xml.",
-        anchor="w",
-        justify=tk.LEFT,
-        wraplength=300,
-        bd=0,
-        highlightthickness=0,
-    )
-    self.plate_gt_hint_lbl.pack(fill=tk.X, pady=(5, 7))
-    self._set_inline_label_state(
-        self.plate_gt_hint_lbl,
-        tone="muted",
-        emphasis=False,
-    )
-
-    self.plate_gt_btn_row = ttk.Frame(
-        self.plate_gt_frame,
-        style="Panel.TFrame",
-    )
-    self.plate_gt_btn_row.pack(fill=tk.X)
-
-    self.plate_gt_save_btn = ttk.Button(
-        self.plate_gt_btn_row,
-        text="Zapisz GT",
-        command=lambda: z2_plate_gt_runtime.commit_plate_gt_editor(self),
-    )
-    self.plate_gt_save_btn.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-    self.plate_gt_clear_btn = ttk.Button(
-        self.plate_gt_btn_row,
-        text="Wyczyść",
-        command=lambda: z2_plate_gt_runtime.clear_plate_gt_editor(self),
-    )
-    self.plate_gt_clear_btn.pack(side=tk.LEFT, padx=(6, 0))
-
-    z2_plate_gt_runtime.refresh_plate_gt_editor(self)
+    # GT edytujemy bezpośrednio nad polygonem na canvasie.
+    self.plate_gt_frame = None
+    self.plate_gt_entry = None
+    self.plate_gt_var = None
+    self.plate_gt_save_btn = None
+    self.plate_gt_clear_btn = None
 
     # Legacy right-side detection configuration was replaced by the graph flow,
     # scoped modals, and the global device menu. Keep the old attributes as

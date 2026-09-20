@@ -30,7 +30,7 @@ from .section_header_label import SectionHeaderLabel
 from . import z2_workflow_methods
 from . import z2_canvas_overlays
 from . import z2_canvas_interaction
-from . import z2_plate_gt_runtime
+from . import z2_plate_gt_inline
 from .z2_main_widgets import create_annotation_widgets
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
 from .z2_canvas_metrics_ui import (
@@ -773,6 +773,12 @@ def _schedule_preview_selection_render(
 def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
     ann = self._get_preview_annotation()
     if ann is None or canvas.original_image is None:
+        try:
+            z2_plate_gt_inline.hide_inline_plate_gt_editors(
+                self, destroy=True
+            )
+        except Exception:
+            pass
         self._preview_super_correction_badge_bbox = None
         self._preview_super_correction_handle_bbox = None
         self._preview_fullscreen_toggle_bbox = None
@@ -819,13 +825,22 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
         legend_theme = self._get_preview_legend_theme()
         canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
         canvas_height = max(1.0, float(canvas.winfo_height() or 1.0))
+        (
+            viewport_left,
+            viewport_top,
+            viewport_right,
+            viewport_bottom,
+        ) = z2_plate_gt_inline.canvas_viewport_bounds(canvas)
 
         toggle_size = 24.0
         toggle_pad = 12.0
         toggle_gap = 8.0
-        toggle_x2 = max(toggle_pad + toggle_size, canvas_width - toggle_pad)
+        toggle_x2 = max(
+            viewport_left + toggle_pad + toggle_size,
+            viewport_right - toggle_pad,
+        )
         toggle_x1 = toggle_x2 - toggle_size
-        toggle_y1 = toggle_pad
+        toggle_y1 = viewport_top + toggle_pad
         toggle_y2 = toggle_y1 + toggle_size
         toggle_fill = str(legend_theme.get("panel_fill", "#1f2933"))
         toggle_outline = str(legend_theme.get("shell_outline", "#2fbf71"))
@@ -896,10 +911,22 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
         badge_w = lamp_d + gap + text_w + gap + handle_w + (pad_x * 2.0)
         default_x = max(14.0, toggle_x1 - toggle_gap - badge_w)
         state_anchor_x = float(getattr(self, "_preview_super_correction_badge_offset_x", default_x) or default_x)
-        state_anchor_x = min(max(0.0, state_anchor_x), max(0.0, canvas_width - badge_w))
-        max_badge_x_before_toggle = max(0.0, toggle_x1 - toggle_gap - badge_w)
-        state_anchor_x = min(state_anchor_x, max_badge_x_before_toggle)
-        state_anchor_y = min(max(0.0, state_anchor_y), max(0.0, canvas_height - badge_h))
+        state_anchor_x = min(
+            max(viewport_left, state_anchor_x),
+            max(viewport_left, viewport_right - badge_w),
+        )
+        max_badge_x_before_toggle = max(
+            viewport_left,
+            toggle_x1 - toggle_gap - badge_w,
+        )
+        state_anchor_x = min(
+            state_anchor_x,
+            max_badge_x_before_toggle,
+        )
+        state_anchor_y = min(
+            max(viewport_top, state_anchor_y),
+            max(viewport_top, viewport_bottom - badge_h),
+        )
         self._preview_super_correction_badge_offset_x = state_anchor_x
         self._preview_super_correction_badge_offset_y = state_anchor_y
         state_bg_id = canvas.create_rectangle(
@@ -1041,39 +1068,7 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
             tags=("preview_overlay", "preview_plate_outline")
         )
 
-        if not light_overlay:
-            min_x = min(points[0::2]) if points else 0
-            min_y = min(points[1::2]) if points else 0
-            fit_score = self._get_plate_detection_fit_score(det, ann)
-            label_text = f"Det {float(getattr(det, 'confidence', 0.0) or 0.0):.2f}"
-            if fit_score is not None:
-                label_text += f" | Fit {fit_score:.2f}"
-            label_id = canvas.create_text(
-                min_x + 6,
-                max(10, min_y - 7),
-                text=label_text,
-                fill=label_fill,
-                anchor="sw",
-                font=("Segoe UI", 9, "bold"),
-                tags=("preview_overlay",)
-            )
-            label_bbox = canvas.bbox(label_id) or (
-                min_x,
-                max(0, min_y - 22),
-                min_x + 132,
-                max(18, min_y - 2),
-            )
-            rect_id = canvas.create_rectangle(
-                min_x,
-                max(0, min_y - 22),
-                max(min_x + 132, float(label_bbox[2]) + 8.0),
-                max(18, min_y - 2),
-                outline="",
-                fill=label_bg,
-                tags=("preview_overlay",)
-            )
-            canvas.tag_lower(rect_id, label_id)
-
+        # DET/FIT jest renderowane we wspólnym boxie z polem GT.
         if is_selected and not is_delete_candidate:
             zoom_level = max(0.01, float(getattr(canvas, "zoom_level", 1.0) or 1.0))
             radius = 5.0 if zoom_level <= 2.0 else min(8.0, 5.0 + ((zoom_level - 2.0) * 1.0))
@@ -1142,6 +1137,17 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
                 tags=("preview_overlay",)
             )
 
+    try:
+        z2_plate_gt_inline.render_inline_plate_gt_editors(
+            self,
+            canvas,
+            plate_detections,
+            selected_plate_idx,
+            light_overlay=bool(light_overlay),
+        )
+    except Exception:
+        pass
+
     _draw_preview_plate_combo_overlay(
         self,
         canvas,
@@ -1163,43 +1169,95 @@ def _draw_preview_plate_combo_overlay(
     image_approved: bool = False,
 ) -> None:
     try:
+        try:
+            canvas.delete("preview_fullscreen_toggle")
+        except Exception:
+            pass
+        try:
+            canvas.delete("preview_gt_mode_toggle")
+        except Exception:
+            pass
+
         canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
         canvas_height = max(1.0, float(canvas.winfo_height() or 1.0))
-        if canvas_width < 180.0 or canvas_height < 90.0:
+        if canvas_width < 220.0 or canvas_height < 90.0:
             return
 
+        try:
+            (
+                viewport_left,
+                viewport_top,
+                viewport_right,
+                viewport_bottom,
+            ) = z2_plate_gt_inline.canvas_viewport_bounds(canvas)
+        except Exception:
+            viewport_left = float(canvas.canvasx(0.0))
+            viewport_top = float(canvas.canvasy(0.0))
+            viewport_right = float(canvas.canvasx(canvas_width))
+            viewport_bottom = float(canvas.canvasy(canvas_height))
+
+        viewport_width = max(1.0, viewport_right - viewport_left)
+
         total = max(0, int(len(plate_detections or [])))
+        gt_count = int(
+            z2_plate_gt_inline.count_plate_gt(plate_detections)
+        )
+        gt_mode_on = bool(
+            z2_plate_gt_inline.gt_mode_enabled(self)
+        )
+        show_gt_counter = bool(
+            z2_plate_gt_inline.gt_required_for_current_route(self)
+            or gt_mode_on
+        )
+
         if total > 0:
             try:
-                current = int(selected_plate_idx if selected_plate_idx is not None else 0) + 1
+                current = (
+                    int(
+                        selected_plate_idx
+                        if selected_plate_idx is not None
+                        else 0
+                    )
+                    + 1
+                )
             except Exception:
                 current = 1
             current = max(1, min(int(current), int(total)))
-            title_text = "TABLICA"
-            value_text = f"{current} / {total}"
+            title_text = "RAMKA"
+            value_text = f"{current}/{total}"
         else:
-            title_text = "BRAK RAMKI"
-            value_text = "0 / 0"
+            title_text = "BRAK"
+            value_text = "0/0"
+
+        gt_text = f"GT {gt_count}/{total}"
+        gt_complete = bool(total > 0 and gt_count >= total)
 
         theme = self._get_preview_legend_theme()
         panel_fill = str(theme.get("panel_fill", "#101820"))
         entry_fill = str(theme.get("entry_fill", "#172432"))
         muted = str(theme.get("section_muted", "#9fb0bd"))
         accent = str(theme.get("shell_outline", "#2fbf71"))
+        icon_fg = str(theme.get("entry_text", "#f8fafc"))
         warning = "#f1c40f"
         error = "#ff5b5b"
+
         is_ok = bool(image_approved) and total > 0
-        value_fill = accent if is_ok else (warning if total > 0 else error)
-        outline = value_fill
+        value_fill = (
+            accent if is_ok else (warning if total > 0 else error)
+        )
+        gt_fill = (
+            accent if gt_complete else (warning if gt_count > 0 else muted)
+        )
+
         status_text = "OK" if is_ok else "NOK"
         status_fill = "#21a765" if is_ok else "#d64545"
         status_outline = "#8ff0b8" if is_ok else "#ff9a9a"
-        try:
-            panel_is_light = bool(self._legend_color_is_light(panel_fill))
-        except Exception:
-            panel_is_light = False
-        shadow_fill = blend_hex_colors(panel_fill, "#000000", 0.12 if panel_is_light else 0.42)
-        font_cache = getattr(self, "_preview_plate_combo_font_cache", None)
+
+        font_cache = getattr(
+            self,
+            "_preview_plate_combo_font_cache",
+            None,
+        )
         if not isinstance(font_cache, dict):
             font_cache = {}
             self._preview_plate_combo_font_cache = font_cache
@@ -1208,77 +1266,192 @@ def _draw_preview_plate_combo_overlay(
             key = (str(family), int(size), str(weight))
             font_obj = font_cache.get(key)
             if font_obj is None:
-                font_obj = tkfont.Font(self.frame, family=str(family), size=int(size), weight=str(weight))
+                font_obj = tkfont.Font(
+                    self.frame,
+                    family=str(family),
+                    size=int(size),
+                    weight=str(weight),
+                )
                 font_cache[key] = font_obj
             return font_obj
 
         label_font = _combo_font(8, "bold", "Segoe UI")
-        value_font = _combo_font(24, "bold", "Bahnschrift SemiBold")
-        status_font = _combo_font(18, "bold", "Bahnschrift SemiBold")
-        title_w = float(label_font.measure(title_text))
-        value_w = float(value_font.measure(value_text))
-        status_w = float(status_font.measure(status_text))
-        title_h = max(12.0, float(label_font.metrics("linespace") or 12))
-        value_h = max(28.0, float(value_font.metrics("linespace") or 28))
-        pad_x = 10.0
-        pad_y = 5.0
-        gap = 8.0
-        title_box_w = max(72.0, title_w + (pad_x * 2.0))
-        value_box_w = max(88.0, value_w + (pad_x * 2.0))
-        status_box_w = max(70.0, status_w + (pad_x * 2.0))
-        combo_w = title_box_w + gap + value_box_w + gap + status_box_w
-        combo_h = max(34.0, value_h + (pad_y * 2.0))
-        x1 = (canvas_width - combo_w) / 2.0
-        y1 = 12.0
-        x1 = max(12.0, min(x1, canvas_width - combo_w - 12.0))
-        y1 = max(10.0, min(y1, canvas_height - combo_h - 10.0))
-        x2 = x1 + combo_w
+        value_font = _combo_font(
+            20,
+            "bold",
+            "Bahnschrift SemiBold",
+        )
+        gt_font = _combo_font(
+            11,
+            "bold",
+            "Bahnschrift SemiBold",
+        )
+        icon_font = _combo_font(8, "bold", "Segoe UI")
+        status_font = _combo_font(
+            16,
+            "bold",
+            "Bahnschrift SemiBold",
+        )
+
+        pad_x = 9.0
+        gap = 6.0
+
+        title_box_w = max(
+            62.0,
+            float(label_font.measure(title_text)) + (pad_x * 2.0),
+        )
+        value_box_w = max(
+            70.0,
+            float(value_font.measure(value_text)) + (pad_x * 2.0),
+        )
+        status_box_w = max(
+            58.0,
+            float(status_font.measure(status_text)) + (pad_x * 2.0),
+        )
+        gt_box_w = (
+            max(
+                68.0,
+                float(gt_font.measure(gt_text)) + (pad_x * 2.0),
+            )
+            if show_gt_counter
+            else 0.0
+        )
+
+        icon_box_w = 30.0
+        combo_h = 36.0
+
+        # Preserve the original status group first:
+        # RAMKA | n/N | OK/NOK
+        # Then append GT counter and the two action tiles.
+        combo_w = (
+            title_box_w
+            + gap
+            + value_box_w
+            + gap
+            + status_box_w
+        )
+        if show_gt_counter:
+            combo_w += gap + gt_box_w
+        combo_w += gap + icon_box_w + gap + icon_box_w
+
+        x1 = viewport_left + ((viewport_width - combo_w) / 2.0)
+        y1 = viewport_top + 12.0
+        x1 = max(
+            viewport_left + 12.0,
+            min(x1, viewport_right - combo_w - 12.0),
+        )
+        y1 = max(
+            viewport_top + 10.0,
+            min(y1, viewport_bottom - combo_h - 10.0),
+        )
         y2 = y1 + combo_h
+
         title_x2 = x1 + title_box_w
+
         value_x1 = title_x2 + gap
         value_x2 = value_x1 + value_box_w
-        status_x1 = value_x2 + gap
 
-        shadow_offset = 2.0
-        canvas.create_rectangle(
-            x1 + shadow_offset,
-            y1 + shadow_offset,
-            x2 + shadow_offset,
-            y2 + shadow_offset,
-            outline="",
-            fill=shadow_fill,
-            tags=("preview_overlay", "preview_plate_combo_overlay"),
-        )
+        status_x1 = value_x2 + gap
+        status_x2 = status_x1 + status_box_w
+
+        next_x = status_x2 + gap
+
+        if show_gt_counter:
+            gt_x1 = next_x
+            gt_x2 = gt_x1 + gt_box_w
+            next_x = gt_x2 + gap
+        else:
+            gt_x1 = next_x
+            gt_x2 = next_x
+
+        gt_icon_x1 = next_x
+        gt_icon_x2 = gt_icon_x1 + icon_box_w
+
+        fs_icon_x1 = gt_icon_x2 + gap
+        fs_icon_x2 = fs_icon_x1 + icon_box_w
+
+        # No common background and no common shadow: tiles only.
         canvas.create_rectangle(
             x1,
             y1,
             title_x2,
             y2,
-            outline=outline,
+            outline=value_fill,
             fill=entry_fill,
             width=1,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
+
         canvas.create_rectangle(
             value_x1,
             y1,
             value_x2,
             y2,
-            outline=outline,
+            outline=value_fill,
             fill=panel_fill,
             width=2,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
+
         canvas.create_rectangle(
             status_x1,
             y1,
-            x2,
+            status_x2,
             y2,
             outline=status_outline,
             fill=status_fill,
             width=2,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
+
+        if show_gt_counter:
+            canvas.create_rectangle(
+                gt_x1,
+                y1,
+                gt_x2,
+                y2,
+                outline=gt_fill,
+                fill=panel_fill,
+                width=1,
+                tags=("preview_overlay", "preview_plate_combo_overlay"),
+            )
+
+        gt_icon_outline = accent if gt_mode_on else muted
+        gt_icon_fill = (
+            blend_hex_colors(accent, panel_fill, 0.72)
+            if gt_mode_on
+            else panel_fill
+        )
+        canvas.create_rectangle(
+            gt_icon_x1,
+            y1,
+            gt_icon_x2,
+            y2,
+            outline=gt_icon_outline,
+            fill=gt_icon_fill,
+            width=1,
+            tags=(
+                "preview_overlay",
+                "preview_plate_combo_overlay",
+                "preview_gt_mode_toggle",
+            ),
+        )
+
+        canvas.create_rectangle(
+            fs_icon_x1,
+            y1,
+            fs_icon_x2,
+            y2,
+            outline=muted,
+            fill=panel_fill,
+            width=1,
+            tags=(
+                "preview_overlay",
+                "preview_plate_combo_overlay",
+                "preview_fullscreen_toggle",
+            ),
+        )
+
         canvas.create_text(
             x1 + (title_box_w / 2.0),
             y1 + (combo_h / 2.0),
@@ -1288,6 +1461,7 @@ def _draw_preview_plate_combo_overlay(
             font=label_font,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
+
         canvas.create_text(
             value_x1 + (value_box_w / 2.0),
             y1 + (combo_h / 2.0) - 1.0,
@@ -1297,6 +1471,7 @@ def _draw_preview_plate_combo_overlay(
             font=value_font,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
+
         canvas.create_text(
             status_x1 + (status_box_w / 2.0),
             y1 + (combo_h / 2.0) - 1.0,
@@ -1306,10 +1481,89 @@ def _draw_preview_plate_combo_overlay(
             font=status_font,
             tags=("preview_overlay", "preview_plate_combo_overlay"),
         )
+
+        if show_gt_counter:
+            canvas.create_text(
+                gt_x1 + (gt_box_w / 2.0),
+                y1 + (combo_h / 2.0),
+                text=gt_text,
+                fill=gt_fill,
+                anchor="center",
+                font=gt_font,
+                tags=("preview_overlay", "preview_plate_combo_overlay"),
+            )
+
+        canvas.create_text(
+            gt_icon_x1 + (icon_box_w / 2.0),
+            y1 + (combo_h / 2.0) - 1.0,
+            text="GT",
+            fill=accent if gt_mode_on else muted,
+            anchor="center",
+            font=icon_font,
+            tags=(
+                "preview_overlay",
+                "preview_plate_combo_overlay",
+                "preview_gt_mode_toggle",
+            ),
+        )
+
+        fs_inner = 7.0
+        ix1 = fs_icon_x1 + fs_inner
+        iy1 = y1 + fs_inner
+        ix2 = fs_icon_x2 - fs_inner
+        iy2 = y2 - fs_inner
+        corner = 5.0
+
+        fs_active = bool(
+            getattr(self, "_preview_fullscreen_active", False)
+        )
+
+        if fs_active:
+            lines = (
+                (ix1 + corner, iy1, ix1, iy1, ix1, iy1 + corner),
+                (ix2 - corner, iy1, ix2, iy1, ix2, iy1 + corner),
+                (ix1 + corner, iy2, ix1, iy2, ix1, iy2 - corner),
+                (ix2 - corner, iy2, ix2, iy2, ix2, iy2 - corner),
+            )
+        else:
+            lines = (
+                (ix1, iy1 + corner, ix1, iy1, ix1 + corner, iy1),
+                (ix2, iy1 + corner, ix2, iy1, ix2 - corner, iy1),
+                (ix1, iy2 - corner, ix1, iy2, ix1 + corner, iy2),
+                (ix2, iy2 - corner, ix2, iy2, ix2 - corner, iy2),
+            )
+
+        for coords in lines:
+            canvas.create_line(
+                *coords,
+                fill=icon_fg,
+                width=1.6,
+                capstyle=tk.ROUND,
+                tags=(
+                    "preview_overlay",
+                    "preview_plate_combo_overlay",
+                    "preview_fullscreen_toggle",
+                ),
+            )
+
+        self._plate_gt_mode_toggle_bbox = (
+            float(gt_icon_x1),
+            float(y1),
+            float(gt_icon_x2),
+            float(y2),
+        )
+        self._preview_fullscreen_toggle_bbox = (
+            float(fs_icon_x1),
+            float(y1),
+            float(fs_icon_x2),
+            float(y2),
+        )
+
         canvas.tag_raise("preview_plate_combo_overlay")
+        canvas.tag_raise("preview_gt_mode_toggle")
+        canvas.tag_raise("preview_fullscreen_toggle")
     except Exception:
         pass
-
 
 def _build_preview_canvas_metrics_rows(self, *args, **kwargs):
     return z2_canvas_overlays._build_preview_canvas_metrics_rows(self, *args, **kwargs)
@@ -3048,6 +3302,16 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
     canvas_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
     canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
     mark_phase("coords")
+
+    if z2_plate_gt_inline.is_gt_mode_toggle_hit(
+        self, canvas_x, canvas_y
+    ):
+        z2_plate_gt_inline.toggle_gt_mode(self)
+        try:
+            self._refresh_preview_canvas()
+        except Exception:
+            pass
+        return True
 
     if _handle_preview_bottom_hint_click(self, canvas_x, canvas_y, event):
         return True
