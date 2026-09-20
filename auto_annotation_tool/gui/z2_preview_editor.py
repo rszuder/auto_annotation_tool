@@ -30,6 +30,7 @@ from .section_header_label import SectionHeaderLabel
 from . import z2_workflow_methods
 from . import z2_canvas_overlays
 from . import z2_canvas_interaction
+from . import z2_plate_gt_runtime
 from .z2_main_widgets import create_annotation_widgets
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
 from .z2_canvas_metrics_ui import (
@@ -233,6 +234,10 @@ def _on_preview_canvas_motion(self, event=None):
             except Exception:
                 pass
         return None
+    try:
+        z2_plate_gt_runtime.refresh_plate_gt_editor(self)
+    except Exception:
+        pass
     self._sync_preview_canvas_cursor()
     return None
 

@@ -29,6 +29,7 @@ from .zoomable_canvas import ZoomableCanvas
 from .section_header_label import SectionHeaderLabel
 from . import z2_workflow_methods
 from . import z2_canvas_overlays
+from . import z2_plate_gt_runtime
 from .z2_main_widgets import create_annotation_widgets
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
 from .z2_canvas_metrics_ui import (
@@ -236,6 +237,10 @@ def _compute_preview_plate_focus_view_state(self, polygon: list[tuple[float, flo
 
 def _refresh_preview_plate_context_overlays(self) -> None:
     """Refresh lightweight fullscreen overlays after changing image/plate context."""
+    try:
+        z2_plate_gt_runtime.refresh_plate_gt_editor(self)
+    except Exception:
+        pass
     try:
         self._refresh_preview_legend_backdrop()
     except Exception:
