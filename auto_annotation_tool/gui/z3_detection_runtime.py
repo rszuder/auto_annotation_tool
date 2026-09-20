@@ -883,7 +883,13 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     true_texts = self._get_preview_expected_texts(local_meta[pid])
                 except Exception:
                     true_texts = []
-                if not true_texts:
+                try:
+                    uses_plate_gt_contract = bool(
+                        self._preview_uses_plate_gt_contract(local_meta[pid])
+                    )
+                except Exception:
+                    uses_plate_gt_contract = False
+                if not true_texts and not uses_plate_gt_contract:
                     true_texts = self._get_true_texts_from_filename(source_image)
 
                 try:

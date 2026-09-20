@@ -11,6 +11,7 @@ from .z3_metadata_cache import mark_preview_metadata_changed, PreviewMetadataAut
 import tkinter as tk
 
 from ..config import logger
+from ..plate_ground_truth import normalize_plate_ground_truth_text
 
 
 def _is_exportable_character_record(self, rec) -> bool:
@@ -39,8 +40,60 @@ def _derive_preview_status_from_characters(self, chars) -> str:
             valid_count += 1
     return "perfect" if valid_count == len(chars) and valid_count > 0 else "needs_fix"
 
+def _get_preview_ground_truth_text(self, data: dict | None = None) -> str:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if not isinstance(source_data, dict):
+        return ""
+
+    direct = normalize_plate_ground_truth_text(
+        source_data.get("ground_truth_text")
+    )
+    if direct:
+        return direct
+
+    attrs = source_data.get("plate_attributes")
+    if isinstance(attrs, dict):
+        nested = normalize_plate_ground_truth_text(
+            attrs.get("ground_truth_text")
+        )
+        if nested:
+            return nested
+    return ""
+
+
+def _preview_uses_plate_gt_contract(self, data: dict | None = None) -> bool:
+    source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if not isinstance(source_data, dict):
+        return False
+
+    if self._get_preview_ground_truth_text(source_data):
+        return True
+
+    for field_name in (
+        "source_annotation_id",
+        "plate_annotation_id",
+        "ground_truth_source",
+    ):
+        if str(source_data.get(field_name, "") or "").strip():
+            return True
+
+    attrs = source_data.get("plate_attributes")
+    if isinstance(attrs, dict):
+        for field_name in (
+            "plate_annotation_id",
+            "ground_truth_source",
+            "ground_truth_text",
+        ):
+            if str(attrs.get(field_name, "") or "").strip():
+                return True
+
+    return False
+
+
 def _preview_has_reference_text_source(self, data: dict | None = None) -> bool:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if self._preview_uses_plate_gt_contract(source_data):
+        return True
     return any(bool(value) for value in self._get_preview_reference_text_values(source_data))
 
 def _get_preview_reference_text_values(self, data: dict | None = None) -> list[str]:
@@ -99,6 +152,8 @@ def _merge_preview_expected_text_values(*groups) -> list[str]:
 
 def _get_preview_filename_expected_texts(self, data: dict | None = None) -> list[str]:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+    if self._preview_uses_plate_gt_contract(source_data):
+        return []
     if isinstance(source_data, dict) and source_data.get("source_expected_text_source") == "mobile_crop_human_review":
         return []
     normalized = []
@@ -141,6 +196,11 @@ def _should_merge_filename_expected_texts(data: dict | None, explicit_values: li
 
 def _get_preview_expected_texts(self, data: dict | None = None) -> list[str]:
     source_data = data if isinstance(data, dict) else self._get_preview_active_data(create=False)
+
+    if self._preview_uses_plate_gt_contract(source_data):
+        ground_truth_text = self._get_preview_ground_truth_text(source_data)
+        return [ground_truth_text] if ground_truth_text else []
+
     filename_values = self._get_preview_filename_expected_texts(source_data if isinstance(source_data, dict) else None)
     if isinstance(source_data, dict):
         for field_name in ("source_expected_texts", "expected_texts", "ground_truth_texts"):
@@ -182,6 +242,9 @@ def _resolve_preview_expected_text_for_crop(self, data: dict | None = None, char
     if not isinstance(source_chars, list):
         source_chars = []
 
+    uses_gt_contract = self._preview_uses_plate_gt_contract(
+        source_data if isinstance(source_data, dict) else None
+    )
     expected_texts = self._get_preview_expected_texts(source_data if isinstance(source_data, dict) else None)
     expected_texts = [
         str(text or "").strip().upper()
@@ -229,6 +292,7 @@ def _resolve_preview_expected_text_for_crop(self, data: dict | None = None, char
         "text_resolved": bool(matched_text),
         "count_resolved": bool(count_resolved),
         "ambiguous": bool(expected_lengths and not count_resolved),
+        "expected_source": ("ground_truth" if uses_gt_contract else "legacy"),
         "resolution": resolution,
     }
 

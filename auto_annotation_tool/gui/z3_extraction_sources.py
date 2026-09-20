@@ -960,15 +960,22 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
     # Nowy kontrakt: GT należy do konkretnego polygonu Z2.
     # Parser nazwy pozostaje wyłącznie jako zgodność wsteczna dla starych danych,
     # które nie mają ground_truth_text.
-    explicit_gt_flags = []
+    contract_flags = []
     for detection in ordered_plates:
         attrs = dict(getattr(detection, "attributes", {}) or {})
-        explicit_gt_flags.append(
-            bool(normalize_plate_ground_truth_text(attrs.get("ground_truth_text")))
+        gt_text = normalize_plate_ground_truth_text(
+            attrs.get("ground_truth_text")
+        )
+        contract_flags.append(
+            bool(
+                gt_text
+                or str(attrs.get("plate_annotation_id") or "").strip()
+                or str(attrs.get("ground_truth_source") or "").strip()
+            )
         )
 
     needs_legacy_filename_gt = bool(
-        ordered_plates and not all(explicit_gt_flags)
+        ordered_plates and not all(contract_flags)
     )
     expected_tokens = (
         host._extract_source_plate_tokens_from_filename(image_name)
@@ -992,9 +999,15 @@ def prepare_plate_cut_detections_for_source(host, image_name: str, plates: list)
         gt_text = normalize_plate_ground_truth_text(
             attributes.get("ground_truth_text")
         )
-        if gt_text:
-            attributes["ground_truth_text"] = gt_text
-            attributes.setdefault("ground_truth_source", "manual_z2")
+        uses_gt_contract = bool(
+            gt_text
+            or str(attributes.get("plate_annotation_id") or "").strip()
+            or str(attributes.get("ground_truth_source") or "").strip()
+        )
+        if uses_gt_contract:
+            if gt_text:
+                attributes["ground_truth_text"] = gt_text
+                attributes.setdefault("ground_truth_source", "manual_z2")
             attributes.pop("source_expected_text", None)
             attributes.pop("source_expected_texts", None)
             attributes.pop("source_expected_text_source", None)
@@ -1028,7 +1041,19 @@ def backfill_preview_expected_texts_from_sources(host, metadata_map: dict) -> bo
             data.get("ground_truth_text")
             or (attrs.get("ground_truth_text") if isinstance(attrs, dict) else "")
         )
-        if explicit_gt:
+        uses_gt_contract = bool(
+            explicit_gt
+            or str(data.get("source_annotation_id") or "").strip()
+            or str(data.get("ground_truth_source") or "").strip()
+            or (
+                isinstance(attrs, dict)
+                and (
+                    str(attrs.get("plate_annotation_id") or "").strip()
+                    or str(attrs.get("ground_truth_source") or "").strip()
+                )
+            )
+        )
+        if uses_gt_contract:
             continue
         source_image = str(
             data.get("source_image")

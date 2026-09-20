@@ -1258,6 +1258,8 @@ class CharacterAnnotationTab:
 
     _derive_preview_status_from_characters = z3_preview_metadata_runtime._derive_preview_status_from_characters
     _preview_has_reference_text_source = z3_preview_metadata_runtime._preview_has_reference_text_source
+    _get_preview_ground_truth_text = z3_preview_metadata_runtime._get_preview_ground_truth_text
+    _preview_uses_plate_gt_contract = z3_preview_metadata_runtime._preview_uses_plate_gt_contract
     _get_preview_reference_text_values = z3_preview_metadata_runtime._get_preview_reference_text_values
     _get_preview_filename_expected_texts = z3_preview_metadata_runtime._get_preview_filename_expected_texts
     _get_preview_expected_texts = z3_preview_metadata_runtime._get_preview_expected_texts
