@@ -376,6 +376,45 @@ def _update_preview_edit_status(self, *args, **kwargs):
     return z2_workflow_methods._update_preview_edit_status(self, *args, **kwargs)
 
 
+def _clear_preview_selection_transition_overlay(self) -> None:
+    """Remove image-owned overlay immediately when switching preview images.
+
+    Selection rendering is intentionally debounced for responsiveness. Without
+    this clear, polygons from the previous image remain visible during that
+    short debounce window and can appear on top of the next preview.
+    """
+    canvas = getattr(self, "preview_canvas", None)
+    if canvas is not None:
+        try:
+            canvas.delete("preview_overlay")
+        except Exception:
+            pass
+
+    try:
+        z2_plate_gt_inline.hide_inline_plate_gt_editors(
+            self,
+            destroy=False,
+        )
+    except Exception:
+        pass
+
+    for attr_name in (
+        "_preview_fullscreen_toggle_bbox",
+        "_plate_gt_mode_toggle_bbox",
+        "_z2_gt_pack_status_bbox",
+        "_preview_bottom_hint_bbox",
+        "_preview_bottom_hint_move_bbox",
+        "_preview_bottom_hint_collapse_bbox",
+        "_preview_bottom_hint_restore_bbox",
+        "_preview_super_correction_badge_bbox",
+        "_preview_super_correction_handle_bbox",
+    ):
+        try:
+            setattr(self, attr_name, None)
+        except Exception:
+            pass
+
+
 def _load_current_preview_selection(
     self,
     reset_view: bool = True,
@@ -399,6 +438,7 @@ def _load_current_preview_selection(
         return
 
     if selection_changed:
+        _clear_preview_selection_transition_overlay(self)
         try:
             self.preview_canvas.grab_release()
         except Exception:
@@ -1645,6 +1685,14 @@ def _draw_preview_plate_combo_overlay(
             float(y2),
         )
 
+        try:
+            canvas.addtag_withtag(
+                getattr(canvas, "VIEWPORT_FIXED_TAG", "preview_viewport_fixed"),
+                "preview_plate_combo_overlay",
+            )
+        except Exception:
+            pass
+
         canvas.tag_raise("preview_plate_combo_overlay")
         canvas.tag_raise("preview_gt_pack_status")
         canvas.tag_raise("preview_gt_mode_toggle")
@@ -2821,17 +2869,43 @@ def _commit_new_preview_polygon(self):
     new_det.attributes["manual_source"] = "preview"
     ann.detections.append(new_det)
     try:
+        # Adding a polygon mutates an existing annotation in place. Bump the
+        # shared counter version even though this hot path intentionally avoids
+        # the heavyweight full runtime-cache invalidation.
+        self._preview_counter_version = (
+            int(getattr(self, "_preview_counter_version", 0) or 0) + 1
+        )
+        counter_version = int(self._preview_counter_version)
         count_cache = getattr(self, "_current_preview_plate_count_cache", None)
         if isinstance(count_cache, dict):
+            try:
+                image_approved = bool(
+                    self._preview_annotation_is_explicitly_approved(ann)
+                )
+            except Exception:
+                image_approved = False
+
             if not had_plate_before:
                 count_cache["images_with_plates"] = max(
                     0,
                     int(count_cache.get("images_with_plates", 0) or 0) + 1,
                 )
+                if image_approved:
+                    count_cache["approved_images"] = max(
+                        0,
+                        int(count_cache.get("approved_images", 0) or 0) + 1,
+                    )
+
             count_cache["total_plates"] = max(
                 0,
                 int(count_cache.get("total_plates", 0) or 0) + 1,
             )
+            if image_approved:
+                count_cache["approved_plates"] = max(
+                    0,
+                    int(count_cache.get("approved_plates", 0) or 0) + 1,
+                )
+            count_cache["counter_version"] = counter_version
             self._current_preview_plate_count_cache = count_cache
     except Exception:
         pass
@@ -3646,6 +3720,14 @@ def on_zoomable_canvas_drag(self, canvas: ZoomableCanvas, event):
     except Exception:
         pass
 
+    # Inline GT cards are real Tk widgets. During plain canvas pan,
+    # buffered canvas.move() is cheap, but moving/restyling Tk widgets
+    # in parallel causes visible stutter in campaign/char mode.
+    try:
+        z2_plate_gt_inline.relocate_inline_plate_gt_editors(self, canvas=canvas)
+    except Exception:
+        pass
+
     canvas_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
     canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
     if _drag_preview_bottom_hint(self, event):
@@ -4207,6 +4289,7 @@ def _on_preview_select(self, event, *, defer_render: bool = True):
     self._preview_session_restore_index = idx
     self._preview_session_restore_filename = str(getattr(self.current_annotations[idx], "filename", "") or "")
     if defer_render:
+        _clear_preview_selection_transition_overlay(self)
         self._schedule_preview_selection_render(
             idx,
             previous_idx,

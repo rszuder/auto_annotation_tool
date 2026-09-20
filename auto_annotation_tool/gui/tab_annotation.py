@@ -2762,6 +2762,8 @@ class AnnotationTab:
         return z2_canvas_interaction.on_zoomable_canvas_should_block_pan(self, *args, **kwargs)
     def on_zoomable_canvas_zoom(self, *args, **kwargs):
         return z2_canvas_interaction.on_zoomable_canvas_zoom(self, *args, **kwargs)
+    def on_zoomable_canvas_pan_applied(self, *args, **kwargs):
+        return z2_canvas_interaction.on_zoomable_canvas_pan_applied(self, *args, **kwargs)
     def on_zoomable_canvas_final_quality_delay_ms(self, *args, **kwargs):
         return z2_canvas_interaction.on_zoomable_canvas_final_quality_delay_ms(self, *args, **kwargs)
     def _get_preview_canvas_cursor(self, *args, **kwargs):

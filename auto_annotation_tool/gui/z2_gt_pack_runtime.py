@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from ..campaign_manager import CAMPAIGN
@@ -22,6 +23,7 @@ PRODUCER = "auto_annotation_tool.desktop.z2"
 OUTBOX_SCHEMA = "alpr.gt.sync_outbox.v1"
 MOUNTS_SCHEMA = "alpr.gt.mounts.v1"
 PROJECT_REF_PREFIX = "project://"
+GT_PACK_STATUS_IO_CACHE_TTL_S = 0.45
 
 
 def _safe_path(value):
@@ -338,24 +340,51 @@ def set_gt_pack_mounts(
         else ""
     )
     host._z2_gt_mount_config_loaded = True
+    invalidate_gt_pack_status_cache(host)
     if persist:
         _persist_mount_payload(host)
 
 
-def get_gt_pack_status(host) -> dict:
-    _ensure_mount_config_loaded(host)
-    sources = get_configured_source_pack_paths(host)
-    working = get_working_gt_pack_path(
-        host,
-        create_parent=False,
-    )
+def invalidate_gt_pack_status_cache(host) -> None:
+    host._z2_gt_pack_status_io_cache = None
 
+
+def _get_gt_pack_status_io_snapshot(host) -> dict:
+    now = time.monotonic()
+    cached = getattr(host, "_z2_gt_pack_status_io_cache", None)
+    if isinstance(cached, dict):
+        try:
+            age = now - float(cached.get("created_at", 0.0) or 0.0)
+        except Exception:
+            age = GT_PACK_STATUS_IO_CACHE_TTL_S + 1.0
+        if 0.0 <= age <= GT_PACK_STATUS_IO_CACHE_TTL_S:
+            return dict(cached)
+
+    sources = get_configured_source_pack_paths(host)
+    working = get_working_gt_pack_path(host, create_parent=False)
     try:
-        pending_count = len(
-            dict(_load_outbox(host).get("items", {}) or {})
-        )
+        pending_count = len(dict(_load_outbox(host).get("items", {}) or {}))
     except Exception:
         pending_count = 0
+
+    snapshot = {
+        "created_at": now,
+        "source_count": int(len(sources)),
+        "working_path": str(working or ""),
+        "working_enabled": bool(working is not None),
+        "pending_count": int(pending_count),
+    }
+    host._z2_gt_pack_status_io_cache = dict(snapshot)
+    return snapshot
+
+
+def get_gt_pack_status(host) -> dict:
+    _ensure_mount_config_loaded(host)
+    io_state = _get_gt_pack_status_io_snapshot(host)
+    source_count = int(io_state.get("source_count", 0) or 0)
+    working_path = str(io_state.get("working_path", "") or "")
+    working_enabled = bool(io_state.get("working_enabled", False))
+    pending_count = int(io_state.get("pending_count", 0) or 0)
 
     report = dict(
         getattr(host, "_z2_gt_last_restore_report", {}) or {}
@@ -364,7 +393,7 @@ def get_gt_pack_status(host) -> dict:
         list(report.get("conflicts", []) or [])
     )
 
-    enabled = bool(sources or working is not None)
+    enabled = bool(source_count > 0 or working_enabled)
     if conflict_count > 0:
         tone = "conflict"
         text = f"PACK C{conflict_count}"
@@ -380,8 +409,8 @@ def get_gt_pack_status(host) -> dict:
 
     return {
         "enabled": enabled,
-        "source_count": len(sources),
-        "working_path": str(working or ""),
+        "source_count": int(source_count),
+        "working_path": working_path,
         "pending_count": int(pending_count),
         "conflict_count": int(conflict_count),
         "tone": tone,
@@ -821,6 +850,7 @@ def _write_outbox(host, payload):
             path.unlink(missing_ok=True)
         except Exception:
             pass
+        invalidate_gt_pack_status_cache(host)
         return
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -835,6 +865,7 @@ def _write_outbox(host, payload):
         encoding="utf-8",
     )
     os.replace(temp, path)
+    invalidate_gt_pack_status_cache(host)
 
 
 def _outbox_key(item):

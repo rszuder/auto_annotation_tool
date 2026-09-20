@@ -2612,6 +2612,12 @@ def _schedule_preview_resume_persist(
 
 
 def _invalidate_preview_runtime_caches(self) -> None:
+    # Monotonic content token shared by counter/drawer caches. Mutating
+    # detections or GT inside an existing ImageAnnotation does not change the
+    # current_annotations list identity, so list id/length alone is unsafe.
+    self._preview_counter_version = (
+        int(getattr(self, "_preview_counter_version", 0) or 0) + 1
+    )
     self._preview_any_auto_in_run_cache = None
     self._preview_list_summary_cache = None
     self._preview_list_render_state_cache = None

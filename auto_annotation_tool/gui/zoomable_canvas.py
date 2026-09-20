@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 class ZoomableCanvas(tk.Canvas):
     """Canvas z obsługą zoom'u (kółko myszy) i pan'u (LPM + przeciąganie)."""
+
+    VIEWPORT_FIXED_TAG = "preview_viewport_fixed"
     
     def __init__(self, parent, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
@@ -857,7 +859,12 @@ class ZoomableCanvas(tk.Canvas):
         if abs(applied_dx) < 1e-9 and abs(applied_dy) < 1e-9:
             return
 
-        if not self._apply_buffered_pan_move(applied_dx, applied_dy):
+        if self._apply_buffered_pan_move(applied_dx, applied_dy):
+            self._delegate_interaction(
+                "pan_applied",
+                SimpleNamespace(dx=float(applied_dx), dy=float(applied_dy)),
+            )
+        else:
             self._schedule_deferred_display(delay_ms=16, interaction_fast=True)
     
     def _on_pan_release(self, event):
@@ -1073,6 +1080,13 @@ class ZoomableCanvas(tk.Canvas):
             return False
 
         try:
+            viewport_before_x = float(self.canvasx(0.0))
+            viewport_before_y = float(self.canvasy(0.0))
+        except Exception:
+            viewport_before_x = 0.0
+            viewport_before_y = 0.0
+
+        try:
             self.move("all", float(dx), float(dy))
         except Exception:
             return False
@@ -1093,6 +1107,25 @@ class ZoomableCanvas(tk.Canvas):
                 origin_y + full_height,
             )
         )
+
+        try:
+            viewport_after_x = float(self.canvasx(0.0))
+            viewport_after_y = float(self.canvasy(0.0))
+        except Exception:
+            viewport_after_x = viewport_before_x
+            viewport_after_y = viewport_before_y
+
+        fixed_dx = viewport_after_x - viewport_before_x - float(dx)
+        fixed_dy = viewport_after_y - viewport_before_y - float(dy)
+        try:
+            self.move(
+                self.VIEWPORT_FIXED_TAG,
+                float(fixed_dx),
+                float(fixed_dy),
+            )
+        except Exception:
+            pass
+
         self._pan_buffered_move_active = True
         return True
 

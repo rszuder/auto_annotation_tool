@@ -155,6 +155,24 @@ def _editor_store(host) -> dict:
     return store
 
 
+def suspend_inline_plate_gt_editors(host) -> None:
+    # Real Tk widgets are expensive to place/lift/restyle every animation frame.
+    if bool(getattr(host, "_plate_gt_inline_interaction_suspended", False)):
+        return
+
+    host._plate_gt_inline_interaction_suspended = True
+    for record in list(_editor_store(host).values()):
+        if not isinstance(record, dict):
+            continue
+        shell = record.get("shell")
+        if shell is None:
+            continue
+        try:
+            shell.place_forget()
+        except Exception:
+            pass
+
+
 def _after_store(host) -> dict:
     store = getattr(host, "_plate_gt_inline_save_after", None)
     if not isinstance(store, dict):
@@ -796,6 +814,58 @@ def _card_overlaps_plate(card_x, card_y, plate_bbox, margin=5.0) -> bool:
     )
 
 
+def _plate_bbox_meaningfully_visible(
+    canvas_width,
+    canvas_height,
+    plate_bbox,
+    *,
+    min_visible_ratio: float = 0.10,
+) -> bool:
+    """Return True when enough of this plate is actually inside the viewport.
+
+    Ratio uses the smaller area of (plate bbox, viewport). That keeps a plate
+    visible when it is larger than the viewport at deep zoom, while rejecting
+    tiny edge slivers from unrelated/off-screen plates.
+    """
+    try:
+        px1, py1, px2, py2 = [float(v) for v in plate_bbox]
+        viewport_w = max(1.0, float(canvas_width))
+        viewport_h = max(1.0, float(canvas_height))
+    except Exception:
+        return False
+
+    if px2 < px1:
+        px1, px2 = px2, px1
+    if py2 < py1:
+        py1, py2 = py2, py1
+
+    plate_w = max(0.0, px2 - px1)
+    plate_h = max(0.0, py2 - py1)
+    if plate_w <= 0.0 or plate_h <= 0.0:
+        return False
+
+    ix1 = max(0.0, px1)
+    iy1 = max(0.0, py1)
+    ix2 = min(viewport_w, px2)
+    iy2 = min(viewport_h, py2)
+    intersection_w = max(0.0, ix2 - ix1)
+    intersection_h = max(0.0, iy2 - iy1)
+
+    # Do not keep a card alive for a one-pixel strip at the edge.
+    if intersection_w < 3.0 or intersection_h < 3.0:
+        return False
+
+    intersection_area = intersection_w * intersection_h
+    plate_area = plate_w * plate_h
+    viewport_area = viewport_w * viewport_h
+    reference_area = max(1.0, min(plate_area, viewport_area))
+
+    return bool(
+        (intersection_area / reference_area)
+        >= float(min_visible_ratio)
+    )
+
+
 def _resolve_non_overlapping_card_position(
     canvas_width,
     canvas_height,
@@ -882,7 +952,13 @@ def _resolve_non_overlapping_card_position(
         ):
             return int(card_x), int(card_y)
 
-    return None
+    fallback_x, fallback_y = _clamp_card_position(
+        canvas_width,
+        canvas_height,
+        requested_x,
+        requested_y,
+    )
+    return int(fallback_x), int(fallback_y)
 
 
 def _draw_tether(
@@ -939,6 +1015,137 @@ def _draw_tether(
         pass
 
 
+def relocate_inline_plate_gt_editors(
+    host,
+    *,
+    canvas=None,
+) -> None:
+    """Reposition existing GT cards only; no value/style refresh."""
+    canvas = canvas or getattr(host, "preview_canvas", None)
+    if canvas is None:
+        return
+
+    try:
+        canvas.delete("preview_gt_tether")
+    except Exception:
+        pass
+
+    if not bool(getattr(host, "_plate_gt_inline_enabled", False)):
+        hide_inline_plate_gt_editors(host, destroy=False)
+        return
+
+    ann = host._get_preview_annotation()
+    if ann is None:
+        hide_inline_plate_gt_editors(host, destroy=False)
+        return
+
+    try:
+        plates = list(host._get_plate_detections(ann) or [])
+    except Exception:
+        plates = []
+
+    canvas_width = max(1, int(canvas.winfo_width() or 1))
+    canvas_height = max(1, int(canvas.winfo_height() or 1))
+    viewport_left, viewport_top, _, _ = canvas_viewport_bounds(canvas)
+
+    for plate_idx, det in enumerate(plates):
+        key = _key_for(det)
+        record = _editor_store(host).get(key)
+        if not isinstance(record, dict):
+            continue
+
+        polygon = list(host._detection_polygon(det) or [])
+        if len(polygon) < 4:
+            continue
+
+        record["ann"] = ann
+        record["det"] = det
+        record["plate_idx"] = int(plate_idx)
+
+        canvas_points = [
+            canvas.image_to_canvas_coords(px, py)
+            for px, py in polygon
+        ]
+        xs = [
+            float(point[0]) - float(viewport_left)
+            for point in canvas_points
+        ]
+        ys = [
+            float(point[1]) - float(viewport_top)
+            for point in canvas_points
+        ]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        if not _plate_bbox_meaningfully_visible(
+            canvas_width,
+            canvas_height,
+            (min_x, min_y, max_x, max_y),
+        ):
+            shell = record.get("shell")
+            if shell is not None:
+                try:
+                    shell.place_forget()
+                except Exception:
+                    pass
+            continue
+        plate_center_x = (min_x + max_x) / 2.0
+        plate_center_y = (min_y + max_y) / 2.0
+
+        base_x = plate_center_x - (CARD_WIDTH / 2.0)
+        base_y = min_y - CARD_HEIGHT - CARD_GAP
+        if base_y < 2:
+            base_y = max_y + CARD_GAP
+
+        offset = _offset_store(host).get(key, (0.0, 0.0))
+        try:
+            offset_x = float(offset[0])
+            offset_y = float(offset[1])
+        except Exception:
+            offset_x = 0.0
+            offset_y = 0.0
+
+        card_x, card_y = _resolve_non_overlapping_card_position(
+            canvas_width,
+            canvas_height,
+            base_x + offset_x,
+            base_y + offset_y,
+            (min_x, min_y, max_x, max_y),
+        )
+
+        record["base_x"] = float(base_x)
+        record["base_y"] = float(base_y)
+        record["card_x"] = float(card_x)
+        record["card_y"] = float(card_y)
+
+        shell = record.get("shell")
+        if shell is not None:
+            try:
+                shell.place(
+                    x=int(card_x),
+                    y=int(card_y),
+                    width=CARD_WIDTH,
+                    height=CARD_HEIGHT,
+                )
+                shell.lift()
+            except Exception:
+                pass
+
+        _draw_tether(
+            host,
+            canvas,
+            float(card_x) + float(viewport_left),
+            float(card_y) + float(viewport_top),
+            plate_center_x + float(viewport_left),
+            plate_center_y + float(viewport_top),
+        )
+
+    try:
+        host._plate_gt_inline_interaction_suspended = False
+    except Exception:
+        pass
+
+
 def render_inline_plate_gt_editors(
     host,
     canvas,
@@ -951,6 +1158,12 @@ def render_inline_plate_gt_editors(
         canvas.delete("preview_gt_tether")
     except Exception:
         pass
+
+    if light_overlay:
+        relocate_inline_plate_gt_editors(host, canvas=canvas)
+        return
+
+    host._plate_gt_inline_interaction_suspended = False
 
     if not gt_mode_enabled(host):
         hide_inline_plate_gt_editors(host, destroy=False)
@@ -1032,6 +1245,17 @@ def render_inline_plate_gt_editors(
         ys = [value - viewport_top for value in canvas_ys]
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
+
+        if not _plate_bbox_meaningfully_visible(
+            canvas_width,
+            canvas_height,
+            (min_x, min_y, max_x, max_y),
+        ):
+            try:
+                shell.place_forget()
+            except Exception:
+                pass
+            continue
         plate_center_x = (min_x + max_x) / 2.0
         plate_center_y = (min_y + max_y) / 2.0
 

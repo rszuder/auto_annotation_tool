@@ -916,6 +916,9 @@ def _start_plate_annotation_package_export(self, *args, **kwargs):
 
 def _get_current_preview_plate_count_state(self) -> dict:
     annotations = list(getattr(self, "current_annotations", []) or [])
+    counter_version = int(
+        getattr(self, "_preview_counter_version", 0) or 0
+    )
     approved_set = getattr(self, "_preview_approved_filenames", None)
     campaign_approved_set = getattr(self, "_campaign_pending_approved_filenames", None)
     approval_cache_token = (
@@ -930,6 +933,7 @@ def _get_current_preview_plate_count_state(self) -> dict:
         isinstance(cache, dict)
         and int(cache.get("annotations_id", -1) or -1) == int(id(getattr(self, "current_annotations", None)))
         and int(cache.get("total_images", -1) or -1) == int(len(annotations))
+        and int(cache.get("counter_version", -1) or -1) == int(counter_version)
         and tuple(cache.get("approval_cache_token", ())) == approval_cache_token
     ):
         return cache
@@ -962,6 +966,7 @@ def _get_current_preview_plate_count_state(self) -> dict:
     cache = {
         "annotations_id": int(id(getattr(self, "current_annotations", None))),
         "total_images": int(len(annotations)),
+        "counter_version": int(counter_version),
         "approval_cache_token": approval_cache_token,
         "images_with_plates": int(images_with_plates),
         "total_plates": int(total_plates),

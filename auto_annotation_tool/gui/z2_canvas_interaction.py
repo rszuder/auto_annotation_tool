@@ -1805,6 +1805,12 @@ def _set_preview_fullscreen(self, active: bool):
             except Exception:
                 pass
         self._preview_fullscreen_active = True
+        # Fullscreen changes the canvas geometry after the current image
+        # has already been rendered. Force a fit only for this layout
+        # transition so the first image is centered like subsequent ones.
+        self._preview_force_fit_after_resize = True
+        self._preview_polygon_focus_restore_state = None
+        self._preview_focus_target = None
         self._preview_controls_legend_fullscreen_expanded = False
         self._preview_controls_legend_current_width = 0.0
         self._preview_controls_legend_current_height = 0.0
@@ -2338,6 +2344,23 @@ def on_zoomable_canvas_zoom(self, canvas: ZoomableCanvas, event):
         "zoom",
         f"level={float(getattr(canvas, 'zoom_level', 0.0) or 0.0):.3f} at=({float(getattr(event, 'x', 0.0)):.1f},{float(getattr(event, 'y', 0.0)):.1f})"
     )
+    return False
+
+
+def on_zoomable_canvas_pan_applied(
+    self,
+    canvas: ZoomableCanvas,
+    event,
+):
+    if canvas is not self.preview_canvas:
+        return False
+    try:
+        z2_plate_gt_inline.relocate_inline_plate_gt_editors(
+            self,
+            canvas=canvas,
+        )
+    except Exception:
+        pass
     return False
 
 
