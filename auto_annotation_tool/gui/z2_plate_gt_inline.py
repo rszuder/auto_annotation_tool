@@ -183,6 +183,18 @@ def save_inline_plate_layout_gt_value(
         det.attributes = previous_attributes
         return False, get_plate_layout_gt(previous_attributes)
 
+    try:
+        z2_gt_pack_runtime.sync_plate_layout_after_xml_save(
+            host,
+            ann,
+            det,
+            normalized,
+            retry_pending=True,
+        )
+    except Exception:
+        # XML remains authoritative locally; GT Pack sync has its own outbox.
+        pass
+
     return True, normalized
 
 

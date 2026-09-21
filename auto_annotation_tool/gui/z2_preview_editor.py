@@ -457,6 +457,16 @@ def _load_current_preview_selection(
         )
 
     try:
+        gt_hydrate = z2_gt_pack_runtime.hydrate_annotations_from_gt_pack(self, ann)
+    except Exception as exc:
+        gt_hydrate = {
+            "changed": False,
+            "created": 0,
+            "conflicts": [],
+            "error": str(exc),
+        }
+
+    try:
         gt_restore = z2_gt_pack_runtime.restore_gt_for_annotation(self, ann)
     except Exception as exc:
         gt_restore = {
@@ -464,6 +474,16 @@ def _load_current_preview_selection(
             "conflicts": [],
             "error": str(exc),
         }
+
+    if bool(gt_hydrate.get("changed")):
+        gt_restore["changed"] = True
+    gt_restore["hydrated"] = int(gt_hydrate.get("created", 0) or 0)
+    gt_restore["conflicts"] = (
+        list(gt_hydrate.get("conflicts", []) or [])
+        + list(gt_restore.get("conflicts", []) or [])
+    )
+    if gt_hydrate.get("error") and not gt_restore.get("error"):
+        gt_restore["error"] = gt_hydrate.get("error")
 
     self._z2_gt_last_restore_report = dict(gt_restore or {})
 

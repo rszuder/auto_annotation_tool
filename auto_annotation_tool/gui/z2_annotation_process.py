@@ -4666,6 +4666,18 @@ def _switch_annotation_input_dir(self, input_dir: Path, *, show_hint: bool = Tru
     if not self._ensure_preview_edits_saved("zmiana puli obrazow Z2"):
         return False
 
+    if free_mode_context:
+        try:
+            from . import z2_gt_companion_flow
+
+            z2_gt_companion_flow.prepare_free_mode_gt_binding(
+                self,
+                resolved_input_dir,
+                parent=getattr(self, "frame", None),
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udało się przygotować GT companion dla free mode: {exc}")
+
     defer_heavy_source_refresh = bool(free_mode_context and current_route == "auto")
 
     if free_mode_context:

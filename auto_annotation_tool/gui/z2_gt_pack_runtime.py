@@ -9,14 +9,24 @@ from pathlib import Path
 
 from ..campaign_manager import CAMPAIGN
 from ..config import SESSION, logger
-from ..gt_pack import ALPRGTPack, fingerprint_image, normalize_polygon
+from ..gt_pack import (
+    ALPRGTPack,
+    denormalize_polygon,
+    fingerprint_image,
+    normalize_polygon,
+)
+from ..data_models import Detection
 from ..plate_ground_truth import (
     GROUND_TRUTH_SOURCE_MANUAL_Z2,
     PLATE_ANNOTATION_ID_ATTR,
     ensure_plate_detection_contract,
     get_plate_ground_truth,
+    get_plate_layout_gt,
+    has_explicit_plate_layout_gt,
     normalize_plate_ground_truth_text,
+    normalize_plate_layout_gt,
     set_plate_ground_truth,
+    set_plate_layout_gt,
 )
 
 PRODUCER = "auto_annotation_tool.desktop.z2"
@@ -209,18 +219,39 @@ def _persist_mount_payload(host) -> None:
         logger.debug("Nie udało się zapisać mountów GT Pack: %s", exc)
 
 
-def _ensure_mount_config_loaded(host) -> None:
-    """Load persisted mounts once without clobbering explicit runtime config.
+def _mount_context_key() -> str:
+    project_root = _active_project_root()
+    if project_root is None:
+        return "free"
+    return f"project:{_path_key(project_root)}"
 
-    Tests, import flows and future callers may deliberately inject
-    ``_z2_gt_pack_source_paths`` / ``_z2_gt_working_pack_path`` before the
-    persistence layer is touched. A non-empty runtime value is authoritative
-    for that host instance. ``set_gt_pack_mounts()`` marks even an intentionally
-    empty configuration as loaded, so an explicit "disable all" remains
-    distinguishable from a fresh host that should read persisted settings.
+
+def _ensure_mount_config_loaded(host) -> None:
+    """Load persisted manual mounts for the current project/free context.
+
+    The previous implementation cached mounts for the lifetime of AnnotationTab,
+    which allowed a project switch to retain another project's PACK state.
+    Explicit values injected before the first load remain authoritative, while a
+    context switch always reloads the proper project/session payload.
     """
-    if bool(getattr(host, "_z2_gt_mount_config_loaded", False)):
+    context_key = _mount_context_key()
+    loaded = bool(getattr(host, "_z2_gt_mount_config_loaded", False))
+    loaded_key = str(getattr(host, "_z2_gt_mount_context_key", "") or "")
+    # Backward compatibility: callers/tests from the pre-context runtime may
+    # mark the payload as loaded without recording a context key. Adopt the
+    # current context once instead of discarding an explicitly injected setup.
+    if loaded and not loaded_key:
+        host._z2_gt_mount_context_key = context_key
         return
+    if loaded and loaded_key == context_key:
+        return
+    if loaded and loaded_key != context_key:
+        host._z2_gt_pack_source_paths = []
+        host._z2_gt_working_pack_path = ""
+        host._z2_gt_resource_source_paths = []
+        host._z2_gt_resource_working_pack_path = ""
+        host._z2_gt_resource_key = ""
+        host._z2_gt_mount_config_loaded = False
 
     raw_sources = getattr(host, "_z2_gt_pack_source_paths", None)
     raw_working = getattr(host, "_z2_gt_working_pack_path", None)
@@ -246,6 +277,7 @@ def _ensure_mount_config_loaded(host) -> None:
             else ""
         )
         host._z2_gt_mount_config_loaded = True
+        host._z2_gt_mount_context_key = context_key
         return
 
     payload = _load_mount_payload(host)
@@ -258,6 +290,7 @@ def _ensure_mount_config_loaded(host) -> None:
         str(working) if working is not None else ""
     )
     host._z2_gt_mount_config_loaded = True
+    host._z2_gt_mount_context_key = context_key
 
 def get_configured_source_pack_paths(host) -> list[Path]:
     _ensure_mount_config_loaded(host)
@@ -276,6 +309,54 @@ def get_configured_source_pack_paths(host) -> list[Path]:
     return result
 
 
+def get_resource_source_pack_paths(host) -> list[Path]:
+    result = []
+    seen = set()
+    for raw in list(getattr(host, "_z2_gt_resource_source_paths", []) or []):
+        path = _safe_path(raw)
+        if path is None:
+            continue
+        key = _path_key(path)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def _get_all_source_pack_paths(host) -> list[Path]:
+    values = list(get_configured_source_pack_paths(host)) + list(get_resource_source_pack_paths(host))
+    result = []
+    seen = set()
+    for path in values:
+        key = _path_key(path)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(path)
+    return result
+
+
+def set_gt_resource_binding(
+    host,
+    *,
+    source_paths=None,
+    working_path=None,
+    resource_key: str = "",
+) -> None:
+    """Set non-global GT sources owned by the current image resource O."""
+    host._z2_gt_resource_source_paths = [
+        str(Path(path))
+        for path in list(source_paths or [])
+        if str(path or "").strip()
+    ]
+    host._z2_gt_resource_working_pack_path = (
+        str(Path(working_path))
+        if str(working_path or "").strip()
+        else ""
+    )
+    host._z2_gt_resource_key = str(resource_key or "").strip()
+    invalidate_gt_pack_status_cache(host)
+
+
 def get_working_gt_pack_path(
     host,
     *,
@@ -286,6 +367,10 @@ def get_working_gt_pack_path(
     explicit = _safe_path(
         getattr(host, "_z2_gt_working_pack_path", None)
     )
+    if explicit is None:
+        explicit = _safe_path(
+            getattr(host, "_z2_gt_resource_working_pack_path", None)
+        )
     if explicit is None:
         explicit = _default_project_working_pack(
             _active_project_root()
@@ -299,7 +384,7 @@ def get_working_gt_pack_path(
 
 def get_mounted_gt_pack_paths(host) -> list[Path]:
     _ensure_mount_config_loaded(host)
-    values = list(get_configured_source_pack_paths(host))
+    values = list(_get_all_source_pack_paths(host))
 
     working = get_working_gt_pack_path(
         host,
@@ -340,6 +425,7 @@ def set_gt_pack_mounts(
         else ""
     )
     host._z2_gt_mount_config_loaded = True
+    host._z2_gt_mount_context_key = _mount_context_key()
     invalidate_gt_pack_status_cache(host)
     if persist:
         _persist_mount_payload(host)
@@ -360,7 +446,7 @@ def _get_gt_pack_status_io_snapshot(host) -> dict:
         if 0.0 <= age <= GT_PACK_STATUS_IO_CACHE_TTL_S:
             return dict(cached)
 
-    sources = get_configured_source_pack_paths(host)
+    sources = _get_all_source_pack_paths(host)
     working = get_working_gt_pack_path(host, create_parent=False)
     try:
         pending_count = len(dict(_load_outbox(host).get("items", {}) or {}))
@@ -659,11 +745,247 @@ def _find_exact_geometry_candidates(mounted, *, image_id, normalized_points):
     return sorted(result.values(), key=lambda item: item["plate_id"])
 
 
+def _pack_layout_state(pack, plate_id):
+    resolver = getattr(pack, "resolve_plate_layout_gt", None)
+    if not callable(resolver):
+        return {"kind": "missing", "state": {}}
+    state = dict(resolver(plate_id) or {})
+    if state.get("conflict"):
+        return {"kind": "conflict", "state": state}
+    if not state.get("resolved"):
+        return {"kind": "missing", "state": state}
+    operation = str(state.get("operation") or "").strip().lower()
+    has_layout = bool(state.get("has_layout", False))
+    if operation == "clear" or not has_layout:
+        return {"kind": "clear", "layout": "", "state": state}
+    layout = normalize_plate_layout_gt(state.get("layout"), default="")
+    return {"kind": "set", "layout": layout, "state": state}
+
+
+def _resolve_same_plate_layout_across_packs(mounted, *, image_id, plate_id):
+    observations = []
+    for pack_path, pack in mounted:
+        plate = pack.get_plate(plate_id)
+        if not isinstance(plate, dict):
+            continue
+        if str(plate.get("image_id") or "").strip() != image_id:
+            observations.append({"pack": str(pack_path), "kind": "identity_conflict"})
+            continue
+        item = _pack_layout_state(pack, plate_id)
+        item["pack"] = str(pack_path)
+        observations.append(item)
+
+    if not observations:
+        return {"found": False, "conflict": False, "observations": []}
+    if any(item.get("kind") in {"conflict", "identity_conflict"} for item in observations):
+        return {
+            "found": True,
+            "conflict": True,
+            "reason": "mounted_pack_layout_conflict",
+            "observations": observations,
+        }
+
+    semantic = set()
+    for item in observations:
+        if item.get("kind") == "set":
+            semantic.add(("set", str(item.get("layout") or "")))
+        elif item.get("kind") == "clear":
+            semantic.add(("clear", ""))
+    if len(semantic) > 1:
+        return {
+            "found": True,
+            "conflict": True,
+            "reason": "mounted_pack_layout_semantic_conflict",
+            "observations": observations,
+        }
+    if not semantic:
+        return {"found": True, "conflict": False, "kind": "missing", "observations": observations}
+    operation, layout = next(iter(semantic))
+    return {
+        "found": True,
+        "conflict": False,
+        "kind": operation,
+        "layout": layout,
+        "observations": observations,
+    }
+
+
+def _collect_hydration_candidates(mounted, *, image_id):
+    by_plate = {}
+    conflicts = []
+    for pack_path, pack in mounted:
+        image = pack.get_image(image_id)
+        if not isinstance(image, dict):
+            continue
+        for raw_plate_id in list(image.get("plate_ids", []) or []):
+            plate_id = str(raw_plate_id or "").strip()
+            if not plate_id:
+                continue
+            plate = pack.get_plate(plate_id)
+            if not isinstance(plate, dict) or str(plate.get("image_id") or "").strip() != image_id:
+                conflicts.append({
+                    "plate_id": plate_id,
+                    "reason": "pack_plate_image_identity",
+                    "pack": str(pack_path),
+                })
+                continue
+            geometry = dict(pack.resolve_plate_geometry(plate_id) or {})
+            if geometry.get("conflict"):
+                conflicts.append({
+                    "plate_id": plate_id,
+                    "reason": "pack_geometry_conflict",
+                    "pack": str(pack_path),
+                })
+                continue
+            if not geometry.get("resolved"):
+                continue
+            points = list(geometry.get("points", []) or [])
+            if len(points) < 4:
+                continue
+            by_plate.setdefault(plate_id, []).append({
+                "pack": str(pack_path),
+                "points": points,
+            })
+
+    candidates = []
+    for plate_id, observations in sorted(by_plate.items()):
+        unique_points = []
+        for observation in observations:
+            points = observation.get("points", [])
+            if not any(_points_equal(points, existing) for existing in unique_points):
+                unique_points.append(points)
+        if len(unique_points) > 1:
+            conflicts.append({
+                "plate_id": plate_id,
+                "reason": "mounted_pack_geometry_semantic_conflict",
+                "packs": [item.get("pack") for item in observations],
+            })
+            continue
+        if unique_points:
+            candidates.append({"plate_id": plate_id, "points": unique_points[0]})
+    return candidates, conflicts
+
+
+def hydrate_annotations_from_gt_pack(host, ann):
+    """Create missing plate detections from portable pack geometry.
+
+    Hydration is idempotent.  Existing plate IDs win; an exact local geometry
+    match is left in place so the normal restore pass can rebind its ID without
+    duplicating the polygon.
+    """
+    report = {
+        "enabled": False,
+        "changed": False,
+        "created": 0,
+        "conflicts": [],
+        "image_id": "",
+    }
+    mounted = _open_mounted_packs(host)
+    if not mounted:
+        return report
+    report["enabled"] = True
+
+    image_path = _resolve_annotation_image_path(host, ann)
+    if image_path is None:
+        report["reason"] = "missing_image"
+        return report
+    try:
+        fingerprint = fingerprint_preview_image(host, image_path)
+    except Exception as exc:
+        report["reason"] = "fingerprint_failed"
+        report["error"] = str(exc)
+        return report
+
+    image_id = str(fingerprint.get("image_id") or "")
+    report["image_id"] = image_id
+    width = int(fingerprint.get("width", 0) or 0)
+    height = int(fingerprint.get("height", 0) or 0)
+    candidates, conflicts = _collect_hydration_candidates(mounted, image_id=image_id)
+    report["conflicts"].extend(conflicts)
+
+    try:
+        local_plates = list(host._get_plate_detections(ann) or [])
+    except Exception:
+        local_plates = []
+    local_ids = {
+        str(dict(getattr(det, "attributes", {}) or {}).get(PLATE_ANNOTATION_ID_ATTR) or "").strip()
+        for det in local_plates
+    }
+    local_geometries = []
+    for det in local_plates:
+        normalized = _normalized_detection_polygon(host, det, width=width, height=height)
+        if normalized:
+            local_geometries.append(normalized)
+
+    detections = list(getattr(ann, "detections", []) or [])
+    for candidate in candidates:
+        plate_id = str(candidate.get("plate_id") or "").strip()
+        normalized_points = list(candidate.get("points", []) or [])
+        if not plate_id or plate_id in local_ids:
+            continue
+        if any(_points_equal(normalized_points, local) for local in local_geometries):
+            # restore_gt_for_annotation will perform the canonical ID rebind.
+            continue
+        try:
+            pixel_points = denormalize_polygon(
+                normalized_points,
+                image_width=width,
+                image_height=height,
+            )
+        except Exception as exc:
+            report["conflicts"].append({
+                "plate_id": plate_id,
+                "reason": "hydrate_denormalize_failed",
+                "error": str(exc),
+            })
+            continue
+        xs = [float(point[0]) for point in pixel_points]
+        ys = [float(point[1]) for point in pixel_points]
+        attributes = {PLATE_ANNOTATION_ID_ATTR: plate_id}
+
+        gt_state = _resolve_same_plate_across_packs(mounted, image_id=image_id, plate_id=plate_id)
+        if gt_state.get("conflict"):
+            report["conflicts"].append({"plate_id": plate_id, "reason": gt_state.get("reason")})
+        elif gt_state.get("found") and gt_state.get("kind") == "set":
+            set_plate_ground_truth(
+                attributes,
+                gt_state.get("text"),
+                source=str(gt_state.get("source") or GROUND_TRUTH_SOURCE_MANUAL_Z2),
+            )
+
+        layout_state = _resolve_same_plate_layout_across_packs(
+            mounted, image_id=image_id, plate_id=plate_id
+        )
+        if layout_state.get("conflict"):
+            report["conflicts"].append({"plate_id": plate_id, "reason": layout_state.get("reason")})
+        elif layout_state.get("found") and layout_state.get("kind") == "set":
+            set_plate_layout_gt(attributes, layout_state.get("layout"))
+
+        det = Detection(
+            label="plate",
+            confidence=1.0,
+            bbox=(min(xs), min(ys), max(xs), max(ys)),
+            polygon=[(float(x), float(y)) for x, y in pixel_points],
+            attributes=attributes,
+        )
+        detections.append(det)
+        local_plates.append(det)
+        local_ids.add(plate_id)
+        local_geometries.append(normalized_points)
+        report["created"] += 1
+        report["changed"] = True
+
+    if report["changed"]:
+        ann.detections = detections
+    return report
+
+
 def restore_gt_for_annotation(host, ann):
     report = {
         "enabled": False,
         "changed": False,
         "restored": 0,
+        "restored_layouts": 0,
         "rebound_plate_ids": 0,
         "conflicts": [],
         "image_id": "",
@@ -808,6 +1130,41 @@ def restore_gt_for_annotation(host, ann):
                 "local_gt": local_gt,
             })
 
+        if local_plate_id:
+            layout_resolved = _resolve_same_plate_layout_across_packs(
+                mounted,
+                image_id=image_id,
+                plate_id=local_plate_id,
+            )
+            if layout_resolved.get("conflict"):
+                report["conflicts"].append({
+                    "plate_index": index,
+                    "plate_id": local_plate_id,
+                    "reason": layout_resolved.get("reason"),
+                })
+            elif layout_resolved.get("found") and layout_resolved.get("kind") == "set":
+                pack_layout = normalize_plate_layout_gt(
+                    layout_resolved.get("layout"), default=""
+                )
+                local_layout_explicit = has_explicit_plate_layout_gt(attributes)
+                local_layout = (
+                    get_plate_layout_gt(attributes, default="")
+                    if local_layout_explicit
+                    else ""
+                )
+                if local_layout_explicit and local_layout != pack_layout:
+                    report["conflicts"].append({
+                        "plate_index": index,
+                        "plate_id": local_plate_id,
+                        "reason": "local_layout_differs_from_pack",
+                        "local_layout": local_layout,
+                        "pack_layout": pack_layout,
+                    })
+                elif not local_layout_explicit and pack_layout:
+                    set_plate_layout_gt(attributes, pack_layout)
+                    report["restored_layouts"] += 1
+                    report["changed"] = True
+
         det.attributes = attributes
 
     return report
@@ -871,6 +1228,7 @@ def _write_outbox(host, payload):
 def _outbox_key(item):
     return "|".join((
         str(item.get("plate_id") or ""),
+        str(item.get("field") or "ground_truth"),
         str(item.get("operation") or ""),
     ))
 
@@ -887,7 +1245,9 @@ def _sync_item_to_pack(item):
     plate_id = str(item.get("plate_id") or "").strip()
     polygon = list(item.get("polygon", []) or [])
     operation = str(item.get("operation") or "").strip().lower()
+    field = str(item.get("field") or "ground_truth").strip().lower()
     text = normalize_plate_ground_truth_text(item.get("text"))
+    layout = normalize_plate_layout_gt(item.get("layout"), default="")
     source = str(
         item.get("source") or GROUND_TRUTH_SOURCE_MANUAL_Z2
     ).strip()
@@ -916,26 +1276,54 @@ def _sync_item_to_pack(item):
         plate_id=plate_id,
     )
 
-    if operation == "clear":
-        pack.clear_ground_truth(
-            plate_id,
-            source=source,
-            producer=PRODUCER,
-        )
-    elif operation == "set" and text:
-        pack.set_ground_truth(
-            plate_id,
-            text,
-            source=source,
-            producer=PRODUCER,
-        )
+    if field == "layout":
+        if operation == "clear":
+            pack.clear_plate_layout_gt(
+                plate_id,
+                source=source,
+                producer=PRODUCER,
+            )
+        elif operation == "set" and layout:
+            pack.set_plate_layout_gt(
+                plate_id,
+                layout,
+                source=source,
+                producer=PRODUCER,
+            )
+        else:
+            return {"ok": False, "reason": "invalid_layout_operation"}
+    elif field == "ground_truth":
+        if operation == "clear":
+            pack.clear_ground_truth(
+                plate_id,
+                source=source,
+                producer=PRODUCER,
+            )
+        elif operation == "set" and text:
+            pack.set_ground_truth(
+                plate_id,
+                text,
+                source=source,
+                producer=PRODUCER,
+            )
+        else:
+            return {"ok": False, "reason": "invalid_operation"}
+        # A text edit in Z2 materializes the visible layout GT as well.
+        if layout:
+            pack.set_plate_layout_gt(
+                plate_id,
+                layout,
+                source=source,
+                producer=PRODUCER,
+            )
     else:
-        return {"ok": False, "reason": "invalid_operation"}
+        return {"ok": False, "reason": "invalid_field"}
 
     return {
         "ok": True,
         "plate_id": plate_id,
         "image_id": image["image_id"],
+        "field": field,
         "operation": operation,
     }
 
@@ -1008,8 +1396,10 @@ def sync_plate_gt_after_xml_save(
         "image_name": str(getattr(ann, "filename", "") or image_path.name),
         "plate_id": plate_id,
         "polygon": [[float(x), float(y)] for x, y in polygon[:4]],
+        "field": "ground_truth",
         "operation": operation,
         "text": normalized,
+        "layout": get_plate_layout_gt(attributes, default=""),
         "source": str(
             attributes.get("ground_truth_source")
             or GROUND_TRUTH_SOURCE_MANUAL_Z2
@@ -1028,8 +1418,11 @@ def sync_plate_gt_after_xml_save(
     if result.get("ok"):
         payload = _load_outbox(host)
         items = dict(payload.get("items", {}) or {})
-        for key in list(items):
-            if key.startswith(f"{plate_id}|"):
+        for key, pending in list(items.items()):
+            if (
+                str((pending or {}).get("plate_id") or "").strip() == plate_id
+                and str((pending or {}).get("field") or "ground_truth").strip().lower() == "ground_truth"
+            ):
                 items.pop(key, None)
         payload["items"] = items
         _write_outbox(host, payload)
@@ -1042,6 +1435,75 @@ def sync_plate_gt_after_xml_save(
         or result.get("reason")
         or "unknown"
     )
+    _queue_outbox_item(host, item)
+    return {
+        **result,
+        "enabled": True,
+        "queued": True,
+        "working_pack_path": str(working_path),
+    }
+
+
+def sync_plate_layout_after_xml_save(
+    host,
+    ann,
+    det,
+    requested_layout,
+    *,
+    retry_pending: bool = True,
+):
+    if bool(retry_pending):
+        try:
+            retry_pending_gt_sync(host)
+        except Exception:
+            pass
+
+    working_path = get_working_gt_pack_path(host, create_parent=True)
+    if working_path is None:
+        return {"ok": True, "enabled": False, "reason": "no_working_pack"}
+
+    image_path = _resolve_annotation_image_path(host, ann)
+    if image_path is None:
+        return {"ok": False, "enabled": True, "reason": "missing_image"}
+
+    attributes = ensure_plate_detection_contract(det)
+    plate_id = str(attributes.get(PLATE_ANNOTATION_ID_ATTR) or "").strip()
+    polygon = _detection_polygon(host, det)
+    layout = normalize_plate_layout_gt(requested_layout, default="")
+    operation = "set" if layout else "clear"
+    item = {
+        "working_pack_path": str(working_path),
+        "image_path": str(image_path),
+        "image_name": str(getattr(ann, "filename", "") or image_path.name),
+        "plate_id": plate_id,
+        "polygon": [[float(x), float(y)] for x, y in polygon[:4]],
+        "field": "layout",
+        "operation": operation,
+        "layout": layout,
+        "source": GROUND_TRUTH_SOURCE_MANUAL_Z2,
+    }
+
+    try:
+        result = _sync_item_to_pack(item)
+    except Exception as exc:
+        result = {"ok": False, "reason": "exception", "error": str(exc)}
+
+    if result.get("ok"):
+        payload = _load_outbox(host)
+        items = dict(payload.get("items", {}) or {})
+        for key, pending in list(items.items()):
+            if (
+                str((pending or {}).get("plate_id") or "").strip() == plate_id
+                and str((pending or {}).get("field") or "ground_truth").strip().lower() == "layout"
+            ):
+                items.pop(key, None)
+        payload["items"] = items
+        _write_outbox(host, payload)
+        result["enabled"] = True
+        result["working_pack_path"] = str(working_path)
+        return result
+
+    item["last_error"] = str(result.get("error") or result.get("reason") or "unknown")
     _queue_outbox_item(host, item)
     return {
         **result,

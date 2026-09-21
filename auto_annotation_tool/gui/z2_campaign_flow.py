@@ -773,6 +773,15 @@ def open_campaign_step2_entry(
                 bootstrap["input_source"] = "raw_current_iteration"
 
         input_dir = Path(bootstrap.get("input_dir") or input_dir)
+        try:
+            from . import z2_gt_companion_flow
+
+            z2_gt_companion_flow.activate_campaign_gt_binding(host, input_dir)
+        except Exception as exc:
+            try:
+                logger.debug(f"Nie udało się aktywować GT companion dla kampanii: {exc}")
+            except Exception:
+                pass
         manual_template = bool(bootstrap.get("manual_template", target == "plate"))
         plate_bootstrap_model = str(bootstrap.get("plate_model_path") or "").strip()
         restore_run_dir = bootstrap.get("restore_run_dir")

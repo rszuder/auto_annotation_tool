@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 ZakĹ‚adka: Panel kampanii i etapow projektu.
@@ -786,6 +786,27 @@ class CampaignTab:
             )
         except Exception:
             pass
+
+        # O is a complete image resource: discover portable GT companions at the
+        # same entry point used by E1 and the graph resource modal.
+        try:
+            from . import z2_gt_companion_flow
+
+            resolved_pool = CAMPAIGN.get_master_pool_dir() or Path(selected)
+            campaign_step1_ingest._update_ingest_plan_progress_dialog(
+                self,
+                18,
+                "Sprawdzam dane Ground Truth przy zasobie O.",
+                "Szukam bezpośrednich katalogów *.alprgt obok obrazów.",
+            )
+            z2_gt_companion_flow.offer_campaign_gt_import(
+                self,
+                Path(resolved_pool),
+                parent=parent or self.frame,
+            )
+        except Exception as exc:
+            logger.debug(f"Nie udało się obsłużyć companionów GT zasobu O: {exc}")
+
         self.current_ingest_plan = {}
         iter_image_count = self._get_iteration_image_count()
 

@@ -21,6 +21,7 @@ from typing import Any, Iterable
 from PIL import Image, ImageOps
 
 from .registration_text import NORMALIZATION_POLICY, normalize_registration
+from .plate_ground_truth import normalize_plate_layout_gt
 
 
 PACK_SCHEMA = "alpr.gt.pack.v1"
@@ -28,12 +29,14 @@ IMAGE_SCHEMA = "alpr.gt.image.v1"
 PLATE_SCHEMA = "alpr.gt.plate.v1"
 GEOMETRY_SCHEMA = "alpr.gt.geometry.v1"
 REVISION_SCHEMA = "alpr.gt.revision.v1"
+LAYOUT_REVISION_SCHEMA = "alpr.gt.layout-revision.v1"
 CONFLICT_SCHEMA = "alpr.gt.conflict.v1"
 
 IMAGE_ID_PREFIX = "img-sha256-"
 PLATE_ID_PREFIX = "plate-ann-"
 GEOMETRY_ID_PREFIX = "geom-sha256-"
 REVISION_ID_PREFIX = "rev-sha256-"
+LAYOUT_REVISION_ID_PREFIX = "layout-rev-sha256-"
 CONFLICT_ID_PREFIX = "conflict-sha256-"
 
 DEFAULT_PRODUCER = "auto_annotation_tool"
@@ -375,6 +378,78 @@ def make_revision_record(
     }
 
 
+def _layout_revision_core(
+    *,
+    plate_id: str,
+    operation: str,
+    layout: str | None,
+    parents: Iterable[str],
+    source: str,
+) -> dict:
+    operation_key = str(operation or "").strip().lower()
+    if operation_key not in {"set", "clear"}:
+        raise GTPackFormatError(f"Nieobsługiwana operacja layout GT: {operation!r}")
+    normalized = (
+        normalize_plate_layout_gt(layout, default="")
+        if operation_key == "set"
+        else None
+    )
+    if operation_key == "set" and not normalized:
+        raise GTPackFormatError("Operacja SET layout wymaga single_row albo two_row.")
+    return {
+        "plate_id": str(plate_id),
+        "operation": operation_key,
+        "value": normalized,
+        "parents": _unique_sorted(parents),
+        "source": str(source or "manual").strip() or "manual",
+    }
+
+
+def make_layout_revision_record(
+    *,
+    plate_id: str,
+    layout: str | None = None,
+    operation: str = "set",
+    parents: Iterable[str] = (),
+    source: str = "manual",
+    producer: str = DEFAULT_PRODUCER,
+) -> dict:
+    core = _layout_revision_core(
+        plate_id=plate_id,
+        operation=operation,
+        layout=layout,
+        parents=parents,
+        source=source,
+    )
+    revision_id = f"{LAYOUT_REVISION_ID_PREFIX}{_content_sha256(core)}"
+    return {
+        "schema": LAYOUT_REVISION_SCHEMA,
+        "layout_revision_id": revision_id,
+        **core,
+        "observed_by": _unique_sorted([producer]),
+    }
+
+
+def _layout_revision_id_from_record(record: dict) -> str:
+    core = _layout_revision_core(
+        plate_id=str(record.get("plate_id") or ""),
+        operation=str(record.get("operation") or ""),
+        layout=record.get("value"),
+        parents=record.get("parents", []) or [],
+        source=str(record.get("source") or "manual"),
+    )
+    return f"{LAYOUT_REVISION_ID_PREFIX}{_content_sha256(core)}"
+
+
+def _semantic_layout_revision_state(record: dict) -> tuple[str, str | None]:
+    operation = str(record.get("operation") or "").strip().lower()
+    if operation == "clear":
+        return ("clear", None)
+    if operation == "set":
+        return ("set", normalize_plate_layout_gt(record.get("value"), default=""))
+    return ("", None)
+
+
 def _geometry_id_from_record(record: dict) -> str:
     core = _geometry_core(
         plate_id=str(record.get("plate_id") or ""),
@@ -472,10 +547,12 @@ class ALPRGTPack:
         self.plates_dir = self.root / "plates"
         self.geometries_dir = self.root / "geometries"
         self.revisions_dir = self.root / "revisions"
+        self.layout_revisions_dir = self.root / "layout_revisions"
         self.conflicts_dir = self.root / "conflicts"
         self.blobs_dir = self.root / "blobs" / "images"
         self.lock_path = self.root / LOCK_FILENAME
         self._lock_depth = 0
+        self._create_mode = bool(create)
 
         if create:
             self._ensure_structure()
@@ -499,6 +576,7 @@ class ALPRGTPack:
                 "plates": 0,
                 "geometries": 0,
                 "revisions": 0,
+                "layout_revisions": 0,
                 "conflicts": 0,
                 "blobs": 0,
             },
@@ -524,6 +602,7 @@ class ALPRGTPack:
             self.plates_dir,
             self.geometries_dir,
             self.revisions_dir,
+            self.layout_revisions_dir,
             self.conflicts_dir,
             self.blobs_dir,
         ):
@@ -548,7 +627,10 @@ class ALPRGTPack:
                 "GT Pack używa innej polityki normalizacji rejestracji."
             )
         self.manifest = manifest
-        self._ensure_structure()
+        # Opening a source pack is read-only. Missing directories are tolerated
+        # and created lazily only by write operations.
+        if self._create_mode:
+            self._ensure_structure()
         return manifest
 
     @contextmanager
@@ -673,6 +755,12 @@ class ALPRGTPack:
             revision_id,
         )
 
+    def get_layout_revision(self, revision_id: str) -> dict | None:
+        return self._read_record(
+            self.layout_revisions_dir,
+            revision_id,
+        )
+
     def _list_records(self, directory: Path) -> list[dict]:
         result = []
         for path in sorted(directory.glob("*.json")):
@@ -689,6 +777,9 @@ class ALPRGTPack:
 
     def list_revisions(self) -> list[dict]:
         return self._list_records(self.revisions_dir)
+
+    def list_layout_revisions(self) -> list[dict]:
+        return self._list_records(self.layout_revisions_dir)
 
     def list_geometries(self) -> list[dict]:
         return self._list_records(self.geometries_dir)
@@ -709,6 +800,26 @@ class ALPRGTPack:
         result: dict[str, dict] = {}
         for record in self.list_revisions():
             record_id = str(record.get("revision_id") or "")
+            if not record_id:
+                continue
+            if restrict and record_id not in allowed:
+                continue
+            result[record_id] = record
+        return result
+
+    def _layout_revision_record_map(
+        self,
+        plate: dict | None = None,
+    ) -> dict[str, dict]:
+        restrict = plate is not None
+        allowed = set(
+            _unique_sorted(
+                (plate or {}).get("layout_revision_ids", []) or []
+            )
+        )
+        result: dict[str, dict] = {}
+        for record in self.list_layout_revisions():
+            record_id = str(record.get("layout_revision_id") or "")
             if not record_id:
                 continue
             if restrict and record_id not in allowed:
@@ -750,6 +861,16 @@ class ALPRGTPack:
             records,
         )
 
+    def _compute_layout_heads(
+        self,
+        plate: dict,
+    ) -> list[str]:
+        records = self._layout_revision_record_map(plate)
+        return _graph_heads(
+            plate.get("layout_revision_ids", []) or [],
+            records,
+        )
+
     def _compute_geometry_heads(
         self,
         plate: dict,
@@ -771,7 +892,13 @@ class ALPRGTPack:
         normalized["geometry_revision_ids"] = _unique_sorted(
             normalized.get("geometry_revision_ids", []) or []
         )
+        normalized["layout_revision_ids"] = _unique_sorted(
+            normalized.get("layout_revision_ids", []) or []
+        )
         normalized["revision_heads"] = self._compute_revision_heads(
+            normalized
+        )
+        normalized["layout_heads"] = self._compute_layout_heads(
             normalized
         )
         normalized["geometry_heads"] = self._compute_geometry_heads(
@@ -837,6 +964,7 @@ class ALPRGTPack:
 
             if copy_blob:
                 blob_name = fingerprint["source_file_sha256"]
+                self.blobs_dir.mkdir(parents=True, exist_ok=True)
                 blob_path = self.blobs_dir / blob_name
                 if not blob_path.exists():
                     shutil.copy2(image_path, blob_path)
@@ -918,6 +1046,7 @@ class ALPRGTPack:
             existing = dict(existing or {})
             existing.setdefault("revision_ids", [])
             existing.setdefault("geometry_revision_ids", [])
+            existing.setdefault("layout_revision_ids", [])
             existing = self._normalize_plate_heads(existing)
 
             current_geometry = (
@@ -976,6 +1105,10 @@ class ALPRGTPack:
                     existing.get("revision_ids", []) or []
                 ),
                 "revision_heads": [],
+                "layout_revision_ids": _unique_sorted(
+                    existing.get("layout_revision_ids", []) or []
+                ),
+                "layout_heads": [],
                 "legacy_ids": _unique_sorted(
                     existing.get("legacy_ids", []) or []
                 ),
@@ -1195,6 +1328,151 @@ class ALPRGTPack:
             "reason": "concurrent_ground_truth",
         }
 
+    def _append_layout_revision(
+        self,
+        plate_id: str,
+        *,
+        operation: str,
+        layout: str | None,
+        source: str,
+        producer: str,
+    ) -> dict:
+        plate = self.get_plate(plate_id)
+        if not plate:
+            raise GTPackError(f"Nieznany plate_id: {plate_id}")
+        plate = self._normalize_plate_heads(plate)
+
+        current = self.resolve_plate_layout_gt(plate_id)
+        desired_state = (
+            ("clear", None)
+            if str(operation).lower() == "clear"
+            else ("set", normalize_plate_layout_gt(layout, default=""))
+        )
+        if (
+            current.get("resolved")
+            and (
+                ("clear", None)
+                if str(current.get("operation") or "").lower() == "clear"
+                else ("set", normalize_plate_layout_gt(current.get("layout"), default=""))
+            ) == desired_state
+            and len(current.get("layout_revision_ids", []) or []) == 1
+        ):
+            existing_revision = self.get_layout_revision(current["layout_revision_ids"][0])
+            if existing_revision:
+                return existing_revision
+
+        revision = make_layout_revision_record(
+            plate_id=plate_id,
+            layout=layout,
+            operation=operation,
+            parents=plate.get("layout_heads", []),
+            source=source,
+            producer=producer,
+        )
+        revision_id = revision["layout_revision_id"]
+        existing_revision = self.get_layout_revision(revision_id)
+        if existing_revision:
+            revision["observed_by"] = _unique_sorted(
+                list(existing_revision.get("observed_by", []) or [])
+                + list(revision.get("observed_by", []) or [])
+            )
+        self._write_record(self.layout_revisions_dir, revision_id, revision)
+        plate["layout_revision_ids"] = _unique_sorted(
+            list(plate.get("layout_revision_ids", []) or []) + [revision_id]
+        )
+        plate = self._normalize_plate_heads(plate)
+        self._write_record(self.plates_dir, plate_id, plate)
+        self.refresh_manifest()
+        return revision
+
+    def set_plate_layout_gt(
+        self,
+        plate_id: str,
+        layout: str,
+        *,
+        source: str = "manual_z2",
+        producer: str = DEFAULT_PRODUCER,
+    ) -> dict:
+        normalized = normalize_plate_layout_gt(layout, default="")
+        if not normalized:
+            raise GTPackFormatError("Nieprawidłowy layout GT. Użyj single_row albo two_row.")
+        with self.write_lock():
+            return self._append_layout_revision(
+                plate_id,
+                operation="set",
+                layout=normalized,
+                source=source,
+                producer=producer,
+            )
+
+    def clear_plate_layout_gt(
+        self,
+        plate_id: str,
+        *,
+        source: str = "manual_z2",
+        producer: str = DEFAULT_PRODUCER,
+    ) -> dict:
+        with self.write_lock():
+            return self._append_layout_revision(
+                plate_id,
+                operation="clear",
+                layout=None,
+                source=source,
+                producer=producer,
+            )
+
+    def resolve_plate_layout_gt(self, plate_id: str) -> dict:
+        plate = self.get_plate(plate_id)
+        if not plate:
+            return {
+                "resolved": False,
+                "conflict": False,
+                "has_layout": False,
+                "operation": "",
+                "layout": "",
+                "layout_revision_ids": [],
+                "reason": "missing_plate",
+            }
+        records = self._layout_revision_record_map(plate)
+        head_ids = _graph_heads(plate.get("layout_revision_ids", []) or [], records)
+        revisions = [records[revision_id] for revision_id in head_ids if revision_id in records]
+        if not revisions:
+            return {
+                "resolved": False,
+                "conflict": False,
+                "has_layout": False,
+                "operation": "",
+                "layout": "",
+                "layout_revision_ids": [],
+                "reason": "missing_layout",
+            }
+        states = {_semantic_layout_revision_state(revision) for revision in revisions}
+        if len(states) == 1:
+            operation, value = next(iter(states))
+            is_set = operation == "set"
+            return {
+                "resolved": True,
+                "conflict": False,
+                "has_layout": bool(is_set and value),
+                "operation": operation,
+                "layout": str(value or "") if is_set else "",
+                "layout_revision_ids": head_ids,
+                "reason": "resolved" if is_set else "cleared",
+            }
+        values = sorted(
+            {str(value or "") if operation == "set" else "<CLEAR>" for operation, value in states}
+        )
+        return {
+            "resolved": False,
+            "conflict": True,
+            "has_layout": False,
+            "operation": "",
+            "layout": "",
+            "values": values,
+            "layout_revision_ids": head_ids,
+            "reason": "concurrent_layout",
+        }
+
     def resolve_plate_geometry(
         self,
         plate_id: str,
@@ -1266,6 +1544,7 @@ class ALPRGTPack:
         plate_annotation_id: str | None,
         ground_truth_text: str | None = None,
         ground_truth_source: str = "manual_z2",
+        plate_layout_gt: str | None = None,
         alias: str | None = None,
         copy_blob: bool = False,
         producer: str = DEFAULT_PRODUCER,
@@ -1293,6 +1572,15 @@ class ALPRGTPack:
                     source=ground_truth_source,
                     producer=producer,
                 )
+            layout_revision = None
+            normalized_layout = normalize_plate_layout_gt(plate_layout_gt, default="")
+            if normalized_layout:
+                layout_revision = self.set_plate_layout_gt(
+                    plate["plate_id"],
+                    normalized_layout,
+                    source=ground_truth_source,
+                    producer=producer,
+                )
             return {
                 "image": image,
                 "plate": self.get_plate(
@@ -1304,7 +1592,11 @@ class ALPRGTPack:
                 "ground_truth": self.resolve_ground_truth(
                     plate["plate_id"]
                 ),
+                "layout_ground_truth": self.resolve_plate_layout_gt(
+                    plate["plate_id"]
+                ),
                 "revision": revision,
+                "layout_revision": layout_revision,
             }
 
     def _merge_image_record(
@@ -1407,6 +1699,7 @@ class ALPRGTPack:
         for field in (
             "geometry_revision_ids",
             "revision_ids",
+            "layout_revision_ids",
             "legacy_ids",
         ):
             chosen[field] = _unique_sorted(
@@ -1418,6 +1711,7 @@ class ALPRGTPack:
         # recalculated after all immutable revisions have been imported.
         chosen["geometry_heads"] = []
         chosen["revision_heads"] = []
+        chosen["layout_heads"] = []
         self._write_record(
             self.plates_dir,
             plate_id,
@@ -1479,6 +1773,34 @@ class ALPRGTPack:
             revision_id,
             chosen,
         )
+
+    def _merge_layout_revision_record(
+        self,
+        incoming: dict,
+    ) -> None:
+        revision_id = str(incoming.get("layout_revision_id") or "").strip()
+        if not revision_id:
+            raise GTPackFormatError("Rekord layout GT bez layout_revision_id.")
+        existing = self.get_layout_revision(revision_id)
+        if not existing:
+            self._write_record(self.layout_revisions_dir, revision_id, incoming)
+            return
+        left_core = {key: value for key, value in existing.items() if key != "observed_by"}
+        right_core = {key: value for key, value in incoming.items() if key != "observed_by"}
+        if left_core != right_core:
+            self._record_conflict(
+                kind="layout_revision_identity",
+                record_id=revision_id,
+                candidates=[existing, incoming],
+            )
+            chosen = dict(_deterministic_choice(existing, incoming))
+        else:
+            chosen = dict(existing)
+        chosen["observed_by"] = _unique_sorted(
+            list(existing.get("observed_by", []) or [])
+            + list(incoming.get("observed_by", []) or [])
+        )
+        self._write_record(self.layout_revisions_dir, revision_id, chosen)
 
     def _merge_geometry_record(
         self,
@@ -1569,6 +1891,8 @@ class ALPRGTPack:
                 self._merge_geometry_record(geometry)
             for revision in other.list_revisions():
                 self._merge_revision_record(revision)
+            for layout_revision in other.list_layout_revisions():
+                self._merge_layout_revision_record(layout_revision)
             for plate in other.list_plates():
                 self._merge_plate_record(plate)
             for image in other.list_images():
@@ -1658,6 +1982,9 @@ class ALPRGTPack:
             "revisions": len(
                 list(self.revisions_dir.glob("*.json"))
             ),
+            "layout_revisions": len(
+                list(self.layout_revisions_dir.glob("*.json"))
+            ),
             "conflicts": len(
                 list(self.conflicts_dir.glob("*.json"))
             ),
@@ -1691,47 +2018,46 @@ class ALPRGTPack:
         with self.write_lock():
             return self.refresh_manifest()
 
-    def summary(self) -> dict:
-        self.refresh_manifest()
+    def summary(self, *, refresh_manifest: bool = True) -> dict:
+        if refresh_manifest:
+            self.refresh_manifest()
         unresolved_gt = 0
         unresolved_geometry = 0
+        unresolved_layout = 0
         cleared_gt = 0
+        cleared_layout = 0
 
         for plate in self.list_plates():
-            plate_id = str(
-                plate.get("plate_id") or ""
-            )
-            gt_state = self.resolve_ground_truth(
-                plate_id
-            )
+            plate_id = str(plate.get("plate_id") or "")
+            gt_state = self.resolve_ground_truth(plate_id)
             if gt_state.get("conflict"):
                 unresolved_gt += 1
-            if (
-                gt_state.get("resolved")
-                and gt_state.get("operation")
-                == "clear"
-            ):
+            if gt_state.get("resolved") and gt_state.get("operation") == "clear":
                 cleared_gt += 1
-            if self.resolve_plate_geometry(
-                plate_id
-            ).get("conflict"):
+            layout_state = self.resolve_plate_layout_gt(plate_id)
+            if layout_state.get("conflict"):
+                unresolved_layout += 1
+            if layout_state.get("resolved") and layout_state.get("operation") == "clear":
+                cleared_layout += 1
+            if self.resolve_plate_geometry(plate_id).get("conflict"):
                 unresolved_geometry += 1
 
-        result = dict(
-            self.manifest.get("record_counts", {})
-            or {}
-        )
+        result = {
+            "images": len(list(self.images_dir.glob("*.json"))),
+            "plates": len(list(self.plates_dir.glob("*.json"))),
+            "geometries": len(list(self.geometries_dir.glob("*.json"))),
+            "revisions": len(list(self.revisions_dir.glob("*.json"))),
+            "layout_revisions": len(list(self.layout_revisions_dir.glob("*.json"))),
+            "conflicts": len(list(self.conflicts_dir.glob("*.json"))),
+            "blobs": len([path for path in self.blobs_dir.glob("*") if path.is_file()]),
+        }
         result.update(
             {
-                "unresolved_gt_conflicts": int(
-                    unresolved_gt
-                ),
-                "unresolved_geometry_conflicts": int(
-                    unresolved_geometry
-                ),
-                "cleared_ground_truth": int(
-                    cleared_gt
-                ),
+                "unresolved_gt_conflicts": int(unresolved_gt),
+                "unresolved_geometry_conflicts": int(unresolved_geometry),
+                "unresolved_layout_conflicts": int(unresolved_layout),
+                "cleared_ground_truth": int(cleared_gt),
+                "cleared_layout_ground_truth": int(cleared_layout),
             }
         )
         return result
@@ -1747,6 +2073,7 @@ class ALPRGTPack:
         plates = self.list_plates()
         geometries = self.list_geometries()
         revisions = self.list_revisions()
+        layout_revisions = self.list_layout_revisions()
 
         image_records = {
             str(record.get("image_id") or ""): record
@@ -1767,6 +2094,11 @@ class ALPRGTPack:
             str(record.get("revision_id") or ""): record
             for record in revisions
             if str(record.get("revision_id") or "")
+        }
+        layout_revision_records = {
+            str(record.get("layout_revision_id") or ""): record
+            for record in layout_revisions
+            if str(record.get("layout_revision_id") or "")
         }
 
         for image_id, image in image_records.items():
@@ -1816,6 +2148,18 @@ class ALPRGTPack:
                     f"{revision_id}: nieprawidłowa rewizja GT: {exc}"
                 )
 
+        for layout_revision_id, revision in layout_revision_records.items():
+            try:
+                expected = _layout_revision_id_from_record(revision)
+                if expected != layout_revision_id:
+                    issues.append(
+                        f"{layout_revision_id}: błędny content hash rewizji layout GT"
+                    )
+            except Exception as exc:
+                issues.append(
+                    f"{layout_revision_id}: nieprawidłowa rewizja layout GT: {exc}"
+                )
+
         for plate_id, plate in plate_records.items():
             image_id = str(
                 plate.get("image_id") or ""
@@ -1835,6 +2179,9 @@ class ALPRGTPack:
                 )
                 or []
             )
+            layout_revision_ids = _unique_sorted(
+                plate.get("layout_revision_ids", []) or []
+            )
 
             local_revisions = {
                 record_id: revision_records[record_id]
@@ -1845,6 +2192,11 @@ class ALPRGTPack:
                 record_id: geometry_records[record_id]
                 for record_id in geometry_ids
                 if record_id in geometry_records
+            }
+            local_layout_revisions = {
+                record_id: layout_revision_records[record_id]
+                for record_id in layout_revision_ids
+                if record_id in layout_revision_records
             }
 
             for revision_id in revision_ids:
@@ -1911,6 +2263,38 @@ class ALPRGTPack:
                 issues.append(
                     f"{plate_id}: nieaktualne revision_heads"
                 )
+
+            for layout_revision_id in layout_revision_ids:
+                revision = layout_revision_records.get(layout_revision_id)
+                if not revision:
+                    issues.append(
+                        f"{plate_id}: brak rewizji layout GT {layout_revision_id}"
+                    )
+                    continue
+                if str(revision.get("plate_id") or "") != plate_id:
+                    issues.append(
+                        f"{plate_id}: rewizja layout {layout_revision_id} należy do innej tablicy"
+                    )
+                for parent_id in _unique_sorted(revision.get("parents", []) or []):
+                    parent = layout_revision_records.get(parent_id)
+                    if not parent:
+                        issues.append(
+                            f"{layout_revision_id}: brak parent layout GT {parent_id}"
+                        )
+                    elif str(parent.get("plate_id") or "") != plate_id:
+                        issues.append(
+                            f"{layout_revision_id}: parent layout GT {parent_id} należy do innej tablicy"
+                        )
+
+            layout_cycles = _graph_cycle_nodes(layout_revision_ids, local_layout_revisions)
+            if layout_cycles:
+                issues.append(
+                    f"{plate_id}: cykl grafu layout GT: " + ", ".join(sorted(layout_cycles))
+                )
+            expected_layout_heads = _graph_heads(layout_revision_ids, local_layout_revisions)
+            stored_layout_heads = _unique_sorted(plate.get("layout_heads", []) or [])
+            if stored_layout_heads != expected_layout_heads:
+                issues.append(f"{plate_id}: nieaktualne layout_heads")
 
             for geometry_id in geometry_ids:
                 geometry = geometry_records.get(
@@ -2036,6 +2420,7 @@ class ALPRGTPack:
             "plates": len(plates),
             "geometries": len(geometries),
             "revisions": len(revisions),
+            "layout_revisions": len(layout_revisions),
             "conflicts": len(self.list_conflicts()),
             "blobs": len(
                 [
@@ -2053,7 +2438,8 @@ class ALPRGTPack:
             or {}
         )
         for key, value in actual_counts.items():
-            if int(manifest_counts.get(key, -1)) != int(
+            default_manifest_value = 0 if key == "layout_revisions" else -1
+            if int(manifest_counts.get(key, default_manifest_value)) != int(
                 value
             ):
                 issues.append(
@@ -2063,7 +2449,7 @@ class ALPRGTPack:
         return {
             "ok": not issues,
             "issues": issues,
-            "summary": self.summary(),
+            "summary": self.summary(refresh_manifest=False),
         }
 
 
