@@ -1261,10 +1261,6 @@ def _draw_preview_plate_combo_overlay(
             canvas.delete("preview_fullscreen_toggle")
         except Exception:
             pass
-        try:
-            canvas.delete("preview_gt_mode_toggle")
-        except Exception:
-            pass
 
         canvas_width = max(1.0, float(canvas.winfo_width() or 1.0))
         canvas_height = max(1.0, float(canvas.winfo_height() or 1.0))
@@ -1290,13 +1286,7 @@ def _draw_preview_plate_combo_overlay(
         gt_count = int(
             z2_plate_gt_inline.count_plate_gt(plate_detections)
         )
-        gt_mode_on = bool(
-            z2_plate_gt_inline.gt_mode_enabled(self)
-        )
-        show_gt_counter = bool(
-            z2_plate_gt_inline.gt_required_for_current_route(self)
-            or gt_mode_on
-        )
+        show_gt_counter = True
         pack_status = z2_gt_pack_runtime.get_gt_pack_status(self)
 
         if total > 0:
@@ -1388,7 +1378,6 @@ def _draw_preview_plate_combo_overlay(
             "Bahnschrift SemiBold",
         )
         pack_font = _combo_font(8, "bold", "Segoe UI")
-        icon_font = _combo_font(8, "bold", "Segoe UI")
         status_font = _combo_font(
             16,
             "bold",
@@ -1439,7 +1428,7 @@ def _draw_preview_plate_combo_overlay(
         if show_gt_counter:
             combo_w += gap + gt_box_w
         combo_w += gap + pack_box_w
-        combo_w += gap + icon_box_w + gap + icon_box_w
+        combo_w += gap + icon_box_w
 
         x1 = viewport_left + ((viewport_width - combo_w) / 2.0)
         y1 = viewport_top + 12.0
@@ -1475,10 +1464,7 @@ def _draw_preview_plate_combo_overlay(
         pack_x2 = pack_x1 + pack_box_w
         next_x = pack_x2 + gap
 
-        gt_icon_x1 = next_x
-        gt_icon_x2 = gt_icon_x1 + icon_box_w
-
-        fs_icon_x1 = gt_icon_x2 + gap
+        fs_icon_x1 = next_x
         fs_icon_x2 = fs_icon_x1 + icon_box_w
 
         # No common background and no common shadow: tiles only.
@@ -1539,27 +1525,6 @@ def _draw_preview_plate_combo_overlay(
                 "preview_overlay",
                 "preview_plate_combo_overlay",
                 "preview_gt_pack_status",
-            ),
-        )
-
-        gt_icon_outline = accent if gt_mode_on else muted
-        gt_icon_fill = (
-            blend_hex_colors(accent, panel_fill, 0.72)
-            if gt_mode_on
-            else panel_fill
-        )
-        canvas.create_rectangle(
-            gt_icon_x1,
-            y1,
-            gt_icon_x2,
-            y2,
-            outline=gt_icon_outline,
-            fill=gt_icon_fill,
-            width=1,
-            tags=(
-                "preview_overlay",
-                "preview_plate_combo_overlay",
-                "preview_gt_mode_toggle",
             ),
         )
 
@@ -1633,20 +1598,6 @@ def _draw_preview_plate_combo_overlay(
             ),
         )
 
-        canvas.create_text(
-            gt_icon_x1 + (icon_box_w / 2.0),
-            y1 + (combo_h / 2.0) - 1.0,
-            text="GT",
-            fill=accent if gt_mode_on else muted,
-            anchor="center",
-            font=icon_font,
-            tags=(
-                "preview_overlay",
-                "preview_plate_combo_overlay",
-                "preview_gt_mode_toggle",
-            ),
-        )
-
         fs_inner = 7.0
         ix1 = fs_icon_x1 + fs_inner
         iy1 = y1 + fs_inner
@@ -1692,12 +1643,7 @@ def _draw_preview_plate_combo_overlay(
             float(pack_x2),
             float(y2),
         )
-        self._plate_gt_mode_toggle_bbox = (
-            float(gt_icon_x1),
-            float(y1),
-            float(gt_icon_x2),
-            float(y2),
-        )
+        self._plate_gt_mode_toggle_bbox = None
         self._preview_fullscreen_toggle_bbox = (
             float(fs_icon_x1),
             float(y1),
@@ -1715,7 +1661,6 @@ def _draw_preview_plate_combo_overlay(
 
         canvas.tag_raise("preview_plate_combo_overlay")
         canvas.tag_raise("preview_gt_pack_status")
-        canvas.tag_raise("preview_gt_mode_toggle")
         canvas.tag_raise("preview_fullscreen_toggle")
     except Exception:
         pass
@@ -3488,16 +3433,6 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
         self, canvas_x, canvas_y
     ):
         z2_gt_pack_dialog.open_gt_pack_manager(self)
-        return True
-
-    if z2_plate_gt_inline.is_gt_mode_toggle_hit(
-        self, canvas_x, canvas_y
-    ):
-        z2_plate_gt_inline.toggle_gt_mode(self)
-        try:
-            self._refresh_preview_canvas()
-        except Exception:
-            pass
         return True
 
     if _handle_preview_bottom_hint_click(self, canvas_x, canvas_y, event):

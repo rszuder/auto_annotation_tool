@@ -273,71 +273,23 @@ def count_plate_gt(plate_detections) -> int:
 
 
 def gt_required_for_current_route(host) -> bool:
-    return bool(_current_mode_target(host) == "char")
-
-
-def _current_mode_target(host) -> str:
-    try:
-        if bool(host._is_free_mode_session_context()):
-            return "free"
-    except Exception:
-        pass
-
-    try:
-        target = str(CAMPAIGN.get_iteration_target() or "").strip().lower()
-    except Exception:
-        target = ""
-
-    if target in {"plate", "char"}:
-        return target
-
-    try:
-        context = dict(getattr(host, "_campaign_graph_entry_context", {}) or {})
-    except Exception:
-        context = {}
-    gate_id = str(context.get("graph_gate_id") or "").strip().upper()
-    if gate_id in {"T03", "T05"}:
-        return "char"
-    if gate_id == "T04":
-        return "plate"
-    return "free"
+    # GT is optional metadata, never a route requirement.
+    return False
 
 
 def gt_mode_enabled(host) -> bool:
-    target = _current_mode_target(host)
-    previous_target = str(
-        getattr(host, "_plate_gt_inline_mode_target", "") or ""
-    ).strip().lower()
-
-    if (
-        not hasattr(host, "_plate_gt_inline_enabled")
-        or previous_target != target
-    ):
-        host._plate_gt_inline_mode_target = target
-        host._plate_gt_inline_enabled = bool(target == "char")
-
-    return bool(getattr(host, "_plate_gt_inline_enabled", False))
+    # Compatibility query only: inline GT is always available.
+    return True
 
 
 def set_gt_mode_enabled(host, enabled: bool) -> bool:
-    host._plate_gt_inline_mode_target = _current_mode_target(host)
-    host._plate_gt_inline_enabled = bool(enabled)
-    if not enabled:
-        hide_inline_plate_gt_editors(host, destroy=False)
-    return bool(enabled)
+    # Compatibility shim: GT cannot be switched off.
+    return True
 
 
 def toggle_gt_mode(host) -> bool:
-    enabled = set_gt_mode_enabled(host, not gt_mode_enabled(host))
-    try:
-        host._update_preview_edit_status(
-            "Edycja GT włączona." if enabled else "Edycja GT wyłączona.",
-            refresh_toolbar=False,
-            refresh_debug=False,
-        )
-    except Exception:
-        pass
-    return enabled
+    # Compatibility shim: there is no GT ON/OFF mode.
+    return True
 
 
 def _editor_store(host) -> dict:
@@ -1428,10 +1380,6 @@ def relocate_inline_plate_gt_editors(
     except Exception:
         pass
 
-    if not bool(getattr(host, "_plate_gt_inline_enabled", False)):
-        hide_inline_plate_gt_editors(host, destroy=False)
-        return
-
     ann = host._get_preview_annotation()
     if ann is None:
         hide_inline_plate_gt_editors(host, destroy=False)
@@ -1562,10 +1510,6 @@ def render_inline_plate_gt_editors(
         return
 
     host._plate_gt_inline_interaction_suspended = False
-
-    if not gt_mode_enabled(host):
-        hide_inline_plate_gt_editors(host, destroy=False)
-        return
 
     ann = host._get_preview_annotation()
     if ann is None or canvas is None:
@@ -1741,94 +1685,13 @@ def refresh_inline_plate_gt_editors(host) -> None:
 
 
 def draw_gt_mode_toggle(host, canvas) -> None:
-    if canvas is None:
-        host._plate_gt_mode_toggle_bbox = None
-        return
-
+    # Compatibility hook only. Never render a separate GT switch.
     try:
-        canvas.delete("preview_gt_mode_toggle")
+        if canvas is not None:
+            canvas.delete("preview_gt_mode_toggle")
     except Exception:
         pass
-
-    enabled = gt_mode_enabled(host)
-    palette = _palette(host)
-    canvas_bg = palette.get("canvas_bg", palette.get("panel", "#20252b"))
-    panel_bg = palette.get("panel", "#252526")
-    border = palette.get("panel_border", "#555d65")
-    muted = palette.get("muted", "#aeb7bf")
-    accent = palette.get("accent", "#4f8de3")
-
-    (
-        viewport_left,
-        viewport_top,
-        viewport_right,
-        _viewport_bottom,
-    ) = canvas_viewport_bounds(canvas)
-
-    # Leave the far-right corner free for fullscreen/other chrome.
-    x2 = max(
-        viewport_left + float(TOGGLE_WIDTH + 8),
-        viewport_right - 64.0,
-    )
-    x1 = x2 - TOGGLE_WIDTH
-    y1 = viewport_top + 9.0
-    y2 = y1 + TOGGLE_HEIGHT
-
-    fill = blend_hex_colors(
-        accent if enabled else panel_bg,
-        canvas_bg,
-        0.62 if enabled else 0.48,
-    )
-    outline = blend_hex_colors(
-        accent if enabled else border,
-        canvas_bg,
-        0.30,
-    )
-    fg = accent if enabled else muted
-
-    try:
-        canvas.create_rectangle(
-            x1,
-            y1,
-            x2,
-            y2,
-            fill=fill,
-            outline=outline,
-            width=1,
-            tags=("preview_overlay", "preview_gt_mode_toggle"),
-        )
-        canvas.create_text(
-            x1 + 14,
-            (y1 + y2) / 2.0,
-            text="GT",
-            fill=fg,
-            font=("Segoe UI", 8, "bold"),
-            tags=("preview_overlay", "preview_gt_mode_toggle"),
-        )
-        dot_x = x2 - 9
-        dot_y = (y1 + y2) / 2.0
-        canvas.create_oval(
-            dot_x - 3,
-            dot_y - 3,
-            dot_x + 3,
-            dot_y + 3,
-            fill=accent if enabled else "",
-            outline=accent if enabled else muted,
-            width=1,
-            tags=("preview_overlay", "preview_gt_mode_toggle"),
-        )
-        host._plate_gt_mode_toggle_bbox = (
-            float(x1),
-            float(y1),
-            float(x2),
-            float(y2),
-        )
-        try:
-            canvas.tag_raise("preview_gt_mode_toggle")
-        except Exception:
-            pass
-    except Exception:
-        host._plate_gt_mode_toggle_bbox = None
+    host._plate_gt_mode_toggle_bbox = None
 
 
 def refresh_gt_overlay_after_layout(host) -> None:
@@ -1842,14 +1705,7 @@ def refresh_gt_overlay_after_layout(host) -> None:
 
 
 def is_gt_mode_toggle_hit(host, canvas_x, canvas_y) -> bool:
-    bbox = getattr(host, "_plate_gt_mode_toggle_bbox", None)
-    if not (isinstance(bbox, tuple) and len(bbox) == 4):
-        return False
-    try:
-        x1, y1, x2, y2 = [float(value) for value in bbox]
-        return bool(
-            x1 <= float(canvas_x) <= x2
-            and y1 <= float(canvas_y) <= y2
-        )
-    except Exception:
-        return False
+    # No GT switch exists on the canvas.
+    return False
+
+
