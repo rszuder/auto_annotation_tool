@@ -14,6 +14,9 @@ from ..config import CONFIG, logger
 from ..character_recognition import PlateGenerator
 from ..data_models import Detection, ImageAnnotation
 from ..project_cache import PROJECT_CACHE
+from ..gt_resource_companions import (
+    collect_image_resource_gt_pack_paths,
+)
 from .help_manager import HELP
 from .lazy_notebook_tab import _LazyNotebookTab
 from .section_header_label import SectionHeaderLabel
@@ -2289,6 +2292,17 @@ def run_extraction(host) -> None:
     self.is_processing = True
     self._set_extraction_status("Start wyodrębniania...", "neutral")
 
+    try:
+        gt_pack_paths = collect_image_resource_gt_pack_paths(
+            images_dir,
+            campaign=CAMPAIGN,
+        )
+    except Exception as exc:
+        logger.debug(
+            f"Nie udało się zebrać GT Packów dla PZ1: {exc}"
+        )
+        gt_pack_paths = []
+
     def worker():
         campaign_success_to_pz2 = False
         campaign_step3_active = _campaign_step3_context_active(self)
@@ -2297,7 +2311,10 @@ def run_extraction(host) -> None:
                 return
 
             self._log(self.ext_log, f"\nROZPOCZETO RUN WYCINANIA PZ1: {run_dir.name}\n", "HEADER")
-            generator = PlateGenerator(run_dir)
+            generator = PlateGenerator(
+                run_dir,
+                gt_pack_paths=gt_pack_paths,
+            )
             total = len(xml_images)
             processed = 0
 

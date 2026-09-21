@@ -15,7 +15,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Iterable
 
-from .gt_pack import ALPRGTPack, PACK_SCHEMA
+from .gt_pack import ALPRGTPack, PACK_SCHEMA, normalize_polygon
+from .registration_text import normalize_registration
 
 
 COMPANION_SCHEMA = "alpr.image-resource.companions.v1"
@@ -461,4 +462,216 @@ def get_campaign_gt_companion_paths(
         if key and key not in seen and path.is_dir() and (path / "manifest.json").is_file():
             seen.add(key)
             result.append(path)
+    return result
+
+
+def collect_image_resource_gt_pack_paths(
+    image_dir: Path | str,
+    *,
+    campaign=None,
+    iteration_num: int | None = None,
+) -> list[Path]:
+    """Collect readable GT packs that belong to one image resource.
+
+    Direct-child packs (including ``current_work.alprgt``) are considered first.
+    In campaign mode imported O-companions and the project working pack are added.
+    Returned paths are deduplicated and must contain a manifest.
+    """
+    root = Path(image_dir)
+    candidates: list[Path] = []
+
+    try:
+        discovery = discover_gt_pack_companions(
+            root,
+            include_default_working_pack=True,
+        )
+    except Exception:
+        discovery = {}
+
+    for item in list(discovery.get("ground_truth", []) or []):
+        raw = str((item or {}).get("path") or "").strip()
+        if raw:
+            candidates.append(Path(raw))
+
+    if campaign is not None:
+        try:
+            active_name = str(campaign.get_active_project_name() or "").strip()
+        except Exception:
+            active_name = ""
+        if active_name:
+            try:
+                candidates.extend(
+                    get_campaign_gt_companion_paths(
+                        campaign,
+                        image_dir=root,
+                        iteration_num=iteration_num,
+                    )
+                )
+            except Exception:
+                pass
+            try:
+                project_root = campaign.get_active_project_root_dir()
+            except Exception:
+                project_root = None
+            if project_root is not None:
+                working = (
+                    Path(project_root)
+                    / "_campaign_state"
+                    / "ground_truth"
+                    / DEFAULT_WORKING_PACK_NAME
+                )
+                candidates.append(working)
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        path = Path(raw)
+        key = _path_key(path)
+        if not key or key in seen:
+            continue
+        if not path.is_dir() or not (path / "manifest.json").is_file():
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
+
+
+def open_gt_pack_sources(paths: Iterable[Path | str]) -> list[tuple[Path, ALPRGTPack]]:
+    """Open validated read sources once for batch provenance resolution."""
+    result: list[tuple[Path, ALPRGTPack]] = []
+    seen: set[str] = set()
+    for raw in list(paths or []):
+        path = Path(raw)
+        key = _path_key(path)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        try:
+            pack = ALPRGTPack.open(path)
+            validation = dict(pack.validate(deep=False) or {})
+        except Exception:
+            continue
+        if validation.get("ok"):
+            result.append((path, pack))
+    return result
+
+
+def _normalized_points_equal(left, right, *, tolerance: float = 1e-7) -> bool:
+    left_points = list(left or [])
+    right_points = list(right or [])
+    if len(left_points) != len(right_points) or not left_points:
+        return False
+    try:
+        return all(
+            abs(float(lp[0]) - float(rp[0])) <= tolerance
+            and abs(float(lp[1]) - float(rp[1])) <= tolerance
+            for lp, rp in zip(left_points, right_points)
+        )
+    except Exception:
+        return False
+
+
+def resolve_plate_revision_provenance(
+    opened_sources,
+    *,
+    image_id: str,
+    plate_id: str,
+    polygon,
+    image_width: int,
+    image_height: int,
+    ground_truth_text: str | None = None,
+) -> dict[str, Any]:
+    """Resolve revision heads only when portable pack state matches PZ1 input.
+
+    Geometry IDs are exposed only when the current source polygon exactly matches
+    the resolved pack geometry. GT revision IDs are exposed only for a resolved
+    SET whose normalized value equals the current Z2 GT. Any relevant conflict
+    suppresses that provenance instead of choosing a silent winner.
+    """
+    safe_image_id = str(image_id or "").strip()
+    safe_plate_id = str(plate_id or "").strip()
+    expected_gt = normalize_registration(ground_truth_text)
+
+    result = {
+        "geometry_revision_ids": [],
+        "ground_truth_revision_ids": [],
+        "source_geometry_revision_id": None,
+        "source_gt_revision_id": None,
+        "geometry_conflict": False,
+        "ground_truth_conflict": False,
+        "matched_packs": 0,
+    }
+    if not safe_image_id or not safe_plate_id:
+        return result
+
+    try:
+        normalized_polygon = normalize_polygon(
+            polygon,
+            image_width=int(image_width),
+            image_height=int(image_height),
+        )
+    except Exception:
+        normalized_polygon = []
+
+    geometry_ids: set[str] = set()
+    gt_ids: set[str] = set()
+
+    for _path, pack in list(opened_sources or []):
+        try:
+            plate = pack.get_plate(safe_plate_id)
+        except Exception:
+            plate = None
+        if not isinstance(plate, dict):
+            continue
+        if str(plate.get("image_id") or "").strip() != safe_image_id:
+            continue
+
+        result["matched_packs"] += 1
+
+        try:
+            geometry = dict(pack.resolve_plate_geometry(safe_plate_id) or {})
+        except Exception:
+            geometry = {}
+        if geometry.get("conflict"):
+            result["geometry_conflict"] = True
+        elif (
+            normalized_polygon
+            and geometry.get("resolved")
+            and _normalized_points_equal(
+                geometry.get("points", []),
+                normalized_polygon,
+            )
+        ):
+            for value in list(geometry.get("geometry_ids", []) or []):
+                prepared = str(value or "").strip()
+                if prepared:
+                    geometry_ids.add(prepared)
+
+        try:
+            gt_state = dict(pack.resolve_ground_truth(safe_plate_id) or {})
+        except Exception:
+            gt_state = {}
+        if gt_state.get("conflict"):
+            result["ground_truth_conflict"] = True
+        elif (
+            expected_gt
+            and gt_state.get("resolved")
+            and str(gt_state.get("operation") or "").strip().lower() == "set"
+            and normalize_registration(gt_state.get("text")) == expected_gt
+        ):
+            for value in list(gt_state.get("revision_ids", []) or []):
+                prepared = str(value or "").strip()
+                if prepared:
+                    gt_ids.add(prepared)
+
+    if not result["geometry_conflict"]:
+        result["geometry_revision_ids"] = sorted(geometry_ids)
+        if len(geometry_ids) == 1:
+            result["source_geometry_revision_id"] = next(iter(geometry_ids))
+
+    if not result["ground_truth_conflict"]:
+        result["ground_truth_revision_ids"] = sorted(gt_ids)
+        if len(gt_ids) == 1:
+            result["source_gt_revision_id"] = next(iter(gt_ids))
+
     return result

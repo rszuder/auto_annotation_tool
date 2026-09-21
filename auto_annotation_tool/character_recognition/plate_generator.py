@@ -19,12 +19,20 @@ from ..plate_ground_truth import (
     normalize_plate_layout_gt,
 )
 from ..gt_pack import fingerprint_image
+from ..gt_resource_companions import (
+    open_gt_pack_sources,
+    resolve_plate_revision_provenance,
+)
 
 
 class PlateGenerator:
     """Generuje wycięte i znormalizowane rozmiarowo tablice z detections."""
     
-    def __init__(self, output_dir: Path):
+    def __init__(
+        self,
+        output_dir: Path,
+        gt_pack_paths: Optional[List[Path]] = None,
+    ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.images_dir = self.output_dir / "images"
@@ -32,8 +40,11 @@ class PlateGenerator:
         
         self.images_dir.mkdir(exist_ok=True)
         
-        self.metadata = {}  
+        self.metadata = {}
         self.plate_counter = 0
+        self.gt_pack_sources = open_gt_pack_sources(
+            list(gt_pack_paths or [])
+        )
 
     @staticmethod
     def _safe_int(value, default=None):
@@ -56,6 +67,29 @@ class PlateGenerator:
         if not isinstance(parsed, list):
             return []
         return [str(item or "").strip().upper() for item in parsed if str(item or "").strip()]
+
+    @staticmethod
+    def _safe_string_list(value):
+        if isinstance(value, list):
+            return [
+                str(item or "").strip()
+                for item in value
+                if str(item or "").strip()
+            ]
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return []
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return [raw_value]
+        if not isinstance(parsed, list):
+            return [raw_value]
+        return [
+            str(item or "").strip()
+            for item in parsed
+            if str(item or "").strip()
+        ]
 
     def generate_from_annotations(self,
                                  source_image_path: Path,
@@ -236,16 +270,65 @@ class PlateGenerator:
                 source_gt_hash = str(
                     attributes.get("source_gt_hash") or ""
                 ).strip()
-                source_geometry_revision_id = str(
+                declared_geometry_revision_id = str(
                     attributes.get("source_geometry_revision_id")
                     or attributes.get("geometry_revision_id")
                     or ""
                 ).strip()
-                source_gt_revision_id = str(
+                declared_gt_revision_id = str(
                     attributes.get("source_gt_revision_id")
                     or attributes.get("ground_truth_revision_id")
                     or ""
                 ).strip()
+                declared_geometry_revision_ids = self._safe_string_list(
+                    attributes.get("source_geometry_revision_ids")
+                )
+                declared_gt_revision_ids = self._safe_string_list(
+                    attributes.get("source_gt_revision_ids")
+                )
+
+                provenance = {}
+                if (
+                    self.gt_pack_sources
+                    and source_annotation_id
+                    and str(source_identity.get("image_id") or "").strip()
+                ):
+                    provenance = resolve_plate_revision_provenance(
+                        self.gt_pack_sources,
+                        image_id=str(source_identity.get("image_id") or ""),
+                        plate_id=source_annotation_id,
+                        polygon=list(plate_detection.polygon or []),
+                        image_width=int(source_identity.get("width", 0) or 0),
+                        image_height=int(source_identity.get("height", 0) or 0),
+                        ground_truth_text=ground_truth_text,
+                    )
+
+                if self.gt_pack_sources:
+                    source_geometry_revision_ids = list(
+                        provenance.get("geometry_revision_ids", []) or []
+                    )
+                    source_gt_revision_ids = list(
+                        provenance.get("ground_truth_revision_ids", []) or []
+                    )
+                    source_geometry_revision_id = str(
+                        provenance.get("source_geometry_revision_id") or ""
+                    ).strip()
+                    source_gt_revision_id = str(
+                        provenance.get("source_gt_revision_id") or ""
+                    ).strip()
+                else:
+                    source_geometry_revision_ids = list(
+                        declared_geometry_revision_ids
+                    )
+                    source_gt_revision_ids = list(
+                        declared_gt_revision_ids
+                    )
+                    source_geometry_revision_id = declared_geometry_revision_id
+                    source_gt_revision_id = declared_gt_revision_id
+                    if source_geometry_revision_id and not source_geometry_revision_ids:
+                        source_geometry_revision_ids = [source_geometry_revision_id]
+                    if source_gt_revision_id and not source_gt_revision_ids:
+                        source_gt_revision_ids = [source_gt_revision_id]
                 
                 self.metadata[plate_id] = {
                     'source_image': str(source_image_path),
@@ -270,7 +353,13 @@ class PlateGenerator:
                     'source_geometry_revision_id': (
                         source_geometry_revision_id or None
                     ),
+                    'source_geometry_revision_ids': list(
+                        source_geometry_revision_ids
+                    ),
                     'source_gt_revision_id': source_gt_revision_id or None,
+                    'source_gt_revision_ids': list(
+                        source_gt_revision_ids
+                    ),
                     'ground_truth_text': ground_truth_text or None,
                     'ground_truth_source': ground_truth_source or None,
                     'source_expected_text': source_expected_text or None,
