@@ -212,3 +212,39 @@ def test_raw_exact_produces_not_needed():
     assert suggestion["status"] == "not_needed"
     assert suggestion["reason"] == "raw_exact"
     assert suggestion["operations"] == []
+
+def test_assist_snapshots_gt_revision_set():
+    host = Host()
+    data = metadata(
+        "WI9O5PW",
+        "WI905PW",
+        yolo_text="WI905PW",
+    )
+    data["source_gt_revision_ids"] = ["rev-b", "rev-a"]
+
+    suggestion = runtime.store_gt_assist_suggestion(host, data)
+
+    assert suggestion["source_gt_revision_id"] is None
+    assert suggestion["source_gt_revision_ids"] == [
+        "rev-a",
+        "rev-b",
+    ]
+    assert len(suggestion["source_raw_result_hash"]) == 64
+
+
+def test_accept_rejects_stale_gt_revision_even_when_text_and_hash_match():
+    host = Host()
+    data = metadata(
+        "WI9O5PW",
+        "WI905PW",
+        yolo_text="WI905PW",
+    )
+    data["source_gt_revision_ids"] = ["rev-one"]
+
+    runtime.store_gt_assist_suggestion(host, data)
+    data["source_gt_revision_ids"] = ["rev-two"]
+
+    result = runtime.accept_gt_assist_suggestion(host, data)
+
+    assert result["ok"] is False
+    assert result["reason"] == "stale_gt_revision"

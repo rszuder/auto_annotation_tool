@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .z3_gt_contract import (
+    canonical_raw_detection_hash,
+    revision_ids_from_data,
+)
+
 
 PROVENANCE_SCHEMA = "alpr.dataset.sample_provenance.v1"
 
@@ -162,12 +167,62 @@ def _has_mobile_human_review(data: dict) -> bool:
     return False
 
 
+def _raw_validation_matches_source_contract(
+    data: dict,
+) -> bool:
+    raw = data.get("raw_detection")
+    validation = data.get("raw_validation")
+    if not isinstance(raw, dict) or not isinstance(validation, dict):
+        return False
+
+    validation_raw_hash = str(
+        validation.get("raw_result_hash") or ""
+    ).strip()
+    if validation_raw_hash:
+        current_raw_hash = canonical_raw_detection_hash(raw)
+        if validation_raw_hash != current_raw_hash:
+            return False
+
+    validation_gt_hash = str(
+        validation.get("gt_hash") or ""
+    ).strip()
+    current_gt_hash = str(
+        data.get("source_gt_hash") or ""
+    ).strip()
+    if (
+        validation_gt_hash
+        and current_gt_hash
+        and validation_gt_hash != current_gt_hash
+    ):
+        return False
+
+    validation_revision_ids = revision_ids_from_data(
+        validation,
+        "gt_revision_ids",
+        "gt_revision_id",
+    )
+    current_revision_ids = revision_ids_from_data(
+        data,
+        "source_gt_revision_ids",
+        "source_gt_revision_id",
+    )
+    if (
+        validation_revision_ids
+        and validation_revision_ids != current_revision_ids
+    ):
+        return False
+
+    return True
+
+
 def _is_raw_model_exact(data: dict) -> bool:
     raw = data.get("raw_detection")
     validation = data.get("raw_validation")
     if not isinstance(raw, dict) or not isinstance(validation, dict):
         return False
     if str(raw.get("contract") or "").strip() != "gt_blind.v1":
+        return False
+    if not _raw_validation_matches_source_contract(data):
         return False
     if _norm(validation.get("status")) != "perfect":
         return False
@@ -244,9 +299,19 @@ def classify_plate_dataset_provenance(
         "source_geometry_revision_id": str(
             source_data.get("source_geometry_revision_id") or ""
         ).strip(),
+        "source_geometry_revision_ids": revision_ids_from_data(
+            source_data,
+            "source_geometry_revision_ids",
+            "source_geometry_revision_id",
+        ),
         "source_gt_revision_id": str(
             source_data.get("source_gt_revision_id") or ""
         ).strip(),
+        "source_gt_revision_ids": revision_ids_from_data(
+            source_data,
+            "source_gt_revision_ids",
+            "source_gt_revision_id",
+        ),
         "ground_truth_source": str(
             source_data.get("ground_truth_source") or ""
         ).strip(),
@@ -345,6 +410,7 @@ def build_gt_blind_raw_benchmark(records) -> dict:
     invalid_validation_count = 0
     gt_contract_rows = []
     hashed_gt_count = 0
+    revisioned_gt_count = 0
 
     for item in source_records:
         if not isinstance(item, dict):
@@ -374,6 +440,9 @@ def build_gt_blind_raw_benchmark(records) -> dict:
             invalid_validation_count += 1
             continue
         if str(validation.get("expected_source") or "").strip() != "ground_truth":
+            invalid_validation_count += 1
+            continue
+        if not _raw_validation_matches_source_contract(data):
             invalid_validation_count += 1
             continue
 
@@ -416,6 +485,13 @@ def build_gt_blind_raw_benchmark(records) -> dict:
         source_gt_hash = str(data.get("source_gt_hash") or "").strip()
         if source_gt_hash:
             hashed_gt_count += 1
+        source_gt_revision_ids = revision_ids_from_data(
+            data,
+            "source_gt_revision_ids",
+            "source_gt_revision_id",
+        )
+        if source_gt_revision_ids:
+            revisioned_gt_count += 1
 
         gt_contract_rows.append(
             {
@@ -431,6 +507,9 @@ def build_gt_blind_raw_benchmark(records) -> dict:
                 "source_gt_revision_id": str(
                     data.get("source_gt_revision_id") or ""
                 ).strip(),
+                "source_gt_revision_ids": list(
+                    source_gt_revision_ids
+                ),
                 "ground_truth_text": gt_text,
             }
         )
@@ -459,6 +538,7 @@ def build_gt_blind_raw_benchmark(records) -> dict:
             row["source_annotation_id"],
             row["source_gt_hash"],
             row["source_gt_revision_id"],
+            tuple(row["source_gt_revision_ids"]),
             row["ground_truth_text"],
         ),
     )
@@ -470,12 +550,21 @@ def build_gt_blind_raw_benchmark(records) -> dict:
 
     if evaluable_records <= 0:
         gt_hash_coverage = "none"
+        gt_revision_coverage = "none"
     elif hashed_gt_count >= evaluable_records:
         gt_hash_coverage = "full"
     elif hashed_gt_count > 0:
         gt_hash_coverage = "partial"
     else:
         gt_hash_coverage = "text_only"
+
+    if evaluable_records > 0:
+        if revisioned_gt_count >= evaluable_records:
+            gt_revision_coverage = "full"
+        elif revisioned_gt_count > 0:
+            gt_revision_coverage = "partial"
+        else:
+            gt_revision_coverage = "none"
 
     return {
         "schema": RAW_BENCHMARK_SCHEMA,
@@ -508,5 +597,7 @@ def build_gt_blind_raw_benchmark(records) -> dict:
         "invalid_validation_count": int(invalid_validation_count),
         "gt_hash_coverage": gt_hash_coverage,
         "gt_hash_count": int(hashed_gt_count),
+        "gt_revision_coverage": gt_revision_coverage,
+        "gt_revision_count": int(revisioned_gt_count),
         "gt_contract_fingerprint_sha256": gt_contract_fingerprint,
     }

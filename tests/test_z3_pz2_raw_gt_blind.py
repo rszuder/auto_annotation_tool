@@ -155,3 +155,36 @@ def test_detection_runtime_marks_saved_raw_result_as_gt_blind():
     assert '"raw_detection"' in source
     assert '"gt_blind.v1"' in source
     assert "_build_raw_detection_validation" in source
+
+def test_raw_validation_carries_revision_and_raw_result_contract():
+    data = {
+        "source_annotation_id": "plate-ann-one",
+        "source_gt_hash": "gt-hash-v1",
+        "source_gt_revision_ids": ["rev-b", "rev-a"],
+        "source_geometry_revision_ids": ["geom-one"],
+        "ground_truth_text": "ABC123",
+        "raw_detection": {
+            "schema": "alpr.pz2.raw_detection.v1",
+            "contract": "gt_blind.v1",
+            "prediction_text": "ABC123",
+            "characters": chars("ABC123"),
+        },
+    }
+
+    result = validate(data, chars("ABC123"))
+
+    assert result["gt_hash"] == "gt-hash-v1"
+    assert result["gt_revision_id"] is None
+    assert result["gt_revision_ids"] == ["rev-a", "rev-b"]
+    assert result["geometry_revision_id"] == "geom-one"
+    assert result["geometry_revision_ids"] == ["geom-one"]
+    assert len(result["raw_result_hash"]) == 64
+
+
+def test_detection_runtime_persists_canonical_raw_result_hash():
+    source = inspect.getsource(
+        z3_detection_runtime.run_fast_ocr_test
+    )
+
+    assert 'raw_detection["result_hash"]' in source
+    assert "canonical_raw_detection_hash(raw_detection)" in source

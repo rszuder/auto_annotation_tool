@@ -116,3 +116,31 @@ def test_provenance_summary_counts_categories():
         provenance.RAW_MODEL_EXACT: 2,
         provenance.MANUAL: 1,
     }
+
+def test_dataset_provenance_preserves_revision_sets():
+    data = raw_exact_data()
+    data["source_geometry_revision_ids"] = ["geom-b", "geom-a"]
+    data["source_gt_revision_ids"] = ["rev-b", "rev-a"]
+
+    result = provenance.classify_plate_dataset_provenance(
+        None,
+        data,
+        meta_path=Path("metadata.json"),
+    )
+
+    assert result["source_geometry_revision_ids"] == [
+        "geom-a",
+        "geom-b",
+    ]
+    assert result["source_gt_revision_ids"] == [
+        "rev-a",
+        "rev-b",
+    ]
+
+
+def test_raw_model_exact_rejects_validation_from_old_gt_revision():
+    data = raw_exact_data()
+    data["source_gt_revision_ids"] = ["rev-new"]
+    data["raw_validation"]["gt_revision_ids"] = ["rev-old"]
+
+    assert category(data) == provenance.LEGACY_UNTRACKED

@@ -18,6 +18,7 @@ from ..config import get_yolo_class, logger
 from ..character_recognition import CharacterDetector, DetectionMethod
 from ..ocr import PlateOCR
 from ..utils import cleanup_gpu_memory
+from .z3_gt_contract import canonical_raw_detection_hash
 
 YOLO_DETECTION_METHODS = {
     DetectionMethod.YOLO,
@@ -1142,7 +1143,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 )
                 raw_fusion_details["raw_contract"] = "gt_blind.v1"
 
-                local_meta[pid]["raw_detection"] = {
+                raw_detection = {
                     "schema": RAW_DETECTION_SCHEMA,
                     "contract": "gt_blind.v1",
                     "detection_method": str(
@@ -1153,6 +1154,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     "fusion_strategy": str(fusion_strategy or ""),
                     "fusion_details": raw_fusion_details,
                 }
+                raw_detection["result_hash"] = (
+                    canonical_raw_detection_hash(raw_detection)
+                )
+                local_meta[pid]["raw_detection"] = raw_detection
                 local_meta[pid]["raw_validation"] = (
                     self._build_raw_detection_validation(
                         local_meta[pid],

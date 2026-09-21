@@ -12,6 +12,10 @@ import tkinter as tk
 
 from ..config import logger
 from ..plate_ground_truth import normalize_plate_ground_truth_text
+from .z3_gt_contract import (
+    canonical_raw_detection_hash,
+    revision_ids_from_data,
+)
 
 
 def _is_exportable_character_record(self, rec) -> bool:
@@ -499,12 +503,54 @@ def _build_raw_detection_validation(
         edit_distance = None
         cer = None
 
+    raw_detection = source_data.get("raw_detection")
+    if isinstance(raw_detection, dict):
+        raw_result_hash = str(
+            raw_detection.get("result_hash") or ""
+        ).strip()
+        if not raw_result_hash:
+            raw_result_hash = canonical_raw_detection_hash(
+                raw_detection
+            )
+    else:
+        raw_result_hash = ""
+
+    gt_revision_ids = revision_ids_from_data(
+        source_data,
+        "source_gt_revision_ids",
+        "source_gt_revision_id",
+    )
+    geometry_revision_ids = revision_ids_from_data(
+        source_data,
+        "source_geometry_revision_ids",
+        "source_geometry_revision_id",
+    )
+
+    gt_revision_id = (
+        gt_revision_ids[0]
+        if len(gt_revision_ids) == 1
+        else None
+    )
+    geometry_revision_id = (
+        geometry_revision_ids[0]
+        if len(geometry_revision_ids) == 1
+        else None
+    )
+
     return {
         "schema": RAW_VALIDATION_SCHEMA,
         "raw_contract": "gt_blind.v1",
         "status": "perfect" if perfect else "needs_fix",
         "reason_codes": list(dict.fromkeys(reasons)),
         "expected_source": expected_source,
+        "raw_result_hash": raw_result_hash or None,
+        "gt_hash": str(
+            source_data.get("source_gt_hash") or ""
+        ).strip() or None,
+        "gt_revision_id": gt_revision_id,
+        "gt_revision_ids": list(gt_revision_ids),
+        "geometry_revision_id": geometry_revision_id,
+        "geometry_revision_ids": list(geometry_revision_ids),
         "ground_truth_text": target_text or None,
         "prediction_text": candidate_text,
         "expected_char_count": len(target_text) if target_text else 0,

@@ -243,3 +243,61 @@ def test_model_training_provenance_keeps_frozen_raw_benchmark(tmp_path):
         == "a" * 64
     )
     assert result["dataset"]["source_raw_benchmark"]["cer"] == 0.05
+
+def test_raw_benchmark_fingerprint_tracks_full_gt_revision_set():
+    first = raw_plate(
+        image_id="img-a",
+        plate_id="plate-a",
+        gt_hash="same-gt-hash",
+        gt="ABC123",
+        prediction="ABC123",
+        edit_distance=0,
+        exact=True,
+    )
+    first["source_gt_revision_ids"] = ["rev-a", "rev-b"]
+    first["raw_validation"]["gt_revision_ids"] = [
+        "rev-a",
+        "rev-b",
+    ]
+
+    second = json.loads(json.dumps(first))
+    second["source_gt_revision_ids"] = ["rev-a", "rev-c"]
+    second["raw_validation"]["gt_revision_ids"] = [
+        "rev-a",
+        "rev-c",
+    ]
+
+    a = z3_dataset_provenance.build_gt_blind_raw_benchmark(
+        [first]
+    )
+    b = z3_dataset_provenance.build_gt_blind_raw_benchmark(
+        [second]
+    )
+
+    assert a["gt_revision_coverage"] == "full"
+    assert b["gt_revision_coverage"] == "full"
+    assert (
+        a["gt_contract_fingerprint_sha256"]
+        != b["gt_contract_fingerprint_sha256"]
+    )
+
+
+def test_raw_benchmark_excludes_stale_validation_revision():
+    data = raw_plate(
+        image_id="img-a",
+        plate_id="plate-a",
+        gt_hash="same-gt-hash",
+        gt="ABC123",
+        prediction="ABC123",
+        edit_distance=0,
+        exact=True,
+    )
+    data["source_gt_revision_ids"] = ["rev-current"]
+    data["raw_validation"]["gt_revision_ids"] = ["rev-old"]
+
+    result = z3_dataset_provenance.build_gt_blind_raw_benchmark(
+        [data]
+    )
+
+    assert result["evaluable_plates"] == 0
+    assert result["invalid_validation_count"] == 1

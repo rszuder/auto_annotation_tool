@@ -8,6 +8,10 @@ import json
 import tkinter as tk
 
 from ..plate_ground_truth import normalize_plate_ground_truth_text
+from .z3_gt_contract import (
+    canonical_raw_detection_hash,
+    revision_ids_from_data,
+)
 
 
 GT_ASSIST_SCHEMA = "alpr.pz2.gt_assist.v1"
@@ -15,52 +19,11 @@ GT_ASSIST_SOURCE = "gt_assisted"
 GT_ASSIST_CONFIRMED_SOURCE = "gt_assist_confirmed"
 
 
-def _canonical_raw_fingerprint(raw_detection: dict | None) -> str:
-    raw = raw_detection if isinstance(raw_detection, dict) else {}
-    characters = raw.get("characters", [])
-    if not isinstance(characters, list):
-        characters = []
-
-    prepared = []
-    for record in characters:
-        if not isinstance(record, dict):
-            continue
-        bbox = record.get("bbox", [])
-        if isinstance(bbox, (list, tuple)):
-            safe_bbox = []
-            for value in list(bbox)[:4]:
-                try:
-                    safe_bbox.append(round(float(value), 6))
-                except Exception:
-                    safe_bbox.append(0.0)
-        else:
-            safe_bbox = []
-        prepared.append(
-            {
-                "character": str(record.get("character", "") or ""),
-                "bbox": safe_bbox,
-                "confidence": round(
-                    float(record.get("confidence", 0.0) or 0.0),
-                    6,
-                ),
-                "method": str(record.get("method", "") or ""),
-            }
-        )
-
-    core = {
-        "contract": str(raw.get("contract", "") or ""),
-        "prediction_text": str(
-            raw.get("prediction_text", "") or ""
-        ).strip().upper(),
-        "characters": prepared,
-    }
-    payload = json.dumps(
-        core,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
+def _canonical_raw_fingerprint(
+    raw_detection: dict | None,
+) -> str:
+    # Backward-compatible private alias used by older callers/tests.
+    return canonical_raw_detection_hash(raw_detection)
 
 
 def _characters_text(host, records, data=None) -> str:
@@ -145,7 +108,19 @@ def build_gt_assist_suggestion(host, data: dict | None) -> dict:
         raw_chars,
         data=source_data,
     )
-    raw_fingerprint = _canonical_raw_fingerprint(raw_detection)
+    raw_fingerprint = _canonical_raw_fingerprint(
+        raw_detection
+    )
+    gt_revision_ids = revision_ids_from_data(
+        source_data,
+        "source_gt_revision_ids",
+        "source_gt_revision_id",
+    )
+    gt_revision_id = (
+        gt_revision_ids[0]
+        if len(gt_revision_ids) == 1
+        else None
+    )
 
     base = {
         "schema": GT_ASSIST_SCHEMA,
@@ -155,6 +130,11 @@ def build_gt_assist_suggestion(host, data: dict | None) -> dict:
         "source_gt_hash": str(
             source_data.get("source_gt_hash") or ""
         ).strip() or None,
+        "source_gt_revision_id": gt_revision_id,
+        "source_gt_revision_ids": list(gt_revision_ids),
+        "source_raw_result_hash": str(
+            raw_detection.get("result_hash") or raw_fingerprint
+        ).strip(),
         "source_raw_prediction_text": raw_text,
         "ground_truth_text": gt_text or None,
         "operations": [],
@@ -398,6 +378,22 @@ def gt_assist_is_current(
         and expected_gt_hash != current_gt_hash
     ):
         return False, "stale_gt_hash"
+
+    expected_revision_ids = revision_ids_from_data(
+        assist,
+        "source_gt_revision_ids",
+        "source_gt_revision_id",
+    )
+    current_revision_ids = revision_ids_from_data(
+        data,
+        "source_gt_revision_ids",
+        "source_gt_revision_id",
+    )
+    if (
+        expected_revision_ids
+        and expected_revision_ids != current_revision_ids
+    ):
+        return False, "stale_gt_revision"
 
     return True, "current"
 
