@@ -34,3 +34,12 @@ def test_z2_has_no_canvas_gt_toggle_anywhere():
     assert "create_text" not in body
     assert "create_oval" not in body
 
+def test_z2_canvas_hides_gt_pack_infrastructure():
+    root = Path(__file__).resolve().parents[1]
+    preview = (root / "auto_annotation_tool/gui/z2_preview_editor.py").read_text(encoding="utf-8-sig")
+    assert "z2_gt_pack_dialog" not in preview
+    assert "preview_gt_pack_status" not in preview
+    assert "pack_text" not in preview
+    assert "pack_box_w" not in preview
+    assert "open_gt_pack_manager(self)" not in preview
+

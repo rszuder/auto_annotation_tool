@@ -2688,6 +2688,169 @@ def draw_preview_top_badges(
     _place_group(bottom_specs, side="bottom")
 
 
+PREVIEW_FULLSCREEN_TOGGLE_TAG = "preview_fullscreen_toggle"
+
+
+def draw_preview_fullscreen_toggle(
+    host: "CharacterAnnotationTab",
+    canvas,
+    canvas_width: int,
+    *,
+    bar_height: float | None = None,
+):
+    """Draw the FS control inside the fixed top bar, above the drawer lane."""
+    if canvas is None:
+        return None
+
+    try:
+        canvas.delete(PREVIEW_FULLSCREEN_TOGGLE_TAG)
+    except Exception:
+        pass
+
+    toggle_size = 26.0
+    toggle_pad = 12.0
+    toggle_x2 = max(
+        toggle_pad + toggle_size,
+        float(canvas_width) - toggle_pad,
+    )
+    toggle_x1 = toggle_x2 - toggle_size
+
+    # The drawer toggle lives below the top bar. Keeping FS *inside* the bar
+    # prevents the fullscreen drawer from covering it.
+    toggle_y1 = 8.0
+    toggle_y2 = toggle_y1 + toggle_size
+
+    host._preview_fullscreen_toggle_rect = (
+        float(toggle_x1),
+        float(toggle_y1),
+        float(toggle_x2),
+        float(toggle_y2),
+    )
+
+    legend_theme = host._get_preview_legend_theme()
+    toggle_fill = str(
+        legend_theme.get("panel_fill", "#1f2933")
+    )
+    toggle_outline = str(
+        legend_theme.get("badge_plate_outline", "#2fbf71")
+    )
+    toggle_icon = str(
+        legend_theme.get("entry_text", "#f8fafc")
+    )
+    tags = (
+        PREVIEW_FULLSCREEN_TOGGLE_TAG,
+        "preview_overlay",
+        "preview_overlay_action",
+        "preview_action::toggle_fullscreen",
+    )
+
+    canvas.create_rectangle(
+        toggle_x1,
+        toggle_y1,
+        toggle_x2,
+        toggle_y2,
+        outline=toggle_outline,
+        fill=toggle_fill,
+        width=1,
+        tags=tags,
+    )
+
+    inner_pad = 5.0
+    inner_x1 = toggle_x1 + inner_pad
+    inner_y1 = toggle_y1 + inner_pad
+    inner_x2 = toggle_x2 - inner_pad
+    inner_y2 = toggle_y2 - inner_pad
+    corner_len = 5.0
+
+    if bool(getattr(host, "_preview_fullscreen_active", False)):
+        lines = (
+            (
+                inner_x1 + corner_len,
+                inner_y1,
+                inner_x1,
+                inner_y1,
+                inner_x1,
+                inner_y1 + corner_len,
+            ),
+            (
+                inner_x2 - corner_len,
+                inner_y1,
+                inner_x2,
+                inner_y1,
+                inner_x2,
+                inner_y1 + corner_len,
+            ),
+            (
+                inner_x1 + corner_len,
+                inner_y2,
+                inner_x1,
+                inner_y2,
+                inner_x1,
+                inner_y2 - corner_len,
+            ),
+            (
+                inner_x2 - corner_len,
+                inner_y2,
+                inner_x2,
+                inner_y2,
+                inner_x2,
+                inner_y2 - corner_len,
+            ),
+        )
+    else:
+        lines = (
+            (
+                inner_x1,
+                inner_y1 + corner_len,
+                inner_x1,
+                inner_y1,
+                inner_x1 + corner_len,
+                inner_y1,
+            ),
+            (
+                inner_x2,
+                inner_y1 + corner_len,
+                inner_x2,
+                inner_y1,
+                inner_x2 - corner_len,
+                inner_y1,
+            ),
+            (
+                inner_x1,
+                inner_y2 - corner_len,
+                inner_x1,
+                inner_y2,
+                inner_x1 + corner_len,
+                inner_y2,
+            ),
+            (
+                inner_x2,
+                inner_y2 - corner_len,
+                inner_x2,
+                inner_y2,
+                inner_x2 - corner_len,
+                inner_y2,
+            ),
+        )
+
+    for points in lines:
+        canvas.create_line(
+            *points,
+            fill=toggle_icon,
+            width=1.8,
+            capstyle=tk.ROUND,
+            tags=tags,
+        )
+
+    try:
+        canvas.tag_raise(PREVIEW_FULLSCREEN_TOGGLE_TAG)
+    except Exception:
+        pass
+
+    return host._preview_fullscreen_toggle_rect
+
+
+
 def draw_preview_canvas_info_overlay(
     host: "CharacterAnnotationTab",
     canvas,
@@ -2767,53 +2930,16 @@ def draw_preview_canvas_info_overlay(
     except Exception:
         reset_bbox = None
     row1_left_x = float((float(reset_bbox[2]) + 8.0) if reset_bbox else 98.0)
-    toggle_size = 24.0
-    toggle_pad = 12.0
-    toggle_x2 = max(toggle_pad + toggle_size, float(canvas_width) - toggle_pad)
-    toggle_x1 = toggle_x2 - toggle_size
-    toggle_y1 = bar_height + 8.0
-    toggle_y2 = toggle_y1 + toggle_size
-    host._preview_fullscreen_toggle_rect = (
-        float(toggle_x1),
-        float(toggle_y1),
-        float(toggle_x2),
-        float(toggle_y2),
+    toggle_rect = draw_preview_fullscreen_toggle(
+        host,
+        canvas,
+        canvas_width,
+        bar_height=bar_height,
     )
-    try:
-        canvas.delete("preview_action::toggle_fullscreen")
-    except Exception:
-        pass
-    legend_theme = host._get_preview_legend_theme()
-    toggle_fill = str(legend_theme.get("panel_fill", "#1f2933"))
-    toggle_outline = str(legend_theme.get("badge_plate_outline", "#2fbf71"))
-    toggle_icon = str(legend_theme.get("entry_text", "#f8fafc"))
-    canvas.create_rectangle(
-        toggle_x1,
-        toggle_y1,
-        toggle_x2,
-        toggle_y2,
-        outline=toggle_outline,
-        fill=toggle_fill,
-        width=1,
-        tags=("preview_overlay", "preview_action::toggle_fullscreen"),
-    )
-    inner_pad = 5.0
-    inner_x1 = toggle_x1 + inner_pad
-    inner_y1 = toggle_y1 + inner_pad
-    inner_x2 = toggle_x2 - inner_pad
-    inner_y2 = toggle_y2 - inner_pad
-    corner_len = 5.0
-    icon_tags = ("preview_overlay", "preview_action::toggle_fullscreen")
-    if bool(getattr(host, "_preview_fullscreen_active", False)):
-        canvas.create_line(inner_x1 + corner_len, inner_y1, inner_x1, inner_y1, inner_x1, inner_y1 + corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x2 - corner_len, inner_y1, inner_x2, inner_y1, inner_x2, inner_y1 + corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x1 + corner_len, inner_y2, inner_x1, inner_y2, inner_x1, inner_y2 - corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x2 - corner_len, inner_y2, inner_x2, inner_y2, inner_x2, inner_y2 - corner_len, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
+    if isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
+        toggle_x1 = float(toggle_rect[0])
     else:
-        canvas.create_line(inner_x1, inner_y1 + corner_len, inner_x1, inner_y1, inner_x1 + corner_len, inner_y1, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x2, inner_y1 + corner_len, inner_x2, inner_y1, inner_x2 - corner_len, inner_y1, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x1, inner_y2 - corner_len, inner_x1, inner_y2, inner_x1 + corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
-        canvas.create_line(inner_x2, inner_y2 - corner_len, inner_x2, inner_y2, inner_x2 - corner_len, inner_y2, fill=toggle_icon, width=1.8, capstyle=tk.ROUND, tags=icon_tags)
+        toggle_x1 = max(12.0, float(canvas_width) - 38.0)
 
     row2_y = 40.0
     row2_badges = [
@@ -2924,6 +3050,21 @@ def refresh_preview_canvas_info_overlay_only(
 def apply_preview_fullscreen_chrome(host: "CharacterAnnotationTab"):
     preview_tools = getattr(host, "preview_tools", None)
     tools_hidden_by_design = bool(getattr(host, "_preview_tools_hidden_by_design", False))
+
+    try:
+        canvas = getattr(host, "preview_canvas", None)
+        if canvas is not None and getattr(host, "_preview_render_state", None):
+            draw_preview_fullscreen_toggle(
+                host,
+                canvas,
+                max(50, int(canvas.winfo_width() or 50)),
+                bar_height=float(
+                    getattr(host, "_preview_overlay_top_bar_height", 74.0)
+                    or 74.0
+                ),
+            )
+    except Exception:
+        pass
 
     if bool(getattr(host, "_preview_fullscreen_active", False)):
         try:
@@ -3146,6 +3287,18 @@ def set_preview_fullscreen(host, active: bool):
             preview_tools.grid()
     self._sync_preview_edit_status_visibility()
     self._update_preview_toolbar_state()
+    try:
+        draw_preview_fullscreen_toggle(
+            self,
+            self.preview_canvas,
+            max(50, int(self.preview_canvas.winfo_width() or 50)),
+            bar_height=float(
+                getattr(self, "_preview_overlay_top_bar_height", 74.0)
+                or 74.0
+            ),
+        )
+    except Exception:
+        pass
     self._schedule_preview_stabilized_rerender(delay_ms=90)
     self._focus_preview_canvas()
 

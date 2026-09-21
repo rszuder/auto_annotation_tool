@@ -193,89 +193,73 @@ def _save_free_bindings(payload: dict) -> None:
 
 
 def prepare_free_mode_gt_binding(host, image_dir: Path | str, *, parent=None) -> dict:
-    """Activate/prompt GT companions for a free-mode image directory."""
+    """Automatically bind valid GT companions for one free-mode image resource.
+
+    Free mode no longer exposes read-only/writable mount decisions to the
+    operator. Every valid direct-child source ``*.alprgt`` is mounted read-only,
+    while ``current_work.alprgt`` is the canonical write target. Discovery
+    already excludes that canonical working pack from source candidates.
+
+    Older saved ``accepted=False`` decisions are intentionally ignored and
+    migrated to the automatic companion policy.
+    """
     image_dir = Path(image_dir)
     key = _resource_key(image_dir)
     payload = _load_free_bindings()
-    existing = dict(payload["bindings"].get(key) or {})
     discovery = discover_gt_pack_companions(image_dir)
     packs = list(discovery.get("ground_truth", []) or [])
     signature = str(discovery.get("signature") or "")
-    default_working_path = image_dir / DEFAULT_WORKING_PACK_NAME
+    working_path = image_dir / DEFAULT_WORKING_PACK_NAME
 
-    if existing and str(existing.get("signature") or "") == signature:
-        accepted = bool(existing.get("accepted", False))
-        source_paths = [
-            Path(value)
-            for value in list(existing.get("source_paths", []) or [])
-            if str(value or "").strip()
-        ] if accepted else []
-        source_paths = [path for path in source_paths if path.is_dir() and (path / "manifest.json").is_file()]
-        working = str(existing.get("working_path") or default_working_path).strip()
-        z2_gt_pack_runtime.set_gt_resource_binding(
-            host,
-            source_paths=source_paths,
-            working_path=(Path(working) if working else None),
-            resource_key=f"free:{key}",
-        )
-        return {
-            "found": bool(packs),
-            "accepted": accepted,
-            "paths": source_paths,
-            "working_path": working,
-            "discovery": discovery,
-            "restored_binding": True,
-        }
+    source_paths = []
+    seen = set()
+    for item in packs:
+        raw = str((item or {}).get("path") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw)
+        try:
+            path_key = str(path.resolve()).replace("\\", "/").lower()
+        except Exception:
+            path_key = str(path).replace("\\", "/").lower()
+        if not path_key or path_key in seen:
+            continue
+        if not path.is_dir() or not (path / "manifest.json").is_file():
+            continue
+        seen.add(path_key)
+        source_paths.append(path)
 
-    if not packs:
-        payload["bindings"][key] = {
-            "signature": signature,
-            "accepted": False,
-            "source_paths": [],
-            "working_path": str(default_working_path),
-        }
-        _save_free_bindings(payload)
-        z2_gt_pack_runtime.set_gt_resource_binding(
-            host,
-            source_paths=[],
-            working_path=default_working_path,
-            resource_key=f"free:{key}",
-        )
-        return {
-            "found": False,
-            "accepted": False,
-            "paths": [],
-            "working_path": str(default_working_path),
-            "discovery": discovery,
-        }
-
-    accepted = _confirm(
-        host,
-        "Wykryto Ground Truth",
-        _format_prompt(discovery, project_import=False),
-        parent=parent or getattr(host, "frame", None),
-    )
-    source_paths = [Path(str(item.get("path") or "")) for item in packs] if accepted else []
-    working_path = default_working_path
-
-    payload["bindings"][key] = {
+    previous = dict(payload["bindings"].get(key) or {})
+    binding = {
         "signature": signature,
-        "accepted": bool(accepted),
+        "policy": "auto_companion_v1",
+        "accepted": bool(source_paths),
         "source_paths": [str(path) for path in source_paths],
-        "working_path": str(working_path or ""),
+        "working_path": str(working_path),
     }
-    _save_free_bindings(payload)
+    payload["bindings"][key] = binding
+
+    if previous != binding:
+        _save_free_bindings(payload)
+
     z2_gt_pack_runtime.set_gt_resource_binding(
         host,
         source_paths=source_paths,
         working_path=working_path,
         resource_key=f"free:{key}",
     )
+
     return {
-        "found": True,
-        "accepted": bool(accepted),
+        "found": bool(packs),
+        "accepted": bool(source_paths),
+        "auto_bound": True,
         "paths": source_paths,
-        "working_path": str(working_path or ""),
+        "working_path": str(working_path),
         "discovery": discovery,
-        "restored_binding": False,
+        "restored_binding": bool(
+            previous
+            and previous.get("policy") == "auto_companion_v1"
+            and previous == binding
+        ),
+        "invalid_count": len(list(discovery.get("invalid", []) or [])),
     }

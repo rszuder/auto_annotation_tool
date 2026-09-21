@@ -207,6 +207,15 @@ def get_preview_box_variants(host: "CharacterAnnotationTab", data: dict) -> dict
     if not isinstance(data, dict):
         data = {}
     canonical_chars = host._sort_character_records_by_x(data.get("characters", []))
+
+    raw_detection = data.get("raw_detection")
+    if isinstance(raw_detection, dict):
+        raw_result = host._sort_character_records_by_x(
+            raw_detection.get("characters", [])
+        )
+    else:
+        raw_result = []
+
     yolo_filtered = host._sort_character_records_by_x(data.get("yolo_detections", []))
     yolo_nms = host._sort_character_records_by_x(data.get("yolo_nms_detections", []))
     yolo_raw = host._sort_character_records_by_x(data.get("yolo_raw_detections", []))
@@ -219,6 +228,7 @@ def get_preview_box_variants(host: "CharacterAnnotationTab", data: dict) -> dict
         yolo_filtered = host._sort_character_records_by_x(yolo_from_canonical)
 
     return {
+        "RAW_RESULT": raw_result,
         "FINAL": canonical_chars,
         "YOLO_FILTERED": yolo_filtered,
         "YOLO_NMS": yolo_nms,

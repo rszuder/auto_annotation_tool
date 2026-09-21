@@ -87,18 +87,42 @@ def test_selection_stays_on_same_character_after_reordering(host):
     assert host._get_preview_active_data()["characters"][host._preview_char_selected_index]["character"] == "B"
 
 
-def test_frame_control_stays_inside_canvas_and_does_not_accumulate_callbacks(host):
+def test_frame_control_is_retained_and_anchored_to_frame_corner(host):
     canvas = host.preview_canvas
     data = host._get_preview_active_data()
-    control.draw_plate_layout_control(host, data, right=490, top=-40)
-    initial = len(canvas._tclCommands)
-    for _ in range(15):
-        control.draw_plate_layout_control(host, data, right=700, top=40)
-    assert len(canvas._tclCommands) == initial
+
+    control.draw_plate_layout_control(host, data, right=420, top=90)
+    initial_items = canvas.find_withtag(control.CONTROL_TAG)
+    initial_callbacks = len(canvas._tclCommands)
+
     x1, y1, x2, y2 = canvas.bbox(control.CONTROL_TAG)
-    assert 0 <= x1 < x2 <= 500 and 0 <= y1 < y2 <= 300
+    assert abs(float(x2) - 420.0) <= 2.0
+    assert abs(float(y2) - 90.0) <= 2.0
+
+    texts = {
+        str(canvas.itemcget(item, "text"))
+        for item in initial_items
+        if canvas.type(item) == "text"
+    }
+    assert {"1R", "2R"}.issubset(texts)
+
+    for _ in range(15):
+        control.draw_plate_layout_control(host, data, right=450, top=115)
+
+    assert canvas.find_withtag(control.CONTROL_TAG) == initial_items
+    assert len(canvas._tclCommands) == initial_callbacks
+
+    _x1, _y1, moved_x2, moved_y2 = canvas.bbox(control.CONTROL_TAG)
+    assert abs(float(moved_x2) - 450.0) <= 2.0
+    assert abs(float(moved_y2) - 115.0) <= 2.0
+
+    anchor = host._preview_layout_control_anchor
+    assert anchor["right"] == 450.0
+    assert anchor["top"] == 115.0
+
     for item in canvas.find_withtag(control.CONTROL_TAG):
         assert "preview_action::toggle_plate_rows" in canvas.gettags(item)
+
 
 
 def test_header_status_refresh_keeps_hover_control_and_tooltip_timer(host):

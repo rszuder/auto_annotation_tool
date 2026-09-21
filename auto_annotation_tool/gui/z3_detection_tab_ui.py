@@ -2790,13 +2790,13 @@ def build_detection_tab(
 
     self.btn_run_detection = ttk.Button(
         self.btn_run_detection_pulse_frame,
-        text="Uruchom detekcję",
+        text="Uruchom RAW",
         command=self._run_detection_stage,
         style="Accent.TButton"
     )
     self.btn_run_detection.pack(fill=tk.X)
     self.btn_run_detection.configure(
-        text="Uruchom detekcję",
+        text="Uruchom RAW",
         padding=detection_action_button_padding,
         width=34,
     )

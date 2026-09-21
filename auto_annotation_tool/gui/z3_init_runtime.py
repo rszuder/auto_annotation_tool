@@ -19,6 +19,7 @@ from .inertial_scroll import InertialScrollController
 
 PREVIEW_BOX_MODE_OPTIONS = [
     ("AUTO", "Auto (wg etapu)"),
+    ("RAW_RESULT", "RAW wynik eksperymentu"),
     ("FINAL", "Końcowe ramki treningowe"),
     ("YOLO_FILTERED", "YOLO po filtrze sekwencji"),
     ("YOLO_NMS", "YOLO po usunięciu dubli (NMS)"),
@@ -31,6 +32,9 @@ PREVIEW_BOX_MODE_BY_LABEL = {label: key for key, label in PREVIEW_BOX_MODE_OPTIO
 
 PREVIEW_BOX_MODE_BY_LABEL.update({
     "Auto (wg metody)": "AUTO",
+    "RAW": "RAW_RESULT",
+    "Wynik RAW": "RAW_RESULT",
+    "RAW wynik": "RAW_RESULT",
     "Wynik końcowy": "FINAL",
     "YOLO po NMS": "YOLO_NMS",
     "YOLO surowe": "YOLO_RAW",

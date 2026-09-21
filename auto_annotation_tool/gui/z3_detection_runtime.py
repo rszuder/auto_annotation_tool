@@ -38,7 +38,6 @@ OCR_DETECTION_METHODS = {
     DetectionMethod.BOTH,
     DetectionMethod.YOLO_OCR,
 }
-YOLO_BOX_RECALL_CONFIDENCE = 0.00001
 RAW_DETECTION_SCHEMA = "alpr.pz2.raw_detection.v1"
 
 
@@ -353,9 +352,25 @@ def run_detection_stage(host):
     if not all_plate_ids:
         return messagebox.showinfo("Brak", "Wczytaj katalog wyodrębnionych tablic.")
 
-    guard_options = self._prompt_pz2_detection_guard_options(method)
-    if guard_options is None:
-        return
+    try:
+        workflow_context = (
+            "campaign"
+            if bool(
+                getattr(self, "_step3_linear_mode", False)
+                and CAMPAIGN.get_active_project_name()
+            )
+            else "free"
+        )
+    except Exception:
+        workflow_context = "free"
+
+    # Main detection action is a reproducible RAW experiment.
+    # REVIEW/GOLD is a separate layer and must not control RAW scope.
+    guard_options = {
+        "raw_only": True,
+        "process_scope": "all",
+        "workflow_context": workflow_context,
+    }
 
     try:
         from .z3_campaign_flow import _mark_t06_z3_work_session
@@ -523,9 +538,22 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
         return
 
     guard_options = dict(guard_options or {})
+    raw_only = bool(guard_options.get("raw_only", False))
+    workflow_context = str(
+        guard_options.get("workflow_context") or "free"
+    ).strip().lower()
+    if workflow_context not in {"free", "campaign"}:
+        workflow_context = "free"
+
     full_plate_total = len(all_plate_ids)
-    process_scope = str(guard_options.get("process_scope", "all") or "all").strip().lower()
-    if process_scope in {"perfect_only", "non_perfect_only"}:
+    process_scope = (
+        "all"
+        if raw_only
+        else str(
+            guard_options.get("process_scope", "all") or "all"
+        ).strip().lower()
+    )
+    if (not raw_only) and process_scope in {"perfect_only", "non_perfect_only"}:
         metadata = self.preview_metadata if isinstance(getattr(self, "preview_metadata", None), dict) else {}
         scoped_plate_ids: list[str] = []
         for pid in all_plate_ids:
@@ -624,41 +652,73 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
     except Exception:
         detection_method_label = str(method_key or "OCR")
 
-    protect_manual_requested = bool(guard_options.get("protect_manual_boxes", True))
-    protect_manual_boxes = True
-    protect_perfect_plates = bool(guard_options.get("protect_perfect_plates", True))
-    use_perfect_box_refiner = bool(
-        guard_options.get(
-            "use_perfect_box_refiner",
-            guard_options.get("allow_yolo_geometry_on_perfect", True),
+    if raw_only:
+        protect_manual_requested = False
+        protect_manual_boxes = False
+        protect_perfect_plates = False
+        use_perfect_box_refiner = False
+        use_perfect_refiner_continuity_guard = False
+        allow_yolo_geometry_on_perfect = False
+        guard_counts = {}
+    else:
+        protect_manual_requested = bool(
+            guard_options.get("protect_manual_boxes", True)
         )
-        and _method_uses_yolo_geometry(method)
-    )
-    use_perfect_refiner_continuity_guard = bool(
-        use_perfect_box_refiner
-        and guard_options.get("use_perfect_refiner_continuity_guard", True)
-    )
-    allow_yolo_geometry_on_perfect = use_perfect_box_refiner
-    guard_counts = dict(guard_options.get("counts", {}) or {})
+        protect_manual_boxes = True
+        protect_perfect_plates = bool(
+            guard_options.get("protect_perfect_plates", True)
+        )
+        use_perfect_box_refiner = bool(
+            guard_options.get(
+                "use_perfect_box_refiner",
+                guard_options.get(
+                    "allow_yolo_geometry_on_perfect",
+                    True,
+                ),
+            )
+            and _method_uses_yolo_geometry(method)
+        )
+        use_perfect_refiner_continuity_guard = bool(
+            use_perfect_box_refiner
+            and guard_options.get(
+                "use_perfect_refiner_continuity_guard",
+                True,
+            )
+        )
+        allow_yolo_geometry_on_perfect = use_perfect_box_refiner
+        guard_counts = dict(guard_options.get("counts", {}) or {})
     scope_log_label = {
         "perfect_only": "tylko perfect",
         "non_perfect_only": "tylko do korekty",
     }.get(process_scope, "wszystkie tablice")
-    self._log(
-        self.test_log_text,
-        (
-            "[OCHRONA] "
-            f"manual={'ON' if protect_manual_boxes else 'OFF'}"
-            f"{' (wymuszone)' if not protect_manual_requested else ''}, "
-            f"perfect={'ON' if protect_perfect_plates else 'OFF'}, "
-            f"refiner perfect={'ON' if use_perfect_box_refiner else 'OFF'}, "
-            f"ciągłość={'ON' if use_perfect_refiner_continuity_guard else 'OFF'}; "
-            f"zakres={scope_log_label} ({len(all_plate_ids)}/{full_plate_total}); "
-            f"perfect={int(guard_counts.get('perfect', 0) or 0)}, "
-            f"manualne={int(guard_counts.get('manual', 0) or 0)}"
-        ),
-        "INFO",
-    )
+    if raw_only:
+        self._log(
+            self.test_log_text,
+            (
+                "[RAW] Eksperyment GT-blind | "
+                f"kontekst={workflow_context} | "
+                f"zakres=wszystkie wybrane cropy "
+                f"({len(all_plate_ids)}/{full_plate_total}) | "
+                "REVIEW/GOLD pozostaje bez zmian"
+            ),
+            "INFO",
+        )
+    else:
+        self._log(
+            self.test_log_text,
+            (
+                "[OCHRONA] "
+                f"manual={'ON' if protect_manual_boxes else 'OFF'}"
+                f"{' (wymuszone)' if not protect_manual_requested else ''}, "
+                f"perfect={'ON' if protect_perfect_plates else 'OFF'}, "
+                f"refiner perfect={'ON' if use_perfect_box_refiner else 'OFF'}, "
+                f"ciągłość={'ON' if use_perfect_refiner_continuity_guard else 'OFF'}; "
+                f"zakres={scope_log_label} ({len(all_plate_ids)}/{full_plate_total}); "
+                f"perfect={int(guard_counts.get('perfect', 0) or 0)}, "
+                f"manualne={int(guard_counts.get('manual', 0) or 0)}"
+            ),
+            "INFO",
+        )
 
     effective_device_choice = self._get_effective_detection_device_choice()
     effective_yolo_device = self._device_to_ultralytics(effective_device_choice)
@@ -888,8 +948,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
 
                 # RAW inference contract: no GT/reference may influence
                 # detector input, expected count, recall or source selection.
-                true_texts = []
-                expected_char_count = 0
+                # Do not materialize expected text/count in this stage.
                 try:
                     detector.expected_character_count = 0
                 except Exception:
@@ -923,140 +982,6 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 else:
                     yolo_chars = self._sort_character_records_by_x(list(getattr(detector, "last_yolo_detections", [])))
                 yolo_box_backend_chars = yolo_nms_chars or yolo_chars or yolo_raw_chars
-                yolo_low_conf_recall_details = None
-                if (
-                    method == DetectionMethod.YOLO
-                    and true_texts
-                    and self._get_yolo_rescue_enabled()
-                    and float(yolo_runtime.get("symbol_conf", yolo_runtime.get("conf", 0.25)) or 0.25) > 0.10
-                    and hasattr(detector, "detect_yolo_candidate_pass")
-                ):
-                    try:
-                        normal_text = self._characters_to_text(yolo_chars)
-                        expected_text = self._pick_best_true_text(normal_text, true_texts, same_length_only=False)
-                        expected_len = len(str(expected_text or "").strip())
-                        normal_distance = self._best_text_distance(normal_text, true_texts)
-                        normal_gap = abs(int(len(yolo_chars)) - int(expected_len)) if expected_len else 0
-                        if expected_len > 0 and len(yolo_chars) < expected_len:
-                            recall_conf = 0.10
-                            recall_pass = detector.detect_yolo_candidate_pass(img, confidence=recall_conf)
-                            recall_raw = self._sort_character_records_by_x(list(recall_pass.get("raw") or []))
-                            recall_nms = self._sort_character_records_by_x(list(recall_pass.get("nms") or []))
-                            recall_filtered = self._sort_character_records_by_x(list(recall_pass.get("filtered") or []))
-                            recall_text = self._characters_to_text(recall_filtered)
-                            recall_distance = self._best_text_distance(recall_text, true_texts)
-                            recall_gap = abs(int(len(recall_filtered)) - int(expected_len))
-                            improves_text = recall_distance < normal_distance
-                            improves_count = recall_distance == normal_distance and recall_gap < normal_gap
-                            if recall_filtered and (improves_text or improves_count):
-                                detector.last_yolo_raw_detections = list(recall_raw)
-                                detector.last_yolo_nms_detections = list(recall_nms)
-                                detector.last_yolo_detections = list(recall_filtered)
-                                detector.last_yolo_requested_device = recall_pass.get(
-                                    "requested_device",
-                                    getattr(detector, "last_yolo_requested_device", effective_yolo_device),
-                                )
-                                detector.last_yolo_runtime_device = str(
-                                    recall_pass.get(
-                                        "runtime_device",
-                                        getattr(detector, "last_yolo_runtime_device", ""),
-                                    )
-                                    or ""
-                                )
-                                yolo_raw_chars = recall_raw
-                                yolo_nms_chars = recall_nms
-                                yolo_chars = recall_filtered
-                                chars = list(recall_filtered)
-                                yolo_box_backend_chars = yolo_nms_chars or yolo_chars or yolo_raw_chars
-                                yolo_low_conf_recall_details = {
-                                    "enabled": True,
-                                    "conf": float(recall_conf),
-                                    "normal_text": normal_text,
-                                    "recall_text": recall_text,
-                                    "expected_text": expected_text,
-                                    "normal_count": int(len(normal_text)),
-                                    "recall_count": int(len(recall_filtered)),
-                                    "expected_count": int(expected_len),
-                                    "normal_distance": int(normal_distance),
-                                    "recall_distance": int(recall_distance),
-                                }
-                                self._log(
-                                    self.test_log_text,
-                                    (
-                                        f"[YOLO RECALL] {pid}: ys_conf {float(yolo_runtime.get('symbol_conf', yolo_runtime.get('conf', 0.25)) or 0.25):.2f}"
-                                        f" -> {recall_conf:.2f}, [{normal_text}] -> [{recall_text}]"
-                                    ),
-                                    "INFO",
-                                )
-                    except Exception as recall_error:
-                        logger.debug(f"YOLO low-conf recall pominiety dla {pid}: {recall_error}")
-                yolo_box_count_recall_details = None
-                if (
-                    method in (DetectionMethod.YOLO_BOX, DetectionMethod.YOLO)
-                    and true_texts
-                    and int(expected_char_count or 0) > int(len(yolo_box_backend_chars))
-                    and hasattr(detector, "detect_yolo_candidate_pass")
-                ):
-                    try:
-                        normal_count = int(len(yolo_box_backend_chars))
-                        recall_pass = detector.detect_yolo_candidate_pass(
-                            img,
-                            confidence=YOLO_BOX_RECALL_CONFIDENCE,
-                        )
-                        recall_raw = self._sort_character_records_by_x(list(recall_pass.get("raw") or []))
-                        recall_nms = self._sort_character_records_by_x(list(recall_pass.get("nms") or []))
-                        recall_candidates = recall_nms or self._sort_character_records_by_x(
-                            list(recall_pass.get("filtered") or [])
-                        ) or recall_raw
-                        selected_recall = recall_candidates
-                        if hasattr(detector, "_select_sequence_best_count_candidates"):
-                            selected_recall = detector._select_sequence_best_count_candidates(
-                                list(recall_candidates),
-                                int(expected_char_count),
-                            )
-                        selected_recall = self._sort_character_records_by_x(list(selected_recall or []))
-                        if len(selected_recall) > normal_count:
-                            detector.last_yolo_raw_detections = list(recall_raw)
-                            detector.last_yolo_nms_detections = list(selected_recall)
-                            if method == DetectionMethod.YOLO_BOX:
-                                detector.last_yolo_detections = list(selected_recall)
-                            detector.last_yolo_requested_device = recall_pass.get(
-                                "requested_device",
-                                getattr(detector, "last_yolo_requested_device", effective_yolo_device),
-                            )
-                            detector.last_yolo_runtime_device = str(
-                                recall_pass.get(
-                                    "runtime_device",
-                                    getattr(detector, "last_yolo_runtime_device", ""),
-                                )
-                                or ""
-                            )
-                            yolo_raw_chars = recall_raw
-                            yolo_nms_chars = selected_recall
-                            if method == DetectionMethod.YOLO_BOX:
-                                yolo_chars = selected_recall
-                            yolo_box_backend_chars = selected_recall
-                            yolo_box_count_recall_details = {
-                                "enabled": True,
-                                "conf": float(YOLO_BOX_RECALL_CONFIDENCE),
-                                "normal_count": int(normal_count),
-                                "recall_count": int(len(selected_recall)),
-                                "expected_count": int(expected_char_count),
-                                "raw_candidate_count": int(len(recall_raw)),
-                                "nms_candidate_count": int(len(recall_nms)),
-                            }
-                            self._log(
-                                self.test_log_text,
-                                (
-                                    f"[YB RECALL] {pid}: yb_conf "
-                                    f"{float(yolo_runtime.get('box_conf', yolo_runtime.get('conf', 0.25)) or 0.25):.5f}"
-                                    f" -> {YOLO_BOX_RECALL_CONFIDENCE:.5f}, "
-                                    f"boxes {normal_count} -> {len(selected_recall)}"
-                                ),
-                                "INFO",
-                            )
-                    except Exception as recall_error:
-                        logger.debug(f"YB low-conf recall pominiety dla {pid}: {recall_error}")
                 if method == DetectionMethod.YOLO_BOX:
                     chars = build_yolo_box_only_records(self, yolo_box_backend_chars)
                     fusion_strategy = "yolo_box_only" if chars else "no_detection"
@@ -1065,8 +990,6 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         "box_backend_count": int(len(chars)),
                         "box_backend_reference_count": int(len(yolo_box_backend_chars)),
                     }
-                    if isinstance(yolo_box_count_recall_details, dict):
-                        fusion_details["yolo_box_count_recall"] = yolo_box_count_recall_details
                 elif method == DetectionMethod.YOLO:
                     yolo_box_records = build_yolo_box_only_records(self, yolo_box_backend_chars)
                     chars, fusion_strategy, fusion_details = apply_yolo_symbols_to_existing_boxes(
@@ -1087,8 +1010,6 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                             "symbol_reference_count": int(len(yolo_chars)),
                         }
                     )
-                    if isinstance(yolo_box_count_recall_details, dict):
-                        fusion_details["yolo_box_count_recall"] = yolo_box_count_recall_details
                 elif method == DetectionMethod.YOLO_SYMBOL:
                     chars, fusion_strategy, fusion_details = apply_yolo_symbols_to_existing_boxes(
                         self,
@@ -1103,16 +1024,12 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         chars,
                         ocr_chars,
                         yolo_chars,
-                        true_texts,
+                        [],  # RAW contract: no reference texts
                         hybrid_rescue_max_chars=self._get_hybrid_rescue_max_chars(),
                         prefer_yolo_box_positions=(method == DetectionMethod.BOTH and self._use_hybrid_yolo_box_backend()),
                         yolo_box_backend_detections=yolo_box_backend_chars,
                         plate_image=img,
                     )
-                if isinstance(yolo_low_conf_recall_details, dict):
-                    fusion_details = dict(fusion_details or {})
-                    fusion_details["yolo_low_conf_recall"] = yolo_low_conf_recall_details
-
                 c_clean = self._serialize_character_records(
                     chars,
                     fusion_strategy=fusion_strategy,
@@ -1188,6 +1105,109 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     and not list(getattr(detector, "last_yolo_raw_detections", []) or [])
                 ):
                     zero_backend_count += 1
+
+                if raw_only:
+                    # Diagnostics belong to the RAW run and are safe to update.
+                    local_meta[pid]["yolo_detections"] = yolo_clean
+                    local_meta[pid]["yolo_nms_detections"] = yolo_nms_clean
+                    local_meta[pid]["yolo_raw_detections"] = yolo_raw_clean
+
+                    # Evaluation and Assist may use GT only after RAW is frozen.
+                    try:
+                        local_meta[pid]["gt_assist"] = (
+                            self._build_gt_assist_suggestion(
+                                local_meta[pid],
+                            )
+                        )
+                    except Exception as exc:
+                        local_meta[pid]["gt_assist"] = {
+                            "schema": "alpr.pz2.gt_assist.v1",
+                            "status": "unavailable",
+                            "reason": "assist_exception",
+                            "error": str(exc),
+                            "operations": [],
+                        }
+
+                    raw_validation = (
+                        local_meta[pid].get("raw_validation")
+                        if isinstance(
+                            local_meta[pid].get("raw_validation"),
+                            dict,
+                        )
+                        else {}
+                    )
+                    raw_exact = bool(
+                        raw_validation.get("exact_plate_match")
+                    )
+                    if raw_exact:
+                        stat_perfect += 1
+
+                    raw_count = int(len(c_clean or []))
+                    raw_text = str(
+                        raw_detection.get("prediction_text") or ""
+                    ).strip()
+                    gt_text = str(
+                        raw_validation.get("ground_truth_text") or ""
+                    ).strip()
+
+                    if raw_exact:
+                        self._log(
+                            self.test_log_text,
+                            (
+                                f"✅ RAW [{idx+1:03d}/{total}] "
+                                f"{pid}: [{raw_text}]"
+                            ),
+                            "SUCCESS",
+                        )
+                    else:
+                        expected_suffix = (
+                            f" | GT=[{gt_text}]"
+                            if gt_text
+                            else " | GT=brak"
+                        )
+                        self._log(
+                            self.test_log_text,
+                            (
+                                f"RAW [{idx+1:03d}/{total}] "
+                                f"{pid}: [{raw_text or '—'}]"
+                                f"{expected_suffix}"
+                            ),
+                            "INFO",
+                        )
+
+                    _mark_plate_detection(
+                        pid,
+                        result=(
+                            "raw_exact"
+                            if raw_exact
+                            else "raw_saved"
+                        ),
+                        characters=raw_count,
+                        status=str(
+                            local_meta[pid].get("status", "") or ""
+                        ),
+                        extra={
+                            "execution_mode": "raw_experiment",
+                            "workflow_context": workflow_context,
+                            "raw_result_hash": str(
+                                raw_detection.get("result_hash") or ""
+                            ),
+                            "raw_exact_plate_match": raw_exact,
+                        },
+                    )
+
+                    self.frame.after(
+                        0,
+                        lambda c=idx + 1, t=total, p=stat_perfect, token=session_token: self._update_detection_progress_ui(
+                            c,
+                            t,
+                            perfect_count=p,
+                            session_token=token,
+                        ),
+                    )
+                    # Critical separation: do not touch characters/status/layout
+                    # or review fusion metadata in RAW mode.
+                    continue
 
                 preserve_perfect_existing = bool(existing_is_perfect and protect_perfect_plates)
 
@@ -1271,16 +1291,6 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         final_chars = c_clean
                         final_strategy = str(fusion_strategy or "")
 
-                # Compatibility call retained for legacy plumbing.
-                # In gt_blind.v1 true_texts is always empty here, therefore
-                # this guard is a no-op and cannot trim to GT.
-                final_chars, fusion_details = self._apply_final_truth_count_guard(
-                    final_chars,
-                    true_texts,
-                    fusion_details if isinstance(fusion_details, dict) else None,
-                    data=local_meta[pid],
-                )
-
                 # WAŻNE: znaki trafiają do metadata w kolejności czytania.
 
                 self._update_preview_plate_layout_metadata(local_meta[pid], final_chars)
@@ -1342,18 +1352,6 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     self._log(
                         self.test_log_text,
                         f"[HYBRID] {pid}: YOLO poprawiło pozycje {int(fusion_details.get('box_backend_count', 0))} boxów.",
-                        "INFO"
-                    )
-
-                if isinstance(fusion_details, dict) and int(fusion_details.get("trimmed_extra_boxes", 0) or 0) > 0:
-                    trim_stage = str(fusion_details.get("gt_count_guard_stage", "") or "").strip().lower()
-                    stage_suffix = " po merge" if trim_stage == "final_characters" else ""
-                    self._log(
-                        self.test_log_text,
-                        f"[GT] {pid}: przycięto nadmiarowe boxy do długości GT "
-                        f"{stage_suffix}"
-                        f"({int(fusion_details.get('original_box_count', 0) or 0)} -> "
-                        f"{int(fusion_details.get('trimmed_box_count', 0) or 0)}).",
                         "INFO"
                     )
 
@@ -1466,21 +1464,65 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 plate_data = local_meta.get(str(detected_pid))
                 if isinstance(plate_data, dict) and isinstance(plate_data.get("last_detection"), dict):
                     plate_data["last_detection"]["finished_at"] = finished_iso
-            plates_with_chars = sum(
-                1 for pid in all_plate_ids
-                if isinstance(local_meta.get(pid), dict) and local_meta[pid].get("characters")
-            )
-            char_total = sum(
-                len(local_meta[pid].get("characters") or [])
-                for pid in all_plate_ids
-                if isinstance(local_meta.get(pid), dict) and isinstance(local_meta[pid].get("characters"), list)
-            )
+            if raw_only:
+                plates_with_chars = sum(
+                    1
+                    for pid in all_plate_ids
+                    if isinstance(local_meta.get(pid), dict)
+                    and isinstance(
+                        local_meta[pid].get("raw_detection"),
+                        dict,
+                    )
+                    and list(
+                        local_meta[pid]["raw_detection"].get(
+                            "characters",
+                            [],
+                        )
+                        or []
+                    )
+                )
+                char_total = sum(
+                    len(
+                        local_meta[pid]["raw_detection"].get(
+                            "characters",
+                            [],
+                        )
+                        or []
+                    )
+                    for pid in all_plate_ids
+                    if isinstance(local_meta.get(pid), dict)
+                    and isinstance(
+                        local_meta[pid].get("raw_detection"),
+                        dict,
+                    )
+                )
+            else:
+                plates_with_chars = sum(
+                    1 for pid in all_plate_ids
+                    if isinstance(local_meta.get(pid), dict)
+                    and local_meta[pid].get("characters")
+                )
+                char_total = sum(
+                    len(local_meta[pid].get("characters") or [])
+                    for pid in all_plate_ids
+                    if isinstance(local_meta.get(pid), dict)
+                    and isinstance(
+                        local_meta[pid].get("characters"),
+                        list,
+                    )
+                )
             detection_summary = {
                 "started_at": detection_started_iso,
                 "finished_at": finished_iso,
                 "method": str(method_key or "OCR"),
                 "method_label": detection_method_label,
                 "pipeline": detection_pipeline_label,
+                "execution_mode": (
+                    "raw_experiment"
+                    if raw_only
+                    else "review_update"
+                ),
+                "workflow_context": workflow_context,
                 "plate_scope": str(process_scope or "all"),
                 "source_plates": int(full_plate_total),
                 "scope_plates": int(total),
@@ -1489,6 +1531,11 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 "plates_with_chars": int(plates_with_chars),
                 "characters": int(char_total),
                 "perfect": int(stat_perfect),
+                "raw_exact": (
+                    int(stat_perfect)
+                    if raw_only
+                    else None
+                ),
                 "device": str(effective_device_choice or ""),
                 "yolo_device": str(effective_yolo_device or ""),
                 "ocr_device": str(effective_ocr_device or ""),
@@ -1594,7 +1641,14 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
             acc = (stat_perfect / total * 100) if total > 0 else 0
             self._log(
                 self.test_log_text,
-                f"\nSkuteczność: {acc:.1f}% ({stat_perfect}/{total} tablic)",
+                (
+                    f"\nRAW exact match: {acc:.1f}% "
+                    f"({stat_perfect}/{total} tablic)"
+                    if raw_only
+                    else
+                    f"\nSkuteczność: {acc:.1f}% "
+                    f"({stat_perfect}/{total} tablic)"
+                ),
                 "SUCCESS" if acc >= 80 else "WARNING"
             )
 
@@ -1667,8 +1721,17 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
 
                     try:
                         summary_msg = (
-                            f"Podsumowanie detekcji: perfect={stat_perfect}/{total}, "
-                            f"skuteczność={acc:.1f}%"
+                            (
+                                "Podsumowanie RAW: "
+                                f"exact={stat_perfect}/{total}, "
+                                f"exact_rate={acc:.1f}%"
+                            )
+                            if raw_only
+                            else (
+                                "Podsumowanie detekcji: "
+                                f"perfect={stat_perfect}/{total}, "
+                                f"skuteczność={acc:.1f}%"
+                            )
                         )
                         self._log(self.test_log_text, summary_msg, "INFO")
                     except Exception:
@@ -1680,11 +1743,26 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         pct=100,
                         current=total,
                         total=total,
-                        meta_text=f"100% | OK {int(stat_perfect)}/{int(total)} tablic",
+                        meta_text=(
+                            f"100% | RAW exact "
+                            f"{int(stat_perfect)}/{int(total)}"
+                            if raw_only
+                            else
+                            f"100% | OK "
+                            f"{int(stat_perfect)}/{int(total)} tablic"
+                        ),
                     )
                     self._set_test_status(
                         self._compose_detection_method_status(
-                            f"zakończona i zapisana | skuteczność {acc:.1f}%"
+                            (
+                                "RAW zakończony i zapisany | "
+                                f"exact {acc:.1f}%"
+                            )
+                            if raw_only
+                            else (
+                                "zakończona i zapisana | "
+                                f"skuteczność {acc:.1f}%"
+                            )
                         ),
                         "success"
                     )
@@ -1698,8 +1776,9 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     except Exception:
                         pass
 
-                    # 7. odblokuj dalszy krok
-                    self.unlock_dataset_subtab()
+                    # RAW experiment alone does not make GOLD/dataset ready.
+                    if not raw_only:
+                        self.unlock_dataset_subtab()
 
                 except Exception as e:
                     logger.error(f"Błąd finalize() po Szybkim Teście: {e}")

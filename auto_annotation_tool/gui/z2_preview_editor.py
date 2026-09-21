@@ -32,7 +32,6 @@ from . import z2_canvas_overlays
 from . import z2_canvas_interaction
 from . import z2_plate_gt_inline
 from . import z2_gt_pack_runtime
-from . import z2_gt_pack_dialog
 from .z2_main_widgets import create_annotation_widgets
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
 from .z2_canvas_metrics_ui import (
@@ -1287,7 +1286,6 @@ def _draw_preview_plate_combo_overlay(
             z2_plate_gt_inline.count_plate_gt(plate_detections)
         )
         show_gt_counter = True
-        pack_status = z2_gt_pack_runtime.get_gt_pack_status(self)
 
         if total > 0:
             try:
@@ -1328,18 +1326,6 @@ def _draw_preview_plate_combo_overlay(
             accent if gt_complete else (warning if gt_count > 0 else muted)
         )
 
-        pack_text = str(pack_status.get("text") or "PACK OFF")
-        pack_tone = str(pack_status.get("tone") or "off")
-        pack_fill = (
-            error
-            if pack_tone == "conflict"
-            else warning
-            if pack_tone == "pending"
-            else accent
-            if pack_tone == "ok"
-            else muted
-        )
-
         status_text = "OK" if is_ok else "NOK"
         status_fill = "#21a765" if is_ok else "#d64545"
         status_outline = "#8ff0b8" if is_ok else "#ff9a9a"
@@ -1377,7 +1363,6 @@ def _draw_preview_plate_combo_overlay(
             "bold",
             "Bahnschrift SemiBold",
         )
-        pack_font = _combo_font(8, "bold", "Segoe UI")
         status_font = _combo_font(
             16,
             "bold",
@@ -1407,17 +1392,11 @@ def _draw_preview_plate_combo_overlay(
             if show_gt_counter
             else 0.0
         )
-        pack_box_w = max(
-            72.0,
-            float(pack_font.measure(pack_text)) + (pad_x * 2.0),
-        )
-
         icon_box_w = 30.0
         combo_h = 36.0
 
-        # Preserve the original status group first:
-        # RAMKA | n/N | OK/NOK
-        # Then append GT counter and the two action tiles.
+        # Main operator status only:
+        # RAMKA | n/N | OK/NOK | GT n/N | fullscreen
         combo_w = (
             title_box_w
             + gap
@@ -1427,7 +1406,6 @@ def _draw_preview_plate_combo_overlay(
         )
         if show_gt_counter:
             combo_w += gap + gt_box_w
-        combo_w += gap + pack_box_w
         combo_w += gap + icon_box_w
 
         x1 = viewport_left + ((viewport_width - combo_w) / 2.0)
@@ -1459,10 +1437,6 @@ def _draw_preview_plate_combo_overlay(
         else:
             gt_x1 = next_x
             gt_x2 = next_x
-
-        pack_x1 = next_x
-        pack_x2 = pack_x1 + pack_box_w
-        next_x = pack_x2 + gap
 
         fs_icon_x1 = next_x
         fs_icon_x2 = fs_icon_x1 + icon_box_w
@@ -1512,21 +1486,6 @@ def _draw_preview_plate_combo_overlay(
                 width=1,
                 tags=("preview_overlay", "preview_plate_combo_overlay"),
             )
-
-        canvas.create_rectangle(
-            pack_x1,
-            y1,
-            pack_x2,
-            y2,
-            outline=pack_fill,
-            fill=panel_fill,
-            width=1,
-            tags=(
-                "preview_overlay",
-                "preview_plate_combo_overlay",
-                "preview_gt_pack_status",
-            ),
-        )
 
         canvas.create_rectangle(
             fs_icon_x1,
@@ -1584,20 +1543,6 @@ def _draw_preview_plate_combo_overlay(
                 tags=("preview_overlay", "preview_plate_combo_overlay"),
             )
 
-        canvas.create_text(
-            pack_x1 + (pack_box_w / 2.0),
-            y1 + (combo_h / 2.0),
-            text=pack_text,
-            fill=pack_fill,
-            anchor="center",
-            font=pack_font,
-            tags=(
-                "preview_overlay",
-                "preview_plate_combo_overlay",
-                "preview_gt_pack_status",
-            ),
-        )
-
         fs_inner = 7.0
         ix1 = fs_icon_x1 + fs_inner
         iy1 = y1 + fs_inner
@@ -1637,12 +1582,7 @@ def _draw_preview_plate_combo_overlay(
                 ),
             )
 
-        self._z2_gt_pack_status_bbox = (
-            float(pack_x1),
-            float(y1),
-            float(pack_x2),
-            float(y2),
-        )
+        self._z2_gt_pack_status_bbox = None
         self._plate_gt_mode_toggle_bbox = None
         self._preview_fullscreen_toggle_bbox = (
             float(fs_icon_x1),
@@ -1660,7 +1600,6 @@ def _draw_preview_plate_combo_overlay(
             pass
 
         canvas.tag_raise("preview_plate_combo_overlay")
-        canvas.tag_raise("preview_gt_pack_status")
         canvas.tag_raise("preview_fullscreen_toggle")
     except Exception:
         pass
@@ -3428,12 +3367,6 @@ def on_zoomable_canvas_press(self, canvas: ZoomableCanvas, event):
     canvas_x = float(getattr(event, "canvas_x", getattr(event, "x", 0.0)))
     canvas_y = float(getattr(event, "canvas_y", getattr(event, "y", 0.0)))
     mark_phase("coords")
-
-    if z2_gt_pack_runtime.is_gt_pack_status_hit(
-        self, canvas_x, canvas_y
-    ):
-        z2_gt_pack_dialog.open_gt_pack_manager(self)
-        return True
 
     if _handle_preview_bottom_hint_click(self, canvas_x, canvas_y, event):
         return True
