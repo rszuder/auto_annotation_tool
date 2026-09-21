@@ -479,6 +479,16 @@ def _build_raw_detection_validation(
         target_text
         and detected_count == len(target_text)
     )
+    box_count_error = (
+        int(detected_count - len(target_text))
+        if target_text
+        else None
+    )
+    box_count_abs_error = (
+        abs(int(box_count_error))
+        if box_count_error is not None
+        else None
+    )
     geometry_ok = bool(
         detected_count > 0
         and exportable_count == detected_count
@@ -558,6 +568,9 @@ def _build_raw_detection_validation(
         "exportable_char_count": int(exportable_count),
         "exact_text_match": bool(exact_text_match),
         "exact_count_match": bool(exact_count_match),
+        "exact_plate_match": bool(perfect),
+        "box_count_error": box_count_error,
+        "box_count_abs_error": box_count_abs_error,
         "geometry_ok": bool(geometry_ok),
         "layout_conflict": bool(layout_conflict),
         "edit_distance": edit_distance,

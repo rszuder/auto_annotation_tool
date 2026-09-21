@@ -144,3 +144,35 @@ def test_raw_model_exact_rejects_validation_from_old_gt_revision():
     data["raw_validation"]["gt_revision_ids"] = ["rev-old"]
 
     assert category(data) == provenance.LEGACY_UNTRACKED
+
+def test_collect_dataset_revision_ids_deduplicates_all_heads():
+    items = [
+        {
+            "provenance": {
+                "source_gt_revision_ids": [
+                    "rev-b",
+                    "rev-a",
+                ],
+                "source_geometry_revision_ids": [
+                    "geom-b",
+                ],
+            }
+        },
+        {
+            "provenance": {
+                "source_gt_revision_id": "rev-a",
+                "source_geometry_revision_id": "geom-a",
+            }
+        },
+    ]
+
+    result = provenance.collect_dataset_revision_ids(items)
+
+    assert result["gt_revision_ids"] == [
+        "rev-a",
+        "rev-b",
+    ]
+    assert result["geometry_revision_ids"] == [
+        "geom-a",
+        "geom-b",
+    ]

@@ -188,3 +188,38 @@ def test_detection_runtime_persists_canonical_raw_result_hash():
 
     assert 'raw_detection["result_hash"]' in source
     assert "canonical_raw_detection_hash(raw_detection)" in source
+
+def test_raw_validation_reports_exact_plate_and_box_count_error():
+    exact = validate(
+        {
+            "source_annotation_id": "plate-ann-one",
+            "ground_truth_text": "ABC123",
+        },
+        chars("ABC123"),
+    )
+    missing = validate(
+        {
+            "source_annotation_id": "plate-ann-one",
+            "ground_truth_text": "ABC123",
+        },
+        chars("ABC12"),
+    )
+    extra = validate(
+        {
+            "source_annotation_id": "plate-ann-one",
+            "ground_truth_text": "ABC123",
+        },
+        chars("ABC1234"),
+    )
+
+    assert exact["exact_plate_match"] is True
+    assert exact["box_count_error"] == 0
+    assert exact["box_count_abs_error"] == 0
+
+    assert missing["exact_plate_match"] is False
+    assert missing["box_count_error"] == -1
+    assert missing["box_count_abs_error"] == 1
+
+    assert extra["exact_plate_match"] is False
+    assert extra["box_count_error"] == 1
+    assert extra["box_count_abs_error"] == 1

@@ -301,3 +301,84 @@ def test_raw_benchmark_excludes_stale_validation_revision():
 
     assert result["evaluable_plates"] == 0
     assert result["invalid_validation_count"] == 1
+
+def test_raw_benchmark_reports_box_count_accuracy():
+    records = [
+        raw_plate(
+            image_id="img-a",
+            plate_id="plate-a",
+            gt_hash="gt-a",
+            gt="ABC123",
+            prediction="ABC123",
+            edit_distance=0,
+            exact=True,
+        ),
+        raw_plate(
+            image_id="img-b",
+            plate_id="plate-b",
+            gt_hash="gt-b",
+            gt="XYZ999",
+            prediction="XYZ99",
+            edit_distance=1,
+            exact=False,
+        ),
+    ]
+    records[0]["raw_validation"].update(
+        expected_char_count=6,
+        detected_char_count=6,
+        box_count_error=0,
+    )
+    records[1]["raw_validation"].update(
+        expected_char_count=6,
+        detected_char_count=5,
+        box_count_error=-1,
+    )
+
+    result = z3_dataset_provenance.build_gt_blind_raw_benchmark(
+        records
+    )
+
+    assert result["box_count_exact_count"] == 1
+    assert result["box_count_accuracy"] == 0.5
+    assert result["box_count_abs_error_total"] == 1
+    assert result["mean_abs_box_count_error"] == 0.5
+
+
+def test_training_snapshot_keeps_dataset_revision_sets(tmp_path):
+    dataset = make_dataset(tmp_path)
+    manifest_path = dataset / "metadata_manifest.json"
+    payload = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    payload["gt_revision_ids"] = ["rev-b", "rev-a"]
+    payload["geometry_revision_ids"] = [
+        "geom-b",
+        "geom-a",
+    ]
+    payload["gt_contract_fingerprint_sha256"] = "b" * 64
+    manifest_path.write_text(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = build_training_dataset_snapshot(
+        dataset,
+        target="char",
+    )
+
+    assert snapshot["source_gt_revision_ids"] == [
+        "rev-a",
+        "rev-b",
+    ]
+    assert snapshot["source_geometry_revision_ids"] == [
+        "geom-a",
+        "geom-b",
+    ]
+    assert (
+        snapshot["source_gt_contract_fingerprint_sha256"]
+        == "b" * 64
+    )

@@ -319,6 +319,18 @@ def build_dataset_training_provenance(
                 )
                 or ""
             ),
+            "source_gt_revision_ids": list(
+                semantic_manifest.get(
+                    "source_gt_revision_ids"
+                )
+                or []
+            ),
+            "source_geometry_revision_ids": list(
+                semantic_manifest.get(
+                    "source_geometry_revision_ids"
+                )
+                or []
+            ),
             "local_path_hint": str(root),
             "data_yaml": str(yaml_path) if yaml_path.exists() else "",
             "dataset_id_strategy": "composite_v2",
@@ -1285,6 +1297,28 @@ def _dataset_semantic_manifest_summary(root: Path) -> dict[str, Any]:
             if isinstance(raw_benchmark, Mapping)
             else {}
         )
+        def _safe_revision_ids(value) -> list[str]:
+            if not isinstance(value, (list, tuple, set)):
+                return []
+            return sorted(
+                {
+                    str(item or "").strip()
+                    for item in value
+                    if str(item or "").strip()
+                }
+            )
+
+        def _safe_revision_ids(value) -> list[str]:
+            if not isinstance(value, (list, tuple, set)):
+                return []
+            return sorted(
+                {
+                    str(item or "").strip()
+                    for item in value
+                    if str(item or "").strip()
+                }
+            )
+
         return {
             "source_manifest_name": name,
             "source_sample_provenance_schema": provenance_schema,
@@ -1298,8 +1332,18 @@ def _dataset_semantic_manifest_summary(root: Path) -> dict[str, Any]:
             ),
             "source_raw_benchmark": benchmark,
             "source_gt_contract_fingerprint_sha256": str(
-                benchmark.get("gt_contract_fingerprint_sha256") or ""
+                payload.get("gt_contract_fingerprint_sha256")
+                or benchmark.get(
+                    "gt_contract_fingerprint_sha256"
+                )
+                or ""
             ).strip(),
+            "source_gt_revision_ids": _safe_revision_ids(
+                payload.get("gt_revision_ids")
+            ),
+            "source_geometry_revision_ids": _safe_revision_ids(
+                payload.get("geometry_revision_ids")
+            ),
         }
     return {
         "source_manifest_name": "",
@@ -1307,6 +1351,8 @@ def _dataset_semantic_manifest_summary(root: Path) -> dict[str, Any]:
         "source_sample_provenance_counts": {},
         "source_raw_benchmark": {},
         "source_gt_contract_fingerprint_sha256": "",
+        "source_gt_revision_ids": [],
+        "source_geometry_revision_ids": [],
     }
 
 

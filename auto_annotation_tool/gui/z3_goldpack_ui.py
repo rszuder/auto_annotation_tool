@@ -925,6 +925,11 @@ def run_yolo_gold_export(
                 benchmark_plate_records
             )
         )
+        dataset_revision_ids = (
+            z3_dataset_provenance.collect_dataset_revision_ids(
+                manifest_items
+            )
+        )
 
         host._atomic_write_json(
             yolo_out / "metadata_manifest.json",
@@ -934,6 +939,26 @@ def run_yolo_gold_export(
                 "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
                 "provenance_counts": provenance_counts,
                 "raw_benchmark": raw_benchmark,
+                "gt_contract_fingerprint_sha256": str(
+                    raw_benchmark.get(
+                        "gt_contract_fingerprint_sha256"
+                    )
+                    or ""
+                ),
+                "gt_revision_ids": list(
+                    dataset_revision_ids.get(
+                        "gt_revision_ids",
+                        [],
+                    )
+                    or []
+                ),
+                "geometry_revision_ids": list(
+                    dataset_revision_ids.get(
+                        "geometry_revision_ids",
+                        [],
+                    )
+                    or []
+                ),
                 "split_enabled": bool(split_enabled),
                 "selected_strategies": sorted(selected_buckets),
                 "selected_sources": sorted(selected_sources),

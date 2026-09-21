@@ -329,6 +329,80 @@ def classify_plate_dataset_provenance(
     }
 
 
+def collect_dataset_revision_ids(items) -> dict[str, list[str]]:
+    """Aggregate GT/geometry revision provenance from exported samples."""
+    gt_ids: set[str] = set()
+    geometry_ids: set[str] = set()
+
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        provenance = (
+            item.get("provenance")
+            if isinstance(item.get("provenance"), dict)
+            else item
+        )
+        if not isinstance(provenance, dict):
+            continue
+
+        gt_ids.update(
+            revision_ids_from_data(
+                provenance,
+                "source_gt_revision_ids",
+                "source_gt_revision_id",
+            )
+        )
+        geometry_ids.update(
+            revision_ids_from_data(
+                provenance,
+                "source_geometry_revision_ids",
+                "source_geometry_revision_id",
+            )
+        )
+
+    return {
+        "gt_revision_ids": sorted(gt_ids),
+        "geometry_revision_ids": sorted(geometry_ids),
+    }
+
+
+def collect_dataset_revision_ids(items) -> dict[str, list[str]]:
+    """Aggregate GT/geometry revision provenance from exported samples."""
+    gt_ids: set[str] = set()
+    geometry_ids: set[str] = set()
+
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        provenance = (
+            item.get("provenance")
+            if isinstance(item.get("provenance"), dict)
+            else item
+        )
+        if not isinstance(provenance, dict):
+            continue
+
+        gt_ids.update(
+            revision_ids_from_data(
+                provenance,
+                "source_gt_revision_ids",
+                "source_gt_revision_id",
+            )
+        )
+        geometry_ids.update(
+            revision_ids_from_data(
+                provenance,
+                "source_geometry_revision_ids",
+                "source_geometry_revision_id",
+            )
+        )
+
+    return {
+        "gt_revision_ids": sorted(gt_ids),
+        "geometry_revision_ids": sorted(geometry_ids),
+    }
+
+
 def summarize_dataset_provenance(items) -> dict[str, int]:
     counts = {category: 0 for category in KNOWN_CATEGORIES}
     for item in list(items or []):
@@ -403,6 +477,8 @@ def build_gt_blind_raw_benchmark(records) -> dict:
     evaluable_records = 0
     exact_plate_count = 0
     exact_text_count = 0
+    box_count_exact_count = 0
+    box_count_abs_error_total = 0
     total_gt_characters = 0
     total_edit_distance = 0
     missing_ground_truth_count = 0
@@ -482,6 +558,35 @@ def build_gt_blind_raw_benchmark(records) -> dict:
         if plate_exact:
             exact_plate_count += 1
 
+        try:
+            box_count_error = int(
+                validation.get("box_count_error")
+            )
+        except Exception:
+            try:
+                expected_count = int(
+                    validation.get("expected_char_count")
+                    or len(gt_text)
+                )
+            except Exception:
+                expected_count = len(gt_text)
+            try:
+                detected_count = int(
+                    validation.get("detected_char_count")
+                    or len(raw.get("characters", []) or [])
+                )
+            except Exception:
+                detected_count = len(
+                    raw.get("characters", []) or []
+                )
+            box_count_error = int(
+                detected_count - expected_count
+            )
+
+        if box_count_error == 0:
+            box_count_exact_count += 1
+        box_count_abs_error_total += abs(box_count_error)
+
         source_gt_hash = str(data.get("source_gt_hash") or "").strip()
         if source_gt_hash:
             hashed_gt_count += 1
@@ -521,9 +626,19 @@ def build_gt_blind_raw_benchmark(records) -> dict:
         exact_text_rate = (
             float(exact_text_count) / float(evaluable_records)
         )
+        box_count_accuracy = (
+            float(box_count_exact_count)
+            / float(evaluable_records)
+        )
+        mean_abs_box_count_error = (
+            float(box_count_abs_error_total)
+            / float(evaluable_records)
+        )
     else:
         exact_plate_rate = None
         exact_text_rate = None
+        box_count_accuracy = None
+        mean_abs_box_count_error = None
 
     cer = (
         float(total_edit_distance) / float(total_gt_characters)
@@ -583,6 +698,22 @@ def build_gt_blind_raw_benchmark(records) -> dict:
         "exact_text_rate": (
             round(float(exact_text_rate), 8)
             if exact_text_rate is not None
+            else None
+        ),
+        "box_count_exact_count": int(
+            box_count_exact_count
+        ),
+        "box_count_accuracy": (
+            round(float(box_count_accuracy), 8)
+            if box_count_accuracy is not None
+            else None
+        ),
+        "box_count_abs_error_total": int(
+            box_count_abs_error_total
+        ),
+        "mean_abs_box_count_error": (
+            round(float(mean_abs_box_count_error), 8)
+            if mean_abs_box_count_error is not None
             else None
         ),
         "gt_characters": int(total_gt_characters),
