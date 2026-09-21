@@ -16,6 +16,7 @@ from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .zoomable_canvas import ZoomableCanvas
 from .z2_main_widget_bindings import bind_annotation_widget_help_and_events
 from .z2_right_panel_widgets import build_annotation_right_panel
+from . import z2_gt_completion
 
 
 def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
@@ -334,13 +335,6 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         button_text="Wybierz obrazy",
         button_command=self._select_input_dir,
     )
-    self.gt_pack_creator_btn = ttk.Button(
-        source_section,
-        text="Utwórz roboczy pakiet GT…",
-        command=self._open_gt_pack_creator,
-    )
-    self.gt_pack_creator_btn.pack(anchor=tk.E, pady=(4, 8))
-
     self.project_paths_info_lbl = tk.Label(
         source_section,
         textvariable=self.project_paths_info_var,
@@ -1230,6 +1224,12 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         bd=0,
         highlightthickness=0
     )
+    self.gt_completion_followup_box = z2_gt_completion.build_gt_completion_subpanel(
+        self,
+        self.followup_section,
+        key="followup",
+    )
+
     self._register_workflow_step_card(
         "workflow_followup",
         self.followup_section,
@@ -1237,6 +1237,10 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
             self.followup_intro_lbl,
             self.run_output_info_lbl,
             self.post_annotation_hint_lbl,
+        ],
+        child_frames=[
+            self.followup_actions_row,
+            self.gt_completion_followup_box,
         ],
         style_targets=[
             {
@@ -1311,6 +1315,12 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         self.manual_stage_section,
         padding_px=54,
         min_px=220,
+    )
+
+    self.gt_completion_manual_box = z2_gt_completion.build_gt_completion_subpanel(
+        self,
+        self.manual_stage_section,
+        key="manual",
     )
 
     self.manual_stage_buttons_row = ttk.Frame(self.manual_stage_section, style="Panel.TFrame")

@@ -2039,6 +2039,9 @@ def _apply_free_mode_session_snapshot(self, session_state: dict | None = None, r
     self._free_mode_session_restore_in_progress = True
     try:
         restored_route = self._normalize_workflow_route_value(state.get("workflow_route"))
+        restored_screen = self._normalize_free_mode_screen_value(
+            state.get("free_mode_screen")
+        )
         restored_manual_entry_mode = self._normalize_manual_entry_mode(state.get("manual_entry_mode"))
         safe_output_dir = self._coerce_annotation_output_dir(state.get("output_dir"))
         safe_run_dir = self._resolve_safe_annotation_run_dir(state.get("plate_dataset_run"), require_xml=True)
@@ -2063,9 +2066,7 @@ def _apply_free_mode_session_snapshot(self, session_state: dict | None = None, r
         self.manual_entry_mode_var.set(restored_manual_entry_mode)
         self.auto_vehicle_choice_var.set(self._normalize_auto_vehicle_choice(state.get("auto_vehicle_choice")))
         self.workflow_step_var.set(self._normalize_workflow_step_value(state.get("workflow_step")))
-        self.free_mode_screen_var.set(
-            self._normalize_free_mode_screen_value(state.get("free_mode_screen"))
-        )
+        self.free_mode_screen_var.set(restored_screen)
         self._manual_review_active = bool(state.get("manual_review_active", False))
         self._manual_review_from_auto = bool(state.get("manual_review_from_auto", False))
         self._manual_review_origin_route = self._normalize_workflow_route_value(

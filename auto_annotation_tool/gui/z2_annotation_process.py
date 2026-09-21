@@ -4446,7 +4446,9 @@ def _finish(self, success, msg):
             and self._get_workflow_route() == "manual"
             and self._get_manual_entry_mode() == "new"
         )
-        hold_manual_template_on_start = bool(manual_template_free_mode_new_run)
+        # New free-mode manual runs move straight into correction after the
+        # primary "Rozpocznij anotację" action. No intermediate "Dalej" gate.
+        hold_manual_template_on_start = False
         self._last_completed_workflow_route = self._get_workflow_route() or (
             "manual" if manual_template_success else "auto"
         )
@@ -4494,7 +4496,7 @@ def _finish(self, success, msg):
         if manual_template_free_mode_new_run:
             try:
                 self._schedule_left_panel_scroll_to_widget(
-                    getattr(self, "workflow_start_section", None)
+                    getattr(self, "manual_stage_section", None)
                     or getattr(self, "actions_section", None),
                     delay_ms=80,
                 )
@@ -4508,29 +4510,9 @@ def _finish(self, success, msg):
             except Exception:
                 pass
             if manual_template_free_mode_new_run:
-                try:
-                    parent_window = self.frame.winfo_toplevel()
-                except Exception:
-                    parent_window = getattr(self.app, "root", None)
-
-                def _show_manual_xml_success_dialog():
-                    messagebox.showinfo(
-                        "XML anotacji utworzony",
-                        (
-                            "Utworzono nowy run ręcznej anotacji Z2 oraz plik annotations.xml.\n\n"
-                            "Etap wejścia jest gotowy. Kliknij Dalej w karcie, aby przejść do kroku "
-                            "„Korekta i decyzja po anotacji ręcznej”. Tam wykonasz właściwą pracę na tablicach.\n\n"
-                            "Warunek dalszych akcji: narysuj lub popraw ramkę/poligon tablicy na co najmniej "
-                            "jednym obrazie, zapisz anotację i nadaj temu obrazowi status [OK]. Dopiero wtedy "
-                            "aktywują się akcje „Wyodrębnij tablice” oraz „Eksport”."
-                        ),
-                        parent=parent_window,
-                    )
-
-                try:
-                    self.frame.after_idle(_show_manual_xml_success_dialog)
-                except Exception:
-                    _show_manual_xml_success_dialog()
+                # The UI is already on "Korekta i decyzja"; a modal asking for
+                # another "Dalej" would reintroduce the obsolete two-gate flow.
+                pass
             elif not manual_template_success:
                 try:
                     self.frame.after_idle(
@@ -4676,7 +4658,10 @@ def _switch_annotation_input_dir(self, input_dir: Path, *, show_hint: bool = Tru
                 parent=getattr(self, "frame", None),
             )
         except Exception as exc:
-            logger.debug(f"Nie udało się przygotować GT companion dla free mode: {exc}")
+            # GT is optional metadata and must never block Z2 work.
+            logger.debug(
+                f"Nie udało się przygotować opcjonalnego GT companion dla free mode: {exc}"
+            )
 
     defer_heavy_source_refresh = bool(free_mode_context and current_route == "auto")
 
@@ -4742,7 +4727,7 @@ def _switch_annotation_input_dir(self, input_dir: Path, *, show_hint: bool = Tru
 
         if current_manual_entry_mode == "new":
             if free_mode_context:
-                self._set_workflow_step("manual_input", refresh_detection_ui=True)
+                self._set_workflow_step("manual_start", refresh_detection_ui=True)
                 return True
             self._set_workflow_step("manual_start")
         else:

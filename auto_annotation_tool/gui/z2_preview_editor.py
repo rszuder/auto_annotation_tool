@@ -187,7 +187,7 @@ def _get_step2_start_action_label(self) -> str:
             if self._is_free_mode_manual_xml_waiting_for_review():
                 return "Dalej"
             if self._get_manual_entry_mode() == "new":
-                return "Utwórz XML + boxy" if self._manual_vehicle_assist_enabled() else "Utwórz XML"
+                return "Rozpocznij anotację + boxy" if self._manual_vehicle_assist_enabled() else "Rozpocznij anotację"
         except Exception:
             pass
     elif route == "auto":
@@ -3027,7 +3027,7 @@ def _refresh_free_mode_manual_review_export_controls(self) -> None:
         pass
     try:
         self.manual_stage_use_btn.configure(
-            text="Wyodrębnij tablice",
+            text="Przejdź do Z3",
             command=self._open_step3_from_z2_annotation_source,
             state=(tk.NORMAL if extract_enabled else tk.DISABLED),
         )
@@ -3035,7 +3035,7 @@ def _refresh_free_mode_manual_review_export_controls(self) -> None:
         pass
     try:
         self.manual_stage_add_btn.configure(
-            text="Otwórz eksport",
+            text="Przejdź do eksportu",
             command=self._start_z2_export_choice_flow,
             state=(tk.NORMAL if export_enabled else tk.DISABLED),
         )

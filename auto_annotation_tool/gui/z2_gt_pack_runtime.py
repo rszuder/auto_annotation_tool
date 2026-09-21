@@ -1428,6 +1428,12 @@ def sync_plate_gt_after_xml_save(
         _write_outbox(host, payload)
         result["enabled"] = True
         result["working_pack_path"] = str(working_path)
+        try:
+            refresher = getattr(host, "_refresh_gt_completion_ui", None)
+            if callable(refresher):
+                refresher()
+        except Exception:
+            pass
         return result
 
     item["last_error"] = str(
@@ -1501,6 +1507,12 @@ def sync_plate_layout_after_xml_save(
         _write_outbox(host, payload)
         result["enabled"] = True
         result["working_pack_path"] = str(working_path)
+        try:
+            refresher = getattr(host, "_refresh_gt_completion_ui", None)
+            if callable(refresher):
+                refresher()
+        except Exception:
+            pass
         return result
 
     item["last_error"] = str(result.get("error") or result.get("reason") or "unknown")

@@ -406,6 +406,11 @@ def _refresh_free_mode_workflow_ui(self):
         cta_state=cta_state,
     )
 
+    try:
+        self._refresh_gt_completion_ui()
+    except Exception:
+        pass
+
     if (
         not campaign_context
         and str(route or "").strip().lower() == "auto"
@@ -430,15 +435,15 @@ def _refresh_free_mode_workflow_ui(self):
         and str(current_step or "").strip().lower() == "manual_start"
     ):
         try:
-            self.workflow_start_title_lbl.configure(text="Utw\u00f3rz XML anotacji")
+            self.workflow_start_title_lbl.configure(text="Rozpocznij anotację")
         except Exception:
             pass
         try:
             self.start_btn.configure(
                 text=(
-                    "Utwórz XML + boxy pojazdów"
+                    "Rozpocznij anotację + boxy pojazdów"
                     if self._manual_vehicle_assist_enabled()
-                    else "Utwórz XML anotacji"
+                    else "Rozpocznij anotację"
                 )
             )
         except Exception:
@@ -1036,7 +1041,7 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
                 self._set_widget_packed(buttons_row, True, fill=tk.X, pady=(0, 2))
                 try:
                     self.manual_stage_use_btn.configure(
-                        text="Wyodrębnij tablice",
+                        text="Przejdź do Z3",
                         command=self._open_step3_from_z2_annotation_source,
                         state=(tk.NORMAL if approved_ready and not self.is_processing else tk.DISABLED),
                     )
@@ -1048,7 +1053,7 @@ def _refresh_manual_review_followup_ui(self, *, from_auto: bool, active_run: boo
                     pass
                 try:
                     self.manual_stage_add_btn.configure(
-                        text="Otwórz eksport",
+                        text="Przejdź do eksportu",
                         command=self._start_z2_export_choice_flow,
                         state=(tk.NORMAL if export_ready and not self.is_processing else tk.DISABLED),
                     )
@@ -2771,7 +2776,13 @@ def _apply_z2_left_panel_copy_payload(self, payload: Z2CopyPayload, prefix_looku
     except Exception:
         pass
     try:
-        self.followup_title_lbl.configure(text=str(payload.followup_title or ""))
+        followup_prefixes = self._get_z2_thematic_title_prefixes()
+        self.followup_title_lbl.configure(
+            text=self._format_z2_thematic_title(
+                str(payload.followup_title or ""),
+                followup_prefixes.get("followup"),
+            )
+        )
     except Exception:
         pass
     try:

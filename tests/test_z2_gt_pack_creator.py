@@ -39,7 +39,7 @@ def test_ensure_working_gt_pack_rejects_invalid_existing_target(tmp_path):
         ensure_working_gt_pack(tmp_path)
 
 
-def test_creator_action_is_exposed_in_free_source_section():
+def test_gt_pack_is_not_presented_as_a_manual_prerequisite_button():
     root = Path(__file__).resolve().parents[1]
     widget_source = (root / "auto_annotation_tool/gui/z2_main_widgets.py").read_text(
         encoding="utf-8-sig"
@@ -48,5 +48,6 @@ def test_creator_action_is_exposed_in_free_source_section():
         encoding="utf-8-sig"
     )
 
-    assert 'text="Utwórz roboczy pakiet GT…"' in widget_source
-    assert "def _open_gt_pack_creator" in tab_source
+    assert 'text="Utwórz roboczy pakiet GT…"' not in widget_source
+    assert 'text="Zapisuj GT znaków dla modelu Detect"' not in widget_source
+    assert "gt_capture_enabled_var" not in tab_source
