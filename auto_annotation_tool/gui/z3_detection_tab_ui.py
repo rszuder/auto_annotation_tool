@@ -361,7 +361,7 @@ def build_detection_tab(
 
     self.preview_canvas_host = tk.Frame(
         preview_lf,
-        bg=palette.get("field", preview_panel_bg),
+        bg="#1e1e1e",
         bd=0,
         highlightthickness=0,
     )
@@ -376,7 +376,7 @@ def build_detection_tab(
 
     self.preview_canvas = tk.Canvas(
         self.preview_canvas_host,
-        bg=palette.get("field", preview_panel_bg),
+        bg="#1e1e1e",
         bd=0,
         relief=tk.FLAT,
         highlightthickness=0,

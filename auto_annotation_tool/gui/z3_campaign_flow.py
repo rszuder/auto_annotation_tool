@@ -1786,7 +1786,7 @@ def auto_progress_campaign_step3_entry(
         try:
             if hasattr(host.app, "update_status"):
                 host.app.update_status(
-                    "Przygotowuję tablice dla Z3. Po wyodrębnieniu wrócisz do pracy bramki T05 i wybierzesz kolejny krok.",
+                    "Przygotowuję tablice dla Z3. Po wyodrębnieniu automatycznie otworzę PZ2.",
                     "info",
                 )
         except Exception:

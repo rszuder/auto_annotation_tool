@@ -1168,7 +1168,7 @@ def apply_theme(self):
     try:
         self.app.style_canvas_widget(
             self.preview_canvas,
-            background=palette.get("panel", "#1e1e1e"),
+            background="#1e1e1e",
             bordercolor=panel_border
         )
     except Exception:
@@ -3129,7 +3129,7 @@ def _apply_main_pane_layout(self, *, force_defaults: bool = False):
             current_second = max(left_min + center_min, total_width - right_min)
 
         default_left = min(max_left, max(left_min, min(int(total_width * 0.20), 304)))
-        default_right_width = max(right_min, min(int(total_width * 0.22), 360))
+        default_right_width = max(right_min, min(int(total_width * 0.18), 320))
         default_second = max(default_left + center_min, total_width - default_right_width)
         default_second = min(default_second, max_second)
 

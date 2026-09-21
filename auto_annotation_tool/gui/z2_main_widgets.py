@@ -2379,7 +2379,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         self._preview_controls_global_wheel_bound = True
     self.preview_canvas = ZoomableCanvas(
         canvas_frame,
-        bg=palette.get("panel_alt", palette.get("panel", "#1e1e1e")),
+        bg="#1e1e1e",
         highlightthickness=0,
     )
     self.preview_canvas.pack(fill=tk.BOTH, expand=True)

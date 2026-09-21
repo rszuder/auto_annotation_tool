@@ -13,7 +13,9 @@ from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from ..project_cache import PROJECT_CACHE
 from ..plate_ground_truth import (
+    PLATE_LAYOUT_GT_ATTR,
     ensure_plate_detection_contract,
+    normalize_plate_layout_gt,
     normalize_plate_ground_truth_text,
 )
 
@@ -115,12 +117,17 @@ def build_plate_source_gt_hash(
     gt_source = str(
         attrs.get("ground_truth_source") or ""
     ).strip()
+    layout_gt = normalize_plate_layout_gt(
+        attrs.get(PLATE_LAYOUT_GT_ATTR),
+        default="",
+    )
     core = "|".join(
         (
             normalize_xml_image_relpath(image_name),
             plate_id,
             gt_text,
             gt_source,
+            layout_gt,
         )
     )
     return _stable_sha256_text(core)
@@ -171,6 +178,10 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
             gt_source = str(
                 attributes.get("ground_truth_source") or ""
             ).strip()
+            layout_gt = normalize_plate_layout_gt(
+                attributes.get(PLATE_LAYOUT_GT_ATTR),
+                default="",
+            )
 
             identity_key = plate_id or f"geom:{geometry_key}"
             image_gt_parts.append(
@@ -179,6 +190,7 @@ def count_xml_plate_cut_targets(xml_path: Path) -> dict:
                         identity_key,
                         gt_text,
                         gt_source,
+                        layout_gt,
                     )
                 )
             )

@@ -537,7 +537,7 @@ def _get_main_pane_width_limits(self) -> tuple[int, int]:
         int(left_counter_req),
     )
     left_min = max(280, min(420, left_base_req))
-    right_min = max(320, min(460, right_content_req + right_scrollbar_req + 20))
+    right_min = max(280, min(340, right_content_req + right_scrollbar_req + 16))
     return int(left_min), int(right_min)
 
 

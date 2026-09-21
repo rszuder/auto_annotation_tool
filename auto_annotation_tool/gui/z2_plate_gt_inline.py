@@ -7,6 +7,13 @@ import tkinter as tk
 from ..campaign_manager import CAMPAIGN
 from ..plate_ground_truth import (
     GROUND_TRUTH_SOURCE_MANUAL_Z2,
+    PLATE_LAYOUT_GT_ATTR,
+    PLATE_LAYOUT_SINGLE_ROW,
+    PLATE_LAYOUT_TWO_ROW,
+    ensure_plate_layout_gt,
+    get_plate_layout_gt,
+    normalize_plate_layout_gt,
+    set_plate_layout_gt,
     get_plate_ground_truth,
     set_plate_ground_truth,
 )
@@ -14,8 +21,9 @@ from . import z2_gt_pack_runtime
 from .web_slim_scrollbar import blend_hex_colors
 
 
-INLINE_SAVE_DELAY_MS = 550
-CARD_WIDTH = 138
+INLINE_SAVE_DELAY_MS = 2200
+INLINE_GATE_REFRESH_DELAY_MS = 180
+CARD_WIDTH = 176
 CARD_HEIGHT = 40
 CARD_GAP = 7
 TOGGLE_WIDTH = 42
@@ -69,6 +77,179 @@ def format_plate_info(host, det, ann) -> str:
         return f"DET {confidence:.2f}   FIT {float(fit_score):.2f}"
     except Exception:
         return f"DET {confidence:.2f}   FIT —"
+
+
+def _layout_gt_label(layout) -> str:
+    normalized = normalize_plate_layout_gt(layout)
+    return "2R" if normalized == PLATE_LAYOUT_TWO_ROW else "1R"
+
+
+def _update_record_layout_ui(host, record: dict) -> None:
+    if not isinstance(record, dict):
+        return
+    button = record.get("layout_button")
+    layout_var = record.get("layout_var")
+    if button is None:
+        return
+
+    preview = str(record.get("layout_preview") or "").strip()
+    det = record.get("det")
+    layout = (
+        normalize_plate_layout_gt(preview)
+        if preview
+        else get_plate_layout_gt(
+            getattr(det, "attributes", None)
+        )
+    )
+    label = _layout_gt_label(layout)
+
+    try:
+        if layout_var is not None:
+            layout_var.set(label)
+    except Exception:
+        pass
+
+    palette = _palette(host)
+    panel_bg = palette.get("panel", "#252526")
+    color = (
+        palette.get("warning", "#f0a020")
+        if layout == PLATE_LAYOUT_TWO_ROW
+        else palette.get("success", "#2ecc71")
+    )
+    fill = blend_hex_colors(panel_bg, color, 0.22)
+
+    try:
+        button.configure(
+            bg=fill,
+            fg=color,
+            activebackground=blend_hex_colors(fill, color, 0.16),
+            activeforeground=color,
+            highlightbackground=color,
+            highlightcolor=color,
+        )
+    except Exception:
+        pass
+
+
+def save_inline_plate_layout_gt_value(
+    host,
+    ann,
+    det,
+    requested_layout,
+):
+    previous_attributes = dict(getattr(det, "attributes", {}) or {})
+    det.attributes = dict(previous_attributes)
+
+    normalized = set_plate_layout_gt(
+        det.attributes,
+        requested_layout,
+    )
+    if det.attributes == previous_attributes:
+        return True, normalized
+
+    try:
+        host._mark_preview_image_dirty(ann, refresh_list=False)
+    except TypeError:
+        try:
+            host._mark_preview_image_dirty(ann)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    save_kwargs = dict(
+        interactive=False,
+        status_message="",
+        refresh_list=False,
+        refresh_workflow=False,
+        refresh_export_sources=False,
+    )
+    try:
+        saved = bool(host._save_preview_edits(**save_kwargs))
+    except TypeError:
+        try:
+            saved = bool(
+                host._save_preview_edits(
+                    interactive=False,
+                    status_message="",
+                )
+            )
+        except Exception:
+            saved = False
+    except Exception:
+        saved = False
+
+    if not saved:
+        det.attributes = previous_attributes
+        return False, get_plate_layout_gt(previous_attributes)
+
+    return True, normalized
+
+
+def _toggle_record_layout(host, key):
+    record = _editor_store(host).get(key)
+    if not isinstance(record, dict):
+        return "break"
+
+    try:
+        if not bool(host._preview_is_editable()):
+            return "break"
+    except Exception:
+        pass
+
+    ann = record.get("ann")
+    det = record.get("det")
+    if ann is None or det is None:
+        return "break"
+
+    current = get_plate_layout_gt(
+        getattr(det, "attributes", None)
+    )
+    target = (
+        PLATE_LAYOUT_SINGLE_ROW
+        if current == PLATE_LAYOUT_TWO_ROW
+        else PLATE_LAYOUT_TWO_ROW
+    )
+
+    # Instant visual feedback before the XML write.
+    record["layout_preview"] = target
+    _update_record_layout_ui(host, record)
+    try:
+        host.frame.update_idletasks()
+    except Exception:
+        pass
+
+    ok, normalized = save_inline_plate_layout_gt_value(
+        host,
+        ann,
+        det,
+        target,
+    )
+
+    record["layout_preview"] = ""
+    _update_record_layout_ui(host, record)
+
+    message = (
+        f"GT układu tablicy: {_layout_gt_label(normalized)}."
+        if ok
+        else "Nie udało się zapisać GT układu tablicy."
+    )
+    try:
+        host._update_preview_edit_status(
+            message,
+            refresh_toolbar=False,
+            refresh_debug=False,
+        )
+    except TypeError:
+        try:
+            host._update_preview_edit_status(message)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    return "break"
+
 
 
 def count_plate_gt(plate_detections) -> int:
@@ -199,6 +380,50 @@ def _cancel_pending_save(host, key) -> None:
         pass
 
 
+def _schedule_inline_gt_gate_refresh(
+    host,
+    *,
+    delay_ms: int = INLINE_GATE_REFRESH_DELAY_MS,
+) -> None:
+    pending = getattr(host, "_plate_gt_inline_gate_after", None)
+    if pending:
+        try:
+            host.frame.after_cancel(pending)
+        except Exception:
+            pass
+    host._plate_gt_inline_gate_after = None
+
+    def _refresh() -> None:
+        host._plate_gt_inline_gate_after = None
+        try:
+            host._z2_graph_right_panel_render_signature = None
+        except Exception:
+            pass
+        try:
+            host._preview_overlay_dock_inline_gate_state = None
+            host._preview_overlay_dock_gate_render_key = None
+            host._preview_overlay_dock_render_key = None
+        except Exception:
+            pass
+        try:
+            host._refresh_step2_action_states(lightweight=True)
+        except Exception:
+            pass
+        try:
+            host._place_preview_overlay_dock(force_render=False)
+        except Exception:
+            pass
+
+    try:
+        host._plate_gt_inline_gate_after = host.frame.after(
+            max(0, int(delay_ms)),
+            _refresh,
+        )
+    except Exception:
+        host._plate_gt_inline_gate_after = None
+        _refresh()
+
+
 def save_inline_plate_gt_value(
     host,
     ann,
@@ -206,77 +431,125 @@ def save_inline_plate_gt_value(
     requested_text,
     *,
     refresh_gate: bool = True,
+    lightweight_save: bool = False,
+    retry_pack_pending: bool = True,
 ):
+    import time
+
+    save_started_at = time.perf_counter()
+    xml_elapsed_ms = 0.0
+    pack_elapsed_ms = 0.0
+    gate_elapsed_ms = 0.0
+
     previous_attributes = dict(getattr(det, "attributes", {}) or {})
     det.attributes = dict(previous_attributes)
+    ensure_plate_layout_gt(det.attributes)
 
     normalized = set_plate_ground_truth(
         det.attributes,
         requested_text,
         source=GROUND_TRUTH_SOURCE_MANUAL_Z2,
     )
-    if det.attributes == previous_attributes:
-        return True, normalized
+    changed = det.attributes != previous_attributes
 
-    try:
-        host._mark_preview_image_dirty(ann, refresh_list=False)
-    except TypeError:
-        host._mark_preview_image_dirty(ann)
-    except Exception:
-        pass
+    if changed:
+        try:
+            host._mark_preview_image_dirty(ann, refresh_list=False)
+        except TypeError:
+            host._mark_preview_image_dirty(ann)
+        except Exception:
+            pass
 
-    try:
-        saved = bool(
-            host._save_preview_edits(
+        xml_started_at = time.perf_counter()
+        try:
+            save_kwargs = dict(
                 interactive=False,
-                status_message="",
+                status_message="Zapisano GT.",
             )
-        )
-    except Exception:
-        saved = False
-
-    if not saved:
-        det.attributes = previous_attributes
-        try:
-            host._update_preview_edit_status(
-                "Nie udało się automatycznie zapisać GT. "
-                "Przywrócono poprzednią wartość."
-            )
+            if bool(lightweight_save):
+                save_kwargs.update(
+                    refresh_list=False,
+                    refresh_workflow=False,
+                    refresh_export_sources=False,
+                )
+            saved = bool(host._save_preview_edits(**save_kwargs))
         except Exception:
-            pass
-        return False, get_plate_ground_truth(previous_attributes)
-
-    try:
-        pack_sync = z2_gt_pack_runtime.sync_plate_gt_after_xml_save(
-            host, ann, det, normalized
+            saved = False
+        xml_elapsed_ms = max(
+            0.0,
+            (time.perf_counter() - xml_started_at) * 1000.0,
         )
-    except Exception as exc:
-        pack_sync = {
-            "ok": False,
-            "enabled": True,
-            "queued": True,
-            "error": str(exc),
-        }
 
-    if (
-        isinstance(pack_sync, dict)
-        and pack_sync.get("enabled")
-        and not pack_sync.get("ok")
-    ):
+        if not saved:
+            det.attributes = previous_attributes
+            try:
+                host._update_preview_edit_status(
+                    "Nie udało się automatycznie zapisać GT. "
+                    "Przywrócono poprzednią wartość."
+                )
+            except Exception:
+                pass
+            return False, get_plate_ground_truth(previous_attributes)
+
+        pack_started_at = time.perf_counter()
         try:
-            host._update_preview_edit_status(
-                "GT zapisano w annotations.xml; synchronizacja z GT Pack oczekuje na ponowienie."
+            pack_sync = z2_gt_pack_runtime.sync_plate_gt_after_xml_save(
+                host,
+                ann,
+                det,
+                normalized,
+                retry_pending=bool(retry_pack_pending),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            pack_sync = {
+                "ok": False,
+                "enabled": True,
+                "queued": True,
+                "error": str(exc),
+            }
+        pack_elapsed_ms = max(
+            0.0,
+            (time.perf_counter() - pack_started_at) * 1000.0,
+        )
+
+        if (
+            isinstance(pack_sync, dict)
+            and pack_sync.get("enabled")
+            and not pack_sync.get("ok")
+        ):
+            try:
+                host._update_preview_edit_status(
+                    "GT zapisano w annotations.xml; "
+                    "synchronizacja z GT Pack oczekuje na ponowienie."
+                )
+            except Exception:
+                pass
 
     if refresh_gate:
+        gate_started_at = time.perf_counter()
+        _schedule_inline_gt_gate_refresh(host)
+        gate_elapsed_ms = max(
+            0.0,
+            (time.perf_counter() - gate_started_at) * 1000.0,
+        )
+
+    total_elapsed_ms = max(
+        0.0,
+        (time.perf_counter() - save_started_at) * 1000.0,
+    )
+    if changed and total_elapsed_ms >= 80.0:
         try:
-            host._z2_graph_right_panel_render_signature = None
-        except Exception:
-            pass
-        try:
-            host._refresh_step2_action_states(lightweight=False)
+            from ..config import logger
+            logger.info(
+                "[Z2 PERF] inline_gt_save total=%.0fms xml=%.0fms "
+                "pack=%.0fms gate=%.0fms lightweight=%s retry_pending=%s",
+                total_elapsed_ms,
+                xml_elapsed_ms,
+                pack_elapsed_ms,
+                gate_elapsed_ms,
+                int(bool(lightweight_save)),
+                int(bool(retry_pack_pending)),
+            )
         except Exception:
             pass
 
@@ -319,6 +592,7 @@ def _apply_record_style(host, record: dict, *, editing: bool | None = None) -> N
     border = palette.get("panel_border", "#555d65")
     accent = palette.get("accent", "#4f8de3")
     edit_color = palette.get("warning", accent)
+    confirmed_color = palette.get("info", "#38bdf8")
 
     neutral_card_bg = blend_hex_colors(panel_bg, canvas_bg, 0.58)
     neutral_top_bg = blend_hex_colors(field_bg, canvas_bg, 0.44)
@@ -326,12 +600,21 @@ def _apply_record_style(host, record: dict, *, editing: bool | None = None) -> N
     neutral_border = blend_hex_colors(border, canvas_bg, 0.38)
 
     active = bool(record.get("editing", False))
+    confirmed = bool(record.get("confirmed", False))
     if active:
         card_bg = blend_hex_colors(neutral_card_bg, edit_color, 0.24)
         top_bg = blend_hex_colors(neutral_top_bg, edit_color, 0.34)
         entry_bg = blend_hex_colors(neutral_entry_bg, edit_color, 0.18)
         outline = edit_color
         gt_fg = edit_color
+        info_fg = palette.get("fg", "#f3f3f3")
+        border_width = 2
+    elif confirmed:
+        card_bg = blend_hex_colors(neutral_card_bg, confirmed_color, 0.22)
+        top_bg = blend_hex_colors(neutral_top_bg, confirmed_color, 0.30)
+        entry_bg = blend_hex_colors(neutral_entry_bg, confirmed_color, 0.14)
+        outline = confirmed_color
+        gt_fg = confirmed_color
         info_fg = palette.get("fg", "#f3f3f3")
         border_width = 2
     else:
@@ -361,6 +644,7 @@ def _apply_record_style(host, record: dict, *, editing: bool | None = None) -> N
     except Exception:
         pass
 
+    _update_record_layout_ui(host, record)
 
 def _force_uppercase(record: dict) -> str:
     var = record.get("var")
@@ -415,8 +699,12 @@ def _commit_record(host, key, *, final: bool = False):
         ann,
         det,
         str(var.get() or ""),
-        refresh_gate=True,
+        refresh_gate=False,
+        lightweight_save=True,
+        retry_pack_pending=False,
     )
+
+    record["confirmed"] = bool(normalized)
 
     if ok:
         record["last_saved"] = normalized
@@ -435,6 +723,7 @@ def _commit_record(host, key, *, final: bool = False):
 
     if final:
         _apply_record_style(host, record, editing=False)
+        _schedule_inline_gt_gate_refresh(host)
     return "break"
 
 
@@ -471,6 +760,16 @@ def _on_focus_out(host, key) -> None:
     record = _editor_store(host).get(key)
     if not isinstance(record, dict) or bool(record.get("destroying")):
         return
+
+    if bool(record.get("suppress_focus_out_once", False)):
+        record["suppress_focus_out_once"] = False
+        _apply_record_style(host, record, editing=False)
+        return
+
+    if bool(record.get("enter_commit_pending", False)):
+        _apply_record_style(host, record, editing=False)
+        return
+
     _commit_record(host, key, final=True)
     _apply_record_style(host, record, editing=False)
 
@@ -498,14 +797,60 @@ def _on_key_release(host, key, event=None):
 
 
 def _finish_with_enter(host, key):
-    _commit_record(host, key, final=True)
     record = _editor_store(host).get(key)
-    if isinstance(record, dict):
-        _apply_record_style(host, record, editing=False)
+    if not isinstance(record, dict):
+        return "break"
+
+    _cancel_pending_save(host, key)
+    prepared = _force_uppercase(record)
+
+    # Visual acknowledgement comes first. Persistence is intentionally moved
+    # to the next Tk tick so Enter never waits for XML/GT Pack I/O before the
+    # user sees that the registration was accepted.
+    record["editing"] = False
+    record["confirmed"] = bool(str(prepared or "").strip())
+    record["enter_commit_pending"] = True
+    enter_seq = int(record.get("enter_commit_seq", 0) or 0) + 1
+    record["enter_commit_seq"] = enter_seq
+    _apply_record_style(host, record, editing=False)
+
     try:
-        host.preview_canvas.focus_set()
+        host.frame.update_idletasks()
     except Exception:
         pass
+
+    def _persist_after_visual_ack() -> None:
+        current = _editor_store(host).get(key)
+        if not isinstance(current, dict):
+            return
+        if int(current.get("enter_commit_seq", 0) or 0) != enter_seq:
+            return
+
+        current["enter_commit_pending"] = False
+        _commit_record(host, key, final=True)
+
+        current = _editor_store(host).get(key)
+        if isinstance(current, dict):
+            current["suppress_focus_out_once"] = True
+        try:
+            host.preview_canvas.focus_set()
+        except Exception:
+            pass
+
+    try:
+        record["enter_commit_after"] = host.frame.after(
+            12,
+            _persist_after_visual_ack,
+        )
+    except Exception:
+        record["enter_commit_pending"] = False
+        _commit_record(host, key, final=True)
+        record["suppress_focus_out_once"] = True
+        try:
+            host.preview_canvas.focus_set()
+        except Exception:
+            pass
+
     return "break"
 
 
@@ -613,6 +958,10 @@ def _create_editor(host, canvas, key, ann, det, plate_idx):
     muted = palette.get("muted", "#aeb7bf")
     border = palette.get("panel_border", "#555d65")
 
+    layout_value = get_plate_layout_gt(
+        getattr(det, "attributes", None)
+    )
+
     shell = tk.Frame(
         canvas,
         bg=panel_bg,
@@ -654,6 +1003,29 @@ def _create_editor(host, canvas, key, ann, det, plate_idx):
     )
     gt_label.pack(side=tk.LEFT, fill=tk.Y)
 
+    layout_var = tk.StringVar(value=_layout_gt_label(layout_value))
+    layout_button = tk.Label(
+        gt_row,
+        textvariable=layout_var,
+        bg=panel_bg,
+        fg=muted,
+        bd=0,
+        width=3,
+        padx=4,
+        pady=0,
+        cursor="hand2",
+        font=("Segoe UI", 7, "bold"),
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=border,
+    )
+    layout_button.pack(
+        side=tk.RIGHT,
+        fill=tk.Y,
+        padx=(2, 2),
+        pady=(2, 2),
+    )
+
     var = tk.StringVar(
         value=get_plate_ground_truth(
             getattr(det, "attributes", None)
@@ -687,6 +1059,9 @@ def _create_editor(host, canvas, key, ann, det, plate_idx):
         "info_var": info_var,
         "gt_row": gt_row,
         "gt_label": gt_label,
+        "layout_button": layout_button,
+        "layout_var": layout_var,
+        "layout_preview": "",
         "entry": entry,
         "var": var,
         "ann": ann,
@@ -694,7 +1069,12 @@ def _create_editor(host, canvas, key, ann, det, plate_idx):
         "plate_idx": int(plate_idx),
         "destroying": False,
         "editing": False,
+        "confirmed": bool(
+            get_plate_ground_truth(getattr(det, "attributes", None))
+        ),
         "uppercase_sync": False,
+        "enter_commit_pending": False,
+        "suppress_focus_out_once": False,
         "drag": None,
     }
     _editor_store(host)[key] = record
@@ -714,6 +1094,12 @@ def _create_editor(host, canvas, key, ann, det, plate_idx):
     entry.bind("<Return>", lambda _event, k=key: _finish_with_enter(host, k), add="+")
     entry.bind("<KP_Enter>", lambda _event, k=key: _finish_with_enter(host, k), add="+")
     entry.bind("<Escape>", lambda _event, k=key: _on_escape(host, k), add="+")
+
+    layout_button.bind(
+        "<Button-1>",
+        lambda _event, k=key: _toggle_record_layout(host, k),
+        add="+",
+    )
 
     for widget in _drag_handle_widgets(record):
         widget.bind(

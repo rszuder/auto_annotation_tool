@@ -12,7 +12,12 @@ import numpy as np
 from ..config import logger, CV2_AVAILABLE, cv2
 from ..rectification import PlateRectifier
 from ..data_models import ImageAnnotation, Detection
-from ..plate_ground_truth import normalize_plate_ground_truth_text
+from ..plate_ground_truth import (
+    PLATE_LAYOUT_GT_ATTR,
+    PLATE_LAYOUT_TWO_ROW,
+    normalize_plate_ground_truth_text,
+    normalize_plate_layout_gt,
+)
 from ..gt_pack import fingerprint_image
 
 
@@ -104,6 +109,13 @@ class PlateGenerator:
                 if progress_callback:
                     progress_callback(plate_idx + 1, len(plates), source_image_path.name)
                 
+                attributes = dict(plate_detection.attributes or {})
+                plate_layout_gt = normalize_plate_layout_gt(
+                    attributes.get(PLATE_LAYOUT_GT_ATTR),
+                    default="",
+                )
+                layout_gt_explicit = bool(plate_layout_gt)
+
                 x1, y1, x2, y2 = plate_detection.bbox
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                 
@@ -119,7 +131,10 @@ class PlateGenerator:
                 if plate_image.size == 0:
                     continue
                 
-                is_square = False
+                is_square = bool(
+                    layout_gt_explicit
+                    and plate_layout_gt == PLATE_LAYOUT_TWO_ROW
+                )
 
                 if rectify and plate_detection.polygon:
                     try:
@@ -139,12 +154,15 @@ class PlateGenerator:
                         h = max(40, int(round(native_h)))
                         
                         # --- 1. PROSTOWANIE Z ZACHOWANIEM NATURALNYCH PROPORCJI ---
-                        if aspect_ratio < 2.5:
+                        if layout_gt_explicit:
+                            is_square = plate_layout_gt == PLATE_LAYOUT_TWO_ROW
+                        else:
+                            is_square = aspect_ratio < 2.5
+
+                        if is_square:
                             w = int(h * 1.5)  # Dwurzędowa
-                            is_square = True
                         else:
                             w = int(h * 4.56) # Jednorzędowa
-                            is_square = False
                         
                         plate_image = PlateRectifier.rectify(
                             plate_image,
@@ -169,12 +187,14 @@ class PlateGenerator:
                         logger.debug(f"Błąd prostowania tablicy: {e}")
                         # Fallback jeśli prostowanie zawiedzie (traktujemy jak zwykły wycinek)
                         aspect_ratio = plate_image.shape[1] / plate_image.shape[0]
-                        is_square = aspect_ratio < 2.5
+                        if not layout_gt_explicit:
+                            is_square = aspect_ratio < 2.5
 
                 else:
                     # Traktujemy niewyprostowany wycinek jako źródło
                     aspect_ratio = plate_image.shape[1] / plate_image.shape[0]
-                    is_square = aspect_ratio < 2.5
+                    if not layout_gt_explicit:
+                        is_square = aspect_ratio < 2.5
 
                 # --- 3. TWARDA NORMALIZACJA ROZMIARU (RESIZE DO STANDARDU) ---
                 # Nieważne czy tablica była z 10 czy ze 100 metrów, teraz każda
@@ -261,10 +281,27 @@ class PlateGenerator:
                     'ocr_text': str(plate_detection.text) if plate_detection.text else None,
                     'ocr_confidence': float(plate_detection.text_confidence) if plate_detection.text_confidence else 0.0,
                     'detection_confidence': float(plate_detection.confidence),
-                    'plate_layout': 'two_row_candidate' if is_square else 'single_row',
-                    'layout_row_count': 0 if is_square else 1,
-                    'layout_confidence': 0.35 if is_square else 0.55,
-                    'layout_source': 'plate_aspect',
+                    'plate_layout_gt': plate_layout_gt if layout_gt_explicit else None,
+                    'plate_layout_override': plate_layout_gt if layout_gt_explicit else None,
+                    'plate_layout': (
+                        plate_layout_gt
+                        if layout_gt_explicit
+                        else ('two_row_candidate' if is_square else 'single_row')
+                    ),
+                    'layout_row_count': (
+                        (2 if plate_layout_gt == PLATE_LAYOUT_TWO_ROW else 1)
+                        if layout_gt_explicit
+                        else (0 if is_square else 1)
+                    ),
+                    'layout_confidence': (
+                        1.0 if layout_gt_explicit
+                        else (0.35 if is_square else 0.55)
+                    ),
+                    'layout_source': (
+                        'z2_ground_truth'
+                        if layout_gt_explicit
+                        else 'plate_aspect'
+                    ),
                     'plate_attributes': attributes,
                 }
 

@@ -964,11 +964,19 @@ def retry_pending_gt_sync(host):
     }
 
 
-def sync_plate_gt_after_xml_save(host, ann, det, requested_text):
-    try:
-        retry_pending_gt_sync(host)
-    except Exception:
-        pass
+def sync_plate_gt_after_xml_save(
+    host,
+    ann,
+    det,
+    requested_text,
+    *,
+    retry_pending: bool = True,
+):
+    if bool(retry_pending):
+        try:
+            retry_pending_gt_sync(host)
+        except Exception:
+            pass
 
     working_path = get_working_gt_pack_path(host, create_parent=True)
     if working_path is None:

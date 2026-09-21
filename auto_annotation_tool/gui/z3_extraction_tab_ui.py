@@ -2068,6 +2068,46 @@ def refresh_extract_start_card_style(host, progress_bar_cls, *, lightweight: boo
             pass
 
 
+def _continue_campaign_pz1_to_pz2(host) -> bool:
+    """Commit successful PZ1 and continue directly to campaign PZ2.
+
+    T05 CTA 1 is a single work action: prepare plate crops and then enter the
+    character-annotation surface. The graph remains the fallback only when the
+    direct PZ2 transition itself fails.
+    """
+    try:
+        CAMPAIGN.set_current_step(3)
+        CAMPAIGN.set_step3_stage1_done(True)
+        CAMPAIGN.set_step3_stage2_done(False)
+        CAMPAIGN.set_step3_pending()
+    except Exception as exc:
+        logger.debug(
+            f"Nie udało się zapisać gotowości PZ1 przed wejściem do PZ2: {exc}"
+        )
+
+    try:
+        host.go_to_substep_2(force=True)
+        return True
+    except Exception as exc:
+        logger.debug(
+            f"Nie udało się automatycznie przejść z PZ1 do PZ2: {exc}"
+        )
+
+    try:
+        host._campaign_pz2_sync_loading = False
+    except Exception:
+        pass
+
+    try:
+        host._return_to_t05_work_after_step3_pz1()
+    except Exception as fallback_exc:
+        logger.debug(
+            f"Nie udało się również wrócić do pracy T05 po błędzie PZ2: "
+            f"{fallback_exc}"
+        )
+    return False
+
+
 def run_extraction(host) -> None:
     self = host
     campaign_step3_active = _campaign_step3_context_active(self)
@@ -2077,15 +2117,12 @@ def run_extraction(host) -> None:
         if campaign_step3_active:
             try:
                 self._set_extraction_status(
-                    "Tablice są już wyodrębnione. Wracam do pracy bramki T05, gdzie wybierzesz kolejny krok.",
+                    "Tablice są już wyodrębnione. Otwieram PZ2.",
                     "success",
                 )
             except Exception:
                 pass
-            try:
-                self._return_to_t05_work_after_step3_pz1()
-            except Exception as exc:
-                logger.debug(f"Nie udało się wrócić do pracy T05 po gotowym PZ1 kampanii: {exc}")
+            _continue_campaign_pz1_to_pz2(self)
             return
         if bool(getattr(self, "_campaign_detect_splash_visible", False)):
             try:
@@ -2385,7 +2422,7 @@ def run_extraction(host) -> None:
                         self._campaign_step3_hold_pz2_after_reextract = False
                     except Exception:
                         pass
-                    def _commit_preview_and_return_t05(path=run_dir):
+                    def _commit_preview_and_open_pz2(path=run_dir):
                         preview_dir_raw = str(path or "").strip()
                         if preview_dir_raw:
                             try:
@@ -2407,9 +2444,9 @@ def run_extraction(host) -> None:
                                 self._force_save_all()
                             except Exception:
                                 pass
-                        self._return_to_t05_work_after_step3_pz1()
+                        _continue_campaign_pz1_to_pz2(self)
 
-                    self.frame.after(0, _commit_preview_and_return_t05)
+                    self.frame.after(0, _commit_preview_and_open_pz2)
                 else:
                     self.frame.after(0, self.unlock_detection_subtab)
                 if generated_count > 0 and not campaign_below_minimum and not campaign_step3_active:
@@ -2421,7 +2458,7 @@ def run_extraction(host) -> None:
                     self.frame.after(
                         0,
                         lambda: self.app.update_status(
-                            "Wyodrębnianie tablic zakończone. W pracy bramki T05 wybierz PZ2 jako następny krok.",
+                            "Wyodrębnianie tablic zakończone. Otwieram PZ2 do pracy nad znakami.",
                             "success",
                         ) if hasattr(self.app, "update_status") else None,
                     )

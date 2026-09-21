@@ -678,9 +678,11 @@ def apply_character_annotation_theme(host, progress_bar_cls) -> None:
     try:
         self.app.style_canvas_widget(
             self.preview_canvas,
-            background=palette.get("panel", "#1e1e1e"),
+            background="#1e1e1e",
             bordercolor=console_border,
         )
+        if hasattr(self, "preview_canvas_host"):
+            self.preview_canvas_host.configure(bg="#1e1e1e")
     except Exception:
         pass
 
