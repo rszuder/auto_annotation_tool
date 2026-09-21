@@ -129,6 +129,60 @@ def inspect_gt_pack(path: Path | str) -> dict[str, Any]:
     return result
 
 
+
+def ensure_working_gt_pack(
+    image_dir: Path | str,
+    *,
+    producer: str = "auto_annotation_tool.desktop.z2",
+) -> dict[str, Any]:
+    """Create or safely reopen the one writable GT pack for an image folder.
+
+    ``current_work.alprgt`` is the only automatic write target. Named packs are
+    source/export artifacts and are not created here. Existing data is never
+    removed or replaced by this operation.
+    """
+    root = Path(image_dir)
+    if not root.exists() or not root.is_dir():
+        raise ValueError(f"Nieprawidłowy katalog obrazów: {root}")
+
+    target = root / DEFAULT_WORKING_PACK_NAME
+    created = False
+
+    if target.exists():
+        if not target.is_dir() or not (target / "manifest.json").is_file():
+            raise ValueError(
+                f"{DEFAULT_WORKING_PACK_NAME} istnieje, ale nie jest poprawnym ALPR GT Pack."
+            )
+        try:
+            pack = ALPRGTPack.open(target)
+        except Exception as exc:
+            raise ValueError(
+                f"Nie można otworzyć {DEFAULT_WORKING_PACK_NAME}: {exc}"
+            ) from exc
+    else:
+        pack = ALPRGTPack.create(target, producer=producer)
+        created = True
+
+    validation = dict(pack.validate(deep=False) or {})
+    if not validation.get("ok"):
+        issues = "; ".join(str(v) for v in list(validation.get("issues", []) or [])[:3])
+        raise ValueError(
+            f"{DEFAULT_WORKING_PACK_NAME} nie przeszedł walidacji"
+            + (f": {issues}" if issues else ".")
+        )
+
+    try:
+        summary = dict(pack.summary(refresh_manifest=False) or {})
+    except TypeError:
+        summary = dict(pack.summary() or {})
+
+    return {
+        "created": bool(created),
+        "path": target,
+        "summary": summary,
+        "validation": validation,
+    }
+
 def discover_gt_pack_companions(
     image_dir: Path | str,
     *,

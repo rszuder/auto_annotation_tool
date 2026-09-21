@@ -42,6 +42,7 @@ from . import z2_run_lifecycle
 from . import z2_manifest_runtime
 from . import z2_annotation_startup
 from . import z2_status_ui_runtime
+from . import z2_gt_pack_creator
 from .z2_main_widgets import create_annotation_widgets
 from .z2_annotation_delegates import bind_annotation_tab_delegates
 from .z2_auto_scope_modal import prompt_plate_auto_scope_choice
@@ -953,6 +954,9 @@ class AnnotationTab:
         p = filedialog.askdirectory(initialdir=str(Path(CONFIG.DIR_1_RAW).absolute()))
         if p:
             self._switch_annotation_input_dir(Path(p), show_hint=False)
+
+    def _open_gt_pack_creator(self):
+        return z2_gt_pack_creator.open_gt_pack_creator(self)
 
     def _set_input_dir_path_only(self, input_dir: Path, *, resolved_input_dir: Path | None = None) -> None:
         safe_input_dir = Path(resolved_input_dir or input_dir)

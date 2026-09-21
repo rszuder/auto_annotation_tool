@@ -334,6 +334,12 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         button_text="Wybierz obrazy",
         button_command=self._select_input_dir,
     )
+    self.gt_pack_creator_btn = ttk.Button(
+        source_section,
+        text="Utwórz roboczy pakiet GT…",
+        command=self._open_gt_pack_creator,
+    )
+    self.gt_pack_creator_btn.pack(anchor=tk.E, pady=(4, 8))
 
     self.project_paths_info_lbl = tk.Label(
         source_section,
