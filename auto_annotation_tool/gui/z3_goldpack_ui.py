@@ -627,9 +627,6 @@ def run_yolo_gold_export(
     selected_labels = host._format_selected_gold_export_strategy_labels()
     selected_sources = host._get_selected_gold_export_source_buckets()
     selected_source_labels = host._format_selected_gold_export_source_labels()
-    split_enabled = False
-    train_pct, val_pct, test_pct = host._get_gold_export_split_percentages()
-
     if not selected_buckets:
         host._set_console_text(
             host.export_console,
@@ -644,6 +641,44 @@ def run_yolo_gold_export(
             "Zaznacz Auto z runu lub Ręczne poprawki lokalne. Poprawki CVAT po imporcie są dołączane automatycznie."
         )
         return
+
+    try:
+        export_readiness = host._get_step3_yolo_export_readiness_snapshot(
+            selected_strategies=selected_buckets,
+            selected_sources=selected_sources,
+        )
+    except Exception as exc:
+        host._set_console_text(
+            host.export_console,
+            "❌ Nie można potwierdzić gotowości eksportu PZ3.\n\n"
+            f"{exc}"
+        )
+        return
+
+    if not bool(export_readiness.get("ok")):
+        readiness_message = str(
+            export_readiness.get("message", "") or ""
+        ).strip()
+        host._set_console_text(
+            host.export_console,
+            "❌ Eksport PZ3 zablokowany przez bramkę gotowości.\n\n"
+            + (
+                readiness_message
+                or "Aktualny zakres GOLD nie spełnia warunków eksportu."
+            )
+        )
+        try:
+            host.app.update_status(
+                readiness_message
+                or "Eksport PZ3 pozostaje zablokowany do czasu spełnienia warunków GOLD.",
+                "warning",
+            )
+        except Exception:
+            pass
+        return
+
+    split_enabled = False
+    train_pct, val_pct, test_pct = host._get_gold_export_split_percentages()
 
     split_line = "Wariant/split: przygotujesz w Z4"
     host._set_console_text(

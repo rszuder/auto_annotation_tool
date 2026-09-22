@@ -488,13 +488,26 @@ def build_step3_pz3_dataset_mode_view_model(
             host._get_active_preview_context()
         except Exception:
             pass
+        selected_strategies = host._get_selected_gold_export_strategy_buckets()
+        selected_sources = host._get_selected_gold_export_source_buckets()
         export_pool = host._build_campaign_aware_gold_export_counts(
-            selected_strategies=host._get_selected_gold_export_strategy_buckets(),
-            selected_sources=host._get_selected_gold_export_source_buckets(),
+            selected_strategies=selected_strategies,
+            selected_sources=selected_sources,
         )
         selected_plate_count = int(export_pool.get("selected_plate_count", 0) or 0)
         selected_char_count = int(export_pool.get("selected_char_count", 0) or 0)
-        export_ready = bool(selected_plate_count > 0 and selected_char_count > 0)
+        export_readiness_message = ""
+        try:
+            export_readiness = host._get_step3_yolo_export_readiness_snapshot(
+                selected_strategies=selected_strategies,
+                selected_sources=selected_sources,
+            )
+            export_ready = bool(export_readiness.get("ok"))
+            export_readiness_message = str(
+                export_readiness.get("message", "") or ""
+            ).strip()
+        except Exception:
+            export_ready = bool(selected_plate_count > 0 and selected_char_count > 0)
         existing_dataset_status, existing_dataset_status_tone = _get_pz3_existing_dataset_status_from_summary(host)
         try:
             preview_context = host._get_active_preview_context()
@@ -532,10 +545,13 @@ def build_step3_pz3_dataset_mode_view_model(
                 "źródła samodzielnie."
                 if not preview_ready
                 else (
-                    "Następny krok: wróć do PZ2 i uzupełnij poprawne boxy znaków. Dataset wymaga "
-                    "tablic perfect z co najmniej jednym eksportowalnym znakiem."
-                    if selected_plate_count > 0
-                    else "Następny krok: wróć do PZ2 i przygotuj co najmniej jedną tablicę perfect."
+                    export_readiness_message
+                    or (
+                        "Następny krok: wróć do PZ2 i uzupełnij poprawne boxy znaków. Dataset wymaga "
+                        "tablic perfect z co najmniej jednym eksportowalnym znakiem."
+                        if selected_plate_count > 0
+                        else "Następny krok: wróć do PZ2 i przygotuj co najmniej jedną tablicę perfect."
+                    )
                 )
             )
         )
@@ -582,11 +598,14 @@ def build_step3_pz3_dataset_mode_view_model(
                     if in_campaign
                     else "Źródłowy dataset: materiał z aktualnej puli jest gotowy."
                 )
-                if (selected_plate_count > 0 or selected_char_count > 0)
+                if export_ready
                 else (
-                    "Brama PZ3: brak tablic perfect gotowych do datasetu."
-                    if in_campaign
-                    else "Źródłowy dataset: brak tablic perfect gotowych do utworzenia."
+                    export_readiness_message
+                    or (
+                        "Brama PZ3: brak tablic perfect gotowych do datasetu."
+                        if in_campaign
+                        else "Źródłowy dataset: brak tablic perfect gotowych do utworzenia."
+                    )
                 )
             ),
             action_hint_tone=("muted" if export_ready else "warning"),
