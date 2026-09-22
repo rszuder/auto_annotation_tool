@@ -1086,7 +1086,31 @@ def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str
 
     self._preview_history_replaying = True
     try:
-        self.preview_metadata[pid] = copy.deepcopy(snapshot if isinstance(snapshot, dict) else {})
+        restored_data = copy.deepcopy(snapshot if isinstance(snapshot, dict) else {})
+        self.preview_metadata[pid] = restored_data
+
+        # Undo/redo restores REVIEW content, never a previous human GOLD approval.
+        # Replaying history is itself a human edit decision and therefore must
+        # require explicit GOLD confirmation again.
+        try:
+            self._mark_review_edit_started(restored_data)
+        except Exception:
+            pass
+
+        chars = (
+            list(restored_data.get("characters", []) or [])
+            if isinstance(restored_data.get("characters"), list)
+            else []
+        )
+        try:
+            restored_data["status"] = self._derive_preview_status_from_data(
+                restored_data,
+                chars,
+            )
+        except Exception:
+            if isinstance(restored_data.get("review_state"), dict):
+                restored_data["status"] = "needs_fix"
+
         self._preview_char_selected_index = None
         self._preview_char_drag_state = None
         self._preview_char_add_state = None
