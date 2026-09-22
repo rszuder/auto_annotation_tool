@@ -437,7 +437,7 @@ def get_step3_finish_block_message(readiness: dict | None = None) -> str:
     if reason == "missing_char_boxes":
         min_exportable_plates = int(readiness.get("min_exportable_plate_count", 10) or 10)
         return str(readiness.get("message") or "").strip() or (
-            f"E3 wymaga co najmniej {min_exportable_plates} tablic perfect z poprawnymi boxami znaków i etykietami. "
+            f"Do przejścia dalej potrzeba co najmniej {min_exportable_plates} sprawdzonych i zatwierdzonych tablic z poprawnymi ramkami znaków i etykietami. "
             "Wróć do PZ2, oznacz znaki na tablicach i ponownie wykonaj eksport w PZ3."
         )
 
@@ -3580,7 +3580,7 @@ def build_step3_pz3_path_selection_view_model(
         cvat_card_selected=(selected_path == "cvat"),
         dataset_badge_text="DATASET",
         dataset_title_text="Dataset znaków",
-        dataset_desc_text="Główna ścieżka PZ3: materiał z PZ2, zakres tablic perfect i utworzenie źródłowego datasetu znaków.",
+        dataset_desc_text="Główna ścieżka: zatwierdzony materiał i utworzenie źródłowego zbioru znaków.",
         cvat_badge_text="OPCJA",
         cvat_title_text="Korekta w CVAT",
         cvat_desc_text="Opcjonalny obieg: wyślij cropy tablic do CVAT, popraw boxy znaków i wczytaj XML z powrotem.",

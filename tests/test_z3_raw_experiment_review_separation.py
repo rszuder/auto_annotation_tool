@@ -34,8 +34,11 @@ def test_raw_experiment_exits_before_review_gold_mutation():
     review_write = body.index('local_meta[pid]["characters"] = final_chars')
 
     assert raw_store < raw_branch < raw_continue < review_write
-    assert "REVIEW/GOLD remains" not in body  # Polish source is authoritative.
-    assert "REVIEW/GOLD pozostaje bez zmian" in body
+    # Sprawdzamy semantykę kontraktu, nie techniczne napisy UI.
+    assert 'local_meta[pid]["raw_detection"] = raw_detection' in body
+    assert 'local_meta[pid]["characters"] = final_chars' in body
+    assert "if raw_only:" in body
+    assert "Twoje poprawki i zatwierdzenia pozostają bez zmian" in body
 
 
 def test_raw_mode_does_not_unlock_dataset_or_use_review_scope():
@@ -51,6 +54,13 @@ def test_raw_mode_does_not_unlock_dataset_or_use_review_scope():
     assert '"workflow_context": workflow_context' in body
 
 
-def test_z3_main_button_is_named_run_raw():
+def test_z3_main_button_uses_plain_language_but_keeps_raw_runtime_contract():
     ui = _source("auto_annotation_tool/gui/z3_detection_tab_ui.py")
-    assert 'text="Uruchom RAW"' in ui
+    runtime = _source("auto_annotation_tool/gui/z3_detection_runtime.py")
+
+    assert 'text="Uruchom wykrywanie"' in ui
+    assert 'text="Uruchom RAW"' not in ui
+
+    stage = _function_source(runtime, "run_detection_stage")
+    assert '"raw_only": True' in stage
+    assert '"process_scope": "all"' in stage

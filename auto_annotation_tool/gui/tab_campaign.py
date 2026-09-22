@@ -2500,7 +2500,7 @@ class CampaignTab:
         statuses.append(
             WizardStageStatus(
                 key="step3",
-                title=str(getattr(step3_vm, "title", "") or "").strip() or "E3. Znaki i gold pack",
+                title=str(getattr(step3_vm, "title", "") or "").strip() or "E3. Przygotowanie znaków",
                 state=step3_state,
                 summary=step3_summary,
                 details=step3_details,

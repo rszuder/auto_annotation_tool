@@ -605,11 +605,11 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
             ):
                 scoped_plate_ids.append(pid)
         if not scoped_plate_ids:
-            title = "Brak tablic perfect" if process_scope == "perfect_only" else "Brak tablic do korekty"
+            title = "Brak sprawdzonych tablic" if process_scope == "perfect_only" else "Brak tablic do korekty"
             message = (
-                "W aktualnym katalogu PZ2 nie ma tablic ze statusem perfect do przetworzenia."
+                "W tym zestawie nie ma sprawdzonych tablic do przetworzenia."
                 if process_scope == "perfect_only"
-                else "W aktualnym katalogu PZ2 wszystkie tablice mają status perfect."
+                else "W tym zestawie wszystkie tablice są już sprawdzone."
             )
             return messagebox.showinfo(
                 title,
@@ -723,18 +723,18 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
         allow_yolo_geometry_on_perfect = use_perfect_box_refiner
         guard_counts = dict(guard_options.get("counts", {}) or {})
     scope_log_label = {
-        "perfect_only": "tylko perfect",
-        "non_perfect_only": "tylko do korekty",
+        "perfect_only": "tylko sprawdzone",
+        "non_perfect_only": "tylko wymagające sprawdzenia",
     }.get(process_scope, "wszystkie tablice")
     if raw_only:
         self._log(
             self.test_log_text,
             (
-                "[RAW] Eksperyment GT-blind | "
+                "[WYNIK MODELU] Próba bez podpowiedzi z informacji referencyjnej | "
                 f"kontekst={workflow_context} | "
                 f"zakres=wszystkie wybrane cropy "
                 f"({len(all_plate_ids)}/{full_plate_total}) | "
-                "REVIEW/GOLD pozostaje bez zmian"
+                "Twoje poprawki i zatwierdzenia pozostają bez zmian"
             ),
             "INFO",
         )
@@ -1757,7 +1757,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     try:
                         summary_msg = (
                             (
-                                "Podsumowanie RAW: "
+                                "Podsumowanie wyniku modelu: "
                                 f"exact={stat_perfect}/{total}, "
                                 f"exact_rate={acc:.1f}%"
                             )
@@ -1790,7 +1790,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     self._set_test_status(
                         self._compose_detection_method_status(
                             (
-                                "RAW zakończony i zapisany | "
+                                "Wynik modelu został zapisany | "
                                 f"exact {acc:.1f}%"
                             )
                             if raw_only

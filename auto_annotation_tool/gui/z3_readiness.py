@@ -83,13 +83,13 @@ def _compute_step3_yolo_export_readiness(host, *, selected_strategies=None, sele
     if not selected_buckets:
         result.update(
             reason="missing_strategy_filter",
-            message="PZ3 nie ma wybranej strategii gold packa, więc eksport datasetu znaków nie jest możliwy.",
+            message="Nie wybrano sposobu przygotowania danych, dlatego nie można jeszcze utworzyć zbioru znaków.",
         )
         return result
     if not selected_source_buckets:
         result.update(
             reason="missing_source_filter",
-            message="PZ3 nie ma wybranego źródła gold packa, więc eksport datasetu znaków nie jest możliwy.",
+            message="Nie wybrano źródła danych, dlatego nie można jeszcze utworzyć zbioru znaków.",
         )
         return result
 
@@ -141,22 +141,22 @@ def _compute_step3_yolo_export_readiness(host, *, selected_strategies=None, sele
             message = (
                 (
                     f"Bramka E3 pozostaje zamknięta. Minimum kampanii to {min_exportable_plate_count} "
-                    f"eksportowalnych tablic perfect, obecnie PZ3 widzi {exportable_plate_count}. "
+                    f"zatwierdzonych tablic gotowych do eksportu, obecnie PZ3 widzi {exportable_plate_count}. "
                     f"Brakuje {missing_exportable}."
                 )
                 if in_campaign
                 else (
-                    f"PZ3 potrzebuje co najmniej {min_exportable_plate_count} eksportowalnej tablicy perfect, "
+                    f"PZ3 potrzebuje co najmniej {min_exportable_plate_count} zatwierdzonej tablicy gotowej do eksportu, "
                     f"obecnie widzi {exportable_plate_count}."
                 )
             )
         else:
             message = (
                 "Bramka E3 pozostaje zamknięta, bo PZ3 nie ma jeszcze poprawnych boxów znaków i etykiet "
-                "objętych aktualnym zakresem gold packa."
+                "objętych aktualnie wybranym zakresem danych."
                 if in_campaign
                 else (
-                    "PZ3 nie ma jeszcze poprawnych boxów znaków, etykiet i aktualnego zakresu gold packa."
+                    "Brakuje poprawnych ramek znaków, etykiet albo właściwie wybranego zakresu danych."
                 )
             )
         result.update(
@@ -173,7 +173,7 @@ def get_campaign_step3_annotation_readiness(host) -> dict:
         "reason": "missing_char_boxes",
         "message": (
             "Warunek eksportu PZ3 nie jest jeszcze spełniony. W kampanii potrzeba co najmniej 10 tablic "
-            "ze statusem perfect, z poprawnymi boxami znaków i etykietami, objętych aktualnym zakresem gold packa."
+            "ze statusem perfect, z poprawnymi boxami znaków i etykietami, objętych aktualnie wybranym zakresem danych."
         ),
         "exportable_plate_count": 0,
         "exportable_char_count": 0,
@@ -431,11 +431,11 @@ def get_campaign_step3_training_readiness(host) -> dict:
                 ok=False,
                 reason="stale_gold_dataset",
                 validation_message=(
-                    "Źródłowy GOLD zmienił się po utworzeniu datasetu PZ3."
+                    "Zatwierdzony materiał zmienił się po utworzeniu zbioru znaków."
                 ),
                 message=(
-                    "Dataset PZ3 pochodzi ze starszego snapshotu GOLD. "
-                    "Po zmianie REVIEW/GT/geometrii wykonaj eksport PZ3 ponownie."
+                    "Istniejący zbiór znaków pochodzi ze starszej wersji zatwierdzonych danych. "
+                    "Po zmianie znaków, informacji referencyjnej lub geometrii utwórz zbiór znaków ponownie."
                 ),
             )
             return stale
@@ -498,7 +498,7 @@ def get_campaign_step3_training_readiness(host) -> dict:
                     validation_message=validation_message,
                     message=(
                         f"Dataset znaków istnieje, ale E3 nie ma wymaganego minimum {min_exportable_plates} tablic ze statusem perfect. "
-                        "W PZ2 oznacz znaki na tablicach, doprowadź je do statusu perfect, "
+                        "Sprawdź znaki na tablicach i zatwierdź poprawne próbki, "
                         "a następnie ponownie wykonaj eksport w PZ3."
                     ),
                 )

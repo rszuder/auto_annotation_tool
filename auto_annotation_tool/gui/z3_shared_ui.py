@@ -82,13 +82,12 @@ def is_step3_campaign_runtime(host: "CharacterAnnotationTab") -> bool:
 def get_step3_pz2_intro_text(host: "CharacterAnnotationTab") -> str:
     if is_step3_campaign_runtime(host):
         return (
-            "T05 składa się z dwóch kroków. Tutaj, w PZ2, przygotowujesz anotacje znaków na tablicach: "
-            "poprawiasz ramki, wpisujesz znaki i doprowadzasz tablice do statusu perfect. "
-            "Gdy zbiór PZ2 jest sensowny, użyj przycisku „Krok 2: dataset PZ3”, aby przejść do PZ3 i utworzyć źródłowy dataset znaków."
+            "Praca nad znakami ma dwa proste kroki. Najpierw sprawdź ramki i znaki na tablicach oraz zatwierdź poprawne próbki. "
+            "Gdy masz wystarczającą liczbę zatwierdzonych tablic, przejdź dalej i utwórz zbiór znaków."
         )
     return (
-        "PZ2 przygotowuje anotacje znaków na wyodrębnionych tablicach: poprawiasz ramki, wpisujesz znaki "
-        "i doprowadzasz tablice do statusu perfect. Gdy zbiór PZ2 jest sensowny, przejdź do PZ3 i utwórz źródłowy dataset znaków."
+        "Sprawdź ramki i znaki na wyodrębnionych tablicach, a gotowe próbki zatwierdź. "
+        "Gdy masz wystarczającą liczbę zatwierdzonych tablic, utwórz źródłowy zbiór znaków."
     )
 
 
@@ -534,7 +533,7 @@ def build_step3_pz3_dataset_mode_view_model(
         else:
             source_pool_text = (
                 "Materiał do datasetu: brak gotowego zakresu. Wróć do PZ2 i doprowadź tablice "
-                "do statusu perfect albo wczytaj poprawki z CVAT."
+                "do stanu gotowego i zatwierdź je albo wczytaj poprawki z CVAT."
             )
             source_pool_tone = "warning"
         source_next_text = (
@@ -548,9 +547,9 @@ def build_step3_pz3_dataset_mode_view_model(
                     export_readiness_message
                     or (
                         "Następny krok: wróć do PZ2 i uzupełnij poprawne boxy znaków. Dataset wymaga "
-                        "tablic perfect z co najmniej jednym eksportowalnym znakiem."
+                        "zatwierdzonych tablic z co najmniej jednym poprawnym znakiem."
                         if selected_plate_count > 0
-                        else "Następny krok: wróć do PZ2 i przygotuj co najmniej jedną tablicę perfect."
+                        else "Następny krok: wróć do sprawdzania znaków i zatwierdź co najmniej jedną tablicę."
                     )
                 )
             )
@@ -572,7 +571,7 @@ def build_step3_pz3_dataset_mode_view_model(
             existing_selected=False,
             perfect_badge_text="PZ2",
             perfect_title_text="Materiał z PZ2",
-            perfect_desc_text="Źródłem są wyodrębnione tablice z PZ2 oznaczone jako perfect.",
+            perfect_desc_text="Źródłem są wyodrębnione tablice, które zostały sprawdzone i zatwierdzone.",
             existing_badge_text="Z4",
             existing_title_text="Warianty w Z4",
             existing_desc_text="Gotowe datasety i ich warianty wybierzesz w Z4.",
@@ -580,13 +579,13 @@ def build_step3_pz3_dataset_mode_view_model(
             cvat_option2_title="Stan materiału z PZ2",
             cvat_option2_tone="success",
             cvat_option2_desc=(
-                "PZ3 korzysta z wyodrębnionych tablic z PZ2. Do datasetu wejdą tablice perfect "
-                "z poprawnymi boxami znaków; wariant treningowy i split ustawisz później w Z4."
+                "Do zbioru wejdą tylko tablice sprawdzone i zatwierdzone, z poprawnymi ramkami znaków. "
+                "Wariant treningowy i podział danych przygotujesz później."
             ),
             show_gold_filters=True,
             split_title="",
             split_label="",
-            primary_export_label="UTWÓRZ ŹRÓDŁOWY DATASET ZNAKÓW",
+            primary_export_label="UTWÓRZ ZBIÓR ZNAKÓW",
             primary_export_command_id="run_yolo_gold_export",
             primary_export_enabled=export_ready,
             primary_export_columnspan=1,
@@ -602,9 +601,9 @@ def build_step3_pz3_dataset_mode_view_model(
                 else (
                     export_readiness_message
                     or (
-                        "Brama PZ3: brak tablic perfect gotowych do datasetu."
+                        "Brak zatwierdzonych tablic gotowych do utworzenia zbioru."
                         if in_campaign
-                        else "Źródłowy dataset: brak tablic perfect gotowych do utworzenia."
+                        else "Brak zatwierdzonych tablic gotowych do utworzenia zbioru."
                     )
                 )
             ),
@@ -624,8 +623,8 @@ def build_step3_pz3_dataset_mode_view_model(
         mode="existing",
         dataset_source_title="",
         dataset_source_intro=(
-            "PZ3 pracuje na tablicach perfect z aktywnego wyniku PZ2 oraz ręcznych importach. "
-            "Gotowe datasety, warianty treningowe i split przygotujesz w Z4."
+            "Ten krok korzysta ze sprawdzonych i zatwierdzonych tablic oraz z ręcznych poprawek. "
+            "Gotowe warianty treningowe i podział danych przygotujesz w kolejnym etapie."
         ),
         source_preview_text="Ten tryb został przeniesiony do Z4.",
         source_preview_tone="muted",
@@ -638,7 +637,7 @@ def build_step3_pz3_dataset_mode_view_model(
         existing_selected=True,
         perfect_badge_text="PZ2",
         perfect_title_text="Materiał z PZ2",
-        perfect_desc_text="Źródłem są wyodrębnione tablice z PZ2 oznaczone jako perfect.",
+        perfect_desc_text="Źródłem są wyodrębnione tablice, które zostały sprawdzone i zatwierdzone.",
         existing_badge_text="Z4",
         existing_title_text="Warianty w Z4",
         existing_desc_text="Gotowe datasety i ich warianty wybierzesz w Z4.",

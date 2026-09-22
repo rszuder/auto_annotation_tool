@@ -63,7 +63,7 @@ def format_perfect_strategy_counts(counts: dict, perfect_strategy_buckets) -> st
         f"{label}: {int(safe_counts.get(key, 0))}"
         for key, label in perfect_strategy_buckets
     ]
-    return "Tablice perfect wg strategii: " + " | ".join(parts)
+    return "Sprawdzone tablice według sposobu przygotowania: " + " | ".join(parts)
 
 
 def empty_plate_layout_counts() -> dict:
@@ -825,14 +825,14 @@ def run_yolo_gold_export(
     if not selected_buckets:
         host._set_console_text(
             host.export_console,
-            "❌ Nie wybrano żadnej strategii perfect do eksportu gold packa.\n\n"
+            "❌ Nie wybrano żadnego sposobu przygotowania danych do eksportu.\n\n"
             "Zaznacz co najmniej jedną z opcji: OCR exact, YOLO exact, OCR + YOLO rescue, YOLO boxy + OCR lub Manual / inne perfect."
         )
         return
     if not selected_sources:
         host._set_console_text(
             host.export_console,
-            "❌ Nie wybrano żadnego źródła do eksportu gold packa.\n\n"
+            "❌ Nie wybrano żadnego źródła danych do eksportu.\n\n"
             "Zaznacz Auto z runu lub Ręczne poprawki lokalne. Poprawki CVAT po imporcie są dołączane automatycznie."
         )
         return
@@ -859,13 +859,13 @@ def run_yolo_gold_export(
             "❌ Eksport PZ3 zablokowany przez bramkę gotowości.\n\n"
             + (
                 readiness_message
-                or "Aktualny zakres GOLD nie spełnia warunków eksportu."
+                or "Aktualnie zatwierdzone dane nie spełniają jeszcze warunków eksportu."
             )
         )
         try:
             host.app.update_status(
                 readiness_message
-                or "Eksport PZ3 pozostaje zablokowany do czasu spełnienia warunków GOLD.",
+                or "Utworzenie zbioru pozostaje zablokowane do czasu sprawdzenia i zatwierdzenia wymaganej liczby tablic.",
                 "warning",
             )
         except Exception:
@@ -912,7 +912,7 @@ def run_yolo_gold_export(
         ):
             host._set_console_text(
                 host.export_console,
-                "❌ Eksport PZ3 przerwany: źródłowy GOLD zmienił się "
+                "❌ Eksport przerwany: zatwierdzony materiał zmienił się "
                 "pomiędzy preflightem a przygotowaniem eksportu."
             )
             try:
@@ -1003,10 +1003,10 @@ def run_yolo_gold_export(
             msg = (
                 "❌ NIE UDAŁO SIĘ UTWORZYĆ DATASETU YOLO.\n\n"
                 f"Powód: po filtrze strategii ({selected_labels}) i źródeł ({selected_source_labels}) "
-                "nie znaleziono ani jednej tablicy ze statusem perfect.\n\n"
-                "Tablica perfect musi mieć przynajmniej jeden poprawny box znaku z etykietą. Puste tablice nie są eksportowane.\n\n"
-                f"Dostępne tablice perfect wg strategii przed deduplikacją:\n{host._format_perfect_strategy_counts(total_strategy_counts)}\n"
-                f"Dostępne tablice perfect wg źródeł: "
+                "nie znaleziono ani jednej zatwierdzonej tablicy gotowej do eksportu.\n\n"
+                "Zatwierdzona tablica musi mieć przynajmniej jedną poprawną ramkę znaku z etykietą. Puste tablice nie są eksportowane.\n\n"
+                f"Sprawdzone tablice według sposobu przygotowania przed usunięciem duplikatów:\n{host._format_perfect_strategy_counts(total_strategy_counts)}\n"
+                f"Sprawdzone tablice według źródła: "
                 f"{' | '.join(f'{gold_source_labels[key]}: {int(total_source_counts.get(key, 0) or 0)}' for key, _ in gold_source_buckets)}\n\n"
                 "CO DALEJ:\n"
                 "1. Możesz rozszerzyć zaznaczone strategie w pz3.\n"
@@ -1029,7 +1029,7 @@ def run_yolo_gold_export(
 
             try:
                 host.app.update_status(
-                    "Nie utworzono gold packa — pozostajesz w z3/pz3, aby kontynuować pracę.",
+                    "Nie utworzono zbioru znaków. Wróć do sprawdzania tablic i uzupełnij materiał.",
                     "warning"
                 )
             except Exception:
@@ -1051,12 +1051,12 @@ def run_yolo_gold_export(
             if preview_train <= 0 or preview_val <= 0:
                 msg = (
                     "❌ NIE UDAŁO SIĘ PRZYGOTOWAĆ POPRAWNEGO DATASETU DO TRENINGU.\n\n"
-                    f"Do gold packa przeszło tylko {copied} tablic(y), więc przy splicie "
+                    f"Do zbioru przeszło tylko {copied} tablic(y), więc przy splicie "
                     f"{train_pct:.0f}/{val_pct:.0f}/{test_pct:.0f} dostaniesz:\n"
                     f"train={preview_train}, val={preview_val}, test={preview_test}\n\n"
                     "To nie wystarczy do treningu, bo dataset musi mieć co najmniej 1 obraz w train i 1 obraz w val.\n\n"
                     "CO DALEJ:\n"
-                    "1. Dodaj więcej tablic perfect do gold packa.\n"
+                    "1. Sprawdź i zatwierdź więcej tablic.\n"
                     "2. Zmień proporcje splitu tak, aby train i val nie były puste.\n"
                     "3. Wróć do PZ2 / CVAT i popraw więcej tablic."
                 )
@@ -1066,7 +1066,7 @@ def run_yolo_gold_export(
                         gold_dataset_path="",
                         review_pack_path="",
                         retry_pack_path="",
-                        note="Gold pack znaków jest za mały, by przygotować poprawny split train / val / test."
+                        note="Zbiór zatwierdzonych znaków jest za mały, by przygotować poprawny split train / val / test."
                     )
                     failure_summary["gold_dataset_valid"] = False
                     failure_summary["gold_dataset_validation_message"] = msg
@@ -1375,7 +1375,7 @@ def run_yolo_gold_export(
         )
         host._log(
             host.export_console,
-            "[INFO] Dostępne tablice perfect wg źródeł: "
+            "[INFO] Sprawdzone tablice według źródła: "
             + " | ".join(
                 f"{gold_source_labels[key]}={int(total_source_counts.get(key, 0) or 0)}"
                 for key, _ in gold_source_buckets
@@ -1603,9 +1603,9 @@ def run_char_classification_export(
             msg = (
                 "❌ NIE UDAŁO SIĘ UTWORZYĆ DATASETU ZNAKÓW.\n\n"
                 f"Powód: po filtrze strategii ({selected_labels}) i źródeł ({selected_source_labels}) "
-                "nie znaleziono ani jednej tablicy ze statusem perfect.\n\n"
-                f"Dostępne tablice perfect wg strategii przed deduplikacją:\n{host._format_perfect_strategy_counts(total_strategy_counts)}\n"
-                f"Dostępne tablice perfect wg źródeł: "
+                "nie znaleziono ani jednej zatwierdzonej tablicy gotowej do eksportu.\n\n"
+                f"Sprawdzone tablice według sposobu przygotowania przed usunięciem duplikatów:\n{host._format_perfect_strategy_counts(total_strategy_counts)}\n"
+                f"Sprawdzone tablice według źródła: "
                 f"{' | '.join(f'{gold_source_labels[key]}: {int(total_source_counts.get(key, 0) or 0)}' for key, _ in gold_source_buckets)}\n\n"
                 "CO DALEJ:\n"
                 "1. Możesz rozszerzyć zaznaczone strategie w pz3.\n"
@@ -1825,7 +1825,7 @@ def run_char_classification_export(
         )
         host._log(
             host.export_console,
-            "[INFO] Dostępne tablice perfect wg źródeł: "
+            "[INFO] Sprawdzone tablice według źródła: "
             + " | ".join(
                 f"{gold_source_labels[key]}={int(total_source_counts.get(key, 0) or 0)}"
                 for key, _ in gold_source_buckets
@@ -1859,10 +1859,10 @@ def refresh_gold_export_scope_label(host) -> None:
     selected_strategies = host._get_selected_gold_export_strategy_buckets()
     selected_sources = host._get_selected_gold_export_source_buckets()
     if not selected_strategies:
-        set_gold_export_scope_info(host, "Do eksportu gold packa nie wybrano żadnej strategii.", "warning")
+        set_gold_export_scope_info(host, "Nie wybrano żadnego sposobu przygotowania danych do eksportu.", "warning")
         return
     if not selected_sources:
-        set_gold_export_scope_info(host, "Do eksportu gold packa nie wybrano żadnego źródła.", "warning")
+        set_gold_export_scope_info(host, "Nie wybrano żadnego źródła danych do eksportu.", "warning")
         return
 
     selected_labels = host._format_selected_gold_export_strategy_labels()
@@ -1880,7 +1880,7 @@ def refresh_gold_export_scope_label(host) -> None:
 
     set_gold_export_scope_info(
         host,
-        f"Do gold packa: strategie={selected_labels} | źródła={selected_source_labels} | "
+        f"Do eksportu: sposoby={selected_labels} | źródła={selected_source_labels} | "
         f"perfect={selected_count} | znaki={selected_chars} | {layout_summary} | "
         f"{format_gold_export_split_summary(host)}",
         "muted",

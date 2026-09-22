@@ -791,8 +791,8 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
         tone = "muted"
         summary = "Warunek eksportu PZ3: czekam na tablice."
         details = (
-            f"Warunek eksportu PZ3 w kampanii: co najmniej {min_required_perfect} tablic perfect, "
-            "z przynajmniej jednym poprawnym boxem znaku i etykietą, objęta aktywnym zakresem gold packa."
+            f"Warunek eksportu PZ3 w kampanii: co najmniej {min_required_perfect} zatwierdzonych tablic, "
+            "z przynajmniej jednym poprawnym ramką znaku i etykietą, objęta aktywnym zakresem gold packa."
         )
     elif not split_ready:
         tone = "error"
@@ -801,12 +801,12 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
             details = (
                 f"W PZ2 są tablice perfect ({perfect}), ale minimum kampanii to {min_required_perfect} "
                 "tablic eksportowalnych do PZ3. Każda musi mieć zapisany przynajmniej jeden poprawny box znaku "
-                "z etykietą i przechodzić przez aktualne strategie oraz źródła gold packa."
+                "z etykietą i przechodzić przez aktualne wybrany zakres danych."
             )
         else:
             details = (
-                f"Aby wejście do PZ3 miało sens, przygotuj w PZ2 co najmniej {min_required_perfect} tablic perfect: "
-                "oznacz wszystkie znaki, zapisz boxy z etykietami i doprowadź tablicę do statusu perfect."
+                f"Aby wejście do PZ3 miało sens, przygotuj w PZ2 co najmniej {min_required_perfect} zatwierdzonych tablic: "
+                "oznacz wszystkie znaki, zapisz ramki z etykietami i doprowadź tablicę do statusu perfect."
             )
     else:
         ready_target = (
@@ -818,8 +818,8 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
         if ratio < 0.6:
             tone = "warning"
             details = (
-                f"Warunek eksportu PZ3 jest spełniony: minimum {min_required_perfect} eksportowalnych tablic perfect jest osiągnięte. "
-                "Dataset można utworzyć, ale im więcej tablic perfect, tym większy sens treningu w Z4."
+                f"Warunek eksportu PZ3 jest spełniony: minimum {min_required_perfect} eksportowalnych zatwierdzonych tablic jest osiągnięte. "
+                "Dataset można utworzyć, ale im więcej zatwierdzonych tablic, tym większy sens treningu w Z4."
             )
         else:
             tone = "success"
@@ -829,25 +829,25 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
     if in_campaign:
         if not split_ready:
             if missing_for_split > 0:
-                gate_summary = f"Krok 1/2: zbiór PZ2 nie jest jeszcze gotowy. Brakuje {missing_for_split} tablic perfect."
+                gate_summary = f"Krok 1/2: zbiór PZ2 nie jest jeszcze gotowy. Brakuje {missing_for_split} zatwierdzonych tablic."
             else:
                 gate_summary = "Krok 1/2: zbiór PZ2 nie jest jeszcze gotowy. Brakuje eksportowalnych ramek znaków."
             gate_details = (
                 f"Cel PZ2: przygotować anotacje znaków do późniejszego datasetu. Masz {exportable_plate_count}/{min_required_perfect} "
-                f"eksportowalnych tablic perfect i {exportable_char_count} znaków. "
+                f"eksportowalnych zatwierdzonych tablic i {exportable_char_count} znaków. "
                 "Po spełnieniu tego minimum użyj przycisku „Krok 2: dataset PZ3”; w PZ3 powstanie właściwy dataset."
             )
             if perfect != exportable_plate_count:
                 gate_details += (
-                    f" Na liście jest {perfect} tablic perfect, ale do bramki liczy się {exportable_plate_count}; "
-                    "sprawdź zakres strategii i źródeł gold packa."
+                    f" Na liście jest {perfect} zatwierdzonych tablic, ale do bramki liczy się {exportable_plate_count}; "
+                    "sprawdź wybrany zakres danych."
                 )
             summary = gate_summary
             details = f"{gate_details} {details}".strip()
         elif not dataset_ready:
             summary = "Krok 1/2 gotowy: zbiór PZ2 spełnia minimum. Krok 2/2: utwórz dataset znaków w PZ3."
             gate_details = (
-                f"Zbiór PZ2 zawiera {exportable_plate_count}/{min_required_perfect} eksportowalnych tablic perfect "
+                f"Zbiór PZ2 zawiera {exportable_plate_count}/{min_required_perfect} eksportowalnych zatwierdzonych tablic "
                 f"i {exportable_char_count} znaków. To odblokowuje przejście do PZ3, ale nie otwiera jeszcze T06. "
                 "Dopiero eksport źródłowego datasetu znaków w PZ3 domyka warunek bramki."
             )

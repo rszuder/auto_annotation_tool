@@ -275,7 +275,7 @@ def start_review_from_raw(
     if not isinstance(data, dict):
         result = {"ok": False, "reason": "no_active_plate", "plate_id": pid}
         if not quiet:
-            messagebox.showinfo("REVIEW", "Wybierz tablicę w PZ2.")
+            messagebox.showinfo("Sprawdzanie znaków", "Wybierz tablicę do sprawdzenia.")
         return result
 
     raw_detection = data.get("raw_detection")
@@ -283,8 +283,8 @@ def start_review_from_raw(
         result = {"ok": False, "reason": "missing_raw_detection", "plate_id": pid}
         if not quiet:
             messagebox.showinfo(
-                "REVIEW",
-                "Ta tablica nie ma jeszcze wyniku RAW. Najpierw uruchom RAW.",
+                "Brak wyniku wykrywania",
+                "Ta tablica nie ma jeszcze wyniku wykrywania. Najpierw uruchom wykrywanie znaków.",
             )
         return result
 
@@ -306,8 +306,8 @@ def start_review_from_raw(
         }
         if not quiet:
             messagebox.showinfo(
-                "REVIEW już istnieje",
-                "Nie nadpisano istniejącej warstwy REVIEW/GOLD.",
+                "Tablica jest już w trakcie sprawdzania",
+                "Nie nadpisano wcześniejszych poprawek ani zatwierdzenia.",
             )
         return result
 
@@ -372,7 +372,7 @@ def start_review_from_raw(
         host,
         pid,
         persist=persist,
-        message="Rozpoczęto REVIEW z zamrożonego wyniku RAW.",
+        message="Wynik modelu został otwarty do sprawdzenia i korekty.",
     )
     return {
         "ok": True,
@@ -441,14 +441,14 @@ def confirm_review_gold(
     if not isinstance(data, dict):
         result = {"ok": False, "reason": "no_active_plate", "plate_id": pid}
         if not quiet:
-            messagebox.showinfo("GOLD", "Wybierz tablicę w PZ2.")
+            messagebox.showinfo("Zatwierdzanie tablicy", "Wybierz tablicę do zatwierdzenia.")
         return result
 
     state = data.get("review_state")
     if not isinstance(state, dict) or get_review_state_status(data) != REVIEW_IN_PROGRESS:
         result = {"ok": False, "reason": "review_not_in_progress", "plate_id": pid}
         if not quiet:
-            messagebox.showinfo("GOLD", "Najpierw rozpocznij lub wykonaj korektę REVIEW.")
+            messagebox.showinfo("Najpierw sprawdź tablicę", "Otwórz wynik modelu do sprawdzenia i wprowadź potrzebne poprawki.")
         return result
 
     chars = data.get("characters", [])
@@ -456,8 +456,8 @@ def confirm_review_gold(
         result = {"ok": False, "reason": "empty_review", "plate_id": pid}
         if not quiet:
             messagebox.showwarning(
-                "Nie można zatwierdzić GOLD",
-                "REVIEW nie zawiera żadnych ramek znaków.",
+                "Nie można zatwierdzić tablicy",
+                "Ta tablica nie zawiera jeszcze żadnych ramek znaków.",
             )
         return result
 
@@ -483,9 +483,9 @@ def confirm_review_gold(
         }
         if not quiet:
             messagebox.showwarning(
-                "REVIEW nadal wymaga korekty",
-                "Aktualne boxy/znaki nie spełniają warunku perfect. "
-                "Popraw REVIEW i zatwierdź ponownie.",
+                "Tablica nadal wymaga poprawy",
+                "Aktualne ramki lub znaki nie są jeszcze poprawne. "
+                "Wprowadź poprawki i spróbuj zatwierdzić ponownie.",
             )
         return result
 
@@ -529,12 +529,12 @@ def confirm_review_gold(
         host,
         pid,
         persist=persist,
-        message="REVIEW zatwierdzony jako GOLD.",
+        message="Tablica została sprawdzona i zatwierdzona do zbioru danych.",
     )
 
     if not quiet:
         try:
-            messagebox.showinfo("GOLD", "Tablica została jawnie zatwierdzona jako GOLD.")
+            messagebox.showinfo("Tablica zatwierdzona", "Tablica została sprawdzona i może zostać użyta w zbiorze danych.")
         except Exception:
             pass
 

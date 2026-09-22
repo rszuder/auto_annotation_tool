@@ -199,16 +199,16 @@ def build_detection_tab(
     self.detect_left_title_lbl = SectionHeaderLabel(
         self.detect_left_header,
         self.app,
-        text="PZ2. Wykrywanie znaków i analiza",
+        text="Sprawdzanie znaków",
     )
     self.detect_left_title_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
     self.detect_left_intro_lbl = tk.Label(
         self.detect_left_header,
         text=(
-            "Pracujesz na cropach tablic przygotowanych w PZ1. "
-            "Po lewej wybierasz tablicę, a na canvasie rysujesz i poprawiasz boxy znaków. "
-            "Status perfect program nada automatycznie, gdy zapisane znaki będą zgodne z nazwą pliku źródłowego."
+            "Pracujesz na wyodrębnionych tablicach. "
+            "Po lewej wybierasz tablicę, a na obrazie rysujesz i poprawiasz ramki znaków. "
+            "Program sprawdza poprawność techniczną, ale dopiero Twoje zatwierdzenie pozwala użyć tablicy w zbiorze danych."
         ),
         anchor="w",
         justify=tk.LEFT,
@@ -422,16 +422,15 @@ def build_detection_tab(
     self.preview_title_lbl = SectionHeaderLabel(
         self.preview_tools,
         self.app,
-        text="Podgląd tablicy i boxów znaków",
+        text="Podgląd tablicy i ramek znaków",
     )
     self.preview_title_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
     self.preview_intro_lbl = tk.Label(
         self.preview_tools,
         text=(
-            "Pracujesz na cropach tablic przygotowanych w PZ1. "
-            "Wybierz metodę OCR/YOLO, uruchom detekcję, popraw boxy znaków na canvasie "
-            "i oznacz poprawne tablice jako perfect przed przejściem do PZ3."
+            "Wybierz sposób wykrywania, uruchom analizę i popraw ramki oraz znaki na obrazie. "
+            "Po sprawdzeniu zatwierdź tablicę, aby mogła trafić do zbioru danych."
         ),
         anchor="w",
         justify=tk.LEFT,
@@ -1191,15 +1190,15 @@ def build_detection_tab(
     self.preview_list_header_lbl = SectionHeaderLabel(
         list_lf,
         self.app,
-        text="PZ2. Wykrywanie znaków i analiza",
+        text="Sprawdzanie znaków",
     )
     self.preview_list_header_lbl.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
 
     self.preview_list_intro_lbl = tk.Label(
         list_lf,
         text=(
-            "PZ2 przygotowuje anotacje znaków na wyodrębnionych tablicach: poprawiasz ramki, wpisujesz znaki "
-            "i doprowadzasz tablice do statusu perfect. Gdy zbiór PZ2 jest sensowny, przejdź do PZ3 i utwórz źródłowy dataset znaków."
+            "Tutaj sprawdzasz znaki na wyodrębnionych tablicach: poprawiasz ramki, wpisujesz znaki "
+            "i zatwierdzasz gotowe tablice. Gdy masz wystarczającą liczbę zatwierdzonych tablic, utwórz zbiór znaków."
         ),
         anchor="w",
         justify=tk.LEFT,
@@ -1244,7 +1243,7 @@ def build_detection_tab(
     self.plates_legend_scope_header_lbl.grid(row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 1))
     self.plates_legend_total_header_lbl = tk.Label(self.plates_legend_frame, text="Raz.", bd=0, highlightthickness=0)
     self.plates_legend_total_header_lbl.grid(row=0, column=1, sticky="w", padx=(0, 4), pady=(0, 1))
-    self.plates_legend_perfect_header_lbl = tk.Label(self.plates_legend_frame, text="Perf.", bd=0, highlightthickness=0)
+    self.plates_legend_perfect_header_lbl = tk.Label(self.plates_legend_frame, text="OK", bd=0, highlightthickness=0)
     self.plates_legend_perfect_header_lbl.grid(row=0, column=2, sticky="w", padx=(0, 4), pady=(0, 1))
     self.plates_legend_manual_header_lbl = tk.Label(self.plates_legend_frame, text="Man.", bd=0, highlightthickness=0)
     self.plates_legend_manual_header_lbl.grid(row=0, column=3, sticky="w", padx=(0, 4), pady=(0, 1))
@@ -1270,7 +1269,7 @@ def build_detection_tab(
     self.plates_legend_tab_hybrid_lbl = tk.Label(self.plates_legend_frame, text="0", bd=0, highlightthickness=0)
     self.plates_legend_tab_hybrid_lbl.grid(row=1, column=6, sticky="w")
 
-    self.plates_legend_box_title_lbl = tk.Label(self.plates_legend_frame, text="Boxy", bd=0, highlightthickness=0)
+    self.plates_legend_box_title_lbl = tk.Label(self.plates_legend_frame, text="Ramki", bd=0, highlightthickness=0)
     self.plates_legend_box_title_lbl.grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(1, 0))
     self.plates_legend_box_total_lbl = tk.Label(self.plates_legend_frame, text="0", bd=0, highlightthickness=0)
     self.plates_legend_box_total_lbl.grid(row=2, column=1, sticky="w", padx=(0, 4), pady=(1, 0))
@@ -2498,7 +2497,7 @@ def build_detection_tab(
 
     self.preview_perfect_title_lbl = tk.Label(
         self.preview_counts_frame,
-        text="Perfect",
+        text="Sprawdzone",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
@@ -2790,13 +2789,13 @@ def build_detection_tab(
 
     self.btn_run_detection = ttk.Button(
         self.btn_run_detection_pulse_frame,
-        text="Uruchom RAW",
+        text="Uruchom wykrywanie",
         command=self._run_detection_stage,
         style="Accent.TButton"
     )
     self.btn_run_detection.pack(fill=tk.X)
     self.btn_run_detection.configure(
-        text="Uruchom RAW",
+        text="Uruchom wykrywanie",
         padding=detection_action_button_padding,
         width=34,
     )
@@ -2836,7 +2835,7 @@ def build_detection_tab(
     )
     self.btn_start_review_from_raw = ttk.Button(
         self.detection_review_actions_frame,
-        text="RAW → REVIEW",
+        text="Sprawdź i popraw",
         command=self._start_review_from_raw,
         style="WorkflowCard.TButton",
     )
@@ -2847,7 +2846,7 @@ def build_detection_tab(
 
     self.btn_confirm_review_gold = ttk.Button(
         self.detection_review_actions_frame,
-        text="Zatwierdź GOLD",
+        text="Zatwierdź tablicę",
         command=self._confirm_review_gold,
         style="WorkflowCard.TButton",
     )
@@ -2966,7 +2965,7 @@ def build_detection_tab(
         emphasis=False,
     )
 
-    refiner_guard_text = "Refiner perfect: niedostępny w pipeline OCR. Poprawki boxów wymagają modelu YOLO."
+    refiner_guard_text = "Automatyczna korekta ramek jest niedostępna przy samym odczycie tekstu. Do poprawiania geometrii potrzebny jest model wykrywający znaki."
     self.detect_refiner_guard_lbl = tk.Label(
         self.detect_run_status_frame,
         text=refiner_guard_text,
