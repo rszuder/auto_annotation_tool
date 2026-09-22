@@ -407,6 +407,10 @@ def run_cvat_import(host) -> None:
             target_data = metadata.get(pid, {})
             previous_chars = list(target_data.get("characters", [])) if isinstance(target_data.get("characters"), list) else []
             previous_status = str(target_data.get("status", "unknown") or "unknown").strip().lower()
+            try:
+                host._mark_review_edit_started(target_data)
+            except Exception:
+                pass
             host._update_preview_plate_layout_metadata(target_data, clean_chars)
             clean_chars = host._annotate_preview_character_reading_positions(clean_chars, data=target_data)
             target_data["characters"] = clean_chars

@@ -917,6 +917,11 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
     except Exception:
         pass
 
+    try:
+        self._mark_review_edit_started(data)
+    except Exception:
+        pass
+
     chars = list(data.get("characters", []) or []) if isinstance(data.get("characters", []), list) else []
     selected_records = {}
     for attr in ("_preview_char_selected_index", "_preview_char_label_active_index", "_preview_char_hover_label_index"):

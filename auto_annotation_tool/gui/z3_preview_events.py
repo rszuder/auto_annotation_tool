@@ -1331,6 +1331,10 @@ def on_preview_canvas_release(host, event):
             release_perf_start = time.perf_counter()
             data = self._get_preview_active_data(create=True)
             if isinstance(data, dict):
+                try:
+                    self._mark_review_edit_started(data)
+                except Exception:
+                    pass
                 separator = separator_drag_state.get("preview_separator")
                 if isinstance(separator, dict):
                     state = getattr(self, "_preview_render_state", None) or {}
@@ -1361,19 +1365,10 @@ def on_preview_canvas_release(host, event):
                     separator_conflict = bool(self._preview_layout_separator_conflicts_with_chars(data, ordered_chars))
                 except Exception:
                     separator_conflict = False
-                status_now = self._derive_preview_status_from_characters(ordered_chars)
-                if status_now == "perfect" and separator_conflict:
-                    status_now = "needs_fix"
-                elif status_now == "perfect":
-                    try:
-                        expected_resolution = self._resolve_preview_expected_text_for_crop(data, ordered_chars)
-                        expected_texts = list(expected_resolution.get("expected_texts", []) or [])
-                        if expected_texts:
-                            status_now = "perfect" if bool(expected_resolution.get("text_resolved")) else "needs_fix"
-                        elif self._preview_has_reference_text_source(data):
-                            status_now = "needs_fix"
-                    except Exception:
-                        pass
+                status_now = self._derive_preview_status_from_data(
+                    data,
+                    ordered_chars,
+                )
                 data["status"] = status_now
                 try:
                     self._schedule_preview_metadata_save(delay_ms=650)

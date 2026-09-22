@@ -431,6 +431,10 @@ def accept_gt_assist_suggestion(
         accepted,
         data=data,
     )
+    try:
+        host._mark_review_edit_started(data)
+    except Exception:
+        pass
     data["characters"] = accepted
     data["correction_source"] = GT_ASSIST_CONFIRMED_SOURCE
     data["review_source"] = GT_ASSIST_CONFIRMED_SOURCE
