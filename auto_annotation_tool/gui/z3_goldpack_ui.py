@@ -193,15 +193,8 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
             image_names = {entry.name for entry in image_entries if entry.is_file()}
 
         for pid, source_data in metadata.items():
-            if not isinstance(source_data, dict) or source_data.get("status") != "perfect":
+            if not is_gold_export_eligible_data(source_data):
                 continue
-            review_state = source_data.get("review_state")
-            if isinstance(review_state, dict):
-                if str(review_state.get("status", "") or "").strip().lower() != "approved":
-                    continue
-                gold_state = source_data.get("gold_state")
-                if not isinstance(gold_state, dict) or not bool(gold_state.get("approved", False)):
-                    continue
             data = source_data
             if prepare_records:
                 data = _copy_gold_candidate_for_normalization(source_data)
@@ -275,9 +268,7 @@ def count_exportable_characters_in_data(host, data: dict) -> int:
 def count_exportable_perfect_plates_in_metadata(host, metadata_map) -> int:
     count = 0
     for _pid, data in (metadata_map or {}).items():
-        if not isinstance(data, dict):
-            continue
-        if str(data.get("status", "unknown") or "unknown").strip().lower() != "perfect":
+        if not is_gold_export_eligible_data(data):
             continue
         if host._count_exportable_characters_in_data(data) > 0:
             count += 1
@@ -345,9 +336,7 @@ def _compute_contextual_gold_export_counts(host, *, selected_strategies=None, se
 
     metadata_map = _get_contextual_gold_metadata(host)
     for _pid, data in (metadata_map or {}).items():
-        if not isinstance(data, dict):
-            continue
-        if str(data.get("status", "unknown") or "unknown").strip().lower() != "perfect":
+        if not is_gold_export_eligible_data(data):
             continue
 
         strategy_bucket = host._get_perfect_strategy_bucket(data)
@@ -427,13 +416,14 @@ def _compute_statuses_in_metadata_mapping(host, metadata_map):
         if status == "perfect":
             perfect += 1
             layout_perfect_counts[layout_label] = int(layout_perfect_counts.get(layout_label, 0) or 0) + 1
-            bucket = host._get_perfect_strategy_bucket(data)
-            source_bucket = host._get_plate_source_bucket(data)
-            strategy_counts[bucket] += 1
-            strategy_char_counts[bucket] += host._count_exportable_characters_in_data(data)
-            if source_bucket in source_counts:
-                source_counts[source_bucket] += 1
-                source_char_counts[source_bucket] += host._count_exportable_characters_in_data(data)
+            if is_gold_export_eligible_data(data):
+                bucket = host._get_perfect_strategy_bucket(data)
+                source_bucket = host._get_plate_source_bucket(data)
+                strategy_counts[bucket] += 1
+                strategy_char_counts[bucket] += host._count_exportable_characters_in_data(data)
+                if source_bucket in source_counts:
+                    source_counts[source_bucket] += 1
+                    source_char_counts[source_bucket] += host._count_exportable_characters_in_data(data)
         elif status == "needs_fix":
             needs_fix += 1
         else:
@@ -481,9 +471,7 @@ def build_merged_gold_export_counts(host, *, selected_strategies=None, selected_
             continue
 
         for pid, data in metadata.items():
-            if not isinstance(data, dict):
-                continue
-            if str(data.get("status", "unknown") or "unknown").strip().lower() != "perfect":
+            if not is_gold_export_eligible_data(data):
                 continue
             data = _copy_gold_candidate_for_normalization(data)
 
@@ -1820,6 +1808,35 @@ def refresh_gold_export_source_labels(host) -> None:
         )
 
 
+def is_gold_export_eligible_data(data: dict | None) -> bool:
+    """
+    Single source of truth for GOLD/PZ3 eligibility.
+
+    Legacy records without review_state stay backward compatible.
+    New records with review_state require explicit human approval.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    status = str(data.get("status", "unknown") or "unknown").strip().lower()
+    if status != "perfect":
+        return False
+
+    review_state = data.get("review_state")
+    if not isinstance(review_state, dict):
+        return True
+
+    review_status = str(review_state.get("status", "") or "").strip().lower()
+    if review_status != "approved":
+        return False
+
+    gold_state = data.get("gold_state")
+    if not isinstance(gold_state, dict):
+        return False
+
+    return bool(gold_state.get("approved", False))
+
+
 def _copy_gold_candidate_for_normalization(data):
     # Raw detector proposals are immutable diagnostics, often 300 per plate.
     # Preserve them in the export payload without copying/reclassifying them
@@ -1922,7 +1939,7 @@ def ensure_plate_source_metadata(
         changed = True
 
     status = str(data.get("status", "unknown") or "unknown").strip().lower()
-    candidate = bool(status == "perfect")
+    candidate = bool(is_gold_export_eligible_data(data))
     if bool(gold_state.get("candidate", False)) != candidate:
         gold_state["candidate"] = candidate
         changed = True
