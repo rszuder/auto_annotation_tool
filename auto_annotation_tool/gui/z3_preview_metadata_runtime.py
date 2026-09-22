@@ -659,7 +659,7 @@ def _recalculate_preview_statuses_in_metadata(self, metadata: dict | None):
                 )
 
         try:
-            self._reconcile_review_approval(raw_data)
+            self._reconcile_review_gold_integrity(raw_data)
         except Exception:
             pass
 

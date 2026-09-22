@@ -3978,6 +3978,7 @@ def load_preview_data(host, quiet=False):
 
             phase_started = time.perf_counter()
             changed = False
+            review_contract_changed = False
             if self._backfill_preview_expected_texts_from_sources(loaded):
                 changed = True
             for pid, d in loaded.items():
@@ -4046,9 +4047,15 @@ def load_preview_data(host, quiet=False):
                         changed = True
                 if not (quiet and _preview_source_metadata_ready(d)) and self._ensure_plate_source_metadata(d, plate_id=str(pid or ""), meta_path=meta_path):
                     changed = True
+                try:
+                    if self._reconcile_review_gold_integrity(d):
+                        changed = True
+                        review_contract_changed = True
+                except Exception:
+                    pass
             normalize_ms = (time.perf_counter() - phase_started) * 1000.0
 
-            if changed and not quiet:
+            if changed and (not quiet or review_contract_changed):
                 phase_started = time.perf_counter()
                 self._atomic_write_json(meta_path, loaded)
                 current_mtime = meta_path.stat().st_mtime

@@ -1275,6 +1275,7 @@ class CharacterAnnotationTab:
     _build_review_reference_snapshot = staticmethod(z3_review_runtime.build_review_reference_snapshot)
     _review_approval_is_current = staticmethod(z3_review_runtime.review_approval_is_current)
     _reconcile_review_approval = staticmethod(z3_review_runtime.reconcile_review_approval)
+    _reconcile_review_gold_integrity = staticmethod(z3_review_runtime.reconcile_review_gold_integrity)
     _start_review_from_raw = z3_review_runtime.start_review_from_raw
     _mark_review_edit_started = z3_review_runtime.mark_review_edit_started
     _confirm_review_gold = z3_review_runtime.confirm_review_gold

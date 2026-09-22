@@ -132,6 +132,93 @@ def reconcile_review_approval(data: dict | None) -> bool:
     return True
 
 
+
+def reconcile_review_gold_integrity(data: dict | None) -> bool:
+    """
+    Keep persisted REVIEW/GOLD state fail-closed and internally consistent.
+
+    Legacy records without review_state are intentionally untouched.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    state = data.get("review_state")
+    if not isinstance(state, dict):
+        return False
+
+    changed = False
+    review_status = str(state.get("status", "") or "").strip().lower()
+
+    gold_state = data.get("gold_state")
+    if not isinstance(gold_state, dict):
+        gold_state = {}
+        data["gold_state"] = gold_state
+        changed = True
+
+    if review_status == REVIEW_APPROVED:
+        if not review_approval_is_current(data):
+            return bool(reconcile_review_approval(data) or changed)
+
+        persisted_status = str(
+            data.get("status", "unknown") or "unknown"
+        ).strip().lower()
+        gold_approved = bool(gold_state.get("approved", False))
+        if persisted_status != "perfect" or not gold_approved:
+            now = _now_iso()
+            previous_reference = copy.deepcopy(
+                state.get("approved_reference")
+            )
+            state["status"] = REVIEW_IN_PROGRESS
+            state["approved_at"] = None
+            state["modified_at"] = now
+            state["approval_invalidated_at"] = now
+            state["approval_invalidated_reason"] = (
+                "approval_state_incomplete"
+            )
+            state["invalidated_approved_reference"] = previous_reference
+            state["current_reference"] = build_review_reference_snapshot(data)
+            data["status"] = "needs_fix"
+            gold_state["candidate"] = False
+            gold_state["approved"] = False
+            return True
+
+        if not bool(gold_state.get("candidate", False)):
+            gold_state["candidate"] = True
+            changed = True
+        return changed
+
+    if review_status == REVIEW_IN_PROGRESS:
+        if str(data.get("status", "") or "").strip().lower() != "needs_fix":
+            data["status"] = "needs_fix"
+            changed = True
+        if state.get("approved_at") is not None:
+            state["approved_at"] = None
+            changed = True
+        if "approved_reference" in state:
+            state.pop("approved_reference", None)
+            changed = True
+        if bool(gold_state.get("candidate", False)):
+            gold_state["candidate"] = False
+            changed = True
+        if bool(gold_state.get("approved", False)):
+            gold_state["approved"] = False
+            changed = True
+        return changed
+
+    now = _now_iso()
+    state["schema"] = REVIEW_SCHEMA
+    state["status"] = REVIEW_IN_PROGRESS
+    state["approved_at"] = None
+    state["modified_at"] = now
+    state["approval_invalidated_at"] = now
+    state["approval_invalidated_reason"] = "invalid_review_state"
+    state.pop("approved_reference", None)
+    data["status"] = "needs_fix"
+    gold_state["candidate"] = False
+    gold_state["approved"] = False
+    return True
+
+
 def _resolve_plate(host, plate_id=None):
     pid = str(plate_id or getattr(host, "_preview_active_pid", "") or "").strip()
     metadata = getattr(host, "preview_metadata", None)
