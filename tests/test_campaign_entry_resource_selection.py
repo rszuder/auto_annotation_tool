@@ -218,6 +218,24 @@ class EntryResourceSelectionTests(unittest.TestCase):
             (True, 1),
         )
 
+    def test_clear_images_uses_lightweight_state_cleanup(self):
+        self.owner._is_project_start_asset_clearable.return_value = True
+        self.owner._get_iteration_target.return_value = ""
+        self.owner._clear_dashboard_perf_cache = Mock()
+        self.owner._sync_iteration_artifact_registry_from_project_start = Mock()
+        self.owner._refresh_dashboard = Mock()
+        self.owner.app.update_status = Mock()
+        self.campaign.clear_step1_image_source_state.return_value = {"ok": True}
+
+        with patch.object(assets.messagebox, "askyesno", return_value=True):
+            assets._clear_project_start_asset(self.owner, "images")
+
+        self.campaign.clear_step1_image_source_state.assert_called_once_with()
+        self.campaign.clear_master_pool_dir.assert_not_called()
+        self.campaign.clear_latest_ingest_plan.assert_not_called()
+        self.owner._sync_iteration_artifact_registry_from_project_start.assert_not_called()
+        self.owner._refresh_dashboard.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()

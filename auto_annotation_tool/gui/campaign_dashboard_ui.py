@@ -2883,12 +2883,19 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         plates_count = 0
         if run_dir is not None:
             try:
-                annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
-                counter = getattr(annotation_tab, "_get_run_plate_annotation_counts", None)
-                if callable(counter):
-                    images_count, plates_count = counter(run_dir)
+                xml_summary = campaign_step1_assets._scan_project_start_plate_xml_summary(self, run_dir)
+                images_count = int(xml_summary.get("plate_images", 0) or 0)
+                plates_count = int(xml_summary.get("plate_count", 0) or 0)
             except Exception:
                 images_count, plates_count = 0, 0
+            if images_count <= 0 and plates_count <= 0:
+                try:
+                    annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+                    counter = getattr(annotation_tab, "_get_run_plate_annotation_counts", None)
+                    if callable(counter):
+                        images_count, plates_count = counter(run_dir)
+                except Exception:
+                    images_count, plates_count = 0, 0
 
         try:
             image_source = dict(self._get_project_start_effective_images_source() or {})
@@ -14873,6 +14880,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 resource_tree_state["actions"] = tree_actions
             tree_actions.clear()
             latest_snapshot_by_key: dict[str, object] = {}
+            annotation_base_state = None
+            if show_t02_resource_map:
+                resource_tree_state["snapshots"] = {}
             row_count = max(1, len(row_specs))
             for row_index, (row_key, label, primary_label) in enumerate(row_specs, start=1):
                 if show_t02_resource_map:
@@ -14883,9 +14893,18 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 snap_obj = _snapshot_object(row_key, label)
                 latest_snapshot_by_key[row_key] = snap_obj
                 try:
-                    latest_snapshot_by_key[str(getattr(snap_obj, "canonical_key", "") or row_key)] = snap_obj
+                    canonical_snapshot_key = str(getattr(snap_obj, "canonical_key", "") or row_key)
+                    latest_snapshot_by_key[canonical_snapshot_key] = snap_obj
                 except Exception:
-                    pass
+                    canonical_snapshot_key = row_key
+                if show_t02_resource_map:
+                    try:
+                        live_snapshots = resource_tree_state.get("snapshots")
+                        if isinstance(live_snapshots, dict):
+                            live_snapshots[row_key] = snap_obj
+                            live_snapshots[canonical_snapshot_key] = snap_obj
+                    except Exception:
+                        pass
                 snap = snap_obj.as_dict()
                 row_widgets = widgets.setdefault(row_key, {"row_label": label, "primary_label": primary_label})
                 tone_color = tone_colors.get(str(snap.get("tone") or "muted"), muted)
@@ -14926,7 +14945,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         fulfillment_color = tone_colors.get("warning", warning)
                 annotation_dependency_blocked = False
                 if row_key in {"plate_run", "char_run"}:
-                    base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
+                    if annotation_base_state is None:
+                        annotation_base_state = _annotation_base_ready_for_import()
+                    base_ready, _image_source_label, _expected_count = annotation_base_state
                     annotation_dependency_blocked = not base_ready
                     if annotation_dependency_blocked:
                         pending_contract_review = False

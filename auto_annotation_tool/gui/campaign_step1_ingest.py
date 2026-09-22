@@ -1577,6 +1577,14 @@ def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None
     except Exception:
         pass
 
+    # deferred_e1_artifact_sync_after_plan
+    # Synchronizuj kontrakt dopiero z gotowego planu. _collect_project_start_image_names
+    # pobierze wtedy 1000 nazw z pamięci zamiast ponownie skanować katalog na dysku.
+    try:
+        self._sync_iteration_artifact_registry_from_project_start()
+    except Exception as exc:
+        logger.debug(f"Nie udało się zsynchronizować kontraktu O po analizie planu E1: {exc}")
+
     try:
         self._refresh_project_start_assets_table_theme(self._get_step1_ingest_frame_bg())
     except Exception:

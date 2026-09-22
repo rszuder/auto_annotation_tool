@@ -757,7 +757,22 @@ class CampaignTab:
             "Weryfikuję wybrany katalog obrazów.",
             "Sprawdzam, czy wskazany folder zawiera obrazy i czy nie jest zbyt szeroki.",
         )
-        if not CAMPAIGN.set_master_pool_dir(selected):
+        # replace_old_e1_image_state_before_new_source
+        try:
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+        except Exception:
+            active_project = ""
+        try:
+            resolved_selected = str(
+                CAMPAIGN._resolve_valid_image_source_dir(
+                    selected,
+                    project_name=active_project or None,
+                )
+                or ""
+            ).strip()
+        except Exception:
+            resolved_selected = ""
+        if not resolved_selected:
             campaign_step1_ingest._hide_ingest_plan_progress_dialog(self)
             self.app.themed_info(
                 "Nieprawidłowy katalog zdjęć",
@@ -769,23 +784,41 @@ class CampaignTab:
                 tone="warning",
             )
             return False
+
+        # Nowe O zastępuje poprzedni roboczy kontrakt tej iteracji. Najpierw
+        # usuń plan/manifest/powiązanie poprzedniego O, a dopiero potem zapisz
+        # nowe źródło. Dzięki temu stary current_ingest_plan nie może przeciec
+        # do licznika ani tokenu nowego katalogu.
         try:
-            campaign_step1_ingest._update_ingest_plan_progress_dialog(
-                self,
-                12,
-                "Aktualizuję kontrakt zasobów E1.",
-                "Synchronizuję wybrane obrazy z aktualną iteracją projektu.",
-            )
-            self._sync_iteration_artifact_registry_from_project_start(
-                progress_callback=lambda _count, detail: campaign_step1_ingest._update_ingest_plan_progress_dialog(
-                    self,
-                    14,
-                    "Buduję opis wybranego zbioru obrazów.",
-                    str(detail or "Zbieram nazwy obrazów do kontraktu O."),
-                )
-            )
+            CAMPAIGN.clear_step1_image_source_state(project_name=active_project or None)
+        except Exception as exc:
+            logger.debug(f"Nie udało się wyczyścić poprzedniego stanu O przed podmianą źródła: {exc}")
+        self.current_ingest_plan = {}
+        self.ingest_plan_items = []
+        try:
+            self._existing_iteration_ingest_plan_signature = None
         except Exception:
             pass
+
+        if not CAMPAIGN.set_master_pool_dir(resolved_selected, project_name=active_project or None):
+            campaign_step1_ingest._hide_ingest_plan_progress_dialog(self)
+            self.app.themed_info(
+                "Nieprawidłowy katalog zdjęć",
+                (
+                    "Nie udało się zapisać wybranego katalogu zdjęć. "
+                    "Wskaż folder ponownie."
+                ),
+                parent=self.frame,
+                tone="warning",
+            )
+            return False
+
+        campaign_step1_ingest._update_ingest_plan_progress_dialog(
+            self,
+            12,
+            "Przygotowuję nowy zbiór obrazów O.",
+            "Poprzedni plan został odłączony. Analiza nowego katalogu rozpocznie się za chwilę.",
+        )
 
         # O is a complete image resource: discover portable GT companions at the
         # same entry point used by E1 and the graph resource modal.
@@ -807,7 +840,6 @@ class CampaignTab:
         except Exception as exc:
             logger.debug(f"Nie udało się obsłużyć companionów GT zasobu O: {exc}")
 
-        self.current_ingest_plan = {}
         iter_image_count = self._get_iteration_image_count()
 
         if iter_image_count == 0:
@@ -823,6 +855,10 @@ class CampaignTab:
                 "Odświeżam informacje o wybranym zbiorze obrazów.",
                 "W tej iteracji istnieją już obrazy, więc nie tworzę nowego planu E1.",
             )
+            try:
+                self._sync_iteration_artifact_registry_from_project_start()
+            except Exception as exc:
+                logger.debug(f"Nie udało się zsynchronizować istniejącego O po wyborze źródła: {exc}")
             self._refresh_ingest_panel()
             campaign_step1_ingest._update_ingest_plan_progress_dialog(
                 self,

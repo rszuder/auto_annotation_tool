@@ -2609,6 +2609,136 @@ class CampaignManager:
         self.save_state()
         return True
 
+
+    def clear_step1_image_source_state(
+        self,
+        iteration_num: int | None = None,
+        project_name: str = None,
+    ) -> Dict[str, Any]:
+        project_name = self._resolve_project_name(project_name)
+        if not project_name:
+            return {"ok": False, "reason": "missing_project"}
+
+        try:
+            iter_value = int(
+                iteration_num
+                or self.state["projects"][project_name].get("current_iteration", 1)
+                or 1
+            )
+        except Exception:
+            iter_value = 1
+
+        result: Dict[str, Any] = {
+            "ok": True,
+            "project": project_name,
+            "iteration": int(iter_value),
+            "master_pool_cleared": False,
+            "latest_plan_cleared": False,
+            "manifest_removed": False,
+            "artifact_binding_removed": False,
+        }
+
+        try:
+            result["master_pool_cleared"] = bool(
+                self.clear_master_pool_dir(project_name)
+            )
+        except Exception:
+            result["master_pool_cleared"] = False
+
+        try:
+            result["latest_plan_cleared"] = bool(
+                self.clear_latest_ingest_plan(project_name)
+            )
+        except Exception:
+            result["latest_plan_cleared"] = False
+
+        try:
+            manifest_path = self.get_ingest_manifest_path(
+                iter_value, project_name
+            )
+        except Exception:
+            manifest_path = None
+
+        if manifest_path is not None:
+            try:
+                manifest_path = Path(manifest_path)
+                if manifest_path.exists():
+                    manifest_path.unlink()
+                    result["manifest_removed"] = True
+            except Exception as exc:
+                result["ok"] = False
+                result["manifest_error"] = str(exc)
+
+        try:
+            registry = self.load_artifact_registry(project_name)
+        except Exception:
+            registry = {}
+        if not isinstance(registry, dict):
+            registry = {}
+
+        packages = registry.get("packages")
+        if not isinstance(packages, dict):
+            packages = {}
+            registry["packages"] = packages
+
+        iteration_index = registry.get("iteration_index")
+        if not isinstance(iteration_index, dict):
+            iteration_index = {}
+            registry["iteration_index"] = iteration_index
+
+        package_id = str(
+            iteration_index.pop(str(iter_value), "") or ""
+        ).strip()
+        registry_changed = bool(package_id)
+
+        if package_id:
+            package = packages.get(package_id)
+            if isinstance(package, dict):
+                retained_iterations = []
+                for raw_iteration in list(package.get("iterations") or []):
+                    try:
+                        numeric_iteration = int(raw_iteration)
+                    except Exception:
+                        continue
+                    if numeric_iteration != int(iter_value):
+                        retained_iterations.append(numeric_iteration)
+
+                if retained_iterations:
+                    package["iterations"] = sorted(set(retained_iterations))
+                    package["updated_at"] = datetime.now().isoformat(
+                        timespec="seconds"
+                    )
+                    packages[package_id] = package
+                else:
+                    packages.pop(package_id, None)
+
+            result["artifact_binding_removed"] = True
+
+        if registry_changed:
+            try:
+                if not self.save_artifact_registry(registry, project_name):
+                    result["ok"] = False
+                    result["artifact_registry_error"] = "save_failed"
+            except Exception as exc:
+                result["ok"] = False
+                result["artifact_registry_error"] = str(exc)
+
+        for cache_name in (
+            "_ingest_manifest_cache",
+            "_latest_ingest_plan_summary_cache",
+            "_latest_ingest_plan_summary_runtime_cache",
+            "_iteration_image_count_cache",
+            "_iteration_image_source_dir_cache",
+        ):
+            try:
+                cache = getattr(self, cache_name, None)
+                if hasattr(cache, "clear"):
+                    cache.clear()
+            except Exception:
+                pass
+
+        return result
+
     def get_ingest_batch_size(self, project_name: str = None) -> int:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
