@@ -173,6 +173,51 @@ class EntryResourceSelectionTests(unittest.TestCase):
             current_step=1, current_iteration=1, image_count=1000, material_ready=True, plate_material_count=50,
         )))
 
+    def test_filename_tokens_are_hint_not_at_import_gate(self):
+        class Host:
+            @staticmethod
+            def _get_project_start_filename_plate_texts(filename):
+                return assets._get_project_start_filename_plate_texts(filename)
+
+        host = Host()
+
+        self.assertEqual(
+            assets._get_project_start_filename_plate_texts("B955ET_0017.jpg"),
+            ["B955ET", "0017"],
+        )
+        self.assertEqual(
+            assets._project_start_annotation_covers_filename_plates(
+                host, "B955ET_0017.jpg", 1
+            ),
+            (True, 2),
+        )
+
+        self.assertEqual(
+            assets._get_project_start_filename_plate_texts(
+                "1TF8664_SK188LN_001.jpg"
+            ),
+            ["1TF8664", "SK188LN"],
+        )
+        self.assertEqual(
+            assets._project_start_annotation_covers_filename_plates(
+                host, "1TF8664_SK188LN_001.jpg", 1
+            ),
+            (True, 2),
+        )
+
+    def test_single_filename_token_remains_accepted(self):
+        class Host:
+            @staticmethod
+            def _get_project_start_filename_plate_texts(filename):
+                return assets._get_project_start_filename_plate_texts(filename)
+
+        self.assertEqual(
+            assets._project_start_annotation_covers_filename_plates(
+                Host(), "WI1234A_001.jpg", 1
+            ),
+            (True, 1),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

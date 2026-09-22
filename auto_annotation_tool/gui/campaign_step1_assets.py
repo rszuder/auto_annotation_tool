@@ -3489,9 +3489,13 @@ def _get_project_start_filename_plate_signature(filename: str) -> tuple[str, ...
 def _project_start_annotation_covers_filename_plates(self, filename: str, plate_count: int) -> tuple[bool, int]:
     expected_texts = self._get_project_start_filename_plate_texts(filename)
     expected_count = int(len(expected_texts) or 0)
-    if expected_count <= 0:
-        return True, 0
-    return bool(int(plate_count or 0) >= expected_count), expected_count
+
+    # Nazwa pliku jest wyłącznie historyczną podpowiedzią GT. Nie może być
+    # bramką importu AT: prosty parser [A-Z0-9]{4,} potrafi potraktować np.
+    # licznik pliku "0017" albo drugi numer z nazwy jako dodatkową tablicę.
+    # W aktualnym kontrakcie właściwy tekst jest przypisywany do konkretnej
+    # anotacji tablicy podczas kontroli w Z2.
+    return True, expected_count
 
 def _format_project_start_annotation_adoption_summary(compatibility: dict | None) -> str:
     payload = dict(compatibility or {})
