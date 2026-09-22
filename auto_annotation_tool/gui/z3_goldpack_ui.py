@@ -12,6 +12,7 @@ import uuid
 from pathlib import Path
 from .z3_metadata_cache import read_preview_metadata
 from . import z3_dataset_provenance
+from . import z3_review_runtime
 
 import cv2
 
@@ -1828,6 +1829,8 @@ def is_gold_export_eligible_data(data: dict | None) -> bool:
 
     review_status = str(review_state.get("status", "") or "").strip().lower()
     if review_status != "approved":
+        return False
+    if not z3_review_runtime.review_approval_is_current(data):
         return False
 
     gold_state = data.get("gold_state")

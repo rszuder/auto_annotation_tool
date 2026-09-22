@@ -586,6 +586,12 @@ def _derive_preview_status_from_data(self, data: dict | None, chars) -> str:
             review_status = str(review_state.get("status", "") or "").strip().lower()
             if review_status == "in_progress":
                 return "needs_fix"
+            if review_status == "approved":
+                try:
+                    if not self._review_approval_is_current(data):
+                        return "needs_fix"
+                except Exception:
+                    return "needs_fix"
 
     base_status = self._derive_preview_status_from_characters(chars)
     if base_status != "perfect":
@@ -651,6 +657,11 @@ def _recalculate_preview_statuses_in_metadata(self, metadata: dict | None):
                         raw_chars,
                     )
                 )
+
+        try:
+            self._reconcile_review_approval(raw_data)
+        except Exception:
+            pass
 
         if not chars:
             raw_data["status"] = "needs_fix"

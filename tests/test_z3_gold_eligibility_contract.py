@@ -17,7 +17,7 @@ def _legacy_perfect():
 
 
 def _review(status, *, approved=False):
-    return {
+    data = {
         "status": "perfect",
         "characters": [_rec()],
         "review_state": {
@@ -29,6 +29,11 @@ def _review(status, *, approved=False):
             "approved": bool(approved),
         },
     }
+    if status == "approved" and approved:
+        data["review_state"]["approved_reference"] = (
+            gold.z3_review_runtime.build_review_reference_snapshot(data)
+        )
+    return data
 
 
 def test_gold_eligibility_keeps_legacy_compatibility_but_requires_new_approval():

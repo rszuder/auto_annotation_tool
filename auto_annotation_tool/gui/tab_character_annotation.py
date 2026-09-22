@@ -1272,6 +1272,9 @@ class CharacterAnnotationTab:
     _resolve_preview_expected_text_for_crop = z3_preview_metadata_runtime._resolve_preview_expected_text_for_crop
     _build_raw_detection_validation = z3_preview_metadata_runtime._build_raw_detection_validation
     _get_review_state_status = staticmethod(z3_review_runtime.get_review_state_status)
+    _build_review_reference_snapshot = staticmethod(z3_review_runtime.build_review_reference_snapshot)
+    _review_approval_is_current = staticmethod(z3_review_runtime.review_approval_is_current)
+    _reconcile_review_approval = staticmethod(z3_review_runtime.reconcile_review_approval)
     _start_review_from_raw = z3_review_runtime.start_review_from_raw
     _mark_review_edit_started = z3_review_runtime.mark_review_edit_started
     _confirm_review_gold = z3_review_runtime.confirm_review_gold

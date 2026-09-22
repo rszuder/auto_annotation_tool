@@ -8,6 +8,8 @@ import copy
 from datetime import datetime
 from tkinter import messagebox
 
+from .z3_gt_contract import revision_ids_from_data
+
 REVIEW_SCHEMA = "alpr.pz2.review.v1"
 REVIEW_IN_PROGRESS = "in_progress"
 REVIEW_APPROVED = "approved"
@@ -22,6 +24,113 @@ def get_review_state_status(data: dict | None) -> str:
     if not isinstance(state, dict):
         return ""
     return str(state.get("status", "") or "").strip().lower()
+
+
+def _normalize_reference_text(value) -> str:
+    return str(value or "").strip().upper()
+
+
+def build_review_reference_snapshot(data: dict | None) -> dict:
+    source = data if isinstance(data, dict) else {}
+    attrs = source.get("plate_attributes")
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    ground_truth_text = _normalize_reference_text(
+        source.get("ground_truth_text")
+        or attrs.get("ground_truth_text")
+    )
+
+    source_annotation_id = str(
+        source.get("source_annotation_id")
+        or attrs.get("source_annotation_id")
+        or ""
+    ).strip()
+    plate_annotation_id = str(
+        source.get("plate_annotation_id")
+        or attrs.get("plate_annotation_id")
+        or ""
+    ).strip()
+    ground_truth_source = str(
+        source.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip()
+
+    return {
+        "gt_hash": str(source.get("source_gt_hash") or "").strip(),
+        "gt_revision_ids": revision_ids_from_data(
+            source,
+            "source_gt_revision_ids",
+            "source_gt_revision_id",
+        ),
+        "geometry_revision_ids": revision_ids_from_data(
+            source,
+            "source_geometry_revision_ids",
+            "source_geometry_revision_id",
+        ),
+        "ground_truth_text": ground_truth_text,
+        "source_annotation_id": source_annotation_id,
+        "plate_annotation_id": plate_annotation_id,
+        "ground_truth_source": ground_truth_source,
+    }
+
+
+def review_approval_is_current(data: dict | None) -> bool:
+    if not isinstance(data, dict):
+        return False
+
+    state = data.get("review_state")
+    if not isinstance(state, dict):
+        return False
+    if str(state.get("status", "") or "").strip().lower() != REVIEW_APPROVED:
+        return False
+
+    approved_reference = state.get("approved_reference")
+    if not isinstance(approved_reference, dict):
+        return False
+
+    return approved_reference == build_review_reference_snapshot(data)
+
+
+def reconcile_review_approval(data: dict | None) -> bool:
+    """
+    Reopen REVIEW when GT/reference identity changed after human GOLD approval.
+    A new RAW run is intentionally ignored here.
+    """
+    if not isinstance(data, dict):
+        return False
+
+    state = data.get("review_state")
+    if not isinstance(state, dict):
+        return False
+    if str(state.get("status", "") or "").strip().lower() != REVIEW_APPROVED:
+        return False
+    if review_approval_is_current(data):
+        return False
+
+    now = _now_iso()
+    previous_reference = copy.deepcopy(state.get("approved_reference"))
+
+    state["status"] = REVIEW_IN_PROGRESS
+    state["approved_at"] = None
+    state["modified_at"] = now
+    state["approval_invalidated_at"] = now
+    state["approval_invalidated_reason"] = "reference_changed"
+    state["invalidated_approved_reference"] = previous_reference
+    state["current_reference"] = build_review_reference_snapshot(data)
+
+    data["status"] = "needs_fix"
+
+    gold_state = data.get("gold_state")
+    if not isinstance(gold_state, dict):
+        gold_state = {}
+        data["gold_state"] = gold_state
+    gold_state["candidate"] = False
+    gold_state["approved"] = False
+
+    return True
+
 
 def _resolve_plate(host, plate_id=None):
     pid = str(plate_id or getattr(host, "_preview_active_pid", "") or "").strip()
@@ -215,6 +324,7 @@ def mark_review_edit_started(host, data: dict | None):
     state["status"] = REVIEW_IN_PROGRESS
     state["modified_at"] = now
     state["approved_at"] = None
+    state.pop("approved_reference", None)
     if not str(state.get("source", "") or "").strip():
         state["source"] = "raw_detection" if isinstance(raw, dict) else "manual_editor"
     if raw_hash and not str(state.get("raw_result_hash", "") or "").strip():
@@ -298,6 +408,11 @@ def confirm_review_gold(
     state["approved_at"] = now
     state["modified_at"] = now
     state["approved_by"] = "human"
+    state["approved_reference"] = build_review_reference_snapshot(data)
+    state.pop("approval_invalidated_at", None)
+    state.pop("approval_invalidated_reason", None)
+    state.pop("invalidated_approved_reference", None)
+    state.pop("current_reference", None)
     data["status"] = "perfect"
 
     try:
