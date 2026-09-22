@@ -517,11 +517,8 @@ def return_to_wizard_for_step3_rework(host: "CharacterAnnotationTab") -> None:
             readiness = host._get_campaign_step3_training_readiness()
             ready_summary = _read_ready_step3_export_summary(host)
             ready_for_approval = bool(
-                (
-                    host._has_any_step3_export_outputs()
-                    and bool(readiness.get("ok"))
-                )
-                or bool(ready_summary)
+                host._has_any_step3_export_outputs()
+                and bool(readiness.get("ok"))
             )
 
             if current_status == "approved":

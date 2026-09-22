@@ -439,6 +439,130 @@ def _canonical_json_sha256(value) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+
+GOLD_SOURCE_CONTRACT_SCHEMA = "alpr.pz3.gold_source_contract.v1"
+
+
+def build_gold_source_contract_fingerprint(entries) -> dict:
+    """Fingerprint the exact canonical GOLD source selected for PZ3 export."""
+    rows = []
+    total_characters = 0
+
+    for item in list(entries or []):
+        if not isinstance(item, dict):
+            continue
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        if not isinstance(data, dict):
+            continue
+
+        review_state = (
+            data.get("review_state")
+            if isinstance(data.get("review_state"), dict)
+            else {}
+        )
+        approved_reference = (
+            review_state.get("approved_reference")
+            if isinstance(review_state.get("approved_reference"), dict)
+            else {}
+        )
+
+        characters = []
+        for rec in list(data.get("characters") or []):
+            if not isinstance(rec, dict):
+                continue
+            try:
+                bbox = [
+                    round(float(value), 6)
+                    for value in list(rec.get("bbox") or [])[:4]
+                ]
+            except Exception:
+                bbox = []
+            characters.append(
+                {
+                    "character": str(
+                        rec.get("character") or ""
+                    ).strip().upper(),
+                    "bbox": bbox,
+                }
+            )
+
+        characters.sort(
+            key=lambda row: (
+                tuple(row.get("bbox") or []),
+                str(row.get("character") or ""),
+            )
+        )
+        total_characters += len(characters)
+
+        rows.append(
+            {
+                "pid": str(item.get("pid") or "").strip(),
+                "strategy_bucket": str(
+                    item.get("strategy_bucket") or ""
+                ).strip(),
+                "source_bucket": str(
+                    item.get("source_bucket") or ""
+                ).strip(),
+                "source_image": str(
+                    data.get("source_image") or ""
+                ).strip(),
+                "source_image_id": str(
+                    data.get("source_image_id") or ""
+                ).strip(),
+                "source_annotation_id": str(
+                    data.get("source_annotation_id")
+                    or data.get("plate_annotation_id")
+                    or ""
+                ).strip(),
+                "source_gt_hash": str(
+                    data.get("source_gt_hash") or ""
+                ).strip(),
+                "source_gt_revision_ids": revision_ids_from_data(
+                    data,
+                    "source_gt_revision_ids",
+                    "source_gt_revision_id",
+                ),
+                "source_geometry_hash": str(
+                    data.get("source_geometry_hash") or ""
+                ).strip(),
+                "source_geometry_revision_ids": revision_ids_from_data(
+                    data,
+                    "source_geometry_revision_ids",
+                    "source_geometry_revision_id",
+                ),
+                "ground_truth_text": str(
+                    data.get("ground_truth_text") or ""
+                ).strip().upper(),
+                "review_status": str(
+                    review_state.get("status") or ""
+                ).strip().lower(),
+                "approved_reference": approved_reference,
+                "characters": characters,
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            str(row.get("source_image_id") or ""),
+            str(row.get("source_annotation_id") or ""),
+            str(row.get("source_image") or ""),
+            str(row.get("pid") or ""),
+            _canonical_json_sha256(row),
+        )
+    )
+
+    payload = {
+        "schema": GOLD_SOURCE_CONTRACT_SCHEMA,
+        "plates": rows,
+    }
+    return {
+        "schema": GOLD_SOURCE_CONTRACT_SCHEMA,
+        "sha256": _canonical_json_sha256(payload),
+        "plate_count": len(rows),
+        "character_count": int(total_characters),
+    }
+
+
 def _edit_distance(left: str, right: str) -> int:
     left = str(left or "")
     right = str(right or "")

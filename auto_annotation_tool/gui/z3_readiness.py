@@ -8,6 +8,35 @@ from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from ..validators import validate_yolo_dataset
 from .z3_metadata_cache import readiness_key
+from . import z3_dataset_provenance
+
+
+
+def step3_export_summary_matches_current_gold_contract(
+    summary: dict | None,
+    annotation_readiness: dict | None,
+) -> bool:
+    """
+    New summaries are bound to the exact GOLD source snapshot used for export.
+    Legacy summaries without a source fingerprint remain backward compatible.
+    """
+    source_summary = summary if isinstance(summary, dict) else {}
+    source_readiness = (
+        annotation_readiness
+        if isinstance(annotation_readiness, dict)
+        else {}
+    )
+
+    stored_hash = str(
+        source_summary.get("gold_source_contract_sha256") or ""
+    ).strip()
+    if not stored_hash:
+        return True
+
+    current_hash = str(
+        source_readiness.get("gold_source_contract_sha256") or ""
+    ).strip()
+    return bool(current_hash and current_hash == stored_hash)
 
 
 def get_step3_yolo_export_readiness_snapshot(host, *, selected_strategies=None, selected_sources=None) -> dict:
@@ -47,6 +76,8 @@ def _compute_step3_yolo_export_readiness(host, *, selected_strategies=None, sele
         "candidate_count": 0,
         "min_exportable_plate_count": int(min_exportable_plate_count),
         "missing_exportable_plate_count": int(min_exportable_plate_count),
+        "gold_source_contract_schema": "",
+        "gold_source_contract_sha256": "",
     }
 
     if not selected_buckets:
@@ -73,6 +104,18 @@ def _compute_step3_yolo_export_readiness(host, *, selected_strategies=None, sele
             message=f"Nie udało się sprawdzić gotowości eksportu PZ3: {exc}",
         )
         return result
+
+    source_contract = (
+        z3_dataset_provenance.build_gold_source_contract_fingerprint(
+            plate_entries
+        )
+    )
+    result["gold_source_contract_schema"] = str(
+        source_contract.get("schema") or ""
+    )
+    result["gold_source_contract_sha256"] = str(
+        source_contract.get("sha256") or ""
+    )
 
     exportable_plate_count = 0
     exportable_char_count = 0
@@ -137,6 +180,8 @@ def get_campaign_step3_annotation_readiness(host) -> dict:
         "perfect_count": 0,
         "min_exportable_plate_count": 10,
         "missing_exportable_plate_count": 10,
+        "gold_source_contract_schema": "",
+        "gold_source_contract_sha256": "",
     }
 
     try:
@@ -151,12 +196,20 @@ def get_campaign_step3_annotation_readiness(host) -> dict:
         min_exportable_plates = int(export_readiness.get("min_exportable_plate_count", 10) or 10)
         missing_exportable_plates = int(export_readiness.get("missing_exportable_plate_count", 0) or 0)
         export_message = str(export_readiness.get("message", "") or "")
+        source_contract_schema = str(
+            export_readiness.get("gold_source_contract_schema", "") or ""
+        )
+        source_contract_sha256 = str(
+            export_readiness.get("gold_source_contract_sha256", "") or ""
+        )
     except Exception:
         exportable_chars = 0
         selected_plates = 0
         min_exportable_plates = 10
         missing_exportable_plates = 10
         export_message = ""
+        source_contract_schema = ""
+        source_contract_sha256 = ""
 
     try:
         perfect_count = int(self._count_preview_statuses().get("perfect", 0) or 0)
@@ -169,6 +222,8 @@ def get_campaign_step3_annotation_readiness(host) -> dict:
         perfect_count=int(perfect_count),
         min_exportable_plate_count=int(min_exportable_plates),
         missing_exportable_plate_count=int(max(0, int(min_exportable_plates) - int(selected_plates or 0))),
+        gold_source_contract_schema=source_contract_schema,
+        gold_source_contract_sha256=source_contract_sha256,
     )
     if perfect_count < int(min_exportable_plates):
         missing_perfect = max(0, int(min_exportable_plates) - int(perfect_count or 0))
@@ -349,6 +404,12 @@ def get_campaign_step3_training_readiness(host) -> dict:
         exportable_plate_count=int(annotation_readiness.get("exportable_plate_count", 0) or 0),
         exportable_char_count=int(annotation_readiness.get("exportable_char_count", 0) or 0),
         perfect_count=int(annotation_readiness.get("perfect_count", 0) or 0),
+        gold_source_contract_schema=str(
+            annotation_readiness.get("gold_source_contract_schema", "") or ""
+        ),
+        gold_source_contract_sha256=str(
+            annotation_readiness.get("gold_source_contract_sha256", "") or ""
+        ),
     )
     if not bool(annotation_readiness.get("ok")):
         default_result.update(
@@ -360,6 +421,24 @@ def get_campaign_step3_training_readiness(host) -> dict:
         summary = self._read_step3_export_summary()
         if not isinstance(summary, dict) or not summary:
             return default_result
+
+        if not step3_export_summary_matches_current_gold_contract(
+            summary,
+            annotation_readiness,
+        ):
+            stale = dict(default_result)
+            stale.update(
+                ok=False,
+                reason="stale_gold_dataset",
+                validation_message=(
+                    "Źródłowy GOLD zmienił się po utworzeniu datasetu PZ3."
+                ),
+                message=(
+                    "Dataset PZ3 pochodzi ze starszego snapshotu GOLD. "
+                    "Po zmianie REVIEW/GT/geometrii wykonaj eksport PZ3 ponownie."
+                ),
+            )
+            return stale
 
         dataset_path_raw = str(summary.get("gold_dataset_path", "") or "").strip()
         dataset_path = Path(dataset_path_raw) if dataset_path_raw else None

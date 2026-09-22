@@ -784,6 +784,22 @@ def validate_gold_export_artifact_contract(
         )
         return result
 
+    manifest_source_hash = str(
+        manifest.get("gold_source_contract_sha256") or ""
+    ).strip()
+    readiness_source_hash = str(
+        readiness.get("gold_source_contract_sha256") or ""
+    ).strip()
+    if (
+        readiness_source_hash
+        and manifest_source_hash != readiness_source_hash
+    ):
+        result["message"] = (
+            "Eksport nie odpowiada preflightowi PZ3: fingerprint "
+            "źródłowego GOLD jest inny."
+        )
+        return result
+
     if min_plate_count > 0 and manifest_plate_count < min_plate_count:
         result["message"] = (
             f"Gotowy artefakt ma {manifest_plate_count} tablic, "
@@ -878,6 +894,34 @@ def run_yolo_gold_export(
             total_source_counts,
             copied_source_counts,
         ) = host._collect_gold_export_plate_candidates(selected_buckets, selected_sources)
+
+        prepared_source_contract = (
+            z3_dataset_provenance.build_gold_source_contract_fingerprint(
+                plate_entries
+            )
+        )
+        expected_source_contract_hash = str(
+            export_readiness.get("gold_source_contract_sha256") or ""
+        ).strip()
+        prepared_source_contract_hash = str(
+            prepared_source_contract.get("sha256") or ""
+        ).strip()
+        if (
+            expected_source_contract_hash
+            and prepared_source_contract_hash != expected_source_contract_hash
+        ):
+            host._set_console_text(
+                host.export_console,
+                "❌ Eksport PZ3 przerwany: źródłowy GOLD zmienił się "
+                "pomiędzy preflightem a przygotowaniem eksportu."
+            )
+            try:
+                if host._step3_linear_mode and CAMPAIGN.get_active_project_name():
+                    CAMPAIGN.set_step3_needs_rework()
+            except Exception:
+                pass
+            return
+
         if not host._confirm_export_with_uncertain_layouts(plate_entries, export_label="YOLO Detect znaków"):
             host._set_console_text(
                 host.export_console,
@@ -1171,6 +1215,12 @@ def run_yolo_gold_export(
             "split_enabled": bool(split_enabled),
             "selected_strategies": sorted(selected_buckets),
             "selected_sources": sorted(selected_sources),
+            "gold_source_contract_schema": str(
+                prepared_source_contract.get("schema") or ""
+            ),
+            "gold_source_contract_sha256": str(
+                prepared_source_contract.get("sha256") or ""
+            ),
             "readiness_plate_count": int(
                 export_readiness.get("selected_plate_count", 0) or 0
             ),
@@ -1292,6 +1342,12 @@ def run_yolo_gold_export(
             )
             success_summary["gold_export_artifact_schema"] = (
                 GOLD_EXPORT_ARTIFACT_SCHEMA
+            )
+            success_summary["gold_source_contract_schema"] = str(
+                prepared_source_contract.get("schema") or ""
+            )
+            success_summary["gold_source_contract_sha256"] = str(
+                prepared_source_contract.get("sha256") or ""
             )
             success_summary["readiness_plate_count"] = int(
                 export_readiness.get("selected_plate_count", 0) or 0
