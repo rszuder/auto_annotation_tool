@@ -3656,6 +3656,10 @@ def persist_active_preview_characters(
     data = host._get_preview_active_data(create=True)
     if isinstance(data, dict):
         data.pop("_layout_override_chars_backup", None)
+        try:
+            host._mark_review_edit_started(data)
+        except Exception:
+            pass
     previous_chars = list(data.get("characters", [])) if isinstance(data.get("characters"), list) else []
     previous_status = str(data.get("status", "unknown") or "unknown").strip().lower()
     chars = host._get_preview_active_character_records(create=True)
@@ -4249,6 +4253,11 @@ def on_preview_select(host, event=None):
         self._unbind_preview_char_drag_session()
         self._preview_char_drag_state = None
         self._preview_char_add_state = None
+    try:
+        self._refresh_detection_review_controls()
+    except Exception:
+        pass
+
     mode_key = self._get_preview_box_mode_key()
     if fast_select_render and mode_key in {"AUTO", "FINAL"}:
         final_records = self._sort_character_records_by_x(data.get("characters", []))

@@ -579,6 +579,14 @@ def _build_raw_detection_validation(
 
 
 def _derive_preview_status_from_data(self, data: dict | None, chars) -> str:
+    # REVIEW requires explicit human approval before GOLD/perfect.
+    if isinstance(data, dict):
+        review_state = data.get("review_state")
+        if isinstance(review_state, dict):
+            review_status = str(review_state.get("status", "") or "").strip().lower()
+            if review_status == "in_progress":
+                return "needs_fix"
+
     base_status = self._derive_preview_status_from_characters(chars)
     if base_status != "perfect":
         return base_status

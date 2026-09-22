@@ -2834,6 +2834,28 @@ def build_detection_tab(
         width=16,
         state=tk.DISABLED,
     )
+    self.btn_start_review_from_raw = ttk.Button(
+        self.detection_review_actions_frame,
+        text="RAW → REVIEW",
+        command=self._start_review_from_raw,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_start_review_from_raw.pack(side=tk.LEFT, padx=(5, 0))
+    self.btn_start_review_from_raw.configure(
+        padding=detection_action_button_padding, width=14, state=tk.DISABLED
+    )
+
+    self.btn_confirm_review_gold = ttk.Button(
+        self.detection_review_actions_frame,
+        text="Zatwierdź GOLD",
+        command=self._confirm_review_gold,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_confirm_review_gold.pack(side=tk.LEFT, padx=(5, 0))
+    self.btn_confirm_review_gold.configure(
+        padding=detection_action_button_padding, width=15, state=tk.DISABLED
+    )
+
     self.btn_confirm_detection_result = None
 
     self.gt_assist_actions_frame = ttk.Frame(

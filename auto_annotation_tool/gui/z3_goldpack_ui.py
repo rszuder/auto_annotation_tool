@@ -195,6 +195,13 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
         for pid, source_data in metadata.items():
             if not isinstance(source_data, dict) or source_data.get("status") != "perfect":
                 continue
+            review_state = source_data.get("review_state")
+            if isinstance(review_state, dict):
+                if str(review_state.get("status", "") or "").strip().lower() != "approved":
+                    continue
+                gold_state = source_data.get("gold_state")
+                if not isinstance(gold_state, dict) or not bool(gold_state.get("approved", False)):
+                    continue
             data = source_data
             if prepare_records:
                 data = _copy_gold_candidate_for_normalization(source_data)

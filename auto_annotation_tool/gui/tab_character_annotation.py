@@ -51,6 +51,7 @@ from . import z3_navigation_runtime
 from . import z3_preview_typing_runtime
 from . import z3_preview_metadata_runtime
 from . import z3_gt_assist_runtime
+from . import z3_review_runtime
 from . import z3_plate_layout_runtime
 from . import z3_character_geometry
 from . import z3_preview_editor_runtime
@@ -1270,6 +1271,10 @@ class CharacterAnnotationTab:
     _get_preview_expected_texts = z3_preview_metadata_runtime._get_preview_expected_texts
     _resolve_preview_expected_text_for_crop = z3_preview_metadata_runtime._resolve_preview_expected_text_for_crop
     _build_raw_detection_validation = z3_preview_metadata_runtime._build_raw_detection_validation
+    _get_review_state_status = staticmethod(z3_review_runtime.get_review_state_status)
+    _start_review_from_raw = z3_review_runtime.start_review_from_raw
+    _mark_review_edit_started = z3_review_runtime.mark_review_edit_started
+    _confirm_review_gold = z3_review_runtime.confirm_review_gold
     _build_gt_assist_suggestion = z3_gt_assist_runtime.build_gt_assist_suggestion
     _store_gt_assist_suggestion = z3_gt_assist_runtime.store_gt_assist_suggestion
     _gt_assist_is_current = z3_gt_assist_runtime.gt_assist_is_current
@@ -3774,6 +3779,8 @@ class CharacterAnnotationTab:
             "btn_rank_presets",
             "btn_ocr_lab",
             "btn_undo_detection_result",
+            "btn_start_review_from_raw",
+            "btn_confirm_review_gold",
             "btn_confirm_detection_result",
         ):
             widget = getattr(self, attr_name, None)

@@ -113,12 +113,47 @@ def _remove_detection_review_snapshot(host, preview_dir: str | Path | None = Non
 
 def refresh_detection_review_controls(host) -> None:
     self = host
-    snapshot_exists = bool(get_detection_review_snapshot_path(self) and get_detection_review_snapshot_path(self).exists())
-    can_use = bool(snapshot_exists and not getattr(self, "fast_test_running", False) and not getattr(self, "is_processing", False))
+    busy = bool(
+        getattr(self, "fast_test_running", False)
+        or getattr(self, "is_processing", False)
+    )
+    snapshot_exists = bool(
+        get_detection_review_snapshot_path(self)
+        and get_detection_review_snapshot_path(self).exists()
+    )
     widget = getattr(self, "btn_undo_detection_result", None)
     if widget is not None:
         try:
-            widget.config(state=(tk.NORMAL if can_use else tk.DISABLED))
+            widget.config(state=(tk.NORMAL if snapshot_exists and not busy else tk.DISABLED))
+        except Exception:
+            pass
+    try:
+        data = self._get_preview_active_data(create=False)
+    except Exception:
+        data = None
+    if not isinstance(data, dict):
+        data = {}
+    raw_available = isinstance(data.get("raw_detection"), dict)
+    chars = data.get("characters", [])
+    chars = chars if isinstance(chars, list) else []
+    review_state = data.get("review_state")
+    review_status = (
+        str(review_state.get("status", "") or "").strip().lower()
+        if isinstance(review_state, dict)
+        else ""
+    )
+    can_start_review = bool(raw_available and not busy and not review_status and not chars)
+    start_widget = getattr(self, "btn_start_review_from_raw", None)
+    if start_widget is not None:
+        try:
+            start_widget.config(state=(tk.NORMAL if can_start_review else tk.DISABLED))
+        except Exception:
+            pass
+    can_confirm_gold = bool(not busy and review_status == "in_progress" and bool(chars))
+    confirm_widget = getattr(self, "btn_confirm_review_gold", None)
+    if confirm_widget is not None:
+        try:
+            confirm_widget.config(state=(tk.NORMAL if can_confirm_gold else tk.DISABLED))
         except Exception:
             pass
     try:
