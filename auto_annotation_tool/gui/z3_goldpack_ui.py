@@ -616,6 +616,185 @@ def get_gold_export_meta_candidates(host) -> list[Path]:
     return meta_candidates
 
 
+
+GOLD_EXPORT_ARTIFACT_SCHEMA = "alpr.pz3.gold_export_artifact.v1"
+
+
+def validate_gold_export_artifact_contract(
+    dataset_dir: Path,
+    readiness_snapshot: dict | None,
+) -> dict:
+    """
+    Validate the finished PZ3 source dataset against:
+    1) the persisted metadata_manifest.json,
+    2) the actual files/label rows on disk,
+    3) the readiness snapshot that authorized the export.
+    """
+    result = {
+        "ok": False,
+        "message": "",
+        "plate_count": 0,
+        "character_count": 0,
+        "readiness_plate_count": 0,
+        "readiness_character_count": 0,
+        "min_exportable_plate_count": 0,
+    }
+
+    try:
+        root = Path(dataset_dir)
+    except Exception:
+        result["message"] = "Niepoprawna ścieżka datasetu."
+        return result
+
+    manifest_path = root / "metadata_manifest.json"
+    if not manifest_path.exists() or not manifest_path.is_file():
+        result["message"] = "Brak metadata_manifest.json po eksporcie PZ3."
+        return result
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        result["message"] = f"Nie można odczytać metadata_manifest.json: {exc}"
+        return result
+
+    if not isinstance(manifest, dict):
+        result["message"] = "metadata_manifest.json nie jest obiektem JSON."
+        return result
+
+    if str(manifest.get("dataset_type") or "").strip() != "char_yolo_detect":
+        result["message"] = "Manifest nie opisuje datasetu char_yolo_detect."
+        return result
+
+    items = manifest.get("items")
+    if not isinstance(items, list):
+        result["message"] = "Manifest nie zawiera poprawnej listy items."
+        return result
+
+    try:
+        manifest_plate_count = int(manifest.get("plate_count", 0) or 0)
+        manifest_char_count = int(manifest.get("character_count", 0) or 0)
+    except Exception:
+        result["message"] = "Manifest ma niepoprawne liczniki plate_count/character_count."
+        return result
+
+    result["plate_count"] = manifest_plate_count
+    result["character_count"] = manifest_char_count
+
+    if manifest_plate_count != len(items):
+        result["message"] = (
+            "Niespójny manifest: plate_count nie odpowiada liczbie items "
+            f"({manifest_plate_count} != {len(items)})."
+        )
+        return result
+
+    manifest_chars_from_items = 0
+    seen_pids = set()
+
+    for item in items:
+        if not isinstance(item, dict):
+            result["message"] = "Manifest zawiera niepoprawny wpis items."
+            return result
+
+        pid = str(item.get("pid") or "").strip()
+        if not pid:
+            result["message"] = "Manifest zawiera wpis bez pid."
+            return result
+        if pid in seen_pids:
+            result["message"] = f"Manifest zawiera zduplikowany pid: {pid}."
+            return result
+        seen_pids.add(pid)
+
+        chars = item.get("characters")
+        if not isinstance(chars, list):
+            result["message"] = f"Manifest dla {pid} nie zawiera listy characters."
+            return result
+        manifest_chars_from_items += len(chars)
+
+        image_rel = str(item.get("image_path") or "").strip()
+        label_rel = str(item.get("label_path") or "").strip()
+        if not image_rel or not label_rel:
+            result["message"] = f"Manifest dla {pid} nie zawiera ścieżki obrazu lub etykiety."
+            return result
+
+        image_path = root / image_rel
+        label_path = root / label_rel
+        if not image_path.exists() or not image_path.is_file():
+            result["message"] = f"Brak wyeksportowanego obrazu dla {pid}: {image_rel}."
+            return result
+        try:
+            if image_path.stat().st_size <= 0:
+                result["message"] = f"Wyeksportowany obraz dla {pid} jest pusty."
+                return result
+        except Exception:
+            result["message"] = f"Nie można sprawdzić obrazu dla {pid}."
+            return result
+
+        if not label_path.exists() or not label_path.is_file():
+            result["message"] = f"Brak wyeksportowanej etykiety dla {pid}: {label_rel}."
+            return result
+
+        try:
+            label_rows = [
+                line.strip()
+                for line in label_path.read_text(encoding="utf-8").splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+        except Exception as exc:
+            result["message"] = f"Nie można odczytać etykiety dla {pid}: {exc}"
+            return result
+
+        if len(label_rows) != len(chars):
+            result["message"] = (
+                f"Niespójna etykieta dla {pid}: plik ma {len(label_rows)} obiektów, "
+                f"manifest opisuje {len(chars)}."
+            )
+            return result
+
+    if manifest_char_count != manifest_chars_from_items:
+        result["message"] = (
+            "Niespójny manifest: character_count nie odpowiada sumie characters "
+            f"({manifest_char_count} != {manifest_chars_from_items})."
+        )
+        return result
+
+    readiness = readiness_snapshot if isinstance(readiness_snapshot, dict) else {}
+    try:
+        readiness_plate_count = int(readiness.get("selected_plate_count", 0) or 0)
+        readiness_char_count = int(readiness.get("selected_char_count", 0) or 0)
+        min_plate_count = int(readiness.get("min_exportable_plate_count", 0) or 0)
+    except Exception:
+        result["message"] = "Snapshot readiness ma niepoprawne liczniki."
+        return result
+
+    result["readiness_plate_count"] = readiness_plate_count
+    result["readiness_character_count"] = readiness_char_count
+    result["min_exportable_plate_count"] = min_plate_count
+
+    if manifest_plate_count != readiness_plate_count:
+        result["message"] = (
+            "Eksport nie odpowiada preflightowi PZ3: liczba tablic zmieniła się "
+            f"({readiness_plate_count} -> {manifest_plate_count})."
+        )
+        return result
+
+    if manifest_char_count != readiness_char_count:
+        result["message"] = (
+            "Eksport nie odpowiada preflightowi PZ3: liczba znaków zmieniła się "
+            f"({readiness_char_count} -> {manifest_char_count})."
+        )
+        return result
+
+    if min_plate_count > 0 and manifest_plate_count < min_plate_count:
+        result["message"] = (
+            f"Gotowy artefakt ma {manifest_plate_count} tablic, "
+            f"poniżej minimum {min_plate_count}."
+        )
+        return result
+
+    result["ok"] = True
+    return result
+
+
 def run_yolo_gold_export(
     host,
     *,
@@ -962,43 +1141,109 @@ def run_yolo_gold_export(
             )
         )
 
+        manifest_payload = {
+            "schema": GOLD_EXPORT_ARTIFACT_SCHEMA,
+            "dataset_type": "char_yolo_detect",
+            "created_at": timestamp,
+            "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
+            "provenance_counts": provenance_counts,
+            "raw_benchmark": raw_benchmark,
+            "gt_contract_fingerprint_sha256": str(
+                raw_benchmark.get(
+                    "gt_contract_fingerprint_sha256"
+                )
+                or ""
+            ),
+            "gt_revision_ids": list(
+                dataset_revision_ids.get(
+                    "gt_revision_ids",
+                    [],
+                )
+                or []
+            ),
+            "geometry_revision_ids": list(
+                dataset_revision_ids.get(
+                    "geometry_revision_ids",
+                    [],
+                )
+                or []
+            ),
+            "split_enabled": bool(split_enabled),
+            "selected_strategies": sorted(selected_buckets),
+            "selected_sources": sorted(selected_sources),
+            "readiness_plate_count": int(
+                export_readiness.get("selected_plate_count", 0) or 0
+            ),
+            "readiness_character_count": int(
+                export_readiness.get("selected_char_count", 0) or 0
+            ),
+            "readiness_min_exportable_plate_count": int(
+                export_readiness.get("min_exportable_plate_count", 0) or 0
+            ),
+            "plate_count": int(exported_plate_count),
+            "character_count": int(exported_char_count),
+            "layout_counts": {
+                str(key): int(value)
+                for key, value in sorted(layout_counts.items())
+            },
+            "items": manifest_items,
+        }
         host._atomic_write_json(
             yolo_out / "metadata_manifest.json",
-            {
-                "dataset_type": "char_yolo_detect",
-                "created_at": timestamp,
-                "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
-                "provenance_counts": provenance_counts,
-                "raw_benchmark": raw_benchmark,
-                "gt_contract_fingerprint_sha256": str(
-                    raw_benchmark.get(
-                        "gt_contract_fingerprint_sha256"
-                    )
-                    or ""
-                ),
-                "gt_revision_ids": list(
-                    dataset_revision_ids.get(
-                        "gt_revision_ids",
-                        [],
-                    )
-                    or []
-                ),
-                "geometry_revision_ids": list(
-                    dataset_revision_ids.get(
-                        "geometry_revision_ids",
-                        [],
-                    )
-                    or []
-                ),
-                "split_enabled": bool(split_enabled),
-                "selected_strategies": sorted(selected_buckets),
-                "selected_sources": sorted(selected_sources),
-                "plate_count": int(exported_plate_count),
-                "character_count": int(exported_char_count),
-                "layout_counts": {str(key): int(value) for key, value in sorted(layout_counts.items())},
-                "items": manifest_items,
-            },
+            manifest_payload,
         )
+
+        artifact_validation = validate_gold_export_artifact_contract(
+            yolo_out,
+            export_readiness,
+        )
+        if not bool(artifact_validation.get("ok")):
+            validation_message = str(
+                artifact_validation.get("message") or
+                "Końcowy artefakt PZ3 nie przeszedł kontroli spójności."
+            ).strip()
+            host._set_console_text(
+                host.export_console,
+                "❌ EKSPORT PZ3 NIE PRZESZEDŁ KOŃCOWEJ KONTROLI SPÓJNOŚCI.\n\n"
+                + validation_message
+            )
+            try:
+                failure_summary = host._build_step3_export_summary(
+                    gold_dataset_path=str(yolo_out),
+                    review_pack_path="",
+                    retry_pack_path="",
+                    note=(
+                        "Źródłowy dataset został zapisany, ale nie przeszedł "
+                        "kontroli readiness ↔ manifest ↔ pliki."
+                    ),
+                )
+                failure_summary["exportable_plate_count"] = int(
+                    artifact_validation.get("plate_count", 0) or 0
+                )
+                failure_summary["exportable_char_count"] = int(
+                    artifact_validation.get("character_count", 0) or 0
+                )
+                failure_summary["gold_dataset_valid"] = False
+                failure_summary["gold_dataset_validation_message"] = validation_message
+                failure_summary["metadata_manifest_path"] = str(
+                    yolo_out / "metadata_manifest.json"
+                )
+                failure_summary["gold_export_artifact_schema"] = (
+                    GOLD_EXPORT_ARTIFACT_SCHEMA
+                )
+                host._write_step3_export_summary(failure_summary)
+            except Exception:
+                pass
+            try:
+                if host._step3_linear_mode and CAMPAIGN.get_active_project_name():
+                    CAMPAIGN.set_step3_needs_rework()
+            except Exception:
+                pass
+            try:
+                host._update_step3_finish_button_state()
+            except Exception:
+                pass
+            return
 
         split_info_text = (
             f"train={split_stats.get('train', 0)}, val={split_stats.get('val', 0)}, test={split_stats.get('test', 0)}"
@@ -1042,6 +1287,18 @@ def run_yolo_gold_export(
             }
             success_summary["gold_dataset_valid"] = True
             success_summary["gold_dataset_validation_message"] = ""
+            success_summary["metadata_manifest_path"] = str(
+                yolo_out / "metadata_manifest.json"
+            )
+            success_summary["gold_export_artifact_schema"] = (
+                GOLD_EXPORT_ARTIFACT_SCHEMA
+            )
+            success_summary["readiness_plate_count"] = int(
+                export_readiness.get("selected_plate_count", 0) or 0
+            )
+            success_summary["readiness_char_count"] = int(
+                export_readiness.get("selected_char_count", 0) or 0
+            )
             host._write_step3_export_summary(success_summary)
             try:
                 from . import z3_campaign_flow
