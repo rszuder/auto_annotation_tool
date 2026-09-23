@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
+import json
 from auto_annotation_tool.campaign_ingest_planner import CampaignIngestPlanner
 from auto_annotation_tool.campaign_manager import CampaignManager
 from auto_annotation_tool.gui import campaign_step1_ingest as ingest
@@ -61,11 +62,12 @@ def test_manifest_display_preserves_missing_gt_and_empty_histograms(monkeypatch)
 
 
 def test_all_manifest_writers_normalize_explicit_gt_and_hints(tmp_path):
-    writes = []
-    manager = SimpleNamespace(get_ingest_manifest_path=lambda *args: tmp_path / "manifest.json",
-                               _write_json_file=lambda p, data: writes.append(data) or True)
-    manifest = {"selected_images": [{"name": "WI1234A.jpg", "ground_truth_texts": []}]}
+    source = tmp_path / "WI1234A.jpg"
+    source.write_bytes(b"image")
+    manager = SimpleNamespace(get_ingest_manifest_path=lambda *args: tmp_path / "manifest.json")
+    manifest = {"selected_images": [{"name": "WI1234A.jpg", "source_path": str(source), "ground_truth_texts": []}]}
     assert CampaignManager.save_ingest_manifest(manager, manifest)
-    row = writes[0]["selected_images"][0]
+    saved = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    row = saved["selected_images"][0]
     assert row["ground_truth_texts"] == [] and row["filename_text_hints"] == ["WI1234A"]
-    assert writes[0]["missing_explicit_gt_count"] == 1
+    assert saved["missing_explicit_gt_count"] == 1

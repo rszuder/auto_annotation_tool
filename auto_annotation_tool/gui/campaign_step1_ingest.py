@@ -1593,8 +1593,8 @@ def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None
             messagebox.showwarning(
                 "Brak nowych zdjęć do iteracji",
                 (
-                    f"Wybrany folder zawiera {raw_total} zdjęć, ale wszystkie zostały odrzucone jako duble po nazwie.\n\n"
-                    "Ten zestaw zdjęć nie wnosi nowych obrazów do projektu."
+                    f"Wybrany folder zawiera {raw_total} zdjęć, których nazwy są już używane w projekcie.\n\n"
+                    "Rozwiąż kolizje nazw lub wybierz inną pulę obrazów."
                 ),
             )
             return
@@ -1612,7 +1612,7 @@ def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None
         if raw_total != selected_total:
             status_text += f" Do planu E1 weszło {selected_total}."
         if skipped_duplicates > 0:
-            status_text += f" Pominięto {skipped_duplicates} dubli po nazwie."
+            status_text += f" Kolizje nazw: {skipped_duplicates}."
         gt_counts = CampaignIngestPlanner.gt_statistics(plan.get("selected") or [])
         status_text += (f" Jawne numery: {gt_counts['explicit_gt_count']}; "
                         f"bez numeru: {gt_counts['missing_explicit_gt_count']}; "
@@ -2215,27 +2215,11 @@ def _apply_current_ingest_plan(self):
                 eyebrow="ZATWIERDZANIE E1",
                 initial_detail="Zapisuję manifest obrazów i aktualizuję graf kampanii.",
             )
-            try:
-                self._approve_current_iteration_package(
-                    target_iter_dir=target_iter_dir,
-                    source_dir=source_dir,
-                    selected_source_files=selected_images,
-                    selection_mode=selection_mode,
-                    progress_callback=lambda value, message="", **kwargs: _update_ingest_plan_progress_dialog(
-                        self,
-                        value,
-                        message,
-                        str(kwargs.get("detail", "") or ""),
-                    ),
-                )
-                _update_ingest_plan_progress_dialog(
-                    self,
-                    100,
-                    "E1 zatwierdzone.",
-                    "Manifest został zapisany, a graf odświeżony.",
-                )
-            finally:
-                _hide_ingest_plan_progress_dialog(self, delay_ms=650)
+            from .campaign_ingest_identity import approve_ingest_async
+            approve_ingest_async(self, target_iter_dir=target_iter_dir, source_dir=source_dir,
+                                 selected_source_files=selected_images, selection_mode=selection_mode,
+                                 selected_source_metadata=(manifest or {}).get("selected_images"))
+
         return
 
     selected_items = list(self.current_ingest_plan.get("selected", []) or [])
@@ -2318,57 +2302,18 @@ def _apply_current_ingest_plan(self):
             source_dir = selected_source_files[0].parent
     except Exception:
         source_dir = selected_source_files[0].parent
-    try:
-        self._approve_current_iteration_package(
-            target_iter_dir=target_iter_dir,
-            source_dir=source_dir,
-            selected_source_files=selected_source_files,
-            selection_mode=selection_mode,
-            selected_source_metadata=selected_items,
-            proposal_summary={
-                "planner_version": self.current_ingest_plan.get("planner_version", ""),
-                "generated_at": self.current_ingest_plan.get("generated_at", ""),
-                "source_total": self.current_ingest_plan.get("raw_total", 0),
-                "selected_total": self.current_ingest_plan.get("selected_total", 0),
-                "current_iteration_package_count": self.current_ingest_plan.get("selected_total", 0),
-                "batch_size": self.current_ingest_plan.get("batch_size", 0),
-                "skipped_duplicate_filenames": self.current_ingest_plan.get("skipped_duplicate_filenames", self.current_ingest_plan.get("skipped_used", 0)),
-                "skipped_duplicate_approved_filenames": self.current_ingest_plan.get("skipped_duplicate_approved_filenames", 0),
-                "project_overlap_filenames": self.current_ingest_plan.get("project_overlap_filenames", 0),
-                "new_to_project_count": self.current_ingest_plan.get("new_to_project_total", 0),
-                "skipped_invalid_ground_truth": self.current_ingest_plan.get("skipped_invalid_ground_truth", 0),
-            },
-            progress_callback=lambda value, message="", **kwargs: _update_ingest_plan_progress_dialog(
-                self,
-                value,
-                message,
-                str(kwargs.get("detail", "") or ""),
-            ),
-        )
-        _update_ingest_plan_progress_dialog(
-            self,
-            100,
-            "E1 zatwierdzone.",
-            "Manifest został zapisany, a graf odświeżony.",
-        )
-    finally:
-        _hide_ingest_plan_progress_dialog(self)
-
-    try:
-        self.app.update_status(
-            f"Zatwierdzono E1 manifestem: {len(selected_source_files)} zdjęć z wybranego katalogu. Odblokowano Krok 2.",
-            "info",
-        )
-    except Exception:
-        pass
-
-    adoption_scope_notice = self._format_step1_adopted_annotations_z2_scope_notice(selected_source_files)
-    messagebox.showinfo(
-        "E1 zatwierdzone",
-        f"Zapisano manifest iteracji {iter_num:03d}: {len(selected_source_files)} zdjęć.\n\n"
-        "Zdjęcia nie są kopiowane do kolejnej iteracji. Program będzie korzystał z wybranego katalogu źródłowego."
-        f"{adoption_scope_notice}",
+    from .campaign_ingest_identity import approve_ingest_async
+    return approve_ingest_async(
+        self, target_iter_dir=target_iter_dir, source_dir=source_dir,
+        selected_source_files=selected_source_files, selection_mode=selection_mode,
+        selected_source_metadata=selected_items,
+        proposal_summary={
+            "planner_version": self.current_ingest_plan.get("planner_version", ""),
+            "source_total": self.current_ingest_plan.get("raw_total", 0),
+            "selected_total": len(selected_source_files),
+        },
     )
+
 
 def _format_step1_selection_mode_label(selection_mode: str) -> str:
     normalized = str(selection_mode or "").strip().lower()

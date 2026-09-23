@@ -1112,6 +1112,7 @@ class CampaignTab:
         proposal_summary: dict = None,
         progress_callback=None,
         selected_source_metadata=None,
+        prepared_manifest=None,
     ) -> int:
         started_at = perf_counter()
         manifest_ms = 0.0
@@ -1190,24 +1191,20 @@ class CampaignTab:
             force=True,
         )
         manifest_started = perf_counter()
-        try:
-            CAMPAIGN.record_iteration_ingest(
-                source_dir=source_root,
-                selected_source_files=selected_files,
-                selection_mode=selection_mode,
-                proposal_summary=summary_payload,
-                selected_source_metadata=selected_source_metadata,
-                progress_callback=lambda value, message="", **kwargs: _progress(
-                    20.0 + (float(value or 0.0) * 0.60),
-                    message,
-                    detail=str(kwargs.get("detail", "") or ""),
-                    force=bool(kwargs.get("force", False)),
-                ),
+        if prepared_manifest is None:
+            path = CAMPAIGN.record_iteration_ingest(
+                source_dir=source_root, selected_source_files=selected_files,
+                selection_mode=selection_mode, proposal_summary=summary_payload,
+                selected_source_metadata=selected_source_metadata, progress_callback=_progress,
             )
-        except Exception as e:
-            logger.debug(f"Nie udaĹ‚o siÄ™ zapisaÄ‡ manifestu E1 dla {target_iter_dir}: {e}")
-        finally:
-            manifest_ms = max(0.0, (perf_counter() - manifest_started) * 1000.0)
+            if path is None:
+                raise ValueError("E1 manifest save failed")
+            prepared_manifest = CAMPAIGN.load_ingest_manifest()
+        if not isinstance(prepared_manifest, dict) or not prepared_manifest.get("selected_images"):
+            raise ValueError("E1 manifest contains no accepted images")
+        selected_files = [Path(item["source_path"]) for item in prepared_manifest["selected_images"]]
+        package_count = len(selected_files)
+        manifest_ms = max(0.0, (perf_counter() - manifest_started) * 1000.0)
 
         _progress(84, "Zatwierdzam E1.", "Zmieniam status wejścia i odblokowuję kolejny etap.", force=True)
         approve_started = perf_counter()

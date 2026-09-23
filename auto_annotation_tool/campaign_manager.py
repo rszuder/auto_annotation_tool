@@ -99,6 +99,7 @@ class CampaignManager:
         cloned_manifest["iteration"] = int(target_iteration)
         cloned_manifest["created_at"] = datetime.now().isoformat()
         cloned_manifest["selection_mode"] = "iteration_reuse"
+        cloned_manifest["identity_mode"] = "reference"
         cloned_manifest["reused_from_iteration"] = int(source_iteration)
         cloned_manifest["target_dir"] = str(target_raw_dir.resolve())
         cloned_manifest["manifest_only"] = True
@@ -174,6 +175,7 @@ class CampaignManager:
                         "iteration": int(target_iteration),
                         "created_at": datetime.now().isoformat(),
                         "selection_mode": "iteration_reuse",
+                        "identity_mode": "reference",
                         "reused_from_iteration": int(source_iteration),
                         "source_dir": str(source_raw_dir.resolve()),
                         "target_dir": str(target_raw_dir.resolve()),
@@ -641,6 +643,7 @@ class CampaignManager:
         }
 
         manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
+        linked = int(manifest.get("selected_count") or 0)
         if not manifest_saved:
             return {
                 "ok": False,
@@ -759,6 +762,7 @@ class CampaignManager:
             "iteration": int(target_iteration),
             "created_at": datetime.now().isoformat(),
             "selection_mode": "stage_reuse",
+            "identity_mode": "reference",
             "reused_from_iteration": int(source_iteration),
             "source_dir": str(stage_images_dir.resolve()),
             "target_dir": str(target_raw_dir.resolve()),
@@ -777,6 +781,7 @@ class CampaignManager:
             },
         }
         manifest_saved = bool(self.save_ingest_manifest(manifest, target_iteration, project_name))
+        selected_images = list(manifest.get("selected_images") or [])
         if not manifest_saved:
             return {
                 "ok": False,
@@ -3680,16 +3685,24 @@ class CampaignManager:
         manifest: Dict[str, Any],
         iteration_num: int = None,
         project_name: str = None,
+        progress_callback=None,
     ) -> Path | None:
         manifest_path = self.get_ingest_manifest_path(iteration_num, project_name)
         if manifest_path is None:
             return None
-        from .campaign_ingest_planner import CampaignIngestPlanner
-        planner = CampaignIngestPlanner()
-        entries = [{**item, **planner.normalize_text_metadata(item.get("name", ""), item)}
-                   for item in manifest.get("selected_images", []) or [] if isinstance(item, dict)]
-        manifest = {**manifest, "selected_images": entries, **planner.gt_statistics(entries)}
-        if self._write_json_file(manifest_path, manifest):
+        from .campaign_image_identity import save_manifest_with_identity
+        try:
+            approved_entries = self.list_plate_approved_entries(project_name) or []
+        except (AttributeError, TypeError):
+            approved_entries = []
+        def progress(value, message, **kwargs):
+            self._ingest_identity_progress = {"value": value, "message": message, **kwargs}
+            if callable(progress_callback):
+                progress_callback(value, message, **kwargs)
+        prepared = save_manifest_with_identity(manifest, manifest_path, progress=progress, approved_entries=approved_entries)
+        if prepared is not None:
+            manifest.clear()
+            manifest.update(prepared)
             try:
                 self._ingest_manifest_cache.clear()
                 self._iteration_image_count_cache.clear()
@@ -3922,6 +3935,7 @@ class CampaignManager:
         project_name: str = None,
         progress_callback=None,
         selected_source_metadata: List[Dict[str, Any]] | None = None,
+        iteration_num: int | None = None,
     ) -> Path | None:
         project_name = self._resolve_project_name(project_name)
         if not project_name:
@@ -3931,7 +3945,7 @@ class CampaignManager:
         if not source_dir.exists() or not source_dir.is_dir():
             return None
 
-        iteration = int(self.state["projects"][project_name].get("current_iteration", 1))
+        iteration = int(iteration_num or self.state["projects"][project_name].get("current_iteration", 1))
         target_dir = self.get_iteration_raw_dir(iteration, project_name)
         if target_dir is None:
             return None
@@ -4002,9 +4016,9 @@ class CampaignManager:
                 resolved_source_path = source_path.resolve()
             except Exception:
                 resolved_source_path = source_path.absolute()
-            meta = metadata_by_name.get(str(source_path.name or "").strip().lower())
+            meta = metadata_by_path.get(str(resolved_source_path).lower())
             if meta is None:
-                meta = metadata_by_path.get(str(resolved_source_path).lower())
+                meta = metadata_by_name.get(str(source_path.name or "").strip().lower())
             text_fields = planner.normalize_text_metadata(source_path.name, meta)
             true_texts = text_fields["ground_truth_texts"]
             char_hist = text_fields["char_histogram"]
@@ -4041,6 +4055,7 @@ class CampaignManager:
             "iteration": iteration,
             "created_at": datetime.now().isoformat(),
             "selection_mode": normalized_selection_mode,
+            "identity_mode": "reference" if normalized_selection_mode in {"source_reuse", "iteration_reuse"} else "admission",
             "source_dir": str(source_dir.resolve()),
             "target_dir": str(target_dir.resolve()),
             "master_pool_dir": str(master_pool_dir.resolve()) if master_pool_dir else "",
@@ -4060,11 +4075,11 @@ class CampaignManager:
             "Kończę zapis JSON i odświeżam pamięć podręczną projektu.",
             force=True,
         )
-        manifest_path = self.save_ingest_manifest(manifest, iteration, project_name)
+        manifest_path = self.save_ingest_manifest(manifest, iteration, project_name, progress_callback=_progress)
         _progress(
             100,
             "Manifest E1 zapisany.",
-            f"Zapisano {len(selected_images)} obrazów.",
+            f"Zapisano {manifest['selected_count']} obrazów; identyczne pominięte: {manifest.get('identity_summary', {}).get('duplicate_sha256', 0)}.",
             force=True,
         )
         return manifest_path
