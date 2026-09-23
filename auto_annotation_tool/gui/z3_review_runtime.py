@@ -392,6 +392,54 @@ def start_review_from_raw(
         "raw_result_hash": raw_hash,
     }
 
+def can_restore_empty_review(data: dict | None) -> bool:
+    """Only an explicit recovery action may refill an already empty REVIEW."""
+    return bool(
+        isinstance(data, dict)
+        and get_review_state_status(data) == REVIEW_IN_PROGRESS
+        and not data.get("characters")
+        and isinstance(data.get("raw_detection"), dict)
+        and data["raw_detection"].get("characters")
+    )
+
+
+def open_or_restore_review(host):
+    """Toolbar action: open a prediction or recover boxes in an empty review."""
+    if any(getattr(host, flag, False) for flag in (
+        "fast_test_running", "is_processing", "_preview_review_batch_running"
+    )):
+        return {"ok": False, "reason": "busy"}
+    pid, data = _resolve_plate(host)
+    recover = can_restore_empty_review(data)
+    if recover:
+        host._push_preview_history_snapshot(pid)
+    return start_review_from_raw(host, pid, overwrite=recover)
+
+
+def prepare_layout_review(host, data: dict) -> bool:
+    """Materialize the prediction before a layout gesture opens REVIEW.
+
+    The caller owns history, the layout mutation and the final redraw/save.
+    Existing corrections, including an intentionally empty one, are preserved.
+    """
+    if any(getattr(host, flag, False) for flag in (
+        "fast_test_running", "is_processing", "_preview_review_batch_running"
+    )):
+        return False
+    if not get_review_state_status(data) and not data.get("characters"):
+        if isinstance(data.get("raw_detection"), dict):
+            result = start_review_from_raw(host, persist=False, quiet=True, refresh=False)
+            if not result.get("ok"):
+                return False
+        else:
+            from .z3_gt_box_policy import working_characters
+            data["characters"] = copy.deepcopy(working_characters(host, data))
+    mode_var = getattr(host, "preview_box_mode_var", None)
+    if mode_var is not None:
+        mode_var.set(host._get_preview_box_mode_label("AUTO"))
+    return True
+
+
 def prepare_active_preview_review(host) -> bool:
     """An editing gesture opens the displayed prediction without another CTA."""
     if getattr(host, "fast_test_running", False) or getattr(host, "is_processing", False):

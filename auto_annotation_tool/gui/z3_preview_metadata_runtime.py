@@ -1092,11 +1092,11 @@ def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str
         restored_data = copy.deepcopy(snapshot if isinstance(snapshot, dict) else {})
         self.preview_metadata[pid] = restored_data
 
-        # Undo/redo restores REVIEW content, never a previous human GOLD approval.
-        # Replaying history is itself a human edit decision and therefore must
-        # require explicit GOLD confirmation again.
+        # Reopen existing REVIEW/GOLD, but keep a pre-review snapshot as a
+        # prediction. Marking its empty canonical layer would hide RAW on undo.
         try:
-            self._mark_review_edit_started(restored_data)
+            if restored_data.get("review_state") or restored_data.get("characters"):
+                self._mark_review_edit_started(restored_data)
         except Exception:
             pass
 
@@ -1121,6 +1121,9 @@ def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str
         self._preview_char_hover_index = None
         self._preview_char_hover_label_index = None
         self._preview_char_label_active_index = None
+        mode_var = getattr(self, "preview_box_mode_var", None)
+        if mode_var is not None:
+            mode_var.set(self._get_preview_box_mode_label("AUTO"))
         self._refresh_preview_live_metadata_ui(
             status_message=action_label,
             status_tone="info",
@@ -1130,6 +1133,7 @@ def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str
         if not self._redraw_preview_character_overlays_light():
             self._on_preview_select(None)
         self._persist_preview_metadata(success_message=None, refresh_list=False, sync_access=False)
+        self._refresh_detection_review_controls()
         try:
             self._schedule_preview_info_refresh(delay_ms=900)
         except Exception:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..config import logger
 from .z3_gt_box_policy import can_add_character_box
+from .z3_review_runtime import prepare_layout_review
 from .z3_preview_ui import (
     _get_cached_preview_photo,
     _get_cached_preview_source_image,
@@ -1278,6 +1279,8 @@ def on_preview_canvas_release(host, event):
             release_perf_start = time.perf_counter()
             data = self._get_preview_active_data(create=True)
             if isinstance(data, dict):
+                if not prepare_layout_review(self, data):
+                    return "break"
                 try:
                     self._mark_review_edit_started(data)
                 except Exception:
@@ -1307,6 +1310,9 @@ def on_preview_canvas_release(host, event):
                 ordered_chars = self._sort_character_records_by_x(chars, data=data)
                 ordered_chars = self._annotate_preview_character_reading_positions(ordered_chars, data=data)
                 data["characters"] = ordered_chars
+                assist = getattr(self, "_apply_live_gt_assist", None)
+                if callable(assist):
+                    assist(data)
                 separator_conflict = False
                 try:
                     separator_conflict = bool(self._preview_layout_separator_conflicts_with_chars(data, ordered_chars))

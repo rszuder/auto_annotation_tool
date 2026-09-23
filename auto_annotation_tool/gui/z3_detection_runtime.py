@@ -143,11 +143,16 @@ def refresh_detection_review_controls(host) -> None:
         if isinstance(review_state, dict)
         else ""
     )
-    can_start_review = bool(raw_available and not busy and not review_status and not chars)
+    from .z3_review_runtime import can_restore_empty_review
+    can_restore = can_restore_empty_review(data)
+    can_start_review = bool(not busy and (can_restore or (raw_available and not review_status and not chars)))
     start_widget = getattr(self, "btn_start_review_from_raw", None)
     if start_widget is not None:
         try:
-            start_widget.config(state=(tk.NORMAL if can_start_review else tk.DISABLED))
+            start_widget.config(
+                text="Przywróć ramki" if can_restore else "Sprawdź i popraw",
+                state=(tk.NORMAL if can_start_review else tk.DISABLED),
+            )
         except Exception:
             pass
     can_confirm_gold = bool(not busy and review_status == "in_progress" and bool(chars))

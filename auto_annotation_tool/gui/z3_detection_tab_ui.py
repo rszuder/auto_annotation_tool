@@ -2844,7 +2844,7 @@ def build_detection_tab(
     self.btn_start_review_from_raw = ttk.Button(
         self.detection_review_actions_frame,
         text="Sprawdź i popraw",
-        command=self._start_review_from_raw,
+        command=self._open_or_restore_review,
         style="WorkflowCard.TButton",
     )
     self.btn_start_review_from_raw.pack(side=tk.LEFT, padx=(5, 0))

@@ -77,6 +77,7 @@ def _host(current):
     host._on_preview_select = lambda event=None: None
     host._persist_preview_metadata = lambda **kwargs: None
     host._schedule_preview_info_refresh = lambda **kwargs: None
+    host._refresh_detection_review_controls = lambda: None
     return host
 
 

@@ -35,6 +35,7 @@ from .z3_preview_records import (
     normalize_plate_source_origin,
 )
 from .z3_preview_ui import serialize_character_records
+from .z3_review_runtime import prepare_layout_review
 
 _VALID_PREVIEW_LAYOUT_OVERRIDES = {"single_row", "two_row"}
 
@@ -917,6 +918,9 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
     except Exception:
         pass
 
+    if not prepare_layout_review(self, data):
+        return "break"
+
     try:
         self._mark_review_edit_started(data)
     except Exception:
@@ -955,6 +959,9 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
         setattr(self, attr, next((index for index, item in enumerate(ordered_chars) if item is record), None))
     ordered_chars = self._annotate_preview_character_reading_positions(ordered_chars, data=data)
     data["characters"] = ordered_chars
+    assist = getattr(self, "_apply_live_gt_assist", None)
+    if callable(assist):
+        assist(data)
     data["status"] = self._derive_preview_status_from_data(data, ordered_chars)
 
     try:
@@ -981,6 +988,7 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
         message=message,
         tone=tone if tone in {"success", "warning", "error", "info", "muted"} else "info",
     )
+    self._refresh_detection_review_controls()
     return "break"
 
 
