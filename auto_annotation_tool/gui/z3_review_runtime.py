@@ -275,6 +275,8 @@ def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=Fa
     if not isinstance(data, dict) or not isinstance(data.get("raw_detection"), dict):
         return False
     if not overwrite and (get_review_state_status(data) or data.get("characters")
+                          or data.get("working_annotation")
+                          or data.get("fusion_strategy") in {"manual_correction", "manual", "cvat_import"}
                           or (data.get("gold_state") or {}).get("approved")
                           or str(data.get("status") or "") == "perfect"):
         return False

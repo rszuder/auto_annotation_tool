@@ -133,3 +133,50 @@ def test_invalid_geometry_cannot_author_gt_or_be_approved(tmp_path, box):
     data["characters"][0]["bbox"] = box
     assert not review.confirm_review_gold(host, persist=False, quiet=True)["ok"]
     assert not (tmp_path / "current_work.alprgt").exists()
+
+
+def test_pz3_checks_current_gt_before_exporting_an_older_approved_record(tmp_path):
+    from auto_annotation_tool.gui.z3_goldpack_ui import collect_gold_export_plate_candidates
+    host, data = make_host(tmp_path, number="")
+    review.prepare_working_annotation_from_raw(host, data)
+    assert review.confirm_review_gold(host, persist=False, quiet=True)["ok"]
+    old = deepcopy(data)
+    gt.save_plate_ground_truth(host, data, "AT37")
+    host.preview_metadata = {"plate": old}
+    (tmp_path / "images").mkdir()
+    Image.new("RGB", (240, 64)).save(tmp_path / "images/plate.jpg")
+    meta = tmp_path / "metadata.json"
+    meta.write_text(json.dumps(host.preview_metadata), encoding="utf-8")
+    host._loaded_meta_path = meta
+    host._get_gold_export_meta_candidates = lambda: [meta]
+    assert not collect_gold_export_plate_candidates(host, set())[0]
+    assert old["ground_truth_text"] == "AT37"
+    assert not host._review_approval_is_current(old)
+
+
+def test_gt_edit_inherits_imported_revision_without_modifying_source_pack(tmp_path):
+    import hashlib
+    host, data = make_host(tmp_path)
+    original = ALPRGTPack.create(tmp_path / "imported.alprgt")
+    existing = original.upsert_z2_plate(image_path=data["source_image"], polygon=data["source_polygon"],
+                                        plate_annotation_id=data["source_annotation_id"], ground_truth_text="AT37")
+    old_id = existing["revision"]["revision_id"]
+    data["source_gt_revision_ids"] = [old_id]
+    before = {str(path.relative_to(original.root)): hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in original.root.rglob("*") if path.is_file()}
+    revision = gt.save_plate_ground_truth(host, data, "AT38")
+    working = ALPRGTPack.open(tmp_path / "current_work.alprgt")
+    assert working.get_revision(old_id)
+    assert old_id in revision["parents"]
+    assert working.resolve_ground_truth(data["source_annotation_id"])["text"] == "AT38"
+    after = {str(path.relative_to(original.root)): hashlib.sha256(path.read_bytes()).hexdigest()
+             for path in original.root.rglob("*") if path.is_file()}
+    assert before == after
+
+
+def test_rerun_preserves_legacy_empty_manual_annotation(tmp_path):
+    host, data = make_host(tmp_path)
+    data["fusion_strategy"] = "manual_correction"
+    before = deepcopy(data)
+    assert not review.prepare_working_annotation_from_raw(host, data)
+    assert data == before

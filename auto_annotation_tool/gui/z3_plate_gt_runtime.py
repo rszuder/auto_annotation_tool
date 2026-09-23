@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
 from tkinter import messagebox, simpledialog
 
 from ..gt_pack import ALPRGTPack
@@ -31,6 +32,41 @@ def _plate_id(data):
     attrs = data.get("plate_attributes") or {}
     return str(data.get("source_annotation_id") or data.get("plate_annotation_id")
                or attrs.get("plate_annotation_id") or "").strip()
+
+
+def _inherit_plate_history(host, target, data, source, plate_id):
+    """Copy just this plate's immutable ancestry; never write an imported pack."""
+    from ..gt_resource_companions import collect_image_resource_gt_pack_paths
+    from ..campaign_manager import CAMPAIGN
+    paths = collect_image_resource_gt_pack_paths(
+        source.parent, campaign=CAMPAIGN if getattr(host, "_campaign_controlled", False) else None
+    )
+    prior = str(data.get("working_gt_pack_path") or "").strip()
+    if prior:
+        paths.append(Path(prior))
+    required = set(data.get("source_gt_revision_ids") or [])
+    if data.get("source_gt_revision_id"):
+        required.add(data["source_gt_revision_id"])
+    for path in dict.fromkeys(map(Path, paths)):
+        if path.resolve() == target.root.resolve() or not (path / "manifest.json").is_file():
+            continue
+        original = ALPRGTPack.open(path)
+        record = original.get_plate(plate_id)
+        if not record or (required and not required.intersection(record.get("revision_ids") or [])):
+            continue
+        current = target.get_plate(plate_id)
+        if current and current.get("image_id") != record.get("image_id"):
+            raise ValueError("Historia tablicy wskazuje inny obraz źródłowy.")
+        image = original.get_image(record["image_id"])
+        if image:
+            target._merge_image_record(image)
+        for value in original._geometry_record_map(record).values():
+            target._merge_geometry_record(value)
+        for value in original._revision_record_map(record).values():
+            target._merge_revision_record(value)
+        for value in original._layout_revision_record_map(record).values():
+            target._merge_layout_revision_record(value)
+        target._merge_plate_record(record)
 
 
 def _apply_reference(host, data, *, plate_id, text, revision_ids, pack_path, source="manual_z3"):
@@ -63,6 +99,7 @@ def save_plate_ground_truth(host, data, text, *, prepare=True):
     path.parent.mkdir(parents=True, exist_ok=True)
     pack = ALPRGTPack.open(path) if (path / "manifest.json").is_file() else ALPRGTPack.create(path, producer=PRODUCER)
     with pack.write_lock():
+        _inherit_plate_history(host, pack, data, source, plate_id)
         plate = pack.get_plate(plate_id)
         if plate:
             image_id = str(data.get("source_image_id") or "")
@@ -71,10 +108,16 @@ def save_plate_ground_truth(host, data, text, *, prepare=True):
         else:
             image = pack.add_image(source, producer=PRODUCER)
             pack.ensure_plate(image_id=image["image_id"], polygon=polygon, plate_id=plate_id)
+        previous_text = normalize_plate_ground_truth_text(data.get("ground_truth_text"))
+        if previous_text and not pack.resolve_ground_truth(plate_id).get("resolved"):
+            pack.set_ground_truth(plate_id, previous_text,
+                                  source=str(data.get("ground_truth_source") or "legacy_explicit_gt"), producer=PRODUCER)
         revision = pack.set_ground_truth(plate_id, text, source="manual_z3", producer=PRODUCER)
     if data.get("ground_truth_text") == text and data.get("source_gt_revision_ids") == [revision["revision_id"]]:
         return revision
     from .z3_review_runtime import mark_review_edit_started, prepare_working_annotation_from_raw
+    from .z3_review_runtime import build_review_reference_snapshot
+    data.setdefault("gt_origin_reference", copy.deepcopy(build_review_reference_snapshot(data)))
     had_work = bool(data.get("review_state") or data.get("characters") or (data.get("gold_state") or {}).get("approved"))
     mark_review_edit_started(host, data)
     _apply_reference(host, data, plate_id=plate_id, text=text,

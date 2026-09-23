@@ -191,6 +191,11 @@ def collect_gold_export_plate_candidates(host, selected_buckets, selected_source
     for meta in meta_candidates:
         run_dir = meta.parent
         metadata = read_preview_metadata(host, meta)
+        if prepare_records:
+            from .z3_plate_gt_runtime import refresh_working_ground_truth
+            if refresh_working_ground_truth(host, metadata):
+                from .z3_metadata_cache import mark_preview_metadata_changed
+                mark_preview_metadata_changed(host)
         with os.scandir(run_dir / "images") as image_entries:
             image_names = {entry.name for entry in image_entries if entry.is_file()}
 
