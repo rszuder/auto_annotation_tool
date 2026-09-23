@@ -12,6 +12,7 @@ from ..data_models import AnnotationStatus, Detection, ImageAnnotation
 from ..quality_metrics import compute_plate_polygon_fit_metrics
 from ..utils import cleanup_gpu_memory, get_image_size
 from .base import BaseAnnotator
+from .plate_model_contract import plate_class_ids, plate_result_indices
 
 
 class CombinedAnnotator(BaseAnnotator):
@@ -71,6 +72,7 @@ class CombinedAnnotator(BaseAnnotator):
 
             logger.info(f"Ladowanie modelu tablic: {self.plate_model_path}")
             self.plate_model = YoloClass(str(self.plate_model_path))
+            plate_class_ids(getattr(self.plate_model, "names", None))
             if hasattr(self.plate_model, "model") and hasattr(self.plate_model.model, "kpt_shape"):
                 self.is_plate_pose_model = True
                 logger.info("Model tablic: POSE")
@@ -242,6 +244,7 @@ class CombinedAnnotator(BaseAnnotator):
             return plates
 
         result = results[0]
+        plate_indices = plate_result_indices(result, self.plate_model)
         boxes = result.boxes.xyxy.cpu().numpy()
         confs = result.boxes.conf.cpu().numpy()
 
@@ -250,6 +253,8 @@ class CombinedAnnotator(BaseAnnotator):
             keypoints = result.keypoints.data.cpu().numpy()
 
         for i, (box, conf) in enumerate(zip(boxes, confs)):
+            if i not in plate_indices:
+                continue
             x1, y1, x2, y2 = map(float, box)
             x1 += float(offset_x)
             y1 += float(offset_y)

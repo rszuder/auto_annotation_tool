@@ -246,3 +246,46 @@ def test_resize_during_slide_keeps_panels_at_current_window_edges(scene):
     drawer.toggle("right")
     advance(scene)
     assert host.main_right_frame.winfo_x() == host.main_pane.winfo_width()
+
+
+def test_status_handle_stays_clear_of_tool_drawer_through_slide_and_resize(scene):
+    from auto_annotation_tool.gui.z2_drawer_slide import PreviewDrawerSlide
+    from auto_annotation_tool.gui.app_theme_definitions import get_theme_palette
+
+    root, host, drawer, clock, _ = scene
+    enter(scene)
+    host.app.palette = get_theme_palette()
+    host.preview_overlay_dock = tk.Frame(host.canvas_frame)
+    slide = host._preview_drawer_slide = PreviewDrawerSlide(host)
+
+    def bounds(widget):
+        return (widget.winfo_rootx(), widget.winfo_rooty(),
+                widget.winfo_rootx() + widget.winfo_width(), widget.winfo_rooty() + widget.winfo_height())
+
+    def separate(a, b):
+        return a[2] <= b[0] or b[2] <= a[0] or a[3] <= b[1] or b[3] <= a[1]
+
+    for size in ("1100x680", "900x550"):
+        root.geometry(size)
+        root.update()
+        width = host.canvas_frame.winfo_width()
+        slide.place(width, width - 280, 68, 270, 430, fullscreen=True, toggle_y=68)
+        for _ in range(2):
+            drawer.toggle("right")
+            for elapsed in (.07, .25):
+                advance(scene, elapsed)
+                handle = bounds(drawer.buttons["right"])
+                assert separate(handle, bounds(slide.panel))
+                assert separate(handle, bounds(slide.button))
+                assert separate(handle, bounds(host.main_right_frame))
+
+
+def test_right_panel_does_not_absorb_extra_window_width_after_fs(scene):
+    root, host, drawer, clock, _ = scene
+    enter(scene)
+    interaction._set_preview_fullscreen(host, False)
+    advance(scene)
+    before = host.main_right_frame.winfo_width()
+    root.geometry("1400x680")
+    root.update()
+    assert host.main_right_frame.winfo_width() == before

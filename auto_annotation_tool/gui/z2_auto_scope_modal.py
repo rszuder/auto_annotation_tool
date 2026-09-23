@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config import AVAILABLE_DETECT_MODELS
 from ..validators import format_yolo_model_identity, validate_model_file
+from ..annotators.plate_model_contract import plate_class_ids
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 
 
@@ -2056,6 +2057,11 @@ def prompt_plate_auto_scope_choice(host, *, candidate_image_paths: list[Path] | 
                     ok, message, info = validate_model_file(Path(chosen_plate_path))
                     if not ok:
                         messagebox.showerror("Nieprawidłowy model", f"Nie udało się użyć wybranego modelu:\n{message}", parent=dialog)
+                        return
+                    try:
+                        plate_class_ids(info.get("classes"))
+                    except ValueError as exc:
+                        messagebox.showerror("Nieprawidłowy model tablic", str(exc), parent=dialog)
                         return
                     self.plate_custom_var.set(str(chosen_plate_path))
                     self._remember_plate_model_runtime_meta(

@@ -46,6 +46,7 @@ from ..rectification.polygon_validator import PolygonValidator
 from ..training import DatasetCreator
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
 from ..validators import format_yolo_model_identity, validate_model_file
+from ..annotators.plate_model_contract import plate_class_ids
 from .canvas_progress_overlay import CanvasProgressOverlay
 from .help_manager import HELP
 from .inertial_scroll import InertialScrollController
@@ -3985,6 +3986,12 @@ def _apply_campaign_plate_auto_model_choice(self, model_path: Path, *, adopt_to_
         _close_campaign_plate_model_check_dialog(busy_dialog)
     if not ok:
         messagebox.showerror("Nieprawidłowy model", f"Nie udało się użyć wybranego modelu:\n{message}")
+        return False
+
+    try:
+        plate_class_ids(info.get("classes"))
+    except ValueError as exc:
+        messagebox.showerror("Nieprawidłowy model tablic", str(exc), parent=self.frame)
         return False
 
     task = str(info.get("task") or info.get("type") or "").strip().lower()

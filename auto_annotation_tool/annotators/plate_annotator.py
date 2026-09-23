@@ -15,6 +15,7 @@ from ..utils import get_image_size, cleanup_gpu_memory
 from ..rectification import PlateRectifier
 from ..ocr import PlateOCR
 from .base import BaseAnnotator
+from .plate_model_contract import plate_class_ids, plate_result_indices
 
 
 class PlateAnnotator(BaseAnnotator):
@@ -68,6 +69,7 @@ class PlateAnnotator(BaseAnnotator):
             # Załaduj YOLO
             logger.info(f"Ładowanie modelu tablic: {self.model_path}")
             self.model = YoloClass(str(self.model_path))
+            plate_class_ids(getattr(self.model, "names", None))
             
             # Sprawdź, czy model zwraca keypointy.
             if hasattr(self.model, 'model') and hasattr(self.model.model, 'kpt_shape'):
@@ -250,6 +252,7 @@ class PlateAnnotator(BaseAnnotator):
                 return annotation
             
             result = results[0]
+            plate_indices = plate_result_indices(result, self.model)
             boxes = result.boxes.xyxy.cpu().numpy()
             confs = result.boxes.conf.cpu().numpy()
             
@@ -258,6 +261,8 @@ class PlateAnnotator(BaseAnnotator):
                 keypoints = result.keypoints.data.cpu().numpy()
             
             for i, (box, conf) in enumerate(zip(boxes, confs)):
+                if i not in plate_indices:
+                    continue
                 x1, y1, x2, y2 = map(float, box)
                 
                 polygon = None

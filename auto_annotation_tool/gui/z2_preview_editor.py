@@ -854,7 +854,8 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
     label_fill = "#f8f8f8"
     label_bg = "#111111"
 
-    vehicle_detections = self._get_vehicle_detections(ann)
+    from .z2_auto_run_result import vehicle_assistance_visible
+    vehicle_detections = self._get_vehicle_detections(ann) if vehicle_assistance_visible(self) else []
     selected_vehicle_idx = self._get_selected_vehicle_index_for_ann(ann)
     plate_detections = self._get_plate_detections(ann)
     selected_plate_idx = self._get_selected_plate_index_for_ann(ann)
@@ -2386,6 +2387,9 @@ def _find_preview_polygon_hit(self, canvas_x: float, canvas_y: float):
 
 
 def _find_preview_vehicle_hit(self, canvas_x: float, canvas_y: float):
+    from .z2_auto_run_result import vehicle_assistance_visible
+    if not vehicle_assistance_visible(self):
+        return None
     ann = self._get_preview_annotation()
     if ann is None or self.preview_canvas.original_image is None:
         return None

@@ -3016,6 +3016,7 @@ def _start_annotation(self):
                     protected_names = self._get_preview_auto_scope_protected_filenames()
                 live_manual_bundle = protected_view_bundle(
                     self._campaign_auto_pre_run_visible_state, set(protected_names),
+                    build_manual_override=self._build_manual_override_annotation,
                 )
             else:
                 live_manual_bundle = self._get_current_campaign_manual_preview_bundle()

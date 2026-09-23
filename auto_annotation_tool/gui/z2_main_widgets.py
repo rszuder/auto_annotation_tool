@@ -60,7 +60,9 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
 
     left_frame = ttk.Frame(pane, style="Panel.TFrame")
     center_frame = ttk.Frame(pane, style="Panel.TFrame")
-    right_frame = ttk.Frame(pane, style="Panel.TFrame")
+    right_frame = ttk.Frame(pane, style="Panel.TFrame", width=280)
+    # Status copy must wrap inside the sidebar instead of requesting canvas space.
+    right_frame.pack_propagate(False)
     self.main_left_frame = left_frame
     self.main_center_frame = center_frame
     self.main_right_frame = right_frame
@@ -68,7 +70,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
 
     pane.add(left_frame, weight=2)
     pane.add(center_frame, weight=6)
-    pane.add(right_frame, weight=1)
+    pane.add(right_frame, weight=0)
     pane.bind("<Configure>", self._on_main_pane_configure, add="+")
     pane.bind("<ButtonPress-1>", self._on_main_pane_button_press, add="+")
     pane.bind("<B1-Motion>", self._on_main_pane_drag_motion, add="+")

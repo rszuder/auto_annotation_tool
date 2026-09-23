@@ -306,7 +306,7 @@ def _sync_main_pane_right_panel_visibility(self):
 
     try:
         if should_show and not has_right:
-            pane.add(right_frame, weight=1)
+            pane.add(right_frame, weight=0)
         elif not should_show and has_right:
             pane.forget(right_frame)
     except Exception:
@@ -626,14 +626,14 @@ def _sync_approve_hint_wraplength(self, event=None):
     if width <= 1:
         return
 
-    wraplength = max(160, int(width) - 54)
+    wraplength = max(1, int(width) - 54)
     for widget_name in ("approve_context_lbl", "approve_gate_hint_lbl", "approve_breakdown_lbl",
                         "approve_hint_title_lbl", "approve_breakdown_title_lbl"):
         label = getattr(self, widget_name, None)
         if label is None:
             continue
         try:
-            if int(float(label.cget("wraplength") or 0)) != wraplength:
+            if label.winfo_pixels(label.cget("wraplength")) != wraplength:
                 label.configure(wraplength=wraplength)
         except Exception:
             pass

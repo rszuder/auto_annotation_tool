@@ -1990,8 +1990,7 @@ def _render_compact_info_table(
     panel_bg = palette.get("panel", "#252526")
     panel_alt = palette.get("panel_alt", "#2d2d30")
     border = palette.get("border", "#3a3a3a")
-    value_col_width = 118
-    row_label_widgets = []
+    layout_rows = []
     label_signature = tuple(label for label, _value, _tone in normalized_rows)
 
     def _sync_table_wrap(_event=None):
@@ -2000,16 +1999,20 @@ def _render_compact_info_table(
         except Exception:
             host_width = 0
         if host_width <= 1:
-            try:
-                host_width = int(host.winfo_reqwidth() or 0)
-            except Exception:
-                host_width = 0
-        target_wrap = max(80, int(host_width) - int(value_col_width) - 28)
-        for widget in list(row_label_widgets):
-            try:
-                widget.configure(wraplength=target_wrap)
-            except Exception:
-                continue
+            return
+        # Read the current cache: the table can be rebuilt without changing its
+        # host. A callback capturing the first row widgets stops wrapping later
+        # gate summaries. Bound BOTH columns so long values cannot widen a row.
+        usable_width = max(2, host_width - 2)
+        value_width = min(148, int(usable_width * .46))
+        widths = (usable_width - value_width, value_width)
+        for row_widgets in (getattr(host, "_compact_table_cache", None) or {}).get("layout_rows", []):
+            for column, (widget, column_width) in enumerate(zip(row_widgets, widths)):
+                target_wrap = max(1, column_width - 16)
+                if int(widget.master.grid_columnconfigure(column, "minsize")) != column_width:
+                    widget.master.grid_columnconfigure(column, minsize=column_width)
+                if int(widget.cget("wraplength")) != target_wrap:
+                    widget.configure(wraplength=target_wrap)
 
     cache = getattr(host, "_compact_table_cache", None)
     if (
@@ -2063,8 +2066,6 @@ def _render_compact_info_table(
             highlightcolor=border,
         )
         header.pack(fill=tk.X, pady=(0, 2))
-        header.grid_columnconfigure(0, weight=1)
-        header.grid_columnconfigure(1, minsize=value_col_width)
 
         header_left = tk.Label(
             header,
@@ -2078,9 +2079,9 @@ def _render_compact_info_table(
             padx=8,
             pady=3,
             font=("Segoe UI", 9, "bold"),
+            wraplength=96,
         )
         header_left.grid(row=0, column=0, sticky="ew")
-        row_label_widgets.append(header_left)
 
         header_right = tk.Label(
             header,
@@ -2094,8 +2095,10 @@ def _render_compact_info_table(
             padx=8,
             pady=3,
             font=("Segoe UI", 9, "bold"),
+            wraplength=96,
         )
-        header_right.grid(row=0, column=1, sticky="e")
+        header_right.grid(row=0, column=1, sticky="ew")
+        layout_rows.append((header_left, header_right))
 
     cache_rows = []
     for label_text, value_text, tone in normalized_rows:
@@ -2108,8 +2111,6 @@ def _render_compact_info_table(
             highlightcolor=border,
         )
         row.pack(fill=tk.X, pady=(0, 2))
-        row.grid_columnconfigure(0, weight=1)
-        row.grid_columnconfigure(1, minsize=value_col_width)
 
         label_widget = tk.Label(
             row,
@@ -2122,10 +2123,9 @@ def _render_compact_info_table(
             highlightthickness=0,
             padx=8,
             pady=2,
-            wraplength=max(80, int(host.winfo_width() or 0) - value_col_width - 28),
+            wraplength=96,
         )
         label_widget.grid(row=0, column=0, sticky="nsew")
-        row_label_widgets.append(label_widget)
 
         value_widget = tk.Label(
             row,
@@ -2138,8 +2138,10 @@ def _render_compact_info_table(
             padx=8,
             pady=2,
             font=("Segoe UI", 9, "bold"),
+            wraplength=96,
         )
-        value_widget.grid(row=0, column=1, sticky="ne")
+        value_widget.grid(row=0, column=1, sticky="nsew")
+        layout_rows.append((label_widget, value_widget))
         self._set_inline_label_state(value_widget, tone=tone, emphasis=True)
         try:
             setattr(value_widget, "_compact_table_tone", str(tone))
@@ -2154,7 +2156,9 @@ def _render_compact_info_table(
     except Exception:
         pass
     try:
-        setattr(host, "_compact_table_cache", {"labels": label_signature, "rows": cache_rows})
+        setattr(host, "_compact_table_cache", {
+            "labels": label_signature, "rows": cache_rows, "layout_rows": layout_rows,
+        })
     except Exception:
         pass
     try:

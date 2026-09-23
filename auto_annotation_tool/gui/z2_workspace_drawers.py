@@ -128,8 +128,26 @@ class WorkspaceDrawers:
                 button.place(x=max(0, x + panel_width), rely=.52, anchor="w")
             else:
                 button.configure(text="Status ›" if self.target[side] else "‹ Status")
-                button.place(x=min(width, x), rely=.52, anchor="e")
+                self.place_status_toggle()
             button.lift()
+
+    def place_status_toggle(self):
+        """Keep Status in the controls band, clear of the tool drawer content."""
+        if not (self.detached and self.right_allowed
+                and getattr(self.owner, "_preview_fullscreen_active", False)):
+            return
+        frame = self.owner.canvas_frame
+        width = self.host.winfo_width()
+        panel_width = min(self.widths["right"], max(180, width - 80))
+        edge = round(width - panel_width * self.visible["right"])
+        x = frame.winfo_rootx() - self.host.winfo_rootx() + frame.winfo_width() - 10
+        y = max(68, int(getattr(self.owner, "_preview_hud_bottom_in_view", 60)) + 8)
+        slide = getattr(self.owner, "_preview_drawer_slide", None)
+        if slide is not None and slide.active:
+            x -= slide.button.winfo_reqwidth() + 8
+        y += frame.winfo_rooty() - self.host.winfo_rooty()
+        self.buttons["right"].place(x=min(edge, x), y=y, anchor="ne")
+        self.buttons["right"].lift()
 
     def bottom_rendered(self, canvas):
         self._bottom_origin = canvas.bbox("preview_bottom_hint")
@@ -195,7 +213,7 @@ class WorkspaceDrawers:
             self.buttons[side].place_forget()
         self.host.insert(0, self.panels["left"], weight=2)
         if self.right_allowed:
-            self.host.add(self.panels["right"], weight=1)
+            self.host.add(self.panels["right"], weight=0)
         self.detached = False
         # Restore the operator's widths, rather than applying layout defaults.
         def restore_widths():

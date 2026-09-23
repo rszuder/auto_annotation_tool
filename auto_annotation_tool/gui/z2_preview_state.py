@@ -636,7 +636,7 @@ def _build_manual_override_annotation(self, ann):
         attributes = dict(getattr(det, "attributes", {}) or {})
         manually_edited = str(attributes.get("manually_edited", "") or "").strip().lower() == "true"
         manual_source = str(attributes.get("manual_source", "") or "").strip().lower()
-        if manually_edited or manual_source:
+        if manually_edited or manual_source or str(attributes.get("ground_truth_text", "") or "").strip():
             kept_detections.append(det)
             continue
         fallback_plate_detections.append(copy.deepcopy(det))
