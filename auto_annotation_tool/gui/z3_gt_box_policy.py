@@ -36,13 +36,10 @@ def working_characters(host, data):
     if not isinstance(data, dict):
         return []
     if data.get("characters") or (data.get("review_state") or {}).get("status"):
-        records = data.get("characters") or []
-        if (data.get("review_state") or {}).get("status") != "approved":
-            return limit_boxes_to_gt(host, data, records)[0]
-        return records
+        return data.get("characters") or []
     raw = data.get("raw_detection")
     if isinstance(raw, dict):
-        return limit_boxes_to_gt(host, data, raw.get("characters") or [])[0]
+        return raw.get("characters") or []
     return data.get("yolo_detections") or data.get("yolo_nms_detections") or data.get("yolo_raw_detections") or []
 
 

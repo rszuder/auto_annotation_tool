@@ -21,8 +21,8 @@ GT_ASSIST_SOURCE = "gt_assisted"
 GT_ASSIST_CONFIRMED_SOURCE = "gt_assist_confirmed"
 
 
-def apply_live_gt_assist(host, data: dict | None) -> dict:
-    """Limit the working boxes and label REVIEW from explicit GT; preserve RAW."""
+def apply_live_gt_assist(host, data: dict | None, *, prepare: bool = False) -> dict:
+    """Label a working annotation; select geometry only at explicit preparation."""
     if not isinstance(data, dict):
         return {"changed": False, "reason": "no_plate"}
     state = data.get("review_state") or {}
@@ -30,7 +30,9 @@ def apply_live_gt_assist(host, data: dict | None) -> dict:
         return {"changed": False, "reason": "not_editing"}
     gt = normalize_plate_ground_truth_text(host._get_preview_ground_truth_text(data))
     chars = data.get("characters") or []
-    chars, box_limit = limit_boxes_to_gt(host, data, chars)
+    box_limit = None
+    if prepare:
+        chars, box_limit = limit_boxes_to_gt(host, data, chars)
     if box_limit:
         host._update_preview_plate_layout_metadata(data, chars)
         chars = host._annotate_preview_character_reading_positions(chars, data=data)
@@ -85,11 +87,11 @@ def get_live_gt_assist_presentation(host, data: dict | None = None) -> dict:
     editing = (data.get("review_state") or {}).get("status") == "in_progress"
     text, tone = "Asysta GT: aktywna podczas korekty", "info"
     if not gt:
-        text, tone = "Asysta GT: brak GT tablicy w Z2", "warning"
+        text, tone = "Numer tablicy: brak — powstanie po zatwierdzeniu znaków", "info"
     elif not editing:
         text = f"GT: {gt} · asysta aktywna podczas korekty"
     elif len(chars) != len(gt):
-        action = "Dodaj brakujące ramki" if len(chars) < len(gt) else "Usuń nadmiarowe ramki"
+        action = f"Brakuje {len(gt) - len(chars)} ramek" if len(chars) < len(gt) else f"Usuń {len(chars) - len(gt)} nadmiarowych ramek"
         text, tone = f"GT: {gt} · ramki {len(chars)}/{len(gt)}. {action}.", "warning"
     elif (data.get("live_gt_assist") or {}).get("reason") in {"invalid_geometry", "layout_conflict", "layout_uncertain"}:
         text, tone = f"GT: {gt} · sprawdź geometrię i układ ramek", "warning"

@@ -94,12 +94,12 @@ def raw_plate():
     }
 
 
-def test_auto_shows_gt_working_result_before_review_without_changing_metadata():
+def test_auto_shows_raw_before_preparation_without_changing_metadata():
     data = raw_plate()
     data["ground_truth_text"] = "DIFFERENT_GT"
     before = deepcopy(data)
     records, source = preview.get_preview_box_records(Host(mode="AUTO"), data)
-    assert source == "GT_RESULT"
+    assert source == "RAW_RESULT"
     assert records == data["raw_detection"]["characters"]
     assert data == before
 
@@ -177,7 +177,7 @@ def test_open_reviewed_run_preserves_final_mode():
     assert host.mode == "FINAL"
 
 
-@pytest.mark.parametrize("raw_only,expected", [(True, "GT_RESULT"), (False, "AUTO")])
+@pytest.mark.parametrize("raw_only,expected", [(True, "AUTO"), (False, "AUTO")])
 def test_detection_start_selects_its_output_layer(tmp_path, raw_only, expected):
     from auto_annotation_tool.gui import z3_detection_runtime as detection
     host = mode_host("FINAL")

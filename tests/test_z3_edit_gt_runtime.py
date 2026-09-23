@@ -66,10 +66,12 @@ def test_approval_still_rejects_wrong_box_count(text):
     assert data["review_state"]["status"] == "in_progress"
 
 
-def test_approval_reduces_extra_predictions_before_validating_gt():
+def test_explicit_preparation_reduces_extras_before_validation():
     data = plate("ABCD")
     host = quality_host(data)
     raw = deepcopy(data["raw_detection"])
+    assert not review.confirm_review_gold(host, persist=False, quiet=True)["ok"]
+    assist.apply_live_gt_assist(host, data, prepare=True)
     assert review.confirm_review_gold(host, persist=False, quiet=True)["ok"]
     assert len(data["characters"]) == 3
     assert data["raw_detection"] == raw
@@ -170,7 +172,7 @@ def test_zoom_keeps_visible_layer_and_correct_runtime_keys(canvas_host, monkeypa
     host._preview_char_label_mode = False
     host._preview_char_label_active_index = None
     ui.on_preview_select(host)
-    source = "FINAL" if editing else "GT_RESULT"
+    source = "FINAL" if editing else "RAW_RESULT"
     raw = deepcopy(data["raw_detection"])
     for zoom in (1.2, .8, 1.4, 1.0):
         host._preview_zoom_level = zoom
@@ -237,7 +239,7 @@ def test_qe_after_edit_and_zoom_shows_next_raw_boxes_and_s_still_works(canvas_ho
     host.frame.after(450, lambda: done.set(True))
     host.frame.wait_variable(done)
     assert host._preview_active_pid == "next"
-    assert set(host._preview_char_runtime) == {"GT_RESULT:0", "GT_RESULT:1"}
+    assert set(host._preview_char_runtime) == {"RAW_RESULT:0", "RAW_RESULT:1"}
     x, y = host._preview_image_to_canvas_point(27, 32)
     assert events.on_preview_canvas_keypress(host, SimpleNamespace(keysym="s", char="s", state=0, x=x, y=y)) == "break"
     assert host._preview_char_selected_index == 0

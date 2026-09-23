@@ -251,7 +251,7 @@ def resolve_preview_box_source(data: dict, mode_key: str) -> str:
     if isinstance(data.get("raw_detection"), dict):
         # A frozen empty prediction is also a result, not a reason to show
         # intermediate proposals rejected by the pipeline.
-        return "GT_RESULT" if plate_gt(data) else "RAW_RESULT"
+        return "RAW_RESULT"
     for mode, field in (
         ("YOLO_FILTERED", "yolo_detections"),
         ("YOLO_NMS", "yolo_nms_detections"),
@@ -265,7 +265,7 @@ def resolve_preview_box_source(data: dict, mode_key: str) -> str:
 def restore_preview_stage_mode(host: "CharacterAnnotationTab", metadata: dict) -> None:
     """Recover old forced FINAL selection when opening an unreviewed RAW run."""
     mode = host._get_preview_box_mode_key()
-    if mode == "RAW_RESULT" and any(plate_gt(data) for data in metadata.values()):
+    if mode == "GT_RESULT":
         host.preview_box_mode_var.set(host._get_preview_box_mode_label("AUTO"))
         host._save_local_setting("char_preview_box_mode", "AUTO")
         return

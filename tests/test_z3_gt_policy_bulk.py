@@ -77,8 +77,8 @@ def test_auto_view_and_review_use_the_same_gt_limited_geometry():
     host = CharacterAnnotationTab.__new__(CharacterAnnotationTab)
     record = data("XABZCDY", "ABCD")
     host._get_preview_box_mode_key = lambda: "AUTO"
-    displayed, layer = host._get_preview_box_records(record)
-    assert layer == "GT_RESULT" and len(displayed) == 4
+    displayed, _ = limit_boxes_to_gt(host, record, record["raw_detection"]["characters"])
+    assert len(displayed) == 4
     host.preview_metadata = {"p": record}
     host._preview_active_pid = "p"
     host._ensure_plate_source_metadata = Mock()
@@ -163,6 +163,8 @@ def scene(root):
                  "_refresh_gold_export_source_labels", "_refresh_gold_export_scope_label",
                  "_refresh_preview_import_focus_ui", "_update_preview_edit_status", "_ensure_plate_source_metadata"):
         setattr(host, name, Mock())
+    for pid, record in host.preview_metadata.items():
+        review.prepare_working_annotation_from_raw(host, record, plate_id=pid)
     root.update()
     yield host
     host.frame.destroy()

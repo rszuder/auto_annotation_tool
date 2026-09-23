@@ -113,6 +113,8 @@ def _remove_detection_review_snapshot(host, preview_dir: str | Path | None = Non
 
 def refresh_detection_review_controls(host) -> None:
     self = host
+    from .z3_plate_gt_runtime import refresh_plate_ground_truth_ui
+    refresh_plate_ground_truth_ui(host)
     busy = bool(
         getattr(self, "fast_test_running", False)
         or getattr(self, "is_processing", False)
@@ -405,10 +407,11 @@ def run_detection_stage(host):
     except Exception:
         workflow_context = "free"
 
-    # Main detection action is a reproducible RAW experiment.
-    # REVIEW/GOLD is a separate layer and must not control RAW scope.
+    # Freeze the pipeline evidence first, then prepare the working annotation.
+    # A rerun keeps any existing correction and human approval.
     guard_options = {
         "raw_only": True,
+        "prepare_working": True,
         "process_scope": "all",
         "workflow_context": workflow_context,
     }
@@ -630,7 +633,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
 
     try:
         if hasattr(self, "preview_box_mode_var"):
-            result_box_mode = "GT_RESULT" if raw_only else "AUTO"
+            result_box_mode = "AUTO"
             result_box_mode_label = (
                 self._get_preview_box_mode_label(result_box_mode)
                 if hasattr(self, "_get_preview_box_mode_label")
@@ -1229,7 +1232,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                             local_meta[pid].get("status", "") or ""
                         ),
                         extra={
-                            "execution_mode": "raw_experiment",
+                            "execution_mode": "annotation" if guard_options.get("prepare_working") else "raw_evidence",
                             "workflow_context": workflow_context,
                             "raw_result_hash": str(
                                 raw_detection.get("result_hash") or ""
@@ -1247,8 +1250,9 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                             session_token=token,
                         ),
                     )
-                    # Critical separation: do not touch characters/status/layout
-                    # or review fusion metadata in RAW mode.
+                    if guard_options.get("prepare_working"):
+                        from .z3_review_runtime import prepare_working_annotation_from_raw
+                        prepare_working_annotation_from_raw(self, local_meta[pid], plate_id=pid)
                     continue
 
                 preserve_perfect_existing = bool(existing_is_perfect and protect_perfect_plates)
@@ -1506,7 +1510,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 plate_data = local_meta.get(str(detected_pid))
                 if isinstance(plate_data, dict) and isinstance(plate_data.get("last_detection"), dict):
                     plate_data["last_detection"]["finished_at"] = finished_iso
-            if raw_only:
+            if raw_only and not guard_options.get("prepare_working"):
                 plates_with_chars = sum(
                     1
                     for pid in all_plate_ids
@@ -1560,7 +1564,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 "method_label": detection_method_label,
                 "pipeline": detection_pipeline_label,
                 "execution_mode": (
-                    "raw_experiment"
+                    "annotation" if guard_options.get("prepare_working") else "raw_evidence"
                     if raw_only
                     else "review_update"
                 ),
@@ -1684,7 +1688,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
             self._log(
                 self.test_log_text,
                 (
-                    f"\nRAW exact match: {acc:.1f}% "
+                    f"\nZgodność wyniku modelu: {acc:.1f}% "
                     f"({stat_perfect}/{total} tablic)"
                     if raw_only
                     else
@@ -1786,7 +1790,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         current=total,
                         total=total,
                         meta_text=(
-                            f"100% | RAW exact "
+                            f"100% | Wynik modelu "
                             f"{int(stat_perfect)}/{int(total)}"
                             if raw_only
                             else
@@ -1818,8 +1822,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     except Exception:
                         pass
 
-                    # RAW experiment alone does not make GOLD/dataset ready.
-                    if not raw_only:
+                    # Only existing, valid human approvals make the dataset ready.
+                    if guard_options.get("prepare_working"):
+                        self._sync_step3_access_from_preview_state(self.preview_metadata)
+                    elif not raw_only:
                         self.unlock_dataset_subtab()
 
                 except Exception as e:

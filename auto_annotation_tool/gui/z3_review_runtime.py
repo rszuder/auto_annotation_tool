@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import copy
+import math
 from datetime import datetime
 from tkinter import messagebox
 
 from .z3_gt_contract import revision_ids_from_data
+from .z3_gt_box_policy import plate_gt
 from .z3_metadata_cache import mark_preview_metadata_changed
 
 REVIEW_SCHEMA = "alpr.pz2.review.v1"
@@ -268,56 +270,17 @@ def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -
         except Exception:
             pass
 
-def start_review_from_raw(
-    host,
-    plate_id=None,
-    *,
-    overwrite: bool = False,
-    persist: bool = True,
-    quiet: bool = False,
-    refresh: bool = True,
-):
-    """Create mutable REVIEW as a deep copy of frozen RAW."""
-    pid, data = _resolve_plate(host, plate_id)
-    if not isinstance(data, dict):
-        result = {"ok": False, "reason": "no_active_plate", "plate_id": pid}
-        if not quiet:
-            messagebox.showinfo("Sprawdzanie znaków", "Wybierz tablicę do sprawdzenia.")
-        return result
-
-    raw_detection = data.get("raw_detection")
-    if not isinstance(raw_detection, dict):
-        result = {"ok": False, "reason": "missing_raw_detection", "plate_id": pid}
-        if not quiet:
-            messagebox.showinfo(
-                "Brak wyniku wykrywania",
-                "Ta tablica nie ma jeszcze wyniku wykrywania. Najpierw uruchom wykrywanie znaków.",
-            )
-        return result
-
-    raw_chars = raw_detection.get("characters", [])
-    if not isinstance(raw_chars, list):
-        raw_chars = []
-
-    current_review_status = get_review_state_status(data)
-    existing_chars = data.get("characters", [])
-    existing_chars = existing_chars if isinstance(existing_chars, list) else []
-
-    if not overwrite and (current_review_status or existing_chars):
-        result = {
-            "ok": False,
-            "reason": "review_exists",
-            "plate_id": pid,
-            "review_status": current_review_status,
-            "character_count": len(existing_chars),
-        }
-        if not quiet:
-            messagebox.showinfo(
-                "Tablica jest już w trakcie sprawdzania",
-                "Nie nadpisano wcześniejszych poprawek ani zatwierdzenia.",
-            )
-        return result
-
+def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=False):
+    """Materialize once; a rerun must preserve existing human work and approval."""
+    if not isinstance(data, dict) or not isinstance(data.get("raw_detection"), dict):
+        return False
+    if not overwrite and (get_review_state_status(data) or data.get("characters")
+                          or (data.get("gold_state") or {}).get("approved")
+                          or str(data.get("status") or "") == "perfect"):
+        return False
+    pid = plate_id
+    raw_detection = data["raw_detection"]
+    raw_chars = raw_detection.get("characters") or []
     review_chars = copy.deepcopy(raw_chars)
     try:
         host._update_preview_plate_layout_metadata(data, review_chars)
@@ -370,14 +333,74 @@ def start_review_from_raw(
             plate_id=pid,
             default_bucket="auto_preview",
             default_origin="pz2_detect",
-            modified_by="human",
+            modified_by="system",
         )
     except Exception:
         pass
 
     assist = getattr(host, "_apply_live_gt_assist", None)
     if callable(assist):
-        assist(data)
+        assist(data, prepare=True)
+    data["working_annotation"] = {
+        "schema": "alpr.pz2.working.v1", "prepared_at": now,
+        "source_raw_result_hash": raw_hash,
+        "preparation": "gt_assisted" if plate_gt(data) else "pipeline",
+    }
+    return True
+
+
+def start_review_from_raw(
+    host,
+    plate_id=None,
+    *,
+    overwrite: bool = False,
+    persist: bool = True,
+    quiet: bool = False,
+    refresh: bool = True,
+):
+    """Create mutable REVIEW as a deep copy of frozen RAW."""
+    pid, data = _resolve_plate(host, plate_id)
+    if not isinstance(data, dict):
+        result = {"ok": False, "reason": "no_active_plate", "plate_id": pid}
+        if not quiet:
+            messagebox.showinfo("Sprawdzanie znaków", "Wybierz tablicę do sprawdzenia.")
+        return result
+
+    raw_detection = data.get("raw_detection")
+    if not isinstance(raw_detection, dict):
+        result = {"ok": False, "reason": "missing_raw_detection", "plate_id": pid}
+        if not quiet:
+            messagebox.showinfo(
+                "Brak wyniku wykrywania",
+                "Ta tablica nie ma jeszcze wyniku wykrywania. Najpierw uruchom wykrywanie znaków.",
+            )
+        return result
+
+    raw_chars = raw_detection.get("characters", [])
+    if not isinstance(raw_chars, list):
+        raw_chars = []
+
+    current_review_status = get_review_state_status(data)
+    existing_chars = data.get("characters", [])
+    existing_chars = existing_chars if isinstance(existing_chars, list) else []
+
+    if not overwrite and (current_review_status or existing_chars):
+        result = {
+            "ok": False,
+            "reason": "review_exists",
+            "plate_id": pid,
+            "review_status": current_review_status,
+            "character_count": len(existing_chars),
+        }
+        if not quiet:
+            messagebox.showinfo(
+                "Tablica jest już w trakcie sprawdzania",
+                "Nie nadpisano wcześniejszych poprawek ani zatwierdzenia.",
+            )
+        return result
+
+    prepare_working_annotation_from_raw(host, data, plate_id=pid, overwrite=True)
+    raw_hash = str(raw_detection.get("result_hash") or "")
     if refresh:
         _refresh_after_change(
             host, pid, persist=persist,
@@ -519,12 +542,32 @@ def mark_review_edit_started(host, data: dict | None):
 
 def get_review_quality_status(host, data: dict, chars=None) -> str:
     """Validate current geometry/GT before committing a human approval."""
+    if data.get("gt_revision_conflict"):
+        return "needs_fix"
     probe = dict(data)
+    records = data.get("characters", []) if chars is None else chars
+    if data.get("plate_layout") == "two_row_candidate" and not data.get("plate_layout_override"):
+        return "needs_fix"
+    try:
+        for record in records:
+            box = record.get("bbox") if isinstance(record, dict) else getattr(record, "bbox", None)
+            x1, y1, x2, y2 = map(float, box)
+            if not all(math.isfinite(value) for value in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+                return "needs_fix"
+    except (TypeError, ValueError):
+        return "needs_fix"
+    # A human may author the first GT by approving fully labelled geometry.
+    # This is a validation probe only: persistence happens after it succeeds.
+    if not plate_gt(data):
+        from ..plate_ground_truth import normalize_plate_ground_truth_text
+        text = normalize_plate_ground_truth_text(host._characters_to_text(records, data=data))
+        if not text or len(text) != len(records):
+            return "needs_fix"
+        probe["ground_truth_text"] = text
     probe_state = dict(probe.get("review_state") or {})
     probe_state["status"] = REVIEW_APPROVED
     probe_state["approved_reference"] = build_review_reference_snapshot(probe)
     probe["review_state"] = probe_state
-    records = data.get("characters", []) if chars is None else chars
     return str(host._derive_preview_status_from_data(probe, records) or "needs_fix").strip().lower()
 
 
@@ -551,9 +594,6 @@ def confirm_review_gold(
             messagebox.showinfo("Najpierw sprawdź tablicę", "Otwórz wynik modelu do sprawdzenia i wprowadź potrzebne poprawki.")
         return result
 
-    assist = getattr(host, "_apply_live_gt_assist", None)
-    if callable(assist):
-        assist(data)
     chars = data.get("characters", [])
     if not isinstance(chars, list) or not chars:
         result = {"ok": False, "reason": "empty_review", "plate_id": pid}
@@ -584,6 +624,15 @@ def confirm_review_gold(
                 "Wprowadź poprawki i spróbuj zatwierdzić ponownie.",
             )
         return result
+
+    if not plate_gt(data):
+        try:
+            from .z3_plate_gt_runtime import save_plate_ground_truth
+            save_plate_ground_truth(host, data, host._characters_to_text(chars, data=data), prepare=False)
+        except Exception as exc:
+            if not quiet:
+                messagebox.showerror("Nie zapisano numeru tablicy", str(exc))
+            return {"ok": False, "reason": "gt_write_failed", "error": str(exc), "plate_id": pid}
 
     now = _now_iso()
     state["schema"] = REVIEW_SCHEMA

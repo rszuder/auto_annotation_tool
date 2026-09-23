@@ -3704,6 +3704,9 @@ def load_preview_data(host, quiet=False):
             review_contract_changed = False
             if self._backfill_preview_expected_texts_from_sources(loaded):
                 changed = True
+            from .z3_plate_gt_runtime import refresh_working_ground_truth
+            if refresh_working_ground_truth(self, loaded):
+                changed = True
             for pid, d in loaded.items():
                 if not isinstance(d, dict):
                     continue
@@ -3963,11 +3966,6 @@ def on_preview_select(host, event=None):
 
     pid = pid_map[idx]
     data = self.preview_metadata.get(pid, {})
-    assist = getattr(self, "_apply_live_gt_assist", None)
-    if callable(assist) and assist(data).get("changed"):
-        mark_preview_metadata_changed(self)
-        self._schedule_preview_metadata_save(delay_ms=350)
-        self._refresh_preview_listbox_row(pid)
     if not fast_select_render:
         self._update_preview_record_source_label(data)
     current_render_state = getattr(self, "_preview_render_state", None) or {}

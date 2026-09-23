@@ -43,6 +43,7 @@ class Host(SimpleNamespace):
 
 def _base_data():
     return {
+        "ground_truth_text": "A",
         "characters": [],
         "raw_detection": {
             "schema": "alpr.pz2.raw_detection.v1",

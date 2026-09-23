@@ -2564,6 +2564,14 @@ def build_detection_tab(
         anchor="w", bd=0, highlightthickness=0,
     )
     self.preview_approved_char_count_lbl.grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
+    from .z3_plate_gt_runtime import edit_active_plate_ground_truth
+    plate_gt_row = ttk.Frame(self.preview_counts_frame)
+    plate_gt_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+    self.preview_plate_gt_label = ttk.Label(plate_gt_row, text="Numer tablicy: brak", font=("Segoe UI", 10, "bold"))
+    self.preview_plate_gt_label.pack(anchor="w")
+    self.preview_plate_gt_button = ttk.Button(plate_gt_row, text="Ustaw numer", style="WorkflowCard.TButton",
+                                              command=lambda: edit_active_plate_ground_truth(self))
+    self.preview_plate_gt_button.pack(anchor="w", pady=(3, 0))
     self.preview_total_count_lbl = self.preview_unknown_count_lbl
     self._apply_preview_info_stats_style()
 

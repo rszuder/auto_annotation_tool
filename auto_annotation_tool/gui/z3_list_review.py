@@ -66,9 +66,7 @@ def change_plate_approval(host, plate_id, approved):
             and host._get_review_quality_status(data) == "perfect"):
         return {"ok": True, "unchanged": True}
     if not status and not data.get("characters"):
-        started = review.start_review_from_raw(host, plate_id, persist=False, quiet=True, refresh=False)
-        if not started.get("ok"):
-            return started
+        return {"ok": False, "reason": "working_annotation_missing"}
     elif status != review.REVIEW_IN_PROGRESS:
         review.mark_review_edit_started(host, data)
     return review.confirm_review_gold(host, plate_id, persist=False, quiet=True, refresh=False)

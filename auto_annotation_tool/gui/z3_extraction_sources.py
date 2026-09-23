@@ -630,6 +630,10 @@ def refresh_preview_gt_metadata_from_current_xml(
     for crop_id, record in list(metadata.items()):
         if not isinstance(record, dict):
             continue
+        if record.get("working_gt_pack_path"):
+            # PZ2 owns a newer canonical revision. An older source XML cannot
+            # overwrite it; load reads the current working pack revision heads.
+            continue
         attrs = dict(record.get("plate_attributes") or {})
         plate_id = str(
             record.get("source_annotation_id")

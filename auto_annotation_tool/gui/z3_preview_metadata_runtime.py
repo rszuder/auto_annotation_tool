@@ -70,6 +70,8 @@ def _preview_uses_plate_gt_contract(self, data: dict | None = None) -> bool:
     if not isinstance(source_data, dict):
         return False
 
+    if source_data.get("working_annotation"):
+        return True
     if self._get_preview_ground_truth_text(source_data):
         return True
 
@@ -1091,6 +1093,8 @@ def _restore_preview_plate_history_snapshot(self, snapshot, *, action_label: str
     try:
         restored_data = copy.deepcopy(snapshot if isinstance(snapshot, dict) else {})
         self.preview_metadata[pid] = restored_data
+        from .z3_plate_gt_runtime import refresh_working_ground_truth
+        refresh_working_ground_truth(self, {pid: restored_data})
 
         # Reopen existing REVIEW/GOLD, but keep a pre-review snapshot as a
         # prediction. Marking its empty canonical layer would hide RAW on undo.
