@@ -8,6 +8,7 @@ from tkinter import ttk
 
 from ..config import logger
 from .canvas_progress_overlay import CanvasProgressOverlay
+from .z3_badge_legend import CharacterBadgeLegend
 from .z3_detection_guard_dialog import prompt_pz2_detection_guard_options
 from .z3_detection_runtime import (
     confirm_last_detection_result,
@@ -383,6 +384,8 @@ def build_detection_tab(
         takefocus=1,
     )
     self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+    self.preview_badge_legend = CharacterBadgeLegend(self.preview_canvas_host, self)
+    self.preview_badge_legend.grid(row=1, column=0, sticky="ew")
     self.preview_canvas.bind("<Configure>", self._on_preview_canvas_configure)
     self.preview_canvas.bind("<Map>", self._on_preview_canvas_configure, add="+")
     self.preview_canvas.bind("<Enter>", self._on_preview_canvas_enter, add="+")

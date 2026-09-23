@@ -45,8 +45,10 @@ class WorkspaceDrawers:
             pane_ids = tuple(str(item) for item in self.host.panes())
             self.original_right = str(self.panels["right"]) in pane_ids
             self.widths = {side: max(180, panel.winfo_width()) for side, panel in self.panels.items()}
+            self.widths["right"] = min(280, self.widths["right"])
             self.right_inset = (self.host.winfo_width() - self.host.sashpos(1)
                                 if self.original_right else self.widths["right"])
+            self.right_inset = min(285, self.right_inset)
             self.visible.update(left=1.0, right=float(self.original_right))
             self.right_allowed = self.original_right
             self.detached = True
@@ -125,14 +127,14 @@ class WorkspaceDrawers:
                 continue
             if side == "left":
                 button.configure(text="‹ Obrazy" if self.target[side] else "Obrazy ›")
-                button.place(x=max(0, x + panel_width), rely=.52, anchor="w")
+                button.place(x=max(0, x + panel_width), y=0, rely=.52, anchor="w")
             else:
                 button.configure(text="Status ›" if self.target[side] else "‹ Status")
                 self.place_status_toggle()
             button.lift()
 
     def place_status_toggle(self):
-        """Keep Status in the controls band, clear of the tool drawer content."""
+        """Align both side tabs below the tool drawer, outside its content."""
         if not (self.detached and self.right_allowed
                 and getattr(self.owner, "_preview_fullscreen_active", False)):
             return
@@ -140,13 +142,22 @@ class WorkspaceDrawers:
         width = self.host.winfo_width()
         panel_width = min(self.widths["right"], max(180, width - 80))
         edge = round(width - panel_width * self.visible["right"])
-        x = frame.winfo_rootx() - self.host.winfo_rootx() + frame.winfo_width() - 10
-        y = max(68, int(getattr(self.owner, "_preview_hud_bottom_in_view", 60)) + 8)
+        height = self.host.winfo_height()
+        half_height = max(button.winfo_reqheight() for button in self.buttons.values()) / 2
+        y = height * .52
+        x = edge
         slide = getattr(self.owner, "_preview_drawer_slide", None)
-        if slide is not None and slide.active:
-            x -= slide.button.winfo_reqwidth() + 8
-        y += frame.winfo_rooty() - self.host.winfo_rooty()
-        self.buttons["right"].place(x=min(edge, x), y=y, anchor="ne")
+        if slide is not None and slide.active and slide.visible > 0 and slide._geometry:
+            _, dock_x, dock_y, _, dock_height = slide._geometry
+            bottom = frame.winfo_rooty() - self.host.winfo_rooty() + dock_y + dock_height
+            y = max(y, bottom + 8 + half_height)
+            if y + half_height + 4 > height:
+                # On unusually short windows keep the handle accessible next
+                # to the drawer rather than over its last row or off-screen.
+                x = min(x, frame.winfo_rootx() - self.host.winfo_rootx() + dock_x - 8)
+        y = min(y, height - half_height - 4)
+        self.buttons["right"].place(x=x, y=round(y), rely=0, anchor="e")
+        self.buttons["left"].place_configure(y=round(y), rely=0)
         self.buttons["right"].lift()
 
     def bottom_rendered(self, canvas):

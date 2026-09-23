@@ -23,3 +23,8 @@ Workspace/
 *.engine
 
 *.log
+
+# Pytest local temporary directories
+.pytest_tmp/
+.pytest_cache/
+.pt*/

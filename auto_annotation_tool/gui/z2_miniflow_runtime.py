@@ -1574,6 +1574,8 @@ def _open_step3_from_z2_annotation_source(self) -> bool:
     if step3_run_dir is None:
         return False
     xml_path = step3_run_dir / "annotations.xml"
+    step3_manifest = self._load_annotation_run_manifest(step3_run_dir)
+    images_dir = self._resolve_existing_dir(step3_manifest.get("input_dir")) or images_dir
 
     try:
         character_tab = getattr(getattr(self, "app", None), "tabs", {}).get("characters")

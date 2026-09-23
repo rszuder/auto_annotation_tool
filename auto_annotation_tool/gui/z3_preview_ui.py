@@ -3707,6 +3707,9 @@ def load_preview_data(host, quiet=False):
             from .z3_plate_gt_runtime import refresh_working_ground_truth
             if refresh_working_ground_truth(self, loaded):
                 changed = True
+            from .z3_review_runtime import refresh_stale_automatic_working_annotations
+            if refresh_stale_automatic_working_annotations(self, loaded):
+                changed = True
             for pid, d in loaded.items():
                 if not isinstance(d, dict):
                     continue

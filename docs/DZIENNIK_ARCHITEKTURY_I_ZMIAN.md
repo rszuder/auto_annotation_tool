@@ -2960,3 +2960,429 @@ Testy:
 - `python -m py_compile auto_annotation_tool\training\character_class_distribution.py auto_annotation_tool\gui\z4_character_balance.py auto_annotation_tool\gui\z4_dataset_panels.py auto_annotation_tool\gui\z4_dataset_builder.py`;
 - `git diff --check` dla zmienionych plikow PZ1/MZ;
 - szybki test planera na datasecie `pisto` potwierdzil, ze reczny cel per znak jest uwzgledniany, a brak znaku w `train` blokuje wykonalnosc planu syntetycznego.
+
+
+## 2026-09-22: domknięcie kontraktu RAW -> REVIEW -> GOLD -> PZ3 w Z3/PZ2
+
+### Cel
+
+Po wcześniejszym rozdzieleniu eksperymentalnego wyniku detektora od ręcznej korekty doprowadzono workflow `Z3/PZ2 -> PZ3` do jawnego kontraktu stanów. Głównym celem było usunięcie sytuacji, w których wynik modelu, historia undo/redo, reload `metadata.json`, import CVAT albo sam status `perfect` mogły pośrednio nadać materiałowi znaczenie GOLD bez świadomej decyzji użytkownika.
+
+Nowa zasada domenowa:
+
+- model tworzy `RAW`;
+- człowiek pracuje w `REVIEW`;
+- człowiek jawnie zatwierdza `GOLD`;
+- `PZ3` eksportuje tylko aktualny, kwalifikowany GOLD;
+- późniejsza zmiana danych źródłowych albo anotacji unieważnia wcześniejsze zatwierdzenie lub aktualność datasetu.
+
+### Fundament przed Z3GOLD001
+
+Przed serią zmian GOLD dopięto rozdzielenie eksperymentalnego wyniku detekcji od warstwy kanonicznej:
+
+- `run_detection_stage()` uruchamia detekcję w trybie `raw_only=True`;
+- wynik modelu trafia do `raw_detection`;
+- RAW ma kontrakt `gt_blind.v1`;
+- `raw_detection.result_hash` identyfikuje zamrożony wynik detektora;
+- `raw_validation` oraz `gt_assist` mogą korzystać z ground truth dopiero po zamrożeniu RAW;
+- uruchomienie RAW nie nadpisuje kanonicznych `characters`, `status` ani układu REVIEW;
+- tryb podglądu `RAW_RESULT` czyta `raw_detection.characters`, a `FINAL` czyta kanoniczne `characters`.
+
+Ważna zasada metodologiczna: wynik RAW ma pozostać mierzalnym wynikiem modelu, a nie mieszaniną predykcji i późniejszej korekty człowieka.
+
+### Z3GOLD001 - jawne przejście RAW -> REVIEW -> GOLD
+
+Wprowadzono osobny runtime `z3_review_runtime.py` oraz jawne stany:
+
+- `REVIEW_SCHEMA = "alpr.pz2.review.v1"`;
+- `in_progress`;
+- `approved`.
+
+Nowy przepływ:
+
+1. `Uruchom RAW`
+   - tworzy lub odświeża zamrożony wynik RAW;
+   - nie nadaje GOLD.
+
+2. `RAW -> REVIEW`
+   - kopiuje `raw_detection.characters` do kanonicznych `characters`;
+   - ustawia `review_state.status = in_progress`;
+   - ustawia `status = needs_fix`;
+   - czyści autorytet GOLD.
+
+3. edycja REVIEW
+   - użytkownik poprawia boxy, znaki i układ;
+   - REVIEW pozostaje `in_progress`.
+
+4. `Zatwierdź GOLD`
+   - jest jedynym nowym, jawnym wejściem do zatwierdzenia człowieka;
+   - approval jest możliwy tylko wtedy, gdy aktualny REVIEW przechodzi walidację `perfect`;
+   - zapisuje `review_state.status = approved`;
+   - zapisuje `approved_by = human`;
+   - ustawia `gold_state.approved = true`.
+
+Zmiana UX: status `perfect` przestaje sam w sobie oznaczać, że użytkownik świadomie zatwierdził materiał. Dla nowych rekordów istotny jest jawny REVIEW/GOLD.
+
+### Z3GOLD002 - jedno źródło prawdy dla kwalifikacji PZ3
+
+Dodano `is_gold_export_eligible_data(data)` jako wspólny kontrakt kwalifikacji.
+
+Dla nowych rekordów z `review_state` wymagane są łącznie:
+
+- `status == "perfect"`;
+- `review_state.status == "approved"`;
+- approval jest aktualny;
+- `gold_state.approved == true`.
+
+Ten helper jest używany przez liczniki, kandydatów eksportu i readiness PZ3.
+
+Kompatybilność wsteczna:
+
+- rekord bez `review_state` może pozostać eksportowalny przy starym `status == perfect`;
+- jest to świadomy wyjątek tylko dla danych legacy;
+- nowy workflow nie powinien tworzyć nowych rekordów tą ścieżką.
+
+### Z3GOLD003 - approval związany z referencją GT i geometrią
+
+Dodano snapshot referencji zatwierdzenia:
+
+- `approved_reference`;
+- `source_gt_hash`;
+- rewizje GT;
+- rewizje geometrii;
+- `ground_truth_text`;
+- identyfikatory anotacji i źródła.
+
+`review_approval_is_current(data)` porównuje zatwierdzony snapshot z aktualnym stanem źródła.
+
+Jeżeli po zatwierdzeniu zmieni się:
+
+- GT;
+- rewizja GT;
+- geometria źródłowa;
+- tekst referencyjny;
+- identyfikacja anotacji;
+
+approval zostaje unieważniony:
+
+- REVIEW wraca do `in_progress`;
+- `status = needs_fix`;
+- `gold_state.approved = false`;
+- zapisywany jest powód `reference_changed`.
+
+Świadomy wyjątek: ponowne uruchomienie samego RAW nie unieważnia poprawnego GOLD, ponieważ RAW jest warstwą diagnostyczną, a nie zmianą kanonicznej anotacji człowieka.
+
+### Z3GOLD004 - każda znana mutacja człowieka ponownie otwiera REVIEW
+
+Przeprowadzono audyt wejść mutujących kanoniczny stan tablicy.
+
+Do `mark_review_edit_started(...)` dopięto m.in.:
+
+- import CVAT;
+- akceptację GT Assist;
+- ręczne wymuszenie układu `1R/2R`;
+- ręczne przesuwanie separatora rzędów;
+- zwykłe edycje boxów i znaków.
+
+Reguła:
+
+- każda istotna mutacja po zatwierdzeniu GOLD ponownie otwiera REVIEW;
+- approval nie może pozostać ważny po cichej zmianie danych.
+
+### Z3GOLD005 - undo/redo nie przywraca autorytetu GOLD
+
+Historia edytora wcześniej przechowywała cały rekord tablicy, razem ze stanem approval. Odtworzenie starego snapshotu mogło więc odtworzyć także wcześniejsze GOLD.
+
+Nowa semantyka:
+
+- undo/redo może odtworzyć zawartość anotacji;
+- undo/redo nie może odtworzyć historycznej decyzji człowieka `GOLD approved`;
+- odtworzenie historii jest samo w sobie kolejną decyzją edycyjną;
+- po restore REVIEW jest otwarty i wymaga ponownego zatwierdzenia.
+
+Zachowany zostaje zamrożony `raw_detection`.
+
+### Z3GOLD006 - spójność REVIEW/GOLD po restarcie i reloadzie metadata
+
+Dodano `reconcile_review_gold_integrity(data)`.
+
+Przy każdym ładowaniu, również w trybie `quiet`, system sprawdza stan REVIEW/GOLD bez konieczności pełnego przeliczania wszystkich statusów.
+
+Reguły fail-closed dla nowych rekordów:
+
+- `approved`, ale bez aktualnego `approved_reference` -> ponowne otwarcie REVIEW;
+- `approved`, ale bez kompletnego `gold_state.approved` albo bez `status=perfect` -> `approval_state_incomplete`;
+- `in_progress` nie może zachować `gold_state.approved=true`;
+- nieznany lub uszkodzony stan REVIEW -> `invalid_review_state`;
+- legacy bez `review_state` pozostaje nietknięte.
+
+Skutek UX: zamknięcie i ponowne uruchomienie aplikacji nie powinno samo zmienić znaczenia decyzji użytkownika.
+
+Commit:
+- `786e5ce Preserve Z3 review GOLD integrity across reloads`.
+
+### Z3GOLD007 - jedna bramka readiness dla UI i runtime eksportu
+
+Audyt wykazał rozjazd:
+
+- UI PZ3 potrafił aktywować eksport przy `selected_plate_count > 0`;
+- kanoniczny readiness kampanii wymaga `CAMPAIGN_MIN_CHAR_PLATES`, domyślnie `10`;
+- sama funkcja `run_yolo_gold_export()` nie wykonywała ponownie tej samej twardej bramki.
+
+Naprawa:
+
+- UI korzysta z `_get_step3_yolo_export_readiness_snapshot()`;
+- runtime eksportu wykonuje ten sam preflight;
+- katalog datasetu nie jest tworzony przed pozytywnym readiness;
+- komunikat blokady pochodzi z kanonicznej przyczyny readiness.
+
+Skutek UX:
+
+- przycisk nie obiecuje operacji, której backend nie powinien wykonać;
+- użytkownik widzi realny powód blokady, np. `7 / 10` tablic.
+
+Commit:
+- `e9b7d10 Enforce canonical PZ3 export readiness gate`.
+
+### Z3GOLD008 - walidacja gotowego artefaktu PZ3
+
+Preflight może widzieć poprawnych kandydatów, ale w trakcie realnego eksportu może odpaść plik, np. gdy `cv2.imread()` nie potrafi otworzyć obrazu.
+
+Dodano końcową kontrolę:
+
+`readiness <-> metadata_manifest.json <-> pliki na dysku`.
+
+Walidator sprawdza m.in.:
+
+- `plate_count` kontra liczba `items`;
+- `character_count` kontra suma znaków;
+- istnienie każdego wyeksportowanego obrazu;
+- istnienie każdego pliku etykiety;
+- liczbę wierszy YOLO kontra liczbę `characters` w manifeście;
+- zgodność liczby tablic i znaków z readiness;
+- minimum kampanii.
+
+Jeżeli kontrola nie przejdzie:
+
+- `gold_dataset_valid = false`;
+- etap nie jest oznaczany jako gotowy;
+- kampania może wrócić do `needs_rework`.
+
+Commit:
+- `38eacbd Validate PZ3 export artifact against readiness`.
+
+### Z3GOLD009 - fingerprint dokładnego źródła GOLD
+
+Finalny audyt wykazał, że stary, wcześniej poprawnie wyeksportowany dataset mógł pozostać wskazany przez `export_summary.json` nawet po późniejszej zmianie REVIEW/GOLD.
+
+Dodano fingerprint źródła GOLD:
+
+- skład wybranych tablic;
+- identyfikacja źródeł;
+- znaki;
+- bboxy;
+- rewizje GT;
+- rewizje geometrii;
+- `approved_reference`;
+- wybrane źródła i strategie.
+
+Fingerprint jest obliczany dla aktualnego zbioru kandydatów GOLD i przenoszony do:
+
+- readiness;
+- `metadata_manifest.json`;
+- `export_summary.json`.
+
+Nowy dataset PZ3 jest więc związany z dokładnym snapshotem GOLD, z którego powstał.
+
+Jeżeli później użytkownik:
+
+- zmieni znak;
+- przesunie box;
+- zmieni layout;
+- zmieni referencję GT lub geometrię;
+- zmieni skład kwalifikowanych tablic;
+
+bieżący fingerprint przestaje odpowiadać staremu eksportowi i dataset wymaga ponownego utworzenia.
+
+Usunięto również boczny warunek pozwalający traktować sam istniejący `ready_summary` jako wystarczający powód gotowości przy powrocie do grafu. Aktualna gotowość musi przejść przez readiness.
+
+Commit:
+- `b08ff70 Bind PZ3 dataset to GOLD source fingerprint`.
+
+### Aktualny kontrakt danych
+
+```text
+Uruchom RAW
+    |
+    v
+raw_detection
+contract = gt_blind.v1
+zamrożony wynik modelu
+canonical characters bez automatycznego zatwierdzenia
+    |
+    | RAW -> REVIEW
+    v
+review_state = in_progress
+status = needs_fix
+gold_state.approved = false
+    |
+    | edycja człowieka / CVAT / GT Assist / layout / separator / undo-redo
+    v
+REVIEW pozostaje lub ponownie staje się in_progress
+approval = false
+    |
+    | jawne "Zatwierdź GOLD"
+    v
+review_state = approved
+approved_reference = snapshot bieżącej referencji
+status = perfect
+gold_state.approved = true
+    |
+    | PZ3 readiness
+    v
+wspólna kwalifikacja GOLD
+minimum kampanii
+liczniki eksportowalnych tablic/znaków
+fingerprint źródła GOLD
+    |
+    | eksport
+    v
+images/ + labels/ + data.yaml
+metadata_manifest.json
+export_summary.json
+    |
+    | końcowa kontrola
+    v
+readiness == manifest == pliki == fingerprint GOLD
+```
+
+### Model mentalny użytkownika i kontekst UX
+
+Docelowy model ma być prosty:
+
+1. model coś wykrywa - `RAW`;
+2. użytkownik to sprawdza i poprawia - `REVIEW`;
+3. użytkownik świadomie zatwierdza - `GOLD`;
+4. tylko aktualny GOLD może zasilić `PZ3`;
+5. zmiana po zatwierdzeniu oznacza konieczność ponownego REVIEW/GOLD i ewentualnie ponownego eksportu.
+
+UI powinno konsekwentnie komunikować trzy różne poziomy:
+
+- `RAW` - wynik modelu, jeszcze bez autorytetu człowieka;
+- `REVIEW` - materiał w trakcie kontroli albo po zmianie;
+- `GOLD` - jawnie zatwierdzony i aktualny materiał.
+
+Najważniejsze reguły UX:
+
+- sama zielona geometria albo automatyczny `perfect` nie powinny sugerować zatwierdzenia człowieka;
+- po zmianie zatwierdzonego boxa/znaku UI powinno wyjaśniać, że wcześniejszy GOLD został unieważniony;
+- zablokowany PZ3 powinien podawać konkretną przyczynę, a nie tylko wyłączać CTA;
+- po zmianie REVIEW po wcześniejszym eksporcie UI powinno rozróżniać:
+  - dataset PZ3 aktualny;
+  - dataset PZ3 nieaktualny po zmianach;
+  - dataset wymagający ponownego eksportu;
+- readiness w UI i decyzja runtime muszą być tym samym kontraktem.
+
+### Audyt bocznych ścieżek
+
+Sprawdzono potencjalne obejścia nowego kontraktu.
+
+#### `gold_char_pool`
+
+`ensure_plate_source_metadata()` nadal ma historyczną logikę rozpoznającą katalog `gold_char_pool` i może ustawić `gold_state.approved=true` dla danych legacy.
+
+Nie stanowi to aktywnego obejścia nowych rekordów, ponieważ:
+
+- kwalifikacja przez `is_gold_export_eligible_data()` odbywa się wcześniej;
+- nowy rekord z `review_state` nadal wymaga `review_state=approved`;
+- approval musi być aktualny względem `approved_reference`.
+
+Mechanizm pozostaje jako kompatybilność historyczna, nie jako nowa ścieżka zatwierdzania.
+
+#### Detekcja poza RAW
+
+Nie znaleziono drugiego aktywnego wejścia do nowej detekcji, które zapisywałoby wynik modelu bezpośrednio jako kanoniczny GOLD.
+
+Aktualny `run_detection_stage()` prowadzi do `_run_fast_ocr_test()` z `raw_only=True`.
+
+### Testy i weryfikacja
+
+Seria Z3GOLD była rozwijana małymi krokami z osobnymi testami kontraktowymi.
+
+Zakres regresji obejmował m.in.:
+
+- rozdzielenie RAW/REVIEW;
+- GT-blind RAW;
+- podgląd RAW_RESULT;
+- REVIEW/GOLD;
+- zmianę referencji;
+- wszystkie znane wejścia mutujące REVIEW;
+- undo/redo;
+- reload metadata;
+- kwalifikację PZ3;
+- hard readiness gate;
+- zgodność artefaktu eksportu;
+- fingerprint źródła GOLD.
+
+W trakcie Z3GOLD008 pełny zestaw dał:
+
+- `102 passed`;
+- `2 errors` wyłącznie przy fixture `tk.Tk()`.
+
+Błędy środowiskowe:
+
+- lokalna instalacja Python 3.12 nie miała kompletnego `tk.tcl`;
+- testy nie weszły do właściwej logiki GUI;
+- ponowna regresja bez pliku zależnego od Tk przeszła.
+
+To ograniczenie środowiska testowego, nie znany błąd kontraktu GOLD.
+
+### Historia commitów serii
+
+- `4e7ad68` - `Add explicit Z3 RAW review and GOLD approval`
+- `1ad1400` - `Unify Z3 GOLD and PZ3 eligibility contract`
+- `a6c4de8` - `Invalidate Z3 GOLD approval when reference changes`
+- `87db713` - `Reopen Z3 review on all human mutation paths`
+- `1ad1507` - `Prevent Z3 undo redo from restoring GOLD approval`
+- `786e5ce` - `Preserve Z3 review GOLD integrity across reloads`
+- `e9b7d10` - `Enforce canonical PZ3 export readiness gate`
+- `38eacbd` - `Validate PZ3 export artifact against readiness`
+- `b08ff70` - `Bind PZ3 dataset to GOLD source fingerprint`
+
+### Świadoma kompatybilność legacy
+
+Dwa wyjątki pozostają celowo:
+
+1. stare rekordy bez `review_state`;
+2. stare `export_summary.json` bez fingerprintu źródłowego GOLD.
+
+Nowe rekordy i nowe eksporty korzystają z pełnego kontraktu. Wyjątki są zachowane po to, aby nie zerwać istniejących projektów i historycznych danych.
+
+### Stan po audycie
+
+Dla nowego workflow kontrakt `RAW -> REVIEW -> GOLD -> PZ3` jest uznany za architektonicznie domknięty.
+
+Nie dokładamy kolejnych zabezpieczeń bez konkretnego błędu. Następny krok powinien być manualnym testem end-to-end na realnym materiale:
+
+1. uruchomić RAW;
+2. przejść do REVIEW;
+3. poprawić co najmniej jeden box i jeden znak;
+4. zatwierdzić GOLD;
+5. wyeksportować PZ3;
+6. wrócić do PZ2;
+7. zmienić jeden zatwierdzony box albo znak;
+8. potwierdzić, że stary dataset przestaje odpowiadać aktualnemu fingerprintowi;
+9. ponownie zatwierdzić GOLD;
+10. ponownie wyeksportować PZ3.
+
+### Zasada stabilizacyjna na dalszy rozwój Z3
+
+Nie wracamy do modelu, w którym `perfect`, położenie pliku albo wynik detektora same nadają autorytet GOLD.
+
+Autorytet danych treningowych ma trzy warstwy:
+
+- predykcja modelu jest obserwacją;
+- REVIEW jest pracą człowieka;
+- GOLD jest jawną decyzją człowieka powiązaną z konkretną referencją i konkretnym stanem anotacji.
+
+PZ3 ma konsumować wyłącznie materiał, którego ten kontrakt potrafi jednoznacznie udowodnić.

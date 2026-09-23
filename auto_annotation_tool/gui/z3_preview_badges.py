@@ -643,14 +643,14 @@ def draw_preview_source_legend(host, canvas, x: float, y: float):
 def get_preview_badge_component_style(host, component_key: str) -> dict:
     normalized = str(component_key or "").strip().lower().replace("-", "_")
     mapping = {
-        "manual": ("manual", "M", "Reczne"),
-        "manual_box": ("manual", "MB", "Manual box"),
-        "manual_sign": ("manual", "MS", "Manual znak"),
+        "manual": ("manual", "M", "Ręczne"),
+        "manual_box": ("manual", "MB", "Ramka ręczna"),
+        "manual_sign": ("manual", "MS", "Znak ręczny"),
         "gt_assisted": ("manual", "GT", "Znak z GT"),
-        "generated_box": ("ocr", "GB", "Box segmentowany"),
-        "ocr_symbol": ("ocr", "OS", "OCR znak"),
-        "yolo_box": ("yolo_box", "YB", "YOLO box"),
-        "yolo_symbol": ("yolo_symbol", "YS", "YOLO znak"),
+        "generated_box": ("ocr", "GB", "Ramka z segmentacji OCR"),
+        "ocr_symbol": ("ocr", "OS", "Znak z OCR"),
+        "yolo_box": ("yolo_box", "YB", "Ramka z YOLO"),
+        "yolo_symbol": ("yolo_symbol", "YS", "Znak z YOLO"),
     }
     source_key, label, legend = mapping.get(normalized, mapping["ocr_symbol"])
     base_style = dict(get_preview_source_visual_style(host, source_key))
@@ -667,6 +667,7 @@ def get_preview_source_component_legend_items(host) -> list[dict]:
         {"component": "ocr_symbol"},
         {"component": "yolo_box"},
         {"component": "yolo_symbol"},
+        {"component": "gt_assisted"},
     ]
 
 

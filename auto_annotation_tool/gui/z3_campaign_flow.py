@@ -1209,6 +1209,18 @@ def open_campaign_step3_entry(
         latest_xml = str(max(xml_files, key=lambda p: p.stat().st_mtime)) if xml_files else ""
     _mark_entry_phase("source_resolution")
 
+    # A usable run XML can still contain rejected or unreviewed polygons. Bind
+    # the exact approved snapshots before checking/reusing old crop metadata.
+    from .z3_approved_source import source_for_campaign
+    try:
+        approved_source = source_for_campaign(CAMPAIGN)
+    except (OSError, ValueError) as exc:
+        host._set_extraction_status(str(exc), "error")
+        return {"ok": False, "reason": "approved_source_invalid", "message": str(exc)}
+    latest_xml = str(approved_source["xml_path"])
+    preferred_run_dir = approved_source["run_dir"]
+    folder = approved_source["images_dir"]
+    using_preferred_source = True
     entry_preview_key = _campaign_preview_entry_key(latest_xml, folder)
     reuse_loaded_preview = _can_reuse_campaign_preview(host, entry_preview_key)
     if not reuse_loaded_preview:
@@ -1506,6 +1518,13 @@ def open_campaign_step3_entry(
 
     def _can_continue_forced_pz3_without_reextract(refresh_state: dict | None = None) -> bool:
         if not force_dataset_entry:
+            return False
+        # Completed PZ2 work cannot make a crop set from rejected geometry
+        # current. A changed approved source must pass through extraction.
+        if refresh_state and refresh_state.get("reason") in {
+            "preview_source_mismatch", "source_xml_changed", "source_run_changed",
+            "source_xml_newer_than_preview",
+        }:
             return False
         try:
             if host.can_restore_step3_substep(3):

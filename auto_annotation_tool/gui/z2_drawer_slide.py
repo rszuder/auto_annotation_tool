@@ -76,8 +76,9 @@ class PreviewDrawerSlide:
         if self.active:
             self.button.lift()
         drawers = getattr(self.owner, "_preview_workspace_drawers", None)
-        if drawers is not None:
-            drawers.place_status_toggle()
+        place_status_toggle = getattr(drawers, "place_status_toggle", None)
+        if callable(place_status_toggle):
+            place_status_toggle()
 
     def _tick(self):
         self._job = None

@@ -278,6 +278,14 @@ def test_status_handle_stays_clear_of_tool_drawer_through_slide_and_resize(scene
                 assert separate(handle, bounds(slide.panel))
                 assert separate(handle, bounds(slide.button))
                 assert separate(handle, bounds(host.main_right_frame))
+                left_handle = bounds(drawer.buttons["left"])
+                assert abs((handle[1] + handle[3]) - (left_handle[1] + left_handle[3])) <= 2
+                if size == "1100x680":
+                    assert handle[1] >= bounds(slide.panel)[3] + 6
+    drawer.sync_right_visibility(False)
+    root.update()
+    left_handle = bounds(drawer.buttons["left"])
+    assert left_handle[3] <= host.main_pane.winfo_rooty() + host.main_pane.winfo_height()
 
 
 def test_right_panel_does_not_absorb_extra_window_width_after_fs(scene):
@@ -289,3 +297,30 @@ def test_right_panel_does_not_absorb_extra_window_width_after_fs(scene):
     root.geometry("1400x680")
     root.update()
     assert host.main_right_frame.winfo_width() == before
+
+
+def test_layout_reclaims_canvas_space_from_a_restored_528px_sidebar(scene):
+    root, host, drawer, clock, _ = scene
+    root.geometry("1492x702")
+    host.main_pane.pane(host.main_center_frame, weight=6)
+    host.main_pane.pane(host.main_left_frame, weight=2)
+    host.main_pane.pane(host.main_right_frame, weight=0)
+    root.update()
+    host.main_pane.sashpos(1, 959)
+    host.main_pane.sashpos(0, 318)
+    root.update()
+    assert host.main_right_frame.winfo_width() == 528
+    before_canvas = host.main_center_frame.winfo_width()
+    host._main_pane_layout_initialized = True
+    host._pane_has_child = lambda pane, child: str(child) in tuple(map(str, pane.panes()))
+    host._get_main_pane_width_limits = lambda: layout._get_main_pane_width_limits(host)
+    host._sync_main_pane_right_panel_visibility = lambda: layout._sync_main_pane_right_panel_visibility(host)
+    workflow._apply_main_pane_layout(host, force_defaults=False)
+    root.update()
+    assert host.main_right_frame.winfo_width() <= 280
+    assert host.main_center_frame.winfo_width() >= before_canvas + 248
+    assert host.main_left_frame.winfo_width() == 318
+    enter(scene)
+    interaction._set_preview_fullscreen(host, False)
+    advance(scene)
+    assert host.main_right_frame.winfo_width() <= 280

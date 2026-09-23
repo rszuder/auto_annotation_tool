@@ -118,6 +118,30 @@ def test_drawers_move_without_resizing_canvas_or_rerendering(scene):
     owner._schedule_preview_stabilized_rerender.assert_not_called()
 
 
+def test_shared_tool_drawer_animates_with_pz2_workspace_controller(scene):
+    from auto_annotation_tool.gui.z2_drawer_slide import PreviewDrawerSlide
+    from auto_annotation_tool.gui.app_theme_definitions import get_theme_palette
+
+    root, owner, drawer, clock, entry = scene
+    errors = []
+    root.report_callback_exception = lambda *args: errors.append(args)
+    enter(scene)
+    owner.app.palette = get_theme_palette()
+    owner.preview_overlay_dock = tk.Frame(owner.preview_lf)
+    slide = PreviewDrawerSlide(owner, host=owner.preview_lf, clock=lambda: clock[0])
+    slide.place(1200, 1000, 68, 180, 260, fullscreen=True, toggle_y=68)
+    for _ in range(4):
+        # Exercise the actual Tk button callback used by PZ2.
+        slide.button._invoke()
+        slide._cancel()
+        clock[0] += .3
+        slide._tick()
+        root.update()
+        assert slide.visible == (0.0 if slide.hidden else 1.0)
+    assert not errors
+    assert entry.get() == "0.25"
+
+
 def test_reversal_continues_from_current_position_and_preserves_original_window(scene):
     root, owner, drawer, clock, entry = scene
     preview.set_preview_fullscreen(owner, True)

@@ -2115,6 +2115,16 @@ def _continue_campaign_pz1_to_pz2(host) -> bool:
 def run_extraction(host) -> None:
     self = host
     campaign_step3_active = _campaign_step3_context_active(self)
+    if campaign_step3_active:
+        from .z3_approved_source import bind_approved_source, source_for_campaign
+        try:
+            bind_approved_source(self, source_for_campaign(CAMPAIGN))
+        except (OSError, ValueError) as exc:
+            self._show_campaign_extract_failure_modal(
+                title="Nie mogę przygotować zatwierdzonych tablic",
+                message=str(exc), tone="error", default_action="repair", allow_retry=False,
+            )
+            return
     if self._is_extract_preview_ready():
         plate_count = self._get_extract_preview_ready_count()
         self._refresh_extract_action_state()

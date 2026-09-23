@@ -11,6 +11,7 @@ from auto_annotation_tool.data_models import Detection, ImageAnnotation
 from auto_annotation_tool.gui import z2_import_workflow, z2_preview_state, z2_preview_workflow, z2_preview_editor
 from auto_annotation_tool.gui.z2_auto_run_result import protected_view_bundle, vehicle_assistance_visible
 from auto_annotation_tool.plate_import_validation import plate_import_error
+from auto_annotation_tool.gui.z2_restore_semantics import exclude_restored_vehicle_plate_conflicts
 
 
 def plate(box, **attrs):
@@ -143,3 +144,56 @@ def test_multiclass_model_only_converts_plate_class_and_keeps_keypoint_index(mon
 
 def test_plate_model_class_aliases_are_accepted():
     assert plate_class_ids(["number_plate", "vehicle", "tablica"]) == {0, 2}
+
+
+def test_restore_filters_stale_vehicle_plate_even_after_vehicle_boxes_were_removed(tmp_path):
+    import json
+    from auto_annotation_tool.gui import z2_restore_workflow
+    project = tmp_path / "project"
+    source = project / "import" / "annotations.xml"
+    run = project / "result"
+    source.parent.mkdir(parents=True)
+    run.mkdir()
+    (project / "_campaign_state").mkdir()
+    (project / "_campaign_state/project.json").write_text(json.dumps({
+        "project": {"project_start_plate_source_xml": str(source)}}), encoding="utf-8")
+    bad = '<polygon label="plate" source="auto" points="131,188;531,188;531,556;131,556"><attribute name="plate_annotation_id">stale</attribute></polygon>'
+    vehicle = '<box label="vehicle" xtl="130" ytl="188" xbr="531" ybr="556"/>'
+    manual = '<polygon label="plate" source="manual" points="180,430;250,430;250,470;180,470"><attribute name="ground_truth_text">BI360FE</attribute></polygon>'
+    template = '<annotations><image name="BI360FE.jpg" width="640" height="640">{}</image></annotations>'
+    source.write_text(template.format(vehicle + bad), encoding="utf-8")
+    xml = run / "annotations.xml"
+    xml.write_text(template.format(bad + manual), encoding="utf-8")
+    before = xml.read_bytes()
+    manifest = {"annotation_run_type": "auto_annotation"}
+    owner = SimpleNamespace(
+        _bbox_from_polygon=lambda p: (min(x for x,y in p), min(y for x,y in p), max(x for x,y in p), max(y for x,y in p)),
+        _keypoints_from_polygon=lambda p: [(x,y,1.) for x,y in p],
+        _resolve_safe_annotation_run_dir=lambda p, **kw: p,
+        _load_annotation_run_manifest=lambda p: manifest,
+        _mark_auto_plate_origin_for_annotations=lambda a: None,
+        _is_plate_detection_label=lambda name: name == "plate",
+    )
+    owner._parse_cvat_preview_annotations = lambda p: z2_preview_workflow._parse_cvat_preview_annotations(owner, p)
+    restored = []
+    # Stop after the actual restore-preparation path has parsed and repaired
+    # shapes, before unrelated image discovery or UI state is needed.
+    owner._resolve_run_image_dir_for_annotations = lambda annotations, *a, **kw: restored.extend(annotations)
+    z2_restore_workflow._prepare_annotation_run_restore_payload(owner, run)
+    assert len(restored) == 1 and len(restored[0].plates) == 1
+    assert restored[0].plates[0].attributes["ground_truth_text"] == "BI360FE"
+    assert z2_preview_state._get_plate_detections(owner, restored[0]) == restored[0].plates
+    assert len(restored[0]._excluded_vehicle_plate_conflicts) == 1
+    assert xml.read_bytes() == before
+    assert exclude_restored_vehicle_plate_conflicts(owner, restored, run, manifest) == 0
+    reviewed = owner._parse_cvat_preview_annotations(xml)
+    assert exclude_restored_vehicle_plate_conflicts(owner, reviewed, run, {"approved_filenames": ["BI360FE.jpg"]}) == 1
+    assert len(reviewed[0].plates) == 1
+    for attr, value in (("ground_truth_text", "EXPLICIT"), ("manually_edited", "true"),
+                        ("plate_annotation_id", "new-detection")):
+        corrected = owner._parse_cvat_preview_annotations(xml)
+        corrected[0].plates[0].attributes[attr] = value
+        assert exclude_restored_vehicle_plate_conflicts(owner, corrected, run, manifest) == 0
+    corrected = owner._parse_cvat_preview_annotations(xml)
+    corrected[0].plates[0].polygon[0] = (150, 200)
+    assert exclude_restored_vehicle_plate_conflicts(owner, corrected, run, manifest) == 0

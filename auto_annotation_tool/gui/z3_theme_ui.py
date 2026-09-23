@@ -683,6 +683,8 @@ def apply_character_annotation_theme(host, progress_bar_cls) -> None:
         )
         if hasattr(self, "preview_canvas_host"):
             self.preview_canvas_host.configure(bg="#1e1e1e")
+        if hasattr(self, "preview_badge_legend"):
+            self.preview_badge_legend.refresh()
     except Exception:
         pass
 

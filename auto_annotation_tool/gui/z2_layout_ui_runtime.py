@@ -459,7 +459,7 @@ def _restore_right_panel_content_after_fullscreen(self):
 
     try:
         if not self._pane_has_child(pane, right_frame):
-            pane.add(right_frame, weight=1)
+            pane.add(right_frame, weight=0)
     except Exception:
         pass
 

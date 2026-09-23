@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import math
 from datetime import datetime
 from tkinter import messagebox
@@ -270,8 +272,82 @@ def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -
         except Exception:
             pass
 
+def _working_annotation_fingerprint(data):
+    """Hash editable content, excluding display caches and serialization backfills."""
+    payload = {key: data.get(key) for key in (
+        "ground_truth_text", "plate_layout", "plate_layout_override",
+        "plate_layout_separator_y", "layout_override_source", "layout_override_updated_at",
+    )}
+    payload["characters"] = [{
+        "bbox": [float(value) for value in rec.get("bbox", [])],
+        **{key: rec.get(key) for key in ("character", "box_source", "sign_source")},
+    } for rec in data.get("characters", [])]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def can_refresh_automatic_working_annotation(data):
+    """Only replace a stale, untouched automatic preview; unknown history stays protected."""
+    raw = data.get("raw_detection") or {}
+    working = data.get("working_annotation") or {}
+    state = data.get("review_state") or {}
+    source = data.get("source_info") or {}
+    if not all(isinstance(value, dict) for value in (raw, working, state, source)):
+        return False
+    if (data.get("last_detection") or {}).get("execution_mode") == "raw_evidence":
+        return False
+    old_hash = working.get("source_raw_result_hash")
+    if (not old_hash or not raw.get("result_hash") or raw["result_hash"] == old_hash
+            or state.get("raw_result_hash") != old_hash
+            or state.get("status") != REVIEW_IN_PROGRESS
+            or state.get("source") != "raw_detection"
+            or state.get("human_edited") or state.get("reopened_at")
+            or state.get("approved_at") or state.get("approved_reference")
+            or (data.get("gold_state") or {}).get("approved")
+            or data.get("status") == "perfect"
+            or data.get("fusion_strategy") != "review_from_raw"):
+        return False
+    if source and (source.get("last_modified_by") != "system"
+                   or source.get("bucket") != "auto_preview"
+                   or source.get("origin") != "pz2_detect"):
+        return False
+    baseline = working.get("automatic_content_hash")
+    if baseline:
+        try:
+            return baseline == _working_annotation_fingerprint(data)
+        except (TypeError, ValueError, AttributeError):
+            return False
+    # Legacy materializations did not store a content hash. Require all their
+    # independent provenance markers to confirm no review action took place.
+    prepared = working.get("prepared_at")
+    if (not source or not prepared or state.get("started_at") != prepared
+            or state.get("modified_at") != prepared
+            or data.get("layout_override_updated_at")
+            or data.get("layout_override_source")
+            or not data.get("characters")):
+        return False
+    try:
+        if datetime.fromisoformat(source["last_modified_at"]).replace(tzinfo=None) != datetime.fromisoformat(prepared).replace(tzinfo=None):
+            return False
+    except (KeyError, TypeError, ValueError):
+        return False
+    return all(isinstance(rec, dict) and not any(str(rec.get(key) or "").lower().startswith(("manual", "cvat", "human"))
+                       for key in ("method", "source_tag", "box_source", "sign_source", "correction_source"))
+               for rec in data["characters"])
+
+
+def refresh_stale_automatic_working_annotations(host, metadata):
+    """Recover stale previews on loading a run, without rerunning inference."""
+    changed = False
+    for pid, data in metadata.items():
+        if (isinstance(data, dict)
+                and (data.get("last_detection") or {}).get("execution_mode") == "annotation"
+                and can_refresh_automatic_working_annotation(data)):
+            changed = prepare_working_annotation_from_raw(host, data, plate_id=pid) or changed
+    return changed
+
+
 def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=False):
-    """Materialize once; a rerun must preserve existing human work and approval."""
+    """Refresh untouched automatic results; preserve human work and approvals."""
     if not isinstance(data, dict) or not isinstance(data.get("raw_detection"), dict):
         return False
     if not overwrite and (get_review_state_status(data) or data.get("characters")
@@ -279,7 +355,8 @@ def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=Fa
                           or data.get("fusion_strategy") in {"manual_correction", "manual", "cvat_import"}
                           or (data.get("gold_state") or {}).get("approved")
                           or str(data.get("status") or "") == "perfect"):
-        return False
+        if not can_refresh_automatic_working_annotation(data):
+            return False
     pid = plate_id
     raw_detection = data["raw_detection"]
     raw_chars = raw_detection.get("characters") or []
@@ -347,6 +424,7 @@ def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=Fa
         "schema": "alpr.pz2.working.v1", "prepared_at": now,
         "source_raw_result_hash": raw_hash,
         "preparation": "gt_assisted" if plate_gt(data) else "pipeline",
+        "automatic_content_hash": _working_annotation_fingerprint(data),
     }
     return True
 
@@ -523,6 +601,7 @@ def mark_review_edit_started(host, data: dict | None):
     state["schema"] = REVIEW_SCHEMA
     state["status"] = REVIEW_IN_PROGRESS
     state["modified_at"] = now
+    state["human_edited"] = True
     state["approved_at"] = None
     state.pop("approved_reference", None)
     if not str(state.get("source", "") or "").strip():

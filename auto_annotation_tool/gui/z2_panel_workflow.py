@@ -3120,7 +3120,7 @@ def _apply_main_pane_layout(self, *, force_defaults: bool = False):
             total_width = int(pane.winfo_width() or pane.winfo_reqwidth() or 0)
         except Exception:
             total_width = 0
-        if total_width <= 0:
+        if total_width <= 1:
             return
 
         left_min, right_min = self._get_main_pane_width_limits()
@@ -3174,14 +3174,17 @@ def _apply_main_pane_layout(self, *, force_defaults: bool = False):
         desired_second = default_second if force_defaults or not self._main_pane_layout_initialized else current_second
 
         desired_left = max(left_min, min(int(desired_left), max_left))
-        desired_second = max(desired_left + center_min, int(desired_second))
+        # Startup/restore can retain a much wider sash even though the frame
+        # requested 280 px. Apply the limit to the allocated pane on every pass.
+        desired_second = max(desired_left + center_min, total_width - 280, int(desired_second))
         desired_second = min(desired_second, max_second)
 
         try:
-            if abs(int(current_left) - int(desired_left)) > 1:
-                pane.sashpos(0, int(desired_left))
             if abs(int(current_second) - int(desired_second)) > 1:
                 pane.sashpos(1, int(desired_second))
+            # ttk may redistribute the earlier panes when the right sash moves.
+            if abs(int(pane.sashpos(0)) - int(desired_left)) > 1:
+                pane.sashpos(0, int(desired_left))
             self._main_pane_layout_initialized = True
         except Exception:
             pass

@@ -200,7 +200,7 @@ def _build_campaign_char_effective_source(self) -> dict:
             contributor_approved_token = ""
 
     source_state = {
-        "builder_version": 4,
+        "builder_version": 5,
         "approved_manifest_token": self._build_path_change_token(approved_manifest_path),
         "contributor_run_dir": str(contributor_run_dir or ""),
         "contributor_manifest_token": self._build_path_change_token(contributor_manifest_path),
@@ -268,7 +268,6 @@ def _build_campaign_char_effective_source(self) -> dict:
             contributor_entries = list(
                 self._build_campaign_plate_approved_entries_from_run(
                     contributor_run_dir,
-                    extra_included_filenames=preview_source_filenames,
                 ) or []
             )
         except Exception:
@@ -292,8 +291,6 @@ def _build_campaign_char_effective_source(self) -> dict:
                 }
         except Exception:
             contributor_approved_lookup = set()
-        if preview_source_filenames:
-            contributor_approved_lookup |= set(preview_source_filenames)
         if contributor_approved_lookup:
             filtered_entries: list[dict] = []
             for entry in contributor_entries:
@@ -330,7 +327,8 @@ def _build_campaign_char_effective_source(self) -> dict:
         entry_key = self._get_campaign_plate_entry_merge_key(entry)
         if not entry_key:
             continue
-        merged_entries[entry_key] = dict(entry)
+        # A stale run XML must not replace already reviewed polygon snapshots.
+        merged_entries.setdefault(entry_key, dict(entry))
 
     merged_list = list(merged_entries.values())
     if not merged_list:
@@ -1818,6 +1816,10 @@ def _build_campaign_plate_approved_entries_from_run(
         return []
 
     manifest = self._load_annotation_run_manifest(safe_run_dir)
+    # Reopening/synchronizing an old XML must not re-admit rejected polygons
+    # merely because the containing image has an OK flag.
+    from .z2_restore_semantics import exclude_restored_vehicle_plate_conflicts
+    exclude_restored_vehicle_plate_conflicts(self, annotations, safe_run_dir, manifest)
     explicit_approval_enabled = isinstance(manifest, dict) and "approved_filenames" in manifest
     approved_filenames = (
         self._get_preview_approved_filenames()
@@ -2516,6 +2518,14 @@ def _prepare_approved_step3_source_from_z2_run(self, run_dir: Path, images_dir: 
     safe_run_dir = self._resolve_safe_annotation_run_dir(run_dir, require_xml=True)
     if safe_run_dir is None:
         return None
+
+    if not self._is_free_mode_session_context():
+        from .z3_approved_source import source_for_campaign
+        try:
+            return source_for_campaign(CAMPAIGN)["run_dir"]
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Brak zatwierdzonego źródła Z3", str(exc), parent=self.frame.winfo_toplevel())
+            return None
 
     approval_state = self._get_run_plate_strict_approved_state(safe_run_dir)
     if not approval_state.get("ok"):
