@@ -81,7 +81,7 @@ def test_char_route_defaults_gt_mode_on(monkeypatch):
     )
     host = SimpleNamespace(_is_free_mode_session_context=lambda: False)
     assert inline.gt_mode_enabled(host) is True
-    assert inline.gt_required_for_current_route(host) is True
+    assert inline.gt_required_for_current_route(host) is False
 
 
 def test_plate_route_keeps_gt_available_but_optional(monkeypatch):

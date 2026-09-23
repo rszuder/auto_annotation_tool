@@ -629,7 +629,6 @@ def _force_render_campaign_graph_t06_right_panel(
         and int(gt_count or 0) >= int(total_plates or 0)
         and int(gt_missing or 0) == 0
     )
-    ready = bool(ready and gt_ready)
     rows.append(
         (
             "GT numerów tablic",
@@ -925,8 +924,6 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         or 0
     )
     gt_ready = bool(gate_state.get("gt_ready", True))
-    if approval_iteration_target == "char":
-        ready = bool(ready and gt_ready)
     if gate_id == "T02":
         ready = bool(missing_plates <= 0)
     tone = "success" if ready else "warning"
@@ -1596,16 +1593,9 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
                 "expected_total_plates": int(expected_gt_total),
                 "gt_plates": int(gt_count),
                 "missing_gt": int(gt_missing),
-                "ready": bool(
-                    int(expected_gt_total) > 0
-                    and int(gt_count) >= int(expected_gt_total)
-                    and int(gt_missing) == 0
-                ),
+                "geometry_ready": bool(int(expected_gt_total) > 0),
+                "gt_complete": bool(int(expected_gt_total) > 0 and int(gt_missing) == 0),
             }
-        )
-        approve_ready = bool(
-            approve_ready
-            and char_gt_readiness.get("ready")
         )
 
     approval_action = ""
@@ -2074,7 +2064,7 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             char_gt_readiness.get("gt_plates", 0) or 0
         )
         gt_ready = bool(
-            char_gt_readiness.get("ready", False)
+            char_gt_readiness.get("gt_complete", False)
         )
         approve_hint_table_rows.append(
             (
@@ -3655,29 +3645,6 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
                 int(char_gt_state.get("missing_gt", 0) or 0),
                 max(0, int(gt_total) - int(gt_count)),
             )
-            if gt_total > 0 and gt_missing > 0:
-                self._refresh_step2_action_states()
-                missing_images = list(
-                    char_gt_state.get("missing_images", []) or []
-                )
-                examples = ", ".join(missing_images[:4])
-                examples_line = (
-                    f"\nPrzykładowe obrazy: {examples}."
-                    if examples
-                    else ""
-                )
-                return messagebox.showwarning(
-                    "Brakuje GT tablic",
-                    (
-                        "Tor znaków wymaga numeru GT dla każdej "
-                        "zatwierdzonej tablicy.\n\n"
-                        f"GT kompletne: {gt_count}/{gt_total}.\n"
-                        f"Brak GT: {gt_missing}."
-                        f"{examples_line}\n\n"
-                        "W Z2 włącz filtr „Brak GT”. Czerwone pozycje wskazują zdjęcia "
-                        "do poprawy. Uzupełnij GT każdej ramki, a następnie oznacz zdjęcie jako OK."
-                    ),
-                )
 
         if approval_total_plates <= 0 and not (
             (approval_iteration_target == "plate" and cumulative_plate_gate_ready)

@@ -10,11 +10,19 @@ def test_inline_gt_debounce_is_long_enough_to_avoid_mid_typing_flush():
     assert z2_plate_gt_inline.INLINE_SAVE_DELAY_MS >= 2000
 
 
-def test_inline_commit_uses_lightweight_persistence_path():
-    source = inspect.getsource(z2_plate_gt_inline._commit_record)
-    assert "lightweight_save=True" in source
-    assert "retry_pack_pending=False" in source
-    assert "refresh_gate=False" in source
+def test_inline_commit_queues_persistence_without_a_synchronous_save(monkeypatch):
+    host, ann, det = SimpleNamespace(), object(), SimpleNamespace(attributes={})
+    record = {"ann": ann, "det": det, "var": SimpleNamespace(get=lambda: "AB123")}
+    monkeypatch.setattr(z2_plate_gt_inline, "_editor_store", lambda h: {"active": record})
+    monkeypatch.setattr(z2_plate_gt_inline, "_cancel_pending_save", Mock())
+    monkeypatch.setattr(z2_plate_gt_inline, "_force_uppercase", Mock())
+    queue = Mock(return_value=(True, "AB123"))
+    monkeypatch.setattr(z2_plate_gt_inline, "queue_inline_plate_gt_value", queue)
+    direct = Mock(side_effect=AssertionError("No synchronous save while typing"))
+    monkeypatch.setattr(z2_plate_gt_inline, "save_inline_plate_gt_value", direct)
+    assert z2_plate_gt_inline._commit_record(host, "active") == "break"
+    queue.assert_called_once_with(host, ann, det, "AB123")
+    direct.assert_not_called()
 
 
 def test_lightweight_gt_save_skips_heavy_preview_refreshes():

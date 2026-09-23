@@ -36,7 +36,7 @@ def test_all_gt_is_ready():
     assert result["missing_images"] == []
 
 
-def test_missing_gt_blocks_char_readiness():
+def test_missing_gt_does_not_block_geometry_readiness():
     result = summarize_char_gt_entries(
         [
             entry("a", "a.jpg", [plate("AA111"), plate(None)]),
@@ -47,7 +47,9 @@ def test_missing_gt_blocks_char_readiness():
     assert result["total_plates"] == 3
     assert result["gt_plates"] == 2
     assert result["missing_gt"] == 1
-    assert result["ready"] is False
+    assert result["ready"] is True
+    assert result["geometry_ready"] is True
+    assert result["gt_complete"] is False
     assert result["missing_images"] == ["a.jpg"]
 
 

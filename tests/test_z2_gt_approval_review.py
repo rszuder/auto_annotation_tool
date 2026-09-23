@@ -80,9 +80,9 @@ def host(monkeypatch):
     return owner
 
 
-@pytest.mark.parametrize("texts,can_approve", [((), False), (("",), False), (("AA123", ""), False),
-                                              (("AA123", "BB234"), True), (("  - ",), False)])
-def test_character_route_requires_explicit_gt_for_each_plate(host, texts, can_approve):
+@pytest.mark.parametrize("texts,can_approve", [((), False), (("",), True), (("AA123", ""), True),
+                                              (("AA123", "BB234"), True), (("  - ",), True)])
+def test_character_route_can_approve_geometry_without_gt(host, texts, can_approve):
     ann = annotation("AA123_BB234_001.jpg", *texts)
     assert host._preview_annotation_can_be_approved_for_export(ann) is can_approve
 
@@ -95,7 +95,7 @@ def test_other_routes_allow_geometry_approval_without_gt(host, monkeypatch, free
 
 
 @pytest.mark.parametrize("cached", [False, True])
-def test_old_ok_with_missing_gt_is_red_problem_even_if_reused(host, cached):
+def test_old_geometry_approval_remains_valid_without_text_gt(host, cached):
     ann = annotation("old.jpg", "AA123", "")
     ann._approved_for_training = True
     host.current_annotations = [ann]
@@ -103,23 +103,23 @@ def test_old_ok_with_missing_gt_is_red_problem_even_if_reused(host, cached):
     host._campaign_reuse_manual_filenames = {"old.jpg"}
     if cached:
         state._build_preview_list_render_state_cache(host)
-        assert host._get_preview_list_render_state(ann)["approved"] is False
-    assert not host._preview_annotation_is_explicitly_approved(ann)
-    assert host._get_preview_approved_filenames() == set()
-    assert host._preview_annotation_sort_bucket(ann) == "problem"
-    assert state._preview_list_item_color(host, ann) == "#ff0000"
-    assert "BRAK GT: 1" in host._preview_list_item_text(ann, lightweight=True)
+        assert host._get_preview_list_render_state(ann)["approved"] is True
+    assert host._preview_annotation_is_explicitly_approved(ann)
+    assert host._get_preview_approved_filenames() == {"old.jpg"}
+    assert host._preview_annotation_sort_bucket(ann) == "approved"
+    assert state._preview_list_item_color(host, ann) != "#ff0000"
+    assert "OK" in host._preview_list_item_text(ann, lightweight=True)
     host._get_preview_annotation_quality_summary.assert_not_called()
 
 
-def test_problem_sort_puts_missing_gt_ahead_of_complete_approved_images(host):
+def test_missing_gt_does_not_move_approved_geometry_to_problems(host):
     complete = annotation("a.jpg", "AA123")
     missing = annotation("z.jpg", "")
     host.current_annotations = [complete, missing]
     host._preview_approved_filenames = {"a.jpg", "z.jpg"}
     state._build_preview_list_render_state_cache(host)
     rows = state._build_preview_list_sorted_entries(host, "Status: problem, ED, OK")
-    assert [a.filename for _, a in rows] == ["z.jpg", "a.jpg"]
+    assert [a.filename for _, a in rows] == ["a.jpg", "z.jpg"]
 
 
 def test_missing_gt_filter_reveals_old_approved_rows_despite_quality_thresholds(host):
@@ -135,29 +135,27 @@ def test_missing_gt_filter_reveals_old_approved_rows_despite_quality_thresholds(
 
 
 @pytest.mark.parametrize("fast", [False, True])
-def test_mixed_bulk_approval_only_accepts_complete_images(host, fast):
+def test_mixed_bulk_approval_accepts_geometry_but_rejects_empty_images(host, fast):
     host.current_annotations = [annotation("ok.jpg", "AA123"), annotation("partial.jpg", "AA123", ""),
                                 annotation("empty.jpg")]
     workflow._set_selected_preview_images_approved(
         host, True, actual_indices=[0, 1, 2], show_warning_modal=False,
         persist_immediately=not fast, refresh_export_sources=not fast, schedule_followup_refresh=fast,
     )
-    assert host._preview_approved_filenames == {"ok.jpg"}
-    assert host._campaign_pending_approved_filenames == {"ok.jpg"}
-    assert not host.current_annotations[1]._approved_for_training
-    assert "brakującym GT" in host._update_preview_edit_status.call_args.args[0]
+    assert host._preview_approved_filenames == {"ok.jpg", "partial.jpg"}
+    assert host._campaign_pending_approved_filenames == {"ok.jpg", "partial.jpg"}
+    assert host.current_annotations[1]._approved_for_training
+    assert not host.current_annotations[2]._approved_for_training
 
 
-def test_space_rejects_partial_gt_with_exact_plate_numbers(host):
+def test_space_allows_approving_geometry_with_partial_gt(host):
     host.current_annotations = [annotation("partial.jpg", "AA123", "", "")]
     host._set_selected_preview_images_approved = Mock()
     assert interaction._on_preview_toggle_image_approval_shortcut(host) == "break"
-    host._set_selected_preview_images_approved.assert_not_called()
-    text = host._update_preview_edit_status.call_args.args[0]
-    assert "GT" in text and "2 z 3" in text and "2, 3" in text
+    host._set_selected_preview_images_approved.assert_called_once()
 
 
-def test_clearing_gt_removes_approval_and_refreshes_only_current_row(host, monkeypatch):
+def test_clearing_gt_preserves_geometry_approval_and_refreshes_only_current_row(host, monkeypatch):
     ann = annotation("approved.jpg", "AA123")
     ann._approved_for_training = True
     host.current_annotations = [ann, annotation("next.jpg", "BB234")]
@@ -167,13 +165,13 @@ def test_clearing_gt_removes_approval_and_refreshes_only_current_row(host, monke
     monkeypatch.setattr(inline.z2_gt_pack_runtime, "sync_plate_gt_after_xml_save", Mock(return_value={"ok": True}))
     ok, text = inline.save_inline_plate_gt_value(host, ann, ann.plates[0], "", refresh_gate=False, lightweight_save=True)
     assert ok and text == ""
-    assert not ann._approved_for_training
-    assert host._get_preview_approved_filenames() == set()
-    assert not host._campaign_pending_approved_filenames
+    assert ann._approved_for_training
+    assert host._get_preview_approved_filenames() == {ann.filename}
+    assert host._campaign_pending_approved_filenames == {ann.filename}
     assert host.current_preview_index == 0
     host._refresh_preview_list.assert_not_called()
     host._refresh_preview_list_row_for_actual_index.assert_called_once_with(0, refresh_summary=False, lightweight=True)
-    host._schedule_preview_approved_persist.assert_called_once()
+    host._schedule_preview_approved_persist.assert_not_called()
 
 
 def test_filling_last_gt_removes_red_label_without_navigating(host, monkeypatch):
@@ -202,12 +200,12 @@ def test_failed_gt_clear_restores_text_and_approval(host):
     host._schedule_preview_approved_persist.assert_not_called()
 
 
-def test_approved_counter_excludes_legacy_ok_with_missing_gt(host):
+def test_approved_geometry_counter_includes_rows_with_missing_gt(host):
     host.current_annotations = [annotation("ok.jpg", "AA123"), annotation("partial.jpg", "AA123", "")]
     host._preview_approved_filenames = {ann.filename for ann in host.current_annotations}
     counts = run_io._get_current_preview_plate_count_state(host)
-    assert counts["approved_images"] == 1
-    assert counts["approved_plates"] == 1
+    assert counts["approved_images"] == 2
+    assert counts["approved_plates"] == 3
     assert counts["total_plates"] == 3
 
 
@@ -237,8 +235,8 @@ def test_tk_filter_and_row_color_update_after_completing_gt(host):
         host._clear_listbox_selection_fast = lambda box: box.selection_clear(0, tk.END)
         host._refresh_preview_list_row_for_actual_index = MethodType(editor._refresh_preview_list_row_for_actual_index, host)
         review.refresh_annotation_gt_review(host, ann)
-        assert host.preview_listbox.itemcget(0, "foreground") == "#ff0000"
-        assert "BRAK GT" in host.preview_listbox.get(0)
+        assert host.preview_listbox.itemcget(0, "foreground") != "#ff0000"
+        assert "BRAK GT" not in host.preview_listbox.get(0)
 
         ann.plates[1].attributes["ground_truth_text"] = "CC345"
         review.refresh_annotation_gt_review(host, ann)

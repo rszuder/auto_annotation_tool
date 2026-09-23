@@ -4667,6 +4667,16 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             approved_min_plates = 10
         approved_missing = max(0, int(approved_min_plates) - int(approved_plates))
         approved_ready = bool(approved_plates >= approved_min_plates)
+        try:
+            from .z2_gt_readiness import build_char_gt_readiness
+            annotation_tab = getattr(self.app, "tabs", {}).get("annotation")
+            gt_summary = build_char_gt_readiness(
+                annotation_tab, run_dir=getattr(annotation_tab, "current_annotation_run_dir", None)
+            )
+        except Exception:
+            gt_summary = {}
+        approved_gt_count = min(approved_plates, int(gt_summary.get("gt_plates", 0) or 0))
+        missing_text_count = max(0, approved_plates - approved_gt_count)
         approved_source_parts = []
         if project_approved_images > 0 or project_approved_plates > 0:
             approved_source_parts.append(
@@ -4693,7 +4703,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             label=campaign_resource_label("approved_plates"),
             requirement="required",
             source=(" + ".join(approved_source_parts) if approved_source_parts else "Nie wskazano"),
-            validation=approved_validation,
+            validation=(approved_validation + f" Numery dostępne: {approved_gt_count}. "
+                        f"Numery do utworzenia w Z3: {missing_text_count}."),
             tone=("success" if approved_ready else "warning"),
             counter_text=str(approved_plates) if approved_plates > 0 else "",
             description="Anotacje tablic zatwierdzone statusem [OK].",
@@ -4702,6 +4713,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 "contract_ready": bool(approved_ready),
                 "approved_images": int(approved_images or 0),
                 "approved_plates": int(approved_plates or 0),
+                "plate_geometry_count": int(approved_plates or 0),
+                "plate_gt_present_count": approved_gt_count,
+                "plate_gt_missing_count": missing_text_count,
                 "min_plates": int(min_plates or 10),
             },
         )

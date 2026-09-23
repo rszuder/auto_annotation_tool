@@ -3724,7 +3724,6 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         ready = bool(
             int(effective_plates or 0) >= int(min_char_plates)
             and not xml_missing
-            and char_gt_ready
             and not bool(getattr(self, "is_processing", False))
         )
     else:
@@ -3776,15 +3775,6 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
             else "Do otwarcia bramki brakuje pliku anotacji XML."
         )
         detail = "Utwórz XML anotacji tablic w Z2."
-        tone = "warning"
-    elif iteration_target == "char" and char_gt_missing > 0:
-        message = (
-            f"Brakuje GT dla {char_gt_missing} zatwierdzonych tablic."
-        )
-        detail = (
-            f"GT kompletne: {char_gt_count}/{effective_plates}. "
-            "W Z2 włącz filtr „Brak GT”, uzupełnij czerwone pozycje i oznacz je jako OK."
-        )
         tone = "warning"
     elif iteration_target == "char":
         noun = "tablicy" if missing_to_open == 1 else "tablic"
@@ -3865,6 +3855,11 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         "gt_total_plates": int(effective_plates or 0) if iteration_target == "char" else 0,
         "missing_gt": int(char_gt_missing or 0) if iteration_target == "char" else 0,
         "gt_ready": bool(char_gt_ready),
+        "gt_complete": bool(char_gt_ready),
+        "geometry_ready": bool(ready),
+        "plate_geometry_count": int(effective_plates or 0),
+        "plate_gt_present_count": int(char_gt_count or 0),
+        "plate_gt_missing_count": int(char_gt_missing or 0),
         "missing_to_open": int(missing_to_open or 0),
         "missing_focus_label": missing_focus_label,
         "missing_focus_row_label": missing_focus_row_label,

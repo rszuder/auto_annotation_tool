@@ -48,7 +48,7 @@ def apply_missing_gt_filter(host):
     host._invalidate_preview_list_frozen_order()
     host._refresh_preview_list(preserve_selection=True, render_current=True)
     host._update_preview_edit_status(
-        "Lista pokazuje zdjęcia z pustym GT. Wpisz GT dla każdej ramki, a następnie oznacz zdjęcie jako OK."
+        "Lista pokazuje zdjęcia bez numerów tablic. Możesz zatwierdzić geometrię i uzupełnić numery w Z3."
         if missing_gt_filter_active(host) else "Wyłączono filtr brakującego GT."
     )
 

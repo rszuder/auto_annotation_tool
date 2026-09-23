@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 import os
+import math
 
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG
@@ -11,13 +12,23 @@ from ..plate_ground_truth import normalize_plate_ground_truth_text
 
 
 def gt_required_for_current_route(host, *, campaign=None) -> bool:
-    """Use the same character-route requirement as the Z2 exit gate."""
+    """Z2 approves geometry. Text may be authored later in Z3/PZ2."""
+    return False
+
+
+def plate_geometry_valid(plate) -> bool:
+    polygon = plate.get("polygon") if isinstance(plate, dict) else getattr(plate, "polygon", None)
     try:
-        if host._is_free_mode_session_context():
-            return False
-        manager = CAMPAIGN if campaign is None else campaign
-        return str(manager.get_iteration_target() or "").strip().lower() == "char"
-    except (AttributeError, TypeError):
+        if polygon:
+            points = [(float(point[0]), float(point[1])) for point in polygon]
+            if len(points) < 4 or not all(math.isfinite(v) for point in points for v in point):
+                return False
+            area = sum(x1*y2 - x2*y1 for (x1, y1), (x2, y2) in zip(points, points[1:] + points[:1]))
+            return abs(area) > 0
+        bbox = plate.get("bbox") if isinstance(plate, dict) else getattr(plate, "bbox", None)
+        x1, y1, x2, y2 = map(float, bbox)
+        return all(map(math.isfinite, (x1, y1, x2, y2))) and x2 > x1 and y2 > y1
+    except (TypeError, ValueError, IndexError):
         return False
 
 
@@ -47,9 +58,9 @@ def approval_block_reason(host, ann) -> str:
     state = annotation_gt_readiness(ann)
     if not state["total"]:
         return "Najpierw dodaj ramkę tablicy."
-    if state["missing"] and gt_required_for_current_route(host):
-        indices = ", ".join(str(i + 1) for i in state["missing_indices"])
-        return f"Uzupełnij GT dla {state['missing']} z {state['total']} ramek (ramki: {indices})."
+    if any(not plate_geometry_valid(det) for det in getattr(ann, "detections", []) or []
+           if str(getattr(det, "label", "") or "").strip().lower() in CONFIG.PLATE_LABELS):
+        return "Popraw geometrię ramek tablic przed zatwierdzeniem."
     return ""
 
 
@@ -102,6 +113,7 @@ def summarize_char_gt_entries(
             merged[_entry_identity(raw_entry, index)] = raw_entry
 
     total_plates = 0
+    geometry_plates = 0
     gt_plates = 0
     missing_images: list[str] = []
 
@@ -117,6 +129,7 @@ def summarize_char_gt_entries(
                 continue
 
             total_plates += 1
+            geometry_plates += int(plate_geometry_valid(plate_entry))
             if _plate_entry_ground_truth(plate_entry):
                 gt_plates += 1
             else:
@@ -130,7 +143,13 @@ def summarize_char_gt_entries(
         "total_plates": int(total_plates),
         "gt_plates": int(gt_plates),
         "missing_gt": int(missing_gt),
-        "ready": bool(total_plates > 0 and missing_gt == 0),
+        "geometry_ready_plates": geometry_plates,
+        "plate_geometry_count": geometry_plates,
+        "plate_gt_present_count": gt_plates,
+        "plate_gt_missing_count": missing_gt,
+        "geometry_ready": bool(geometry_plates > 0 and geometry_plates == total_plates),
+        "gt_complete": bool(total_plates > 0 and missing_gt == 0),
+        "ready": bool(geometry_plates > 0 and geometry_plates == total_plates),
         "missing_images": list(dict.fromkeys(missing_images)),
     }
 
@@ -171,7 +190,8 @@ def _live_char_gt_entries(host, run_dir, project_entries):
             "source_image_path": str(mapped_path or ""),
         }
         result.append({**identity, "image_name": name, "plates": [
-            {"attributes": dict(getattr(det, "attributes", {}) or {})}
+            {"attributes": dict(getattr(det, "attributes", {}) or {}),
+             "polygon": getattr(det, "polygon", None), "bbox": getattr(det, "bbox", None)}
             for det in host._get_plate_detections(ann)
         ]})
     return result
