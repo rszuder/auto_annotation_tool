@@ -31,13 +31,13 @@ def test_pz2_theme_keeps_dark_background():
 
 def test_z2_right_panel_limits_compact():
     src = inspect.getsource(z2_layout_ui_runtime._get_main_pane_width_limits)
-    assert 'max(280, min(340,' in src
+    assert 'max(260, min(280,' in src
 
 
 def test_z2_right_panel_default_compact():
     src = inspect.getsource(z2_panel_workflow)
-    assert 'int(total_width * 0.18)' in src
-    assert '), 320))' in src
+    assert 'int(total_width * 0.16)' in src
+    assert '), 280))' in src
 
 
 def test_z2_right_panel_copy_wrap_compact():

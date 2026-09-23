@@ -11,8 +11,8 @@ from ..campaign_manager import CAMPAIGN
 from ..config import SESSION, logger
 from ..gt_pack import (
     ALPRGTPack,
+    IMAGE_ID_PREFIX,
     denormalize_polygon,
-    fingerprint_image,
     normalize_polygon,
 )
 from ..data_models import Detection
@@ -552,7 +552,23 @@ def fingerprint_preview_image(host, image_path):
     if isinstance(cache.get(cache_key), dict):
         return dict(cache[cache_key])
 
-    value = fingerprint_image(path)
+    # Restoring annotations needs exact file identity and oriented dimensions,
+    # not pixel/perceptual fingerprints used when writing a portable GT pack.
+    # Reading those fingerprints decoded a full image again on every cold Q/E.
+    import hashlib
+    from PIL import Image
+
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    with Image.open(path) as source:
+        width, height = source.size
+        if source.getexif().get(274) in {5, 6, 7, 8}:
+            width, height = height, width
+    source_hash = digest.hexdigest()
+    value = {"image_id": IMAGE_ID_PREFIX + source_hash, "source_file_sha256": source_hash,
+             "width": width, "height": height}
     cache[cache_key] = dict(value)
     if len(cache) > 256:
         for key in list(cache.keys())[:-192]:
@@ -866,6 +882,20 @@ def _collect_hydration_candidates(mounted, *, image_id):
     return candidates, conflicts
 
 
+def _geometries_overlap(left, right, *, threshold=0.8):
+    """Recognize a corrected copy of the same plate without rebinding its GT."""
+    if _points_equal(left, right):
+        return True
+    import cv2
+    import numpy as np
+
+    a = cv2.convexHull(np.asarray(left, dtype=np.float32).reshape(-1, 2))
+    b = cv2.convexHull(np.asarray(right, dtype=np.float32).reshape(-1, 2))
+    intersection, _ = cv2.intersectConvexConvex(a, b)
+    union = cv2.contourArea(a) + cv2.contourArea(b) - intersection
+    return bool(union > 0 and intersection / union >= threshold)
+
+
 def hydrate_annotations_from_gt_pack(host, ann):
     """Create missing plate detections from portable pack geometry.
 
@@ -877,6 +907,7 @@ def hydrate_annotations_from_gt_pack(host, ann):
         "enabled": False,
         "changed": False,
         "created": 0,
+        "skipped_overlapping": [],
         "conflicts": [],
         "image_id": "",
     }
@@ -925,6 +956,12 @@ def hydrate_annotations_from_gt_pack(host, ann):
             continue
         if any(_points_equal(normalized_points, local) for local in local_geometries):
             # restore_gt_for_annotation will perform the canonical ID rebind.
+            continue
+        if any(_geometries_overlap(normalized_points, local) for local in local_geometries):
+            # Identical image bytes can have several filename aliases and plate
+            # IDs, with slightly different manual corrections in each run.
+            # Keep the current polygon/GT; do not append its old pack geometry.
+            report["skipped_overlapping"].append(plate_id)
             continue
         try:
             pixel_points = denormalize_polygon(
@@ -1350,6 +1387,55 @@ def retry_pending_gt_sync(host):
         "retried": len(items),
         "remaining": len(remaining),
     }
+
+
+def prepare_plate_gt_sync_item(host, ann, det, requested_text):
+    """Capture paths and values on the UI thread; workers receive plain data."""
+    working_path = get_working_gt_pack_path(host, create_parent=True)
+    if working_path is None:
+        return None
+    image_path = _resolve_annotation_image_path(host, ann)
+    if image_path is None:
+        raise ValueError("Brak obrazu do zapisania GT Pack")
+    attributes = ensure_plate_detection_contract(det)
+    polygon = _detection_polygon(host, det)
+    normalized = normalize_plate_ground_truth_text(requested_text)
+    return {
+        "working_pack_path": str(working_path), "image_path": str(image_path),
+        "image_name": str(getattr(ann, "filename", "") or image_path.name),
+        "plate_id": str(attributes.get(PLATE_ANNOTATION_ID_ATTR) or ""),
+        "polygon": [[float(x), float(y)] for x, y in polygon[:4]],
+        "field": "ground_truth", "operation": "set" if normalized else "clear",
+        "text": normalized, "layout": get_plate_layout_gt(attributes, default=""),
+        "source": str(attributes.get("ground_truth_source") or GROUND_TRUTH_SOURCE_MANUAL_Z2),
+    }
+
+
+def sync_gt_items_after_xml_save(xml_path, incoming_items):
+    """Worker-safe sync with a durable outbox and newest-value precedence."""
+    from types import SimpleNamespace
+
+    # This detached adapter has no Tk objects or access to a changing UI run.
+    adapter = SimpleNamespace(_get_current_annotation_xml_path=lambda: Path(xml_path))
+    payload = _load_outbox(adapter)
+    items = dict(payload.get("items", {}) or {})
+    for item in incoming_items:
+        identity = (item.get("plate_id"), item.get("field", "ground_truth"))
+        items = {key: old for key, old in items.items()
+                 if (old.get("plate_id"), old.get("field", "ground_truth")) != identity}
+        items[_outbox_key(item)] = dict(item)
+    _write_outbox(adapter, {"items": items})
+    for key, item in list(items.items()):
+        try:
+            result = _sync_item_to_pack(item)
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
+        if result.get("ok"):
+            items.pop(key, None)
+        else:
+            item["last_error"] = str(result.get("error") or result.get("reason") or "unknown")
+    _write_outbox(adapter, {"items": items})
+    return {"ok": not items, "queued": len(items)}
 
 
 def sync_plate_gt_after_xml_save(

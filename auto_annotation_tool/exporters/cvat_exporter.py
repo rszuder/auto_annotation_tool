@@ -5,6 +5,8 @@ Eksporter anotacji do formatu CVAT XML.
 """
 
 import xml.etree.ElementTree as ET
+import os
+import tempfile
 from xml.dom import minidom
 from pathlib import Path
 from datetime import datetime
@@ -13,6 +15,23 @@ from typing import List, Dict, Optional
 from ..config import CONFIG, logger, CVAT_IMPORT_INFO
 from ..data_models import Detection, ImageAnnotation
 from ..plate_ground_truth import ensure_plate_detection_contract
+
+
+def write_cvat_tree_atomic(root: ET.Element, output_path: Path) -> None:
+    """Serialize once and replace only after a complete write succeeds."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ET.indent(root, space="  ")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=output_path.parent,
+                                         prefix=f".{output_path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            ET.ElementTree(root).write(stream, encoding="utf-8", xml_declaration=True)
+        os.replace(temporary, output_path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 class CVATExporter:
@@ -74,14 +93,9 @@ class CVATExporter:
             for idx, ann in enumerate(annotations):
                 self._add_image(root, idx, ann, include_confidence)
             
-            # Formatuj i zapisz
-            xml_str = ET.tostring(root, encoding='unicode')
-            pretty_xml = self._prettify(xml_str)
-            
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(pretty_xml)
+            # Avoid reparsing the entire document into a second DOM just for
+            # indentation; autosave and run completion both pass through here.
+            write_cvat_tree_atomic(root, output_path)
             
             # Statystyki
             total_vehicles = sum(ann.num_vehicles for ann in annotations)

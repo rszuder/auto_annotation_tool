@@ -304,7 +304,7 @@ class AnnotationTab:
         self._preview_controls_legend_drag_state = None
         self._preview_controls_legend_click_state = None
         self._preview_controls_legend_active_grab_widget = None
-        self._preview_controls_legend_visible = True
+        self._preview_controls_legend_visible = False
         self._preview_metrics_overlay_expanded = True
         self._preview_metrics_overlay_visible = False
         self._preview_metrics_overlay_offset_x = 12.0
@@ -3014,6 +3014,26 @@ class AnnotationTab:
 
     def _save_preview_edits(self, *args, **kwargs):
         return z2_preview_editor._save_preview_edits(self, *args, **kwargs)
+
+    def _force_save_all(self):
+        """Flush canvas edits before shutdown cancels scheduled Tk callbacks."""
+        from .z2_preview_autosave import wait_for_pending_save
+        from .z2_plate_gt_inline import flush_inline_plate_gt_editors
+
+        flush_inline_plate_gt_editors(self)
+        self._cancel_preview_autosave()
+        wait_for_pending_save(self)
+        if getattr(self, "_preview_drag_state", None):
+            self._finish_preview_vertex_drag(
+                mark_dirty=bool(self._preview_drag_state.get("was_moved", False)),
+            )
+            self._cancel_preview_autosave()
+        if self._preview_dirty_images:
+            return self._save_preview_edits(
+                interactive=False, refresh_list=False,
+                refresh_workflow=False, refresh_export_sources=False,
+            )
+        return True
 
 
     def _delete_current_preview_image_hard(self, *args, **kwargs):

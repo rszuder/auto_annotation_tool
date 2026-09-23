@@ -550,8 +550,9 @@ def _get_preview_approved_filenames_base(self) -> set[str]:
 
 
 def _preview_annotation_can_be_approved_for_export(self, ann) -> bool:
+    from .z2_gt_readiness import missing_required_gt
     try:
-        return len(self._get_plate_detections(ann)) > 0
+        return bool(self._get_plate_detections(ann)) and not missing_required_gt(self, ann)
     except Exception:
         return False
 

@@ -514,6 +514,9 @@ def _bind_preview_controls_interactive_items(owner, canvas) -> None:
 def refresh_preview_controls_legend(owner):
     if not bool(getattr(owner, "_startup_ui_ready", False)):
         return
+    if not bool(getattr(owner, "_preview_fullscreen_active", False)):
+        owner._hide_preview_controls_legend_overlay()
+        return
     if not bool(getattr(owner, "_preview_controls_legend_visible", True)):
         owner._hide_preview_controls_legend_overlay()
         return

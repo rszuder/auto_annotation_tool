@@ -1279,12 +1279,15 @@ class CharacterAnnotationTab:
     _start_review_from_raw = z3_review_runtime.start_review_from_raw
     _mark_review_edit_started = z3_review_runtime.mark_review_edit_started
     _confirm_review_gold = z3_review_runtime.confirm_review_gold
+    _get_review_quality_status = z3_review_runtime.get_review_quality_status
+    _prepare_active_preview_review = z3_review_runtime.prepare_active_preview_review
+    _apply_live_gt_assist = z3_gt_assist_runtime.apply_live_gt_assist
     _build_gt_assist_suggestion = z3_gt_assist_runtime.build_gt_assist_suggestion
     _store_gt_assist_suggestion = z3_gt_assist_runtime.store_gt_assist_suggestion
     _gt_assist_is_current = z3_gt_assist_runtime.gt_assist_is_current
     _accept_gt_assist_suggestion = z3_gt_assist_runtime.accept_gt_assist_suggestion
     _reject_gt_assist_suggestion = z3_gt_assist_runtime.reject_gt_assist_suggestion
-    _get_gt_assist_presentation = z3_gt_assist_runtime.get_gt_assist_presentation
+    _get_gt_assist_presentation = z3_gt_assist_runtime.get_live_gt_assist_presentation
     _refresh_gt_assist_controls = z3_gt_assist_runtime.refresh_gt_assist_controls
     _apply_active_gt_assist = z3_gt_assist_runtime.apply_active_gt_assist
     _reject_active_gt_assist = z3_gt_assist_runtime.reject_active_gt_assist
@@ -1426,6 +1429,9 @@ class CharacterAnnotationTab:
 
     def _init_preview_vertical_split(self):
         pane = getattr(self, "preview_vertical_split", None)
+        drawers = getattr(self, "_preview_workspace_drawers", None)
+        if drawers is not None and drawers.detached:
+            return
         if pane is None or self._preview_vertical_split_ready:
             return
 
@@ -1602,6 +1608,10 @@ class CharacterAnnotationTab:
 
         def _rerender_after_layout_settles():
             self._preview_stabilized_render_after_id = None
+            drawers = getattr(self, "_preview_workspace_drawers", None)
+            if drawers is not None and drawers.mode_transition:
+                # The animation completion schedules one render after docking.
+                return
             if getattr(self, "_preview_fullscreen_transition_active", False):
                 old_size = getattr(self, "_preview_fullscreen_old_canvas_size", None)
                 current_size = (canvas.winfo_width(), canvas.winfo_height())
@@ -1673,8 +1683,15 @@ class CharacterAnnotationTab:
     _refresh_preview_character_selection_visual = z3_preview_editor_runtime._refresh_preview_character_selection_visual
     _refresh_preview_editor_toolbar = z3_preview_editor_runtime._refresh_preview_editor_toolbar
     def _ensure_preview_final_box_mode(self, *, render_preview: bool = True):
+        prepare = getattr(self, "_prepare_active_preview_review", None)
+        if callable(prepare):
+            prepare()
         if self._get_preview_box_mode_key() == "FINAL":
             return
+        if self._get_preview_box_mode_key() == "AUTO":
+            data = self._get_preview_active_data(create=False)
+            if self._get_preview_box_records(data)[1] == "FINAL":
+                return
         try:
             self.preview_box_mode_var.set(PREVIEW_BOX_MODE_LABELS["FINAL"])
         except Exception:
@@ -2846,7 +2863,8 @@ class CharacterAnnotationTab:
             self._save_local_setting("char_preview_box_mode", self._get_preview_box_mode_key())
         except Exception:
             pass
-        if self._get_preview_box_mode_key() != "FINAL" and (
+        data = self._get_preview_active_data(create=False)
+        if self._get_preview_box_records(data)[1] != "FINAL" and (
             bool(getattr(self, "_preview_char_edit_mode", False))
             or bool(getattr(self, "_preview_char_add_mode", False))
         ):

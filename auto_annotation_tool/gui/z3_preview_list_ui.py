@@ -236,27 +236,61 @@ def get_preview_box_variants(host: "CharacterAnnotationTab", data: dict) -> dict
     }
 
 
+def resolve_preview_box_source(data: dict, mode_key: str) -> str:
+    """Choose the stage without changing RAW, review records, or their status."""
+    if mode_key != "AUTO":
+        return mode_key
+    data = data if isinstance(data, dict) else {}
+    review = data.get("review_state")
+    review_started = isinstance(review, dict) and bool(review.get("status"))
+    if data.get("characters") or review_started:
+        # An intentionally emptied review must not resurrect predicted boxes.
+        return "FINAL"
+    if isinstance(data.get("raw_detection"), dict):
+        # A frozen empty prediction is also a result, not a reason to show
+        # intermediate proposals rejected by the pipeline.
+        return "RAW_RESULT"
+    for mode, field in (
+        ("YOLO_FILTERED", "yolo_detections"),
+        ("YOLO_NMS", "yolo_nms_detections"),
+        ("YOLO_RAW", "yolo_raw_detections"),
+    ):
+        if data.get(field):
+            return mode
+    return "FINAL"
+
+
+def restore_preview_stage_mode(host: "CharacterAnnotationTab", metadata: dict) -> None:
+    """Recover old forced FINAL selection when opening an unreviewed RAW run."""
+    if host._get_preview_box_mode_key() != "FINAL":
+        return
+    if any(resolve_preview_box_source(data, "AUTO") == "RAW_RESULT"
+           for data in metadata.values()):
+        host.preview_box_mode_var.set(host._get_preview_box_mode_label("AUTO"))
+        host._save_local_setting("char_preview_box_mode", "AUTO")
+
+
 def get_preview_box_records(host: "CharacterAnnotationTab", data: dict):
-    variants = get_preview_box_variants(host, data)
-    method_name = host._get_detection_method_key()
-    mode_key = host._get_preview_box_mode_key()
-
-    if mode_key == "AUTO":
-        final_records = list(variants.get("FINAL", []) or [])
-        if final_records:
-            return final_records, "FINAL"
-        if method_name == "YOLO":
-            for candidate_key in ("YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"):
-                candidate_records = variants.get(candidate_key, [])
-                if candidate_records:
-                    return candidate_records, candidate_key
-        for candidate_key in ("YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"):
-            candidate_records = variants.get(candidate_key, [])
-            if candidate_records:
-                return candidate_records, candidate_key
-        return final_records, "FINAL"
-
-    return variants.get(mode_key, []), mode_key
+    data = data if isinstance(data, dict) else {}
+    mode_key = resolve_preview_box_source(data, host._get_preview_box_mode_key())
+    if mode_key == "RAW_RESULT":
+        raw = data.get("raw_detection")
+        records = raw.get("characters", []) if isinstance(raw, dict) else []
+    else:
+        field = {
+            "FINAL": "characters",
+            "YOLO_FILTERED": "yolo_detections",
+            "YOLO_NMS": "yolo_nms_detections",
+            "YOLO_RAW": "yolo_raw_detections",
+        }.get(mode_key)
+        records = data.get(field, []) if field else []
+        if mode_key == "YOLO_FILTERED" and not records:
+            records = [rec for rec in data.get("characters", []) or []
+                       if isinstance(rec, dict)
+                       and str(rec.get("method", "")).strip().lower() == "yolo"]
+    # Navigation only needs the displayed layer; diagnostic proposals can be
+    # orders of magnitude larger than the frozen pipeline result.
+    return host._sort_character_records_by_x(records), mode_key
 
 
 def characters_to_text(host: "CharacterAnnotationTab", chars, data=None) -> str:
@@ -387,6 +421,13 @@ def format_preview_record_source_label(host: "CharacterAnnotationTab", data: dic
     return f"Źródło rekordu: {source_label}", tone
 
 
+def _review_ready(host, data) -> bool:
+    if not isinstance(data, dict) or (data.get("review_state") or {}).get("status") != "in_progress":
+        return False
+    check = getattr(host, "_get_review_quality_status", None)
+    return bool(callable(check) and check(data) == "perfect")
+
+
 def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, data: dict, *,
                               ordinal: int | None = None, evaluate_status: bool = True) -> str:
     try:
@@ -409,8 +450,11 @@ def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, da
     if ordinal is None:
         ordinal = host._get_plate_listbox_ordinal(plate_id)
 
+    ready = _review_ready(host, data)
     if status == "perfect":
         icon = "🟢"
+    elif ready:
+        icon = "🔵"
     elif status == "needs_fix":
         icon = "🔴"
     else:
@@ -420,6 +464,8 @@ def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, da
     flags = []
     if status == "perfect":
         flags.append("OK")
+    elif ready:
+        flags.append("ZATWIERDŹ")
     layout_flag = host._get_plate_listbox_layout_flag(data)
     if layout_flag:
         flags.append(layout_flag)
@@ -438,6 +484,8 @@ def get_plate_row_foreground(host: "CharacterAnnotationTab", status: str) -> str
 
     if status == "perfect":
         return palette.get("success", "#27ae60")
+    if status == "ready_for_approval":
+        return palette.get("info", "#55c8ff")
     if status == "needs_fix":
         return palette.get("error", "#c0392b")
     return palette.get("muted_dim", "#444444")
@@ -445,6 +493,11 @@ def get_plate_row_foreground(host: "CharacterAnnotationTab", status: str) -> str
 
 def apply_plate_listbox_row_style(host: "CharacterAnnotationTab", row_index: int, status: str) -> None:
     try:
+        ids = getattr(host, "_listbox_pid_by_index", []) or []
+        if 0 <= row_index < len(ids):
+            data = (getattr(host, "preview_metadata", {}) or {}).get(ids[row_index])
+            if _review_ready(host, data):
+                status = "ready_for_approval"
         fg = get_plate_row_foreground(host, status)
         _select_bg, select_fg = host.app.get_list_selection_colors()
         host.plates_listbox.itemconfig(
@@ -655,5 +708,3 @@ def apply_preview_sort_bar_style(
             )
         except Exception:
             pass
-
-

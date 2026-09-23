@@ -2623,7 +2623,8 @@ def _invalidate_preview_runtime_caches(self) -> None:
     self._preview_list_render_state_cache = None
     self._preview_annotation_quality_summary_cache = None
     self._current_preview_plate_count_cache = None
-    self._preview_render_image_cache = {}
+    # Polygon/GT edits do not change image bytes. The image cache is already
+    # keyed by path, mtime and size; keep decoded neighbours for super correction.
 
 
 def flush_free_mode_session_state(self):

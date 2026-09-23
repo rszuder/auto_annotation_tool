@@ -1205,7 +1205,10 @@ class CampaignManager:
     def get_project_root_dir(self, project_name: str) -> Path:
         folder_name = self.state["projects"][project_name]["folder_name"]
         root = Path(CONFIG.DIR_9_PROJECTS) / folder_name
-        self._ensure_project_workspace_tree(root)
+        # Getters are used by canvas/status callbacks. Creating all workspace
+        # directories on every lookup turned a single edit into thousands of IOs.
+        if str(root) not in getattr(self, "_project_workspace_roots_ready", set()) or not root.is_dir():
+            self._ensure_project_workspace_tree(root)
         return root
 
     def get_project_state_dir(self, project_name: str = None) -> Path | None:

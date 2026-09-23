@@ -18,7 +18,7 @@ from ..plate_ground_truth import (
     normalize_plate_ground_truth_text,
     normalize_plate_layout_gt,
 )
-from ..gt_pack import fingerprint_image
+from ..gt_pack import fingerprint_image_identity
 from ..gt_resource_companions import (
     open_gt_pack_sources,
     resolve_plate_revision_provenance,
@@ -116,7 +116,7 @@ class PlateGenerator:
 
             source_identity = {}
             try:
-                source_identity = fingerprint_image(source_image_path)
+                source_identity = fingerprint_image_identity(source_image_path)
             except Exception as exc:
                 logger.debug(
                     f"Nie udało się wyliczyć identity obrazu źródłowego "

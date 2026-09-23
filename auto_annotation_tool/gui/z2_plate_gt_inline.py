@@ -15,6 +15,7 @@ from ..plate_ground_truth import (
     normalize_plate_layout_gt,
     set_plate_layout_gt,
     get_plate_ground_truth,
+    normalize_plate_ground_truth_text,
     set_plate_ground_truth,
 )
 from . import z2_gt_pack_runtime
@@ -273,8 +274,8 @@ def count_plate_gt(plate_detections) -> int:
 
 
 def gt_required_for_current_route(host) -> bool:
-    # GT is optional metadata, never a route requirement.
-    return False
+    from .z2_gt_readiness import gt_required_for_current_route as required
+    return required(host, campaign=CAMPAIGN)
 
 
 def gt_mode_enabled(host) -> bool:
@@ -359,6 +360,13 @@ def _schedule_inline_gt_gate_refresh(
 
     def _refresh() -> None:
         host._plate_gt_inline_gate_after = None
+        try:
+            quiet = host._preview_user_interaction_quiet_remaining_ms(padding_ms=250)
+            if quiet > 0 or getattr(host, "_preview_drag_state", None):
+                _schedule_inline_gt_gate_refresh(host, delay_ms=max(250, int(quiet)))
+                return
+        except (AttributeError, TypeError, ValueError):
+            pass
         try:
             host._z2_graph_right_panel_render_signature = None
         except Exception:
@@ -446,6 +454,8 @@ def save_inline_plate_gt_value(
 
         if not saved:
             det.attributes = previous_attributes
+            from .z2_gt_review import refresh_annotation_gt_review
+            refresh_annotation_gt_review(host, ann, revoke=False)
             try:
                 host._update_preview_edit_status(
                     "Nie udało się automatycznie zapisać GT. "
@@ -455,6 +465,8 @@ def save_inline_plate_gt_value(
                 pass
             return False, get_plate_ground_truth(previous_attributes)
 
+        from .z2_gt_review import refresh_annotation_gt_review
+        refresh_annotation_gt_review(host, ann)
         pack_started_at = time.perf_counter()
         try:
             pack_sync = z2_gt_pack_runtime.sync_plate_gt_after_xml_save(
@@ -520,6 +532,33 @@ def save_inline_plate_gt_value(
     return True, normalized
 
 
+def queue_inline_plate_gt_value(host, ann, det, requested_text):
+    """Accept an edit immediately; persist XML and its GT pack in one worker."""
+    from .z2_preview_autosave import queue_gt_sync, start_preview_autosave
+    from .z2_gt_review import refresh_annotation_gt_review
+
+    previous = dict(getattr(det, "attributes", {}) or {})
+    xml_path = host._get_current_annotation_xml_path()
+    if xml_path is None:
+        host._update_preview_edit_status("Nie można zapisać GT: brak pliku anotacji.")
+        return False, get_plate_ground_truth(previous)
+    det.attributes = dict(previous)
+    ensure_plate_layout_gt(det.attributes)
+    normalized = set_plate_ground_truth(det.attributes, requested_text, source=GROUND_TRUTH_SOURCE_MANUAL_Z2)
+    try:
+        item = z2_gt_pack_runtime.prepare_plate_gt_sync_item(host, ann, det, normalized)
+    except Exception as exc:
+        det.attributes = previous
+        host._update_preview_edit_status(f"Nie można przygotować zapisu GT: {exc}")
+        return False, get_plate_ground_truth(previous)
+    host._mark_preview_image_dirty(ann, refresh_list=False, refresh_row=False)
+    queue_gt_sync(host, xml_path, item)
+    refresh_annotation_gt_review(host, ann)
+    if not start_preview_autosave(host, status_message="Zapisano GT."):
+        host._schedule_preview_autosave()
+    return True, normalized
+
+
 def _key_for(det) -> str:
     return f"plate:{id(det)}"
 
@@ -549,6 +588,13 @@ def _apply_record_style(host, record: dict, *, editing: bool | None = None) -> N
         record["editing"] = bool(editing)
 
     palette = _palette(host)
+    style_signature = (
+        bool(record.get("editing", False)), bool(record.get("confirmed", False)),
+        tuple(sorted(palette.items())),
+        get_plate_layout_gt(getattr(record.get("det"), "attributes", None)),
+    )
+    if record.get("applied_style_signature") == style_signature:
+        return
     canvas_bg = palette.get("canvas_bg", palette.get("panel", "#20252b"))
     panel_bg = palette.get("panel", "#252526")
     field_bg = palette.get("field", "#171717")
@@ -609,6 +655,7 @@ def _apply_record_style(host, record: dict, *, editing: bool | None = None) -> N
         pass
 
     _update_record_layout_ui(host, record)
+    record["applied_style_signature"] = style_signature
 
 def _force_uppercase(record: dict) -> str:
     var = record.get("var")
@@ -658,15 +705,16 @@ def _commit_record(host, key, *, final: bool = False):
     if ann is None or det is None or var is None:
         return "break"
 
-    ok, normalized = save_inline_plate_gt_value(
-        host,
-        ann,
-        det,
-        str(var.get() or ""),
-        refresh_gate=False,
-        lightweight_save=True,
-        retry_pack_pending=False,
-    )
+    previous = get_plate_ground_truth(det.attributes)
+    requested = normalize_plate_ground_truth_text(var.get() or "")
+    if requested == previous:
+        # Hiding/repositioning an unchanged card is not an edit. In superzoom
+        # every next image used to schedule a full campaign gate recalculation.
+        ok, normalized = True, previous
+    else:
+        ok, normalized = queue_inline_plate_gt_value(host, ann, det, requested)
+        if ok:
+            record["gate_refresh_pending"] = True
 
     record["confirmed"] = bool(normalized)
 
@@ -687,7 +735,8 @@ def _commit_record(host, key, *, final: bool = False):
 
     if final:
         _apply_record_style(host, record, editing=False)
-        _schedule_inline_gt_gate_refresh(host)
+        if record.pop("gate_refresh_pending", False):
+            _schedule_inline_gt_gate_refresh(host)
     return "break"
 
 
@@ -702,6 +751,18 @@ def _schedule_save(host, key) -> None:
         _commit_record(host, key, final=False)
         return
     _after_store(host)[key] = after_id
+
+
+def flush_inline_plate_gt_editors(host):
+    """Commit pending text fields before explicit save/export/shutdown."""
+    if getattr(host, "_flushing_inline_gt_edits", False):
+        return
+    host._flushing_inline_gt_edits = True
+    try:
+        for key in list(_editor_store(host)):
+            _commit_record(host, key, final=True)
+    finally:
+        host._flushing_inline_gt_edits = False
 
 
 def _on_focus_in(host, key) -> None:
@@ -739,6 +800,10 @@ def _on_focus_out(host, key) -> None:
 
 
 def _on_key_press(host, key, _event=None):
+    try:
+        host._mark_preview_user_interaction(quiet_ms=1400)
+    except AttributeError:
+        pass
     record = _editor_store(host).get(key)
     if isinstance(record, dict):
         _apply_record_style(host, record, editing=True)
@@ -777,11 +842,6 @@ def _finish_with_enter(host, key):
     enter_seq = int(record.get("enter_commit_seq", 0) or 0) + 1
     record["enter_commit_seq"] = enter_seq
     _apply_record_style(host, record, editing=False)
-
-    try:
-        host.frame.update_idletasks()
-    except Exception:
-        pass
 
     def _persist_after_visual_ack() -> None:
         current = _editor_store(host).get(key)
@@ -1707,5 +1767,3 @@ def refresh_gt_overlay_after_layout(host) -> None:
 def is_gt_mode_toggle_hit(host, canvas_x, canvas_y) -> bool:
     # No GT switch exists on the canvas.
     return False
-
-

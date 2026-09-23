@@ -561,56 +561,13 @@ def _render_preview_image(
         return
 
     try:
-        try:
-            stat = img_path.stat()
-            cache_key = (
-                str(img_path.resolve()),
-                int(getattr(stat, "st_mtime_ns", 0) or 0),
-                int(getattr(stat, "st_size", 0) or 0),
+        from .z2_preview_state import _load_preview_image_cached, _schedule_preview_neighbor_prefetch
+        preview_image = _load_preview_image_cached(self, img_path, ann)
+        if self.current_preview_index is not None:
+            _schedule_preview_neighbor_prefetch(
+                self, self.current_preview_index, int(getattr(self, "_preview_navigation_direction", 1)),
+                self._get_preview_navigation_actual_indices(), require_plates=False,
             )
-        except Exception:
-            cache_key = (str(img_path), 0, 0)
-        image_cache = getattr(self, "_preview_render_image_cache", None)
-        if not isinstance(image_cache, dict):
-            image_cache = {}
-            self._preview_render_image_cache = image_cache
-        preview_image = image_cache.get(cache_key)
-        if preview_image is None:
-            load_started_at = time.perf_counter()
-            img = cv2.imread(str(img_path))
-            if img is None:
-                raise ValueError("Nie można załadować obrazu do podglądu.")
-
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            preview_image = Image.fromarray(img_rgb)
-            image_cache[cache_key] = preview_image
-            load_elapsed_ms = max(0.0, (time.perf_counter() - load_started_at) * 1000.0)
-            if load_elapsed_ms >= 120.0:
-                try:
-                    logger.info(
-                        "[Z2 PERF] preview_image_load total=%.0fms cache=%s file=%s",
-                        load_elapsed_ms,
-                        len(image_cache),
-                        Path(img_path).name,
-                    )
-                except Exception:
-                    pass
-            while len(image_cache) > PREVIEW_IMAGE_CACHE_LIMIT:
-                try:
-                    image_cache.pop(next(iter(image_cache)))
-                except Exception:
-                    break
-        try:
-            image_width = max(1, int(getattr(preview_image, "width", 1) or 1))
-            image_height = max(1, int(getattr(preview_image, "height", 1) or 1))
-            if (
-                int(getattr(ann, "width", 0) or 0) != image_width
-                or int(getattr(ann, "height", 0) or 0) != image_height
-            ):
-                ann.width = image_width
-                ann.height = image_height
-        except Exception:
-            pass
         render_interaction_fast = bool(fast_fullscreen)
         if reset_view:
             if hasattr(self.preview_canvas, "set_image_fit_to_view"):
@@ -860,6 +817,9 @@ def _schedule_preview_selection_render(
 def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
     ann = self._get_preview_annotation()
     if ann is None or canvas.original_image is None:
+        drawers = getattr(self, "_preview_workspace_drawers", None)
+        if drawers is not None:
+            drawers.bottom_button.place_forget()
         try:
             z2_plate_gt_inline.hide_inline_plate_gt_editors(
                 self, destroy=True
@@ -1308,6 +1268,9 @@ def _draw_preview_plate_combo_overlay(
 
         gt_text = f"GT {gt_count}/{total}"
         gt_complete = bool(total > 0 and gt_count >= total)
+        gt_blocked = bool(total > 0 and not gt_complete and z2_plate_gt_inline.gt_required_for_current_route(self))
+        if gt_blocked:
+            gt_text = f"BRAK GT {gt_count}/{total}"
 
         theme = self._get_preview_legend_theme()
         panel_fill = str(theme.get("panel_fill", "#101820"))
@@ -1318,12 +1281,12 @@ def _draw_preview_plate_combo_overlay(
         warning = "#f1c40f"
         error = "#ff5b5b"
 
-        is_ok = bool(image_approved) and total > 0
+        is_ok = bool(image_approved) and total > 0 and not gt_blocked
         value_fill = (
             accent if is_ok else (warning if total > 0 else error)
         )
         gt_fill = (
-            accent if gt_complete else (warning if gt_count > 0 else muted)
+            error if gt_blocked else accent if gt_complete else (warning if gt_count > 0 else muted)
         )
 
         status_text = "OK" if is_ok else "NOK"
@@ -1417,6 +1380,12 @@ def _draw_preview_plate_combo_overlay(
         y1 = max(
             viewport_top + 10.0,
             min(y1, viewport_bottom - combo_h - 10.0),
+        )
+        from .z2_inline_hud import draw_inline_context
+
+        x1, y1 = draw_inline_context(
+            self, canvas, left=viewport_left, top=viewport_top,
+            right=viewport_right, combo_width=combo_w, combo_height=combo_h,
         )
         y2 = y1 + combo_h
 
@@ -1967,12 +1936,16 @@ def _end_preview_bottom_hint_drag(self, event=None) -> bool:
 
 
 def _handle_preview_bottom_hint_click(self, canvas_x: float, canvas_y: float, event=None) -> bool:
-    if not bool(getattr(self, "_preview_fullscreen_active", False)):
+    drawers = getattr(self, "_preview_workspace_drawers", None)
+    if not bool(getattr(self, "_preview_fullscreen_active", False)) and drawers is None:
         return False
     if _preview_hint_point_in_bbox(canvas_x, canvas_y, getattr(self, "_preview_bottom_hint_restore_bbox", None)):
         _toggle_preview_bottom_hint_collapsed(self, False)
         return True
     if _preview_hint_point_in_bbox(canvas_x, canvas_y, getattr(self, "_preview_bottom_hint_collapse_bbox", None)):
+        if drawers is not None:
+            drawers.toggle("bottom")
+            return True
         _toggle_preview_bottom_hint_collapsed(self, True)
         return True
     if _preview_hint_point_in_bbox(canvas_x, canvas_y, getattr(self, "_preview_bottom_hint_move_bbox", None)):
@@ -2068,19 +2041,24 @@ def _preview_bottom_hint_origin(
 
 
 def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
-    if not bool(getattr(self, "_preview_fullscreen_active", False)):
+    drawers = getattr(self, "_preview_workspace_drawers", None)
+    if not bool(getattr(self, "_preview_fullscreen_active", False)) and drawers is None:
         return
+    canvas.delete("preview_bottom_hint")
     try:
         main_pane = getattr(self, "main_pane", None)
         pane_ids = set(str(pane) for pane in (main_pane.panes() if main_pane is not None else ()))
         for frame in (getattr(self, "main_left_frame", None), getattr(self, "main_right_frame", None)):
-            if frame is not None and str(frame) in pane_ids:
+            if drawers is None and frame is not None and str(frame) in pane_ids:
                 return
     except Exception:
         pass
 
     hint_text = str(self._get_preview_bottom_hint_text() or "").strip()
     if not hint_text:
+        if drawers is not None:
+            drawers._bottom_origin = None
+            drawers.bottom_button.place_forget()
         return
 
     try:
@@ -2106,7 +2084,7 @@ def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
     chip_font = self._get_preview_legend_font(8, "normal")
     control_font = self._get_preview_legend_font(7, "bold")
 
-    collapsed = bool(getattr(self, "_preview_bottom_hint_collapsed", False))
+    collapsed = drawers is None and bool(getattr(self, "_preview_bottom_hint_collapsed", False))
     if collapsed:
         pill_w = 62.0
         pill_h = 26.0
@@ -2171,6 +2149,9 @@ def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
     box_w = min(max_box_w, max(min_box_w, title_w, row_w + (inner_pad * 2.0)))
     box_h = inner_pad + title_h + (len(rows) * chip_h) + (max(0, len(rows) - 1) * gap) + inner_pad
     x, y = _preview_bottom_hint_origin(self, canvas_width, canvas_height, box_w, box_h)
+    if drawers is not None:
+        x = float(canvas.canvasx((canvas_width - box_w) / 2))
+        y = float(canvas.canvasy(max(12, canvas_height - box_h - 12)))
 
     canvas.create_rectangle(
         x,
@@ -2196,7 +2177,8 @@ def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
     move_x = x + box_w - inner_pad - (control_w * 2.0) - 4.0
     close_x = x + box_w - inner_pad - control_w
     control_y = title_y
-    for label, bx in (("↔", move_x), ("×", close_x)):
+    controls = (("⌄", close_x),) if drawers is not None else (("↔", move_x), ("×", close_x))
+    for label, bx in controls:
         canvas.create_rectangle(
             bx,
             control_y,
@@ -2216,35 +2198,36 @@ def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
             font=control_font,
             tags=("preview_overlay", "preview_bottom_hint"),
         )
-    canvas.create_rectangle(
-        move_x,
-        control_y,
-        move_x + control_w,
-        control_y + 19.0,
-        fill=chip_fill,
-        outline=accent_fill,
-        width=1,
-        tags=("preview_overlay", "preview_bottom_hint"),
-    )
-    dot_radius = 1.45
-    for dot_x in (move_x + 8.2, move_x + control_w - 8.2):
-        for dot_y in (control_y + 5.3, control_y + 9.5, control_y + 13.7):
-            canvas.create_oval(
-                dot_x - dot_radius,
-                dot_y - dot_radius,
-                dot_x + dot_radius,
-                dot_y + dot_radius,
-                fill=accent_fill,
-                outline=accent_fill,
-                width=1,
-                tags=("preview_overlay", "preview_bottom_hint"),
-            )
-    self._preview_bottom_hint_move_bbox = (
-        float(move_x),
-        float(control_y),
-        float(move_x + control_w),
-        float(control_y + 19.0),
-    )
+    if drawers is None:
+        canvas.create_rectangle(
+            move_x,
+            control_y,
+            move_x + control_w,
+            control_y + 19.0,
+            fill=chip_fill,
+            outline=accent_fill,
+            width=1,
+            tags=("preview_overlay", "preview_bottom_hint"),
+        )
+        dot_radius = 1.45
+        for dot_x in (move_x + 8.2, move_x + control_w - 8.2):
+            for dot_y in (control_y + 5.3, control_y + 9.5, control_y + 13.7):
+                canvas.create_oval(
+                    dot_x - dot_radius,
+                    dot_y - dot_radius,
+                    dot_x + dot_radius,
+                    dot_y + dot_radius,
+                    fill=accent_fill,
+                    outline=accent_fill,
+                    width=1,
+                    tags=("preview_overlay", "preview_bottom_hint"),
+                )
+        self._preview_bottom_hint_move_bbox = (
+            float(move_x),
+            float(control_y),
+            float(move_x + control_w),
+            float(control_y + 19.0),
+        )
     self._preview_bottom_hint_collapse_bbox = (
         float(close_x),
         float(control_y),
@@ -2280,6 +2263,8 @@ def _draw_preview_bottom_hint(self, canvas: ZoomableCanvas):
         chip_y += chip_h + gap
 
     self._preview_bottom_hint_bbox = (float(x), float(y), float(x + box_w), float(y + box_h))
+    if drawers is not None:
+        drawers.bottom_rendered(canvas)
 
 
 def _clamp_preview_point(self, x: float, y: float) -> tuple[float, float]:
@@ -2702,7 +2687,6 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
     if plate_idx < 0 or plate_idx >= len(plate_detections):
         return False
 
-    had_plate_before = bool(self._get_plate_detections(ann))
     self._push_preview_history_snapshot(ann, lightweight_plate_edit=True)
     target_detection = plate_detections[int(plate_idx)]
     try:
@@ -2723,6 +2707,14 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
     self._preview_pending_vertex_hit = None
     self._preview_delete_mode = False
     self._preview_delete_candidate_idx = None
+    # Deletion shifts plate indices. Keep the superzoom view on the plate that
+    # is now selected; otherwise E advances past a plate that was never shown.
+    self._preview_focus_target = None
+    if bool(getattr(self, "_preview_super_correction_active", False)):
+        self._preview_polygon_focus_restore_state = None
+        self._preview_focus_zoom_click_stage = 0
+        self._preview_focus_zoom_restore_state = None
+        self._preview_focus_zoom_history = []
     self._mark_preview_image_dirty(ann, refresh_list=False, refresh_row=False)
     try:
         self._refresh_preview_list_row_for_actual_index(
@@ -2732,6 +2724,12 @@ def _delete_preview_polygon(self, plate_idx: int, autosave: bool = True):
         )
     except Exception:
         pass
+    if remaining_plates and bool(getattr(self, "_preview_super_correction_active", False)):
+        self._focus_preview_plate(
+            self._get_selected_plate_index_for_ann(ann),
+            store_restore=False,
+            push_debug=False,
+        )
     self._refresh_preview_canvas_interactive(delay_ms=220)
     self._push_preview_debug_event("delete", f"p{int(plate_idx) + 1}")
 
@@ -2815,6 +2813,9 @@ def _commit_new_preview_polygon(self):
         pass
     ann.status = AnnotationStatus.SUCCESS
     ann.status_message = "Dodano ręcznie ramkę tablicy."
+    from .z2_gt_review import revoke_incomplete_approval, refresh_missing_gt_count
+    revoke_incomplete_approval(self, ann)
+    refresh_missing_gt_count(self)
 
     plates = self._get_plate_detections(ann)
     self._set_selected_plate_index_for_ann(ann, len(plates) - 1)
@@ -3040,13 +3041,15 @@ def _schedule_preview_autosave(
                 refresh_export_sources=bool(refresh_export_sources),
             )
             return
-        self._save_preview_edits(
-            interactive=False,
-            status_message=status_message or "Zapisano korekte polygonu do annotations.xml.",
-            refresh_list=False,
-            refresh_workflow=bool(refresh_workflow),
-            refresh_export_sources=bool(refresh_export_sources),
-        )
+        if refresh_workflow or refresh_export_sources:
+            self._save_preview_edits(
+                interactive=False, status_message=status_message,
+                refresh_list=False, refresh_workflow=bool(refresh_workflow),
+                refresh_export_sources=bool(refresh_export_sources),
+            )
+        else:
+            from .z2_preview_autosave import start_preview_autosave
+            start_preview_autosave(self, status_message=status_message or "Zapisano poprawki ramek.")
 
     try:
         self._preview_autosave_after_id = self.frame.after(

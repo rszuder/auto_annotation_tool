@@ -186,7 +186,7 @@ def build_detection_tab(
     self.detect_left_panel = left_panel
     self.detect_right_panel = right_panel
     split.add(left_panel, minsize=560, stretch="always")
-    split.add(right_panel, minsize=300, stretch="never")
+    split.add(right_panel, minsize=280, width=300, stretch="never")
 
     left_panel.grid_rowconfigure(0, weight=0)
     left_panel.grid_rowconfigure(1, weight=1)
@@ -1481,7 +1481,7 @@ def build_detection_tab(
     except Exception:
         pass
     try:
-        right_panel.configure(width=368)
+        right_panel.configure(width=300)
     except Exception:
         pass
 
@@ -2866,38 +2866,13 @@ def build_detection_tab(
         padx=(8, 0),
     )
 
-    self.btn_gt_assist_apply = ttk.Button(
-        self.gt_assist_actions_frame,
-        text="Zastosuj GT Assist",
-        command=self._apply_active_gt_assist,
-        style="WorkflowCard.TButton",
-    )
-    self.btn_gt_assist_apply.pack(side=tk.LEFT)
-    self.btn_gt_assist_apply.configure(
-        padding=detection_action_button_padding,
-        width=18,
-        state=tk.DISABLED,
-    )
-
-    self.btn_gt_assist_reject = ttk.Button(
-        self.gt_assist_actions_frame,
-        text="Odrzuć",
-        command=self._reject_active_gt_assist,
-        style="WorkflowCard.TButton",
-    )
-    self.btn_gt_assist_reject.pack(
-        side=tk.LEFT,
-        padx=(5, 0),
-    )
-    self.btn_gt_assist_reject.configure(
-        padding=detection_action_button_padding,
-        width=9,
-        state=tk.DISABLED,
-    )
+    # GT assistance is part of editing, not a separate accept/reject action.
+    self.btn_gt_assist_apply = None
+    self.btn_gt_assist_reject = None
 
     self.gt_assist_status_lbl = tk.Label(
         self.gt_assist_actions_frame,
-        text="GT Assist: brak sugestii",
+        text="Asysta GT: aktywna podczas korekty",
         anchor="w",
         justify="left",
         font=("Segoe UI", 8),
@@ -2914,7 +2889,7 @@ def build_detection_tab(
     )
     self._set_inline_status_label_state(
         self.gt_assist_status_lbl,
-        text="GT Assist: brak sugestii",
+        text="Asysta GT: aktywna podczas korekty",
         tone="muted",
         emphasis=False,
     )

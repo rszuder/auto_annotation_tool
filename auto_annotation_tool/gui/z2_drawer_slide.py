@@ -109,7 +109,8 @@ def place_drawer(owner, frame_width, x, y, width, height):
     if slide is None:
         slide = owner._preview_drawer_slide = PreviewDrawerSlide(owner)
     slide.place(frame_width, x, y, width, height,
-                fullscreen=bool(getattr(owner, "_preview_fullscreen_active", False)))
+                fullscreen=bool(getattr(owner, "_preview_fullscreen_active", False)),
+                toggle_y=max(68, int(getattr(owner, "_preview_hud_bottom_in_view", 60)) + 8))
 
 
 def suspend_drawer(owner):

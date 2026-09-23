@@ -2624,7 +2624,7 @@ def _build_z2_left_panel_copy_context(self) -> Z2LeftPanelCopyContext:
         current_index=self._get_workflow_progress_display()[0],
         total_steps=self._get_workflow_progress_display()[1],
         has_manual_history=bool(
-            (campaign_context or (actual_route == "manual" and manual_entry_mode == "continue"))
+            (actual_route == "manual" and manual_entry_mode == "continue")
             and self._get_manual_review_history_display_entries()
         ),
         auto_completed=self._is_z2_auto_flow_completed(

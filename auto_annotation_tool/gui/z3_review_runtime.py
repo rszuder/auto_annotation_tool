@@ -239,11 +239,11 @@ def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -
     except Exception:
         pass
     try:
-        if host._get_preview_box_mode_key() != "FINAL":
+        if host._get_preview_box_mode_key() != "AUTO":
             label = (
-                host._get_preview_box_mode_label("FINAL")
+                host._get_preview_box_mode_label("AUTO")
                 if hasattr(host, "_get_preview_box_mode_label")
-                else "Końcowe ramki treningowe"
+                else "AUTO"
             )
             host.preview_box_mode_var.set(label)
     except Exception:
@@ -269,6 +269,7 @@ def start_review_from_raw(
     overwrite: bool = False,
     persist: bool = True,
     quiet: bool = False,
+    refresh: bool = True,
 ):
     """Create mutable REVIEW as a deep copy of frozen RAW."""
     pid, data = _resolve_plate(host, plate_id)
@@ -368,12 +369,14 @@ def start_review_from_raw(
     except Exception:
         pass
 
-    _refresh_after_change(
-        host,
-        pid,
-        persist=persist,
-        message="Wynik modelu został otwarty do sprawdzenia i korekty.",
-    )
+    assist = getattr(host, "_apply_live_gt_assist", None)
+    if callable(assist):
+        assist(data)
+    if refresh:
+        _refresh_after_change(
+            host, pid, persist=persist,
+            message="Wynik modelu został otwarty do sprawdzenia i korekty.",
+        )
     return {
         "ok": True,
         "reason": "",
@@ -382,6 +385,37 @@ def start_review_from_raw(
         "character_count": len(review_chars),
         "raw_result_hash": raw_hash,
     }
+
+def prepare_active_preview_review(host) -> bool:
+    """An editing gesture opens the displayed prediction without another CTA."""
+    if getattr(host, "fast_test_running", False) or getattr(host, "is_processing", False):
+        return False
+    pid, data = _resolve_plate(host)
+    if not isinstance(data, dict):
+        return False
+    created = False
+    if not get_review_state_status(data) and not data.get("characters") and isinstance(data.get("raw_detection"), dict):
+        host._push_preview_history_snapshot(pid)
+        result = start_review_from_raw(host, pid, persist=False, quiet=True, refresh=False)
+        if not result.get("ok"):
+            return False
+        created = True
+    if not get_review_state_status(data):
+        mark_review_edit_started(host, data)
+        created = True
+    previous_mode = host._get_preview_box_mode_key()
+    if previous_mode != "AUTO":
+        host.preview_box_mode_var.set(host._get_preview_box_mode_label("AUTO"))
+    assist = getattr(host, "_apply_live_gt_assist", None)
+    changed = bool(assist(data).get("changed")) if callable(assist) else False
+    if created or changed:
+        host._schedule_preview_metadata_save(delay_ms=350)
+        host._refresh_preview_listbox_row(pid)
+        host._refresh_detection_review_controls()
+    if created or changed or previous_mode != "AUTO":
+        host._redraw_preview_character_overlays_light()
+    return True
+
 
 def mark_review_edit_started(host, data: dict | None):
     """Any human edit opens/reopens REVIEW and invalidates GOLD approval."""
@@ -429,6 +463,17 @@ def mark_review_edit_started(host, data: dict | None):
     gold_state["approved"] = False
     return state
 
+def get_review_quality_status(host, data: dict, chars=None) -> str:
+    """Validate current geometry/GT before committing a human approval."""
+    probe = dict(data)
+    probe_state = dict(probe.get("review_state") or {})
+    probe_state["status"] = REVIEW_APPROVED
+    probe_state["approved_reference"] = build_review_reference_snapshot(probe)
+    probe["review_state"] = probe_state
+    records = data.get("characters", []) if chars is None else chars
+    return str(host._derive_preview_status_from_data(probe, records) or "needs_fix").strip().lower()
+
+
 def confirm_review_gold(
     host,
     plate_id=None,
@@ -451,6 +496,9 @@ def confirm_review_gold(
             messagebox.showinfo("Najpierw sprawdź tablicę", "Otwórz wynik modelu do sprawdzenia i wprowadź potrzebne poprawki.")
         return result
 
+    assist = getattr(host, "_apply_live_gt_assist", None)
+    if callable(assist):
+        assist(data)
     chars = data.get("characters", [])
     if not isinstance(chars, list) or not chars:
         result = {"ok": False, "reason": "empty_review", "plate_id": pid}
@@ -461,15 +509,8 @@ def confirm_review_gold(
             )
         return result
 
-    probe = copy.deepcopy(data)
-    probe_state = dict(probe.get("review_state") or {})
-    probe_state["status"] = REVIEW_APPROVED
-    probe["review_state"] = probe_state
-
     try:
-        resolved_status = str(
-            host._derive_preview_status_from_data(probe, chars) or "needs_fix"
-        ).strip().lower()
+        resolved_status = get_review_quality_status(host, data, chars)
     except Exception:
         resolved_status = "needs_fix"
 
@@ -501,6 +542,12 @@ def confirm_review_gold(
     state.pop("invalidated_approved_reference", None)
     state.pop("current_reference", None)
     data["status"] = "perfect"
+
+    if any(rec.get("correction_source") == "gt_assisted" for rec in chars if isinstance(rec, dict)):
+        data["review_source"] = "gt_assist_confirmed"
+        for rec in chars:
+            if isinstance(rec, dict) and rec.get("correction_source") == "gt_assisted":
+                rec["correction_source"] = "gt_assist_confirmed"
 
     try:
         host._ensure_plate_source_metadata(data, plate_id=pid, modified_by="human")

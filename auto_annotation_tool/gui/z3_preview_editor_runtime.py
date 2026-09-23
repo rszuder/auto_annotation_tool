@@ -55,6 +55,10 @@ def _find_preview_char_record_index(chars, target_record) -> int | None:
     return None
 
 def _select_hovered_preview_char_box(self, event=None):
+    if not self._prepare_active_preview_review():
+        return "break"
+    if event is not None and isinstance(getattr(event, "x", None), (int, float)):
+        self._preview_char_hover_index = self._find_preview_character_box_hit(event.x, event.y)
     hover_idx = getattr(self, "_preview_char_hover_index", None)
     if hover_idx is None:
         selected_idx, _selected_rec = self._get_preview_selected_char_record()
@@ -88,6 +92,8 @@ def _select_hovered_preview_char_box(self, event=None):
     )
 
 def _cycle_preview_character_selection(self, step: int, *, activate_label: bool = False):
+    if not self._prepare_active_preview_review():
+        return "break"
     chars = self._get_preview_active_character_records(create=False)
     if not isinstance(chars, list) or not chars:
         self._update_preview_edit_status("Brak boxów znaków do przełączenia.", tone="warning")
@@ -220,7 +226,10 @@ def _get_preview_char_move_handle_radius(self) -> float:
     return max(11.0, min(20.0, 9.0 + (scale * 0.24)))
 
 def _find_preview_character_box_hit(self, canvas_x: float, canvas_y: float):
-    chars = self._get_preview_active_character_records(create=False)
+    data = self._get_preview_active_data(create=False)
+    chars, layer = self._get_preview_box_records(data)
+    if layer == "FINAL":
+        chars = self._get_preview_active_character_records(create=False)
     hits = []
     for idx in range(len(chars) - 1, -1, -1):
         bbox = self._char_record_bbox(chars[idx])

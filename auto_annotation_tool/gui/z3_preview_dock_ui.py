@@ -149,6 +149,9 @@ def _get_preview_dock_row_runtime_state(host: "CharacterAnnotationTab", row_key:
         status_text = "PERFECT" if status_raw == "perfect" else "KOREKTA"
         if status_text == "PERFECT":
             severity = "success"
+        elif status_meta.get("ready_for_approval"):
+            status_text = "GOTOWA"
+            severity = "info"
         elif severity not in {"warning", "error"}:
             severity = "warning"
         return {

@@ -197,7 +197,9 @@ def _sync_left_panel_canvas_width(self, event=None):
 def _should_show_free_mode_manual_right_panel(self) -> bool:
     if not self._is_free_mode_session_context():
         return False
-    if bool(getattr(self, "_preview_fullscreen_active", False)):
+    if bool(getattr(self, "_preview_fullscreen_active", False)) and not getattr(
+        getattr(self, "_preview_workspace_drawers", None), "detached", False
+    ):
         return False
     try:
         route = str(self._get_workflow_route() or "").strip().lower()
@@ -236,7 +238,9 @@ def _should_show_free_mode_manual_right_panel(self) -> bool:
 
 
 def _should_show_right_panel(self) -> bool:
-    if bool(getattr(self, "_preview_fullscreen_active", False)):
+    if bool(getattr(self, "_preview_fullscreen_active", False)) and not getattr(
+        getattr(self, "_preview_workspace_drawers", None), "detached", False
+    ):
         return False
     if self._is_free_mode_session_context():
         return self._should_show_free_mode_manual_right_panel()
@@ -288,6 +292,10 @@ def _sync_preview_left_counter_layout_width(self) -> None:
 
 
 def _sync_main_pane_right_panel_visibility(self):
+    drawers = getattr(self, "_preview_workspace_drawers", None)
+    if drawers is not None and drawers.detached:
+        drawers.sync_right_visibility(self._should_show_right_panel())
+        return
     pane = getattr(self, "main_pane", None)
     right_frame = getattr(self, "main_right_frame", None)
     if pane is None or right_frame is None:
@@ -537,7 +545,7 @@ def _get_main_pane_width_limits(self) -> tuple[int, int]:
         int(left_counter_req),
     )
     left_min = max(280, min(420, left_base_req))
-    right_min = max(280, min(340, right_content_req + right_scrollbar_req + 16))
+    right_min = max(260, min(280, right_content_req + right_scrollbar_req + 16))
     return int(left_min), int(right_min)
 
 
@@ -618,8 +626,9 @@ def _sync_approve_hint_wraplength(self, event=None):
     if width <= 1:
         return
 
-    wraplength = max(220, int(width) - 34)
-    for widget_name in ("approve_context_lbl", "approve_gate_hint_lbl", "approve_breakdown_lbl"):
+    wraplength = max(160, int(width) - 54)
+    for widget_name in ("approve_context_lbl", "approve_gate_hint_lbl", "approve_breakdown_lbl",
+                        "approve_hint_title_lbl", "approve_breakdown_title_lbl"):
         label = getattr(self, widget_name, None)
         if label is None:
             continue
@@ -1109,7 +1118,13 @@ def _filter_preview_list_entries(
     self,
     entries: list[tuple[int, ImageAnnotation]],
 ) -> list[tuple[int, ImageAnnotation]]:
+    from .z2_gt_readiness import annotation_gt_readiness, missing_required_gt
+    from .z2_gt_review import missing_gt_filter_active
     filtered_entries = list(entries or [])
+    if missing_gt_filter_active(self):
+        # The repair filter must also reveal previously approved rows and must
+        # not hide missing GT behind confidence/fit thresholds.
+        return [(idx, ann) for idx, ann in filtered_entries if annotation_gt_readiness(ann)["missing"]]
     if not self._is_free_mode_session_context():
         try:
             project_approved_lookup = set(self._get_campaign_hidden_project_approved_filenames_runtime() or set())
@@ -1120,6 +1135,7 @@ def _filter_preview_list_entries(
                 (actual_idx, ann)
                 for actual_idx, ann in filtered_entries
                 if str(getattr(ann, "filename", "") or "").strip().lower() not in project_approved_lookup
+                or missing_required_gt(self, ann)
             ]
 
     conf_threshold, fit_threshold = self._get_preview_metric_filter_thresholds()
@@ -1133,6 +1149,9 @@ def _filter_preview_list_entries(
 
 
 def _reset_preview_metric_filters(self):
+    variable = getattr(self, "preview_missing_gt_only_var", None)
+    if variable is not None:
+        variable.set(False)
     self.preview_filter_conf_var.set(0.0)
     self.preview_filter_fit_var.set(0.0)
     self._preview_filter_conf_applied = 0.0

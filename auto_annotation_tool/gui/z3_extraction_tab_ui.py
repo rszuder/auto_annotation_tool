@@ -22,6 +22,7 @@ from .lazy_notebook_tab import _LazyNotebookTab
 from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z3_extraction_sources import read_xml_plate_attributes
+from .z3_extraction_progress import ExtractionProgress
 
 
 def _is_live_widget(widget) -> bool:
@@ -2291,6 +2292,30 @@ def run_extraction(host) -> None:
     self.btn_ext_stop.config(state=tk.NORMAL)
     self.is_processing = True
     self._set_extraction_status("Start wyodrębniania...", "neutral")
+    interpolation = self.interpolation_var.get()
+
+    def present_progress(processed, total, plates, phase):
+        percent = min(99.0, 99.0 * processed / max(1, total))
+        self.ext_progress.config(value=percent)
+        self._campaign_detect_splash_progress_value = percent
+        if phase == "prepare":
+            message = "Sprawdzam historię GT i przygotowuję wycinanie tablic..."
+        elif phase == "save":
+            message = f"Zapisuję metadane i historię {plates} wyciętych tablic..."
+        else:
+            message = f"Wycinanie: {processed}/{total} obrazów · {plates} tablic"
+        self._set_extraction_status(message, "neutral")
+        if campaign_step3_active and not bool(getattr(self, "_campaign_detect_splash_visible", False)):
+            self._show_campaign_detect_splash(
+                title="Wyodrębniam tablice dla Z3", body=message, tone="neutral",
+                progress=percent, show_progress=True, show_return=False,
+            )
+
+    progress = ExtractionProgress(
+        self.frame, present_progress,
+        lambda: session_token == self._project_reset_token and self.is_processing,
+    )
+    progress.publish(0, len(xml_images), 0, "prepare")
 
     try:
         gt_pack_paths = collect_image_resource_gt_pack_paths(
@@ -2348,42 +2373,13 @@ def run_extraction(host) -> None:
                         rectify=True,
                         do_deskew=False,
                         enhance_contrast=False,
-                        interpolation=self.interpolation_var.get()
+                        interpolation=interpolation
                     )
 
                 processed += 1
-                self.frame.after(
-                    0,
-                    lambda p=(processed / max(1, total)) * 100: (
-                        self.ext_progress.config(value=p),
-                        setattr(self, "_campaign_detect_splash_progress_value", p),
-                        self._show_campaign_detect_splash(
-                            title=str(getattr(self, "_campaign_detect_splash_title_text", "") or "Wyodrębniam tablice dla Z3"),
-                            body=str(getattr(self, "ext_status", None).cget("text") if getattr(self, "ext_status", None) is not None else ""),
-                            tone="info",
-                            progress=p,
-                            show_progress=True,
-                            show_return=False,
-                        ) if (
-                            session_token == self._project_reset_token
-                            and (
-                                bool(getattr(self, "_campaign_detect_splash_visible", False))
-                                or (
-                                    bool(getattr(self, "_step3_linear_mode", False))
-                                    and bool(CAMPAIGN.get_active_project_name())
-                                )
-                            )
-                        ) else None
-                    )
-                )
-                self.frame.after(
-                    0,
-                    lambda c=processed, t=total: (
-                        self._set_extraction_status(f"{c}/{t} obrazów...", "neutral")
-                        if session_token == self._project_reset_token else None
-                    )
-                )
+                progress.publish(processed, total, generator.plate_counter)
 
+            progress.publish(processed, total, generator.plate_counter, "save")
             generator.save_metadata()
             generated_count = int(getattr(generator, "plate_counter", 0) or 0)
             if generated_count > 0:
@@ -2412,6 +2408,8 @@ def run_extraction(host) -> None:
                     and str(CAMPAIGN.get_iteration_target() or "").strip().lower() == "char"
                     and generated_count < self._get_campaign_step3_min_extracted_plate_count()
                 )
+                self.frame.after(0, lambda: self.ext_progress.config(value=100)
+                    if session_token == self._project_reset_token else None)
                 self.frame.after(
                     0,
                     lambda: self._set_extraction_status(
@@ -2463,6 +2461,7 @@ def run_extraction(host) -> None:
                                 pass
                         _continue_campaign_pz1_to_pz2(self)
 
+                    campaign_success_to_pz2 = True
                     self.frame.after(0, _commit_preview_and_open_pz2)
                 else:
                     self.frame.after(0, self.unlock_detection_subtab)
@@ -2499,6 +2498,7 @@ def run_extraction(host) -> None:
                     )
                 self._log(self.ext_log, f"\n❌ BŁĄD: {e}\n", "ERROR")
         finally:
+            progress.close()
             if session_token == self._project_reset_token:
                 self.is_processing = False
                 self._campaign_step3_reextract_seed_metadata = {}

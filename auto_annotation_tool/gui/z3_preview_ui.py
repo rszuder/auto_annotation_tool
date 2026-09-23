@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from .web_slim_scrollbar import blend_hex_colors
+from .z3_workspace_drawers import workspace_drawers
+from .z3_inline_hud import plan_inline_hud, draw_inline_hud
 from .z3_preview_status_ui import (
     apply_preview_source_actions_style,
     apply_preview_info_stats_style,
@@ -85,6 +87,7 @@ from .z3_preview_list_ui import (
     set_preview_layout_filter_hover,
     get_preview_box_variants,
     get_preview_box_records,
+    restore_preview_stage_mode,
     characters_to_text,
     characters_to_display_rows,
     characters_to_display_text,
@@ -570,6 +573,8 @@ def select_preview_character_box(
     status_message: str | None = None,
 ):
     perf_start = time.perf_counter()
+    if not host._prepare_active_preview_review():
+        return "break"
     ensure_ms = toolbar_ms = status_ms = visual_ms = 0.0
     chars = host._get_preview_active_character_records(create=False)
     if not isinstance(chars, list) or not chars:
@@ -733,6 +738,9 @@ def serialize_character_records(host, chars, fusion_strategy="", fusion_details=
                     record[field_name] = int(raw_value)
             except Exception:
                 pass
+        for field_name in ("correction_source", "gt_assist_original_character", "gt_assist_original_sign_source"):
+            if isinstance(char, dict) and field_name in char:
+                record[field_name] = char[field_name]
         if (
             box_source == "yolo_box"
             or host._character_record_uses_yolo_box_backend(char)
@@ -1009,6 +1017,12 @@ def get_preview_status_presentation(
                 filled_boxes += 1
 
     candidate_text = host._characters_to_text(source_chars, data=source_data).strip().upper()
+    ready_for_approval = False
+    if isinstance(source_data, dict) and (source_data.get("review_state") or {}).get("status") == "in_progress":
+        try:
+            ready_for_approval = host._get_review_quality_status(source_data, source_chars) == "perfect"
+        except AttributeError:
+            pass
     severity = "muted"
     canvas_text = "Nieocenione"
     info_text = "status: nieoceniona"
@@ -1017,6 +1031,10 @@ def get_preview_status_presentation(
         severity = "success"
         canvas_text = "Perfect"
         info_text = "status: OK"
+    elif ready_for_approval:
+        severity = "success"
+        canvas_text = "Gotowa do zatwierdzenia"
+        info_text = "status: zgodna z GT, zatwierdź tablicę"
     elif total_boxes <= 0:
         severity = "warning"
         canvas_text = "Brak ramek"
@@ -1050,6 +1068,7 @@ def get_preview_status_presentation(
 
     return {
         "status": status,
+        "ready_for_approval": ready_for_approval,
         "severity": severity,
         "canvas_text": canvas_text,
         "info_text": info_text,
@@ -1141,7 +1160,8 @@ def _build_preview_canvas_status_badge_specs(
     )
     layout_ok = bool(status_ok or (not layout_uncertain and not layout_conflict))
 
-    status_text = "kompletne" if status_ok else "do korekty"
+    ready_for_approval = bool(status_meta.get("ready_for_approval"))
+    status_text = "kompletne" if status_ok else "gotowa do zatwierdzenia" if ready_for_approval else "do korekty"
     states = [
         {
             "text": f"Odczyt: [{reading_text}]",
@@ -1157,18 +1177,21 @@ def _build_preview_canvas_status_badge_specs(
         },
         {
             "text": f"Status tablicy: {status_text}",
-            "ok": status_ok,
+            "ok": status_ok or ready_for_approval,
             "width": max(184.0, min(252.0, float(canvas_width) * 0.25)),
             "tags": ("preview_overlay",),
         },
         {
-            "text": f"Ramki: {int(frame_count)}",
+            "text": f"Ramki: {int(frame_count)}" + (f"/{len(expected_texts[0])}" if len(expected_texts) == 1 else ""),
             "ok": None,
             "neutral": True,
             "width": max(124.0, min(168.0, float(canvas_width) * 0.16)),
             "tags": ("preview_overlay",),
         },
     ]
+    if len(expected_texts) == 1:
+        states.insert(0, {"text": f"GT: {expected_texts[0]}", "ok": None, "neutral": True,
+                          "width": 160.0, "tags": ("preview_overlay",)})
     evaluated_states = [item for item in states if not bool(item.get("neutral"))]
     pulse_red = bool(
         evaluated_states
@@ -1399,61 +1422,11 @@ def _estimate_preview_canvas_info_badges_bottom(
     data: dict | None = None,
     box_chars=None,
 ) -> float:
-    canvas_w = max(40.0, float(canvas_width or 0.0))
-    row_start_x = 10.0
-    row_gap_x = 8.0
-    row_gap_y = 30.0
-    row_right_limit = max(row_start_x + 80.0, canvas_w - 10.0)
-    row_y = 40.0
+    status_layout = _build_preview_canvas_status_badge_specs(
+        host, canvas_width, data=data, box_chars=box_chars,
+    )
+    return plan_inline_hud(host, canvas_width, data, status_layout)["bar_height"]
 
-    widths = [
-        88.0,
-        max(160.0, min(240.0, canvas_w * 0.25)),
-    ]
-    try:
-        status_layout = _build_preview_canvas_status_badge_specs(
-            host,
-            canvas_width,
-            data=data,
-            box_chars=box_chars,
-        )
-        widths.extend(float(item.get("width", 100.0)) for item in status_layout.get("neutral_badges", []))
-        widths.extend(float(item.get("width", 100.0)) for item in status_layout.get("badges", []))
-    except Exception:
-        widths.extend(
-            [
-                max(124.0, min(168.0, canvas_w * 0.16)),
-                max(156.0, min(232.0, canvas_w * 0.26)),
-                max(124.0, min(174.0, canvas_w * 0.17)),
-                max(184.0, min(252.0, canvas_w * 0.25)),
-            ]
-        )
-
-    badge_x = row_start_x
-    badge_y = row_y
-    for badge_width in widths:
-        width = float(badge_width)
-        if badge_x > row_start_x and (badge_x + width) > row_right_limit:
-            badge_x = row_start_x
-            badge_y += row_gap_y
-        badge_x += width + row_gap_x
-
-    badge_height = max(24.0, host._measure_preview_overlay_font_height(("Segoe UI", 9, "bold")) + 8.0)
-    bottom = badge_y + badge_height
-
-    try:
-        legend_width = float(host._estimate_preview_source_legend_width())
-        legend_height = float(host._estimate_preview_source_legend_height())
-    except Exception:
-        legend_width = legend_height = 0.0
-    if legend_width > 0.0 and legend_height > 0.0:
-        legend_x = badge_x + 2.0
-        legend_y = badge_y
-        if badge_x > row_start_x and (legend_x + legend_width) > row_right_limit:
-            legend_y += row_gap_y
-        bottom = max(bottom, legend_y + legend_height)
-
-    return float(bottom + 6.0)
 
 
 def plan_preview_canvas_info_overlay_layout(
@@ -1465,54 +1438,10 @@ def plan_preview_canvas_info_overlay_layout(
     data: dict | None = None,
     box_chars=None,
 ):
-    canvas_w = max(40.0, float(canvas_width or 0.0))
-    reset_width = host._measure_preview_overlay_text_width("Reset widoku", ("Segoe UI", 9, "bold")) + 14.0
-    title_x = 10.0 + reset_width + 14.0
-    result_slot_width = max(170.0, min(240.0, canvas_w * 0.21))
-    file_slot_width = max(170.0, min(250.0, canvas_w * 0.22))
-    badge_end_x = title_x + result_slot_width + 12.0 + file_slot_width + 6.0 + 78.0 + 6.0 + 84.0 + 6.0
-    legend_x = badge_end_x + 8.0
+    return {"bar_height": _estimate_preview_canvas_info_badges_bottom(
+        host, canvas_width, data=data, box_chars=box_chars,
+    )}
 
-    source_width = host._measure_preview_overlay_text_width(source_line, ("Segoe UI", 9))
-    status_width = host._measure_preview_overlay_text_width(status_text, ("Segoe UI", 9, "bold"))
-    source_right = canvas_w - 10.0
-    source_left = source_right - source_width
-    status_right = source_left - 10.0
-    status_left = status_right - status_width
-
-    legend_width = host._estimate_preview_source_legend_width()
-    legend_height = host._estimate_preview_source_legend_height()
-    info_text_height = host._measure_preview_overlay_font_height(("Segoe UI", 10, "bold"))
-    stack_right_info = bool(status_left <= (badge_end_x + 14.0))
-    available_legend_right = (canvas_w - 12.0) if stack_right_info else (status_left - 12.0)
-    stack_legend = bool((legend_x + legend_width) > available_legend_right)
-
-    legend_y = float(36.0 if stack_legend else 8.0)
-    source_y = float(44.0 if stack_right_info else 16.0)
-    status_y = float(44.0 if stack_right_info else 16.0)
-    legend_bottom = legend_y + float(legend_height)
-    right_info_bottom = max(source_y + info_text_height, status_y + info_text_height)
-    min_bar_height = 78.0 if (stack_legend or stack_right_info) else 74.0
-    badges_bottom = _estimate_preview_canvas_info_badges_bottom(
-        host,
-        canvas_width,
-        data=data,
-        box_chars=box_chars,
-    )
-    bar_height = max(min_bar_height, legend_bottom + 8.0, right_info_bottom + 8.0, badges_bottom)
-
-    return {
-        "title_x": float(title_x),
-        "result_slot_width": float(result_slot_width),
-        "file_slot_width": float(file_slot_width),
-        "legend_x": float(title_x if stack_legend else legend_x),
-        "legend_y": legend_y,
-        "source_x": float(max(20.0, source_right)),
-        "source_y": source_y,
-        "status_x": float(max(20.0, status_right)),
-        "status_y": status_y,
-        "bar_height": float(bar_height),
-    }
 
 
 def focus_preview_canvas(host: "CharacterAnnotationTab"):
@@ -2180,6 +2109,8 @@ def redraw_preview_character_overlay_only(
     char_idx: int,
     *,
     drag_preview: bool = False,
+    records=None,
+    layer: str = "FINAL",
 ) -> bool:
     canvas = getattr(host, "preview_canvas", None)
     state = getattr(host, "_preview_render_state", None) or {}
@@ -2195,11 +2126,11 @@ def redraw_preview_character_overlay_only(
     except Exception:
         return False
 
-    canonical_chars = host._get_preview_active_character_records(create=False)
+    canonical_chars = records if records is not None else host._get_preview_active_character_records(create=False)
     if not (0 <= char_idx < len(canonical_chars)):
         return False
 
-    box_source = "FINAL"
+    box_source = layer
     display_idx = char_idx
     char_record = canonical_chars[char_idx]
     if not isinstance(char_record, dict):
@@ -2236,8 +2167,8 @@ def redraw_preview_character_overlay_only(
     center_x = cx1 + (cx2 - cx1) / 2.0
 
     source_tag = host._get_character_source_tag(char_record, data=data, fallback_index=char_idx)
-    box_source, sign_source = _preview_character_source_parts(host, char_record, data=data, fallback_index=char_idx)
-    visual_tag = _preview_visual_tag_for_box_source(host, box_source, sign_source)
+    geometry_source, sign_source = _preview_character_source_parts(host, char_record, data=data, fallback_index=char_idx)
+    visual_tag = _preview_visual_tag_for_box_source(host, geometry_source, sign_source)
     source_style = host._get_preview_source_visual_style(visual_tag)
     box_color = source_style["outline"]
     guide_color = source_style["guide"]
@@ -2245,7 +2176,7 @@ def redraw_preview_character_overlay_only(
     selection_color = getattr(host.app, "palette", {}).get("accent", "#ffd166")
     selected_box_color = _get_preview_selected_character_box_color(host)
     label_focus_color = getattr(host.app, "palette", {}).get("warning", "#f59e0b")
-    is_selected_box = host._is_preview_char_record_selected(char_record, fallback_index=char_idx)
+    is_selected_box = layer == "FINAL" and host._is_preview_char_record_selected(char_record, fallback_index=char_idx)
     drag_preview = bool(drag_preview)
     try:
         two_row_layout_active = bool(host._should_preview_use_two_row_layers(data))
@@ -2315,7 +2246,7 @@ def redraw_preview_character_overlay_only(
                     include_confidence=False,
                     has_symbol=host._preview_record_has_symbol(char_record),
                     uses_yolo_box_backend=host._character_record_uses_yolo_box_backend(char_record),
-                    box_source=box_source,
+                    box_source=geometry_source,
                     sign_source=sign_source,
                 ),
                 reading_label=reading_label,
@@ -2338,7 +2269,7 @@ def redraw_preview_character_overlay_only(
         label_mode_active = bool(getattr(host, "_preview_char_label_mode", False))
         active_label_idx = getattr(host, "_preview_char_label_active_index", None)
         hover_label_idx = getattr(host, "_preview_char_hover_label_index", None)
-        show_label_box = bool(
+        show_label_box = layer == "FINAL" and bool(
             not drag_preview
             and (
                 label_mode_active
@@ -2862,151 +2793,28 @@ def draw_preview_canvas_info_overlay(
     if canvas is None:
         return
 
-    palette = getattr(host.app, "palette", {})
-    panel_bg = palette.get("panel", "#252526")
-    panel_border = palette.get("border", "#3c3c3c")
-    title_fg = palette.get("fg", "#f3f3f3")
-    muted_fg = palette.get("muted", "#b0b0b0")
-    success_fg = palette.get("success", "#2ecc71")
-    error_fg = palette.get("error", "#e74c3c")
-    try:
-        status_layout = _build_preview_canvas_status_badge_specs(
-            host,
-            canvas_width,
-            data=data,
-            box_chars=box_chars,
-        )
-    except Exception:
-        status_layout = {"badges": [], "neutral_badges": [], "pulse": False, "two_row_display": False}
-    neutral_status_badges = list(status_layout.get("neutral_badges", []) or [])
-    status_badges = list(status_layout.get("badges", []) or [])
-    two_row_display = bool(status_layout.get("two_row_display", False))
-    source_image = str((data or {}).get("source_image", "") or "").strip()
-    source_name = host._truncate_preview_filename(Path(source_image).name if source_image else "Brak pliku", max_chars=28)
-    current_idx = host._get_current_preview_list_index()
-    total = len(getattr(host, "_listbox_pid_by_index", []))
-    current_no = (int(current_idx) + 1) if current_idx is not None and total > 0 else 0
-    bar_height = 74.0 if bool(getattr(host, "_preview_fullscreen_active", False)) else 80.0
-    if two_row_display:
-        bar_height += 18.0
-    bar_height = max(
-        bar_height,
-        _estimate_preview_canvas_info_badges_bottom(
-            host,
-            canvas_width,
-            data=data,
-            box_chars=box_chars,
-        ),
+    status_layout = _build_preview_canvas_status_badge_specs(
+        host, canvas_width, data=data, box_chars=box_chars,
     )
-    host._preview_overlay_top_bar_height = float(bar_height)
-    canvas.create_rectangle(
-        0,
-        0,
-        max(40, int(canvas_width)),
-        bar_height,
-        fill=panel_bg,
-        outline=panel_border,
-        width=1,
-        tags=("preview_overlay",),
-    )
-
-    reset_text_id, reset_bg_id = host._draw_preview_text_badge(
-        canvas,
-        10,
-        8,
-        "Reset widoku",
-        fill_color=panel_border,
-        outline_color=panel_border,
-        text_color=host._get_readable_text_color(panel_border, preferred=title_fg),
-        font=("Segoe UI", 9, "bold"),
-        anchor=tk.NW,
-        pad_x=7,
-        pad_y=3,
-        tags=("preview_overlay_action", "preview_action::reset_view"),
-    )
-    reset_bbox = None
-    try:
-        reset_bbox = canvas.bbox(reset_bg_id or reset_text_id)
-    except Exception:
-        reset_bbox = None
-    row1_left_x = float((float(reset_bbox[2]) + 8.0) if reset_bbox else 98.0)
+    plan = plan_inline_hud(host, canvas_width, data, status_layout)
+    host._preview_overlay_top_bar_height = plan["bar_height"]
+    draw_inline_hud(host, canvas, plan)
     toggle_rect = draw_preview_fullscreen_toggle(
-        host,
-        canvas,
-        canvas_width,
-        bar_height=bar_height,
+        host, canvas, canvas_width, bar_height=plan["bar_height"],
     )
-    if isinstance(toggle_rect, tuple) and len(toggle_rect) == 4:
-        toggle_x1 = float(toggle_rect[0])
-    else:
-        toggle_x1 = max(12.0, float(canvas_width) - 38.0)
-
-    row2_y = 40.0
-    row2_badges = [
-        {
-            "text": f"LP: {current_no}/{total}",
-            "fill": blend_hex_colors(muted_fg, panel_bg, 0.84),
-            "outline": muted_fg,
-            "width": 88.0,
-            "tags": ("preview_overlay",),
-        },
-        {
-            "text": f"Plik: {source_name}",
-            "fill": blend_hex_colors(panel_border, panel_bg, 0.84),
-            "outline": panel_border,
-            "width": max(160.0, min(240.0, float(canvas_width) * 0.25)),
-            "tags": ("preview_overlay", "preview_overlay_action", "preview_action::edit_source_filename"),
-        },
-        *neutral_status_badges,
-        *status_badges,
-    ]
-    row_start_x = 10.0
-    row_gap_x = 8.0
-    row_gap_y = 30.0
-    row_right_limit = max(row_start_x + 80.0, float(canvas_width) - 10.0)
-    badge_x = row_start_x
-    badge_y = row2_y
-    for badge_spec in row2_badges:
-        badge_width = float(badge_spec["width"])
-        if badge_x > row_start_x and (badge_x + badge_width) > row_right_limit:
-            badge_x = row_start_x
-            badge_y += row_gap_y
-        host._draw_preview_fixed_text_badge(
-            canvas,
-            badge_x,
-            badge_y,
-            badge_width,
-            badge_spec["text"],
-            fill_color=badge_spec["fill"],
-            outline_color=badge_spec["outline"],
-            text_color=host._get_readable_text_color(badge_spec["fill"], preferred=title_fg),
-            font=("Segoe UI", 9, "bold"),
-            pad_x=7,
-            pad_y=3,
-            tags=badge_spec.get("tags"),
-        )
-        badge_x += badge_width + row_gap_x
-
-    _sync_preview_canvas_status_pulse(host, canvas, bool(status_layout.get("pulse", False)))
-
-    legend_width = float(host._estimate_preview_source_legend_width())
-    legend_height = float(host._estimate_preview_source_legend_height())
-    legend_x = badge_x + 2.0
-    legend_y = badge_y
-    if legend_width > 0:
-        if badge_x > row_start_x and (legend_x + legend_width) > row_right_limit:
-            legend_x = row_start_x
-            legend_y += row_gap_y
-        if legend_y + legend_height <= (bar_height - 6.0):
-            host._draw_preview_source_legend(canvas, legend_x, legend_y)
-
-    host._place_preview_record_overlay(
-        canvas_width,
-        bar_height,
-        left_x=row1_left_x,
-        top_y=6.0,
-        right_limit=(toggle_x1 - 8.0),
+    reset_x = float(toggle_rect[0]) - 34.0
+    host._draw_preview_text_badge(
+        canvas, reset_x, 8, "\u21ba",
+        fill_color="#233342", outline_color="#b8edff", text_color="#b8edff",
+        font=("Segoe UI", 11, "bold"), anchor=tk.NW, pad_x=5, pad_y=1,
+        tags=("preview_overlay", "preview_overlay_action", "preview_action::reset_view"),
     )
+    # Stable colors convey status without a periodic HUD redraw while editing.
+    _sync_preview_canvas_status_pulse(host, canvas, False)
+    overlay = getattr(host, "preview_record_overlay", None)
+    if overlay is not None:
+        overlay.place_forget()
+
 
 
 def refresh_preview_canvas_info_overlay_only(
@@ -3023,7 +2831,7 @@ def refresh_preview_canvas_info_overlay_only(
         return False
 
     if box_chars is None:
-        box_chars = source_data.get("characters", [])
+        box_chars, _source = host._get_preview_box_records(source_data)
     if not isinstance(box_chars, list):
         box_chars = []
 
@@ -3162,120 +2970,38 @@ def set_preview_fullscreen(host, active: bool):
         windowing_system = ""
     use_native_root_fullscreen = windowing_system not in {"win32"}
 
-    split = getattr(self, "detect_split", None)
-    right_panel = getattr(self, "detect_right_panel", None)
-    preview_split = getattr(self, "preview_vertical_split", None)
-    list_panel = getattr(self, "preview_list_lf", None)
-    footer_nav = getattr(self, "detect_footer_nav", None)
-    log_frame = getattr(self, "detection_log_frame", None)
-
-    if next_state:
-        self._preview_fullscreen_restore_panel_widths = {
-            "right": right_panel.winfo_width() if right_panel is not None else 300,
-            "list": list_panel.winfo_width() if list_panel is not None else 240,
-        }
-        self._preview_fullscreen_restore_log_visible = bool(getattr(self, "_detection_log_visible", False))
+    drawers = workspace_drawers(self)
+    if next_state and not drawers.detached and not drawers.mode_transition:
         try:
             self._preview_fullscreen_restore_root_state = bool(root.attributes("-fullscreen")) if root is not None else False
-        except Exception:
-            self._preview_fullscreen_restore_root_state = False
-        try:
             self._preview_fullscreen_restore_window_state = str(root.state()) if root is not None else "normal"
-        except Exception:
-            self._preview_fullscreen_restore_window_state = "normal"
-        try:
             self._preview_fullscreen_restore_geometry = str(root.geometry()) if root is not None else ""
         except Exception:
-            self._preview_fullscreen_restore_geometry = ""
+            pass
+    drawers.enter()
+    self._preview_fullscreen_active = next_state
 
+    if root is not None:
         try:
-            if self._pane_has_child(split, right_panel):
-                split.forget(right_panel)
-        except Exception:
-            pass
-        try:
-            if self._pane_has_child(preview_split, list_panel):
-                preview_split.forget(list_panel)
-        except Exception:
-            pass
-        try:
-            if log_frame is not None:
-                log_frame.grid_remove()
-        except Exception:
-            pass
-        try:
-            if footer_nav is not None:
-                footer_nav.grid_remove()
-        except Exception:
-            pass
-
-        self._set_detection_process_log_visibility(False)
-        if root is not None:
-            try:
-                if use_native_root_fullscreen:
-                    root.attributes("-fullscreen", True)
-                else:
-                    root.attributes("-fullscreen", False)
-                    try:
-                        root.state("zoomed")
-                    except Exception:
-                        screen_w = int(root.winfo_screenwidth())
-                        screen_h = int(root.winfo_screenheight())
-                        root.geometry(f"{screen_w}x{screen_h}+0+0")
-            except Exception:
-                pass
-        self._preview_fullscreen_active = True
-        self._preview_mode_overlay_position = self._get_preview_mode_overlay_default_position(fullscreen=True)
-    else:
-        if root is not None:
-            try:
-                if use_native_root_fullscreen:
-                    root.attributes("-fullscreen", bool(getattr(self, "_preview_fullscreen_restore_root_state", False)))
-                else:
-                    root.attributes("-fullscreen", False)
-                    restore_state = str(getattr(self, "_preview_fullscreen_restore_window_state", "normal") or "normal")
-                    restore_geometry = str(getattr(self, "_preview_fullscreen_restore_geometry", "") or "")
-                    try:
-                        root.state(restore_state if restore_state in {"normal", "zoomed"} else "normal")
-                    except Exception:
-                        pass
-                    if restore_state != "zoomed" and restore_geometry:
-                        try:
-                            root.geometry(restore_geometry)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-        try:
-            if not self._pane_has_child(split, right_panel) and right_panel is not None:
-                panel_widths = getattr(self, "_preview_fullscreen_restore_panel_widths", {})
-                split.add(right_panel, minsize=300, stretch="never", width=panel_widths.get("right", 300))
+            if use_native_root_fullscreen:
+                root.attributes("-fullscreen", True if next_state else bool(getattr(self, "_preview_fullscreen_restore_root_state", False)))
+            elif next_state:
+                root.attributes("-fullscreen", False)
                 try:
-                    split.paneconfigure(right_panel, minsize=300, stretch="never")
+                    root.state("zoomed")
                 except Exception:
-                    pass
+                    root.geometry(f"{int(root.winfo_screenwidth())}x{int(root.winfo_screenheight())}+0+0")
+            else:
+                root.attributes("-fullscreen", False)
+                restore_state = str(getattr(self, "_preview_fullscreen_restore_window_state", "normal") or "normal")
+                restore_geometry = str(getattr(self, "_preview_fullscreen_restore_geometry", "") or "")
+                root.state(restore_state if restore_state in {"normal", "zoomed"} else "normal")
+                if restore_state != "zoomed" and restore_geometry:
+                    root.geometry(restore_geometry)
         except Exception:
             pass
-        try:
-            if not self._pane_has_child(preview_split, list_panel) and list_panel is not None:
-                panel_widths = getattr(self, "_preview_fullscreen_restore_panel_widths", {})
-                preview_split.add(list_panel, minsize=240, width=panel_widths.get("list", 240),
-                                  before=getattr(self, "preview_lf", None))
-        except Exception:
-            pass
-        try:
-            if footer_nav is not None:
-                footer_nav.grid()
-        except Exception:
-            pass
-        self._set_detection_process_log_visibility(bool(getattr(self, "_preview_fullscreen_restore_log_visible", False)))
-        try:
-            self._sync_detect_right_canvas_width()
-            self._sync_detect_right_scrollregion()
-        except Exception:
-            pass
-        self._preview_fullscreen_active = False
+    if next_state:
+        self._preview_mode_overlay_position = self._get_preview_mode_overlay_default_position(fullscreen=True)
 
     # Resize once after Tk applies the final pane and window geometry. The
     # old synchronous render was repeated by the pending Configure callback.
@@ -3299,7 +3025,11 @@ def set_preview_fullscreen(host, active: bool):
         )
     except Exception:
         pass
-    self._schedule_preview_stabilized_rerender(delay_ms=90)
+    def complete_transition():
+        self._apply_preview_fullscreen_chrome()
+        self._schedule_preview_stabilized_rerender(delay_ms=35)
+
+    drawers.animate_mode(next_state, complete_transition)
     self._focus_preview_canvas()
 
 
@@ -3687,6 +3417,10 @@ def persist_active_preview_characters(
     host._update_preview_plate_layout_metadata(data, sorted_chars)
     sorted_chars = host._annotate_preview_character_reading_positions(sorted_chars, data=data)
     data["characters"] = sorted_chars
+    assist = getattr(host, "_apply_live_gt_assist", None)
+    assist_changed = bool(assist(data).get("changed")) if callable(assist) else False
+    if assist_changed:
+        light_redraw_indices = None
     status_now = host._derive_preview_status_from_data(data, sorted_chars)
     if (
         status_now == "perfect"
@@ -3725,6 +3459,9 @@ def persist_active_preview_characters(
 
     resolved_selected_index = getattr(host, "_preview_char_selected_index", None)
     status_suffix = "Status tablicy: OK." if status_now == "perfect" else "Status tablicy: wymaga korekty."
+    quality = getattr(host, "_get_review_quality_status", None)
+    if status_now != "perfect" and callable(quality) and quality(data, sorted_chars) == "perfect":
+        status_suffix = "Znaki są zgodne z GT. Tablica gotowa do zatwierdzenia."
     live_message = f"{success_message} {status_suffix}".strip()
     live_tone = "success" if status_now == "perfect" else "info"
     # Provenance and the text can change while quality stays needs_fix/perfect.
@@ -4061,6 +3798,8 @@ def load_preview_data(host, quiet=False):
                 current_mtime = meta_path.stat().st_mtime
                 write_ms = (time.perf_counter() - phase_started) * 1000.0
 
+            if self._loaded_meta_path != meta_path:
+                restore_preview_stage_mode(self, loaded)
             self.preview_metadata = loaded
             self._loaded_meta_path = meta_path
             self._loaded_meta_mtime = current_mtime
@@ -4237,6 +3976,11 @@ def on_preview_select(host, event=None):
 
     pid = pid_map[idx]
     data = self.preview_metadata.get(pid, {})
+    assist = getattr(self, "_apply_live_gt_assist", None)
+    if callable(assist) and assist(data).get("changed"):
+        mark_preview_metadata_changed(self)
+        self._schedule_preview_metadata_save(delay_ms=350)
+        self._refresh_preview_listbox_row(pid)
     if not fast_select_render:
         self._update_preview_record_source_label(data)
     current_render_state = getattr(self, "_preview_render_state", None) or {}
@@ -4265,45 +4009,10 @@ def on_preview_select(host, event=None):
     except Exception:
         pass
 
-    mode_key = self._get_preview_box_mode_key()
-    if fast_select_render and mode_key in {"AUTO", "FINAL"}:
-        final_records = self._sort_character_records_by_x(data.get("characters", []))
-        if final_records:
-            yolo_variants = {"FINAL": final_records, "YOLO_FILTERED": [], "YOLO_NMS": [], "YOLO_RAW": []}
-            box_chars, box_source = final_records, "FINAL"
-            yolo_raw_count = yolo_nms_count = yolo_filtered_count = 0
-        else:
-            yolo_variants = self._get_preview_box_variants(data)
-            box_chars, box_source = self._get_preview_box_records(data)
-            yolo_raw_count = len(yolo_variants.get("YOLO_RAW", []))
-            yolo_nms_count = len(yolo_variants.get("YOLO_NMS", []))
-            yolo_filtered_count = len(yolo_variants.get("YOLO_FILTERED", []))
-    else:
-        yolo_variants = self._get_preview_box_variants(data)
-        method_name = self._get_detection_method_key()
-        if mode_key == "AUTO":
-            final_records = list(yolo_variants.get("FINAL", []) or [])
-            if final_records:
-                box_chars, box_source = final_records, "FINAL"
-            elif method_name == "YOLO":
-                box_chars, box_source = [], "FINAL"
-                for candidate_key in ("YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"):
-                    candidate_records = yolo_variants.get(candidate_key, [])
-                    if candidate_records:
-                        box_chars, box_source = candidate_records, candidate_key
-                        break
-            else:
-                box_chars, box_source = final_records, "FINAL"
-                for candidate_key in ("YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"):
-                    candidate_records = yolo_variants.get(candidate_key, [])
-                    if candidate_records:
-                        box_chars, box_source = candidate_records, candidate_key
-                        break
-        else:
-            box_chars, box_source = yolo_variants.get(mode_key, []), mode_key
-        yolo_raw_count = len(yolo_variants.get("YOLO_RAW", []))
-        yolo_nms_count = len(yolo_variants.get("YOLO_NMS", []))
-        yolo_filtered_count = len(yolo_variants.get("YOLO_FILTERED", []))
+    box_chars, box_source = self._get_preview_box_records(data)
+    yolo_raw_count = len(data.get("yolo_raw_detections", []) or [])
+    yolo_nms_count = len(data.get("yolo_nms_detections", []) or [])
+    yolo_filtered_count = len(data.get("yolo_detections", []) or [])
     canonical_chars = self._get_preview_active_character_records(create=False)
     selected_char_idx, _selected_char_rec = self._get_preview_selected_char_record()
     if selected_char_idx is not None and not (0 <= int(selected_char_idx) < len(canonical_chars)):
@@ -4355,26 +4064,10 @@ def on_preview_select(host, event=None):
         c_w = max(50, self.preview_canvas.winfo_width())
         c_h = max(50, self.preview_canvas.winfo_height())
 
-        if fast_select_render:
-            # First frame: reserve a stable top area, but defer expensive status/HUD work.
-            info_bar_height = 74 if bool(getattr(self, "_preview_fullscreen_active", False)) else 80
-        else:
-            status_meta = self._get_preview_status_presentation(
-                data=data,
-                chars=(data or {}).get("characters", []),
-                plate_id=str((data or {}).get("plate_id", "") or getattr(self, "_preview_active_pid", "") or ""),
-            )
-            status_text = str(status_meta.get("canvas_text", "Nieocenione") or "Nieocenione")
-            source_counts = self._count_character_sources(box_chars, data=data)
-            source_line = self._format_preview_source_counts_line(source_counts)
-            info_layout = self._plan_preview_canvas_info_overlay_layout(
-                c_w,
-                source_line,
-                status_text,
-                data=data,
-                box_chars=box_chars,
-            )
-            info_bar_height = int(max(32.0, float(info_layout.get("bar_height", 32.0))))
+        info_layout = self._plan_preview_canvas_info_overlay_layout(
+            c_w, "", "", data=data, box_chars=box_chars,
+        )
+        info_bar_height = int(max(32.0, float(info_layout.get("bar_height", 32.0))))
         self._preview_overlay_top_bar_height = float(info_bar_height)
         add_state = getattr(self, "_preview_char_add_state", None)
         mute_existing_boxes_during_add = isinstance(add_state, dict)
@@ -4977,7 +4670,9 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
     data = self._get_preview_active_data(create=False)
     if not isinstance(data, dict):
         return False
-    chars = self._get_preview_active_character_records(create=False)
+    chars, box_source = self._get_preview_box_records(data)
+    if box_source == "FINAL":
+        chars = self._get_preview_active_character_records(create=False)
     if not isinstance(chars, list):
         chars = []
 
@@ -5024,15 +4719,14 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
             if getattr(self, "_preview_list_select_after_id", None):
                 return
             try:
-                variants = self._get_preview_box_variants(data)
                 self._update_preview_record_source_label(data)
                 self._update_preview_box_info_label(
                     plate_id=current_pid,
-                    mode_key="FINAL",
+                    mode_key=box_source,
                     shown_count=len(chars),
-                    yolo_raw_count=len(variants.get("YOLO_RAW", []) or []),
-                    yolo_nms_count=len(variants.get("YOLO_NMS", []) or []),
-                    yolo_filtered_count=len(variants.get("YOLO_FILTERED", []) or []),
+                    yolo_raw_count=len(data.get("yolo_raw_detections", []) or []),
+                    yolo_nms_count=len(data.get("yolo_nms_detections", []) or []),
+                    yolo_filtered_count=len(data.get("yolo_detections", []) or []),
                 )
             except Exception:
                 pass
@@ -5124,7 +4818,7 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
         # Fast detail signatures are part of the same visual object as the box.
         # Keep the record/index tags so drag/redraw cleanup does not leave stale
         # badges and leader lines behind after a manual correction.
-        char_canvas_tag = self._get_preview_character_canvas_tag("FINAL", int(box_idx))
+        char_canvas_tag = self._get_preview_character_canvas_tag(box_source, int(box_idx))
         char_record_tag = self._get_preview_character_record_canvas_tag(c)
         tags = ("preview_fast_detail", char_canvas_tag, char_record_tag)
         _draw_preview_compact_character_signature(
@@ -5155,7 +4849,9 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
             stagger_index=_get_preview_signature_stagger_index(c, box_idx),
         )
 
-        is_selected_box = bool(selected_record is c or (selected_idx is not None and int(selected_idx) == int(box_idx)))
+        is_selected_box = bool(box_source == "FINAL" and (
+            selected_record is c or (selected_idx is not None and int(selected_idx) == int(box_idx))
+        ))
         if is_selected_box and bool(getattr(self, "_preview_char_edit_mode", False)):
             _draw_preview_character_edit_grips(
                 self,
@@ -5168,7 +4864,7 @@ def draw_preview_fast_render_details(host, plate_id: str | None = None) -> bool:
                 selection_color=selection_color,
             )
 
-        show_label_box = bool(
+        show_label_box = box_source == "FINAL" and bool(
             label_mode_active
             or (active_label_idx is not None and int(active_label_idx) == int(box_idx))
             or (
@@ -5482,6 +5178,10 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
     )
     if frame_tone == "muted":
         frame_color = palette.get("border", "#808890")
+    if (source_data.get("review_state") or {}).get("status") == "in_progress":
+        quality = getattr(self, "_get_review_quality_status", None)
+        if callable(quality) and quality(source_data) == "perfect":
+            frame_color = palette.get("info", "#55c8ff")
     tags = ("preview_plate_status_frame",)
     try:
         handle_radius = float(self._get_preview_char_handle_radius())
@@ -5742,9 +5442,12 @@ def redraw_preview_character_overlays_light(host) -> bool:
     self._draw_preview_layout_separator()
 
     redrawn = False
-    chars = self._get_preview_active_character_records(create=False)
+    data = self._get_preview_active_data(create=False)
+    chars, layer = self._get_preview_box_records(data)
+    if layer == "FINAL":
+        chars = self._get_preview_active_character_records(create=False)
     for idx in range(len(chars)):
-        redrawn = self._redraw_preview_character_overlay_only(int(idx)) or redrawn
+        redrawn = self._redraw_preview_character_overlay_only(int(idx), records=chars, layer=layer) or redrawn
 
     try:
         self._apply_preview_badge_selection_style()

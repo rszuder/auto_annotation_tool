@@ -70,6 +70,11 @@ def _iter_project_workspace_dirs(root: Path) -> list[Path]:
 def _ensure_project_workspace_tree(self, root: Path) -> None:
     for path in self._iter_project_workspace_dirs(root):
         path.mkdir(parents=True, exist_ok=True)
+    ready = getattr(self, "_project_workspace_roots_ready", None)
+    if not isinstance(ready, set):
+        ready = set()
+        self._project_workspace_roots_ready = ready
+    ready.add(str(root))
 
 
 def _get_project_default_fields(self) -> Dict[str, Any]:

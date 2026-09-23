@@ -1096,27 +1096,8 @@ def open_campaign_step2_entry(
             except Exception:
                 pass
 
-        if (
-            effective_manual_template
-            and not opened_existing_run
-            and str(host._get_workflow_route() or "").strip().lower() == "manual"
-            and str(host._get_manual_entry_mode() or "").strip().lower() == "new"
-            and Path(input_dir).exists()
-            and not t04_plate_work_entry
-            and not bool(getattr(host, "_campaign_manual_prepare_pending", False))
-        ):
-            try:
-                host._campaign_manual_prepare_pending = True
-
-                def _prepare_campaign_manual_package() -> None:
-                    try:
-                        host._ensure_campaign_manual_package_ready(iteration_target=target)
-                    finally:
-                        host._campaign_manual_prepare_pending = False
-
-                host.frame.after_idle(_prepare_campaign_manual_package)
-            except Exception:
-                host._campaign_manual_prepare_pending = False
+        # Entering Z2 only restores the workspace. Creating a manual XML or
+        # running models requires the user's start action after Z2 is visible.
         _mark_phase("refresh_ui")
 
         host._campaign_context_project_name = str(active_project or "").strip()
@@ -1126,6 +1107,7 @@ def open_campaign_step2_entry(
             and not opened_existing_run
             and not bool(getattr(host, "current_annotations", None))
         )
+        host._campaign_step2_transition_defer_source_preview = deferred_preview_load
 
         return {
             "ok": True,
@@ -1137,8 +1119,7 @@ def open_campaign_step2_entry(
             "restored_snapshot": bool(restored_snapshot),
             "opened_existing_run": bool(opened_existing_run),
             "manual_prepare_deferred_to_user": bool(
-                t04_plate_work_entry
-                and effective_manual_template
+                effective_manual_template
                 and not opened_existing_run
             ),
             "restore_run_dir": str(restore_run_dir or ""),

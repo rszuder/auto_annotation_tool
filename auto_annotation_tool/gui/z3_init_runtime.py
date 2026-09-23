@@ -184,7 +184,7 @@ def __init__(self, parent, app):
     self._preview_controls_legend_drag_state = None
     self._preview_controls_legend_click_state = None
     self._preview_fullscreen_toggle_rect = None
-    self._preview_controls_legend_visible = True
+    self._preview_controls_legend_visible = False
     self._preview_operation_assistant_visible = True
     self._preview_overlay_dock_expanded = True
     self._preview_overlay_dock_render_key = None

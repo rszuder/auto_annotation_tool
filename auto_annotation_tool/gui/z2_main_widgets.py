@@ -17,6 +17,8 @@ from .zoomable_canvas import ZoomableCanvas
 from .z2_main_widget_bindings import bind_annotation_widget_help_and_events
 from .z2_right_panel_widgets import build_annotation_right_panel
 from . import z2_gt_completion
+from . import z2_gt_review
+from .z2_image_listbox import ImageListbox
 
 
 def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
@@ -2012,7 +2014,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         self.preview_list_legend_problem_badge,
         self.preview_list_legend_problem_lbl,
         self.preview_list_legend_problem_count_lbl,
-    ) = _build_preview_list_legend_item(preview_list_legend_grid, 1, 0, "--", "Brak")
+    ) = _build_preview_list_legend_item(preview_list_legend_grid, 1, 0, "!", "Do poprawy")
     (
         self.preview_list_legend_dirty_item,
         self.preview_list_legend_dirty_badge,
@@ -2059,11 +2061,13 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     self._bind_preview_sort_tile(self.preview_list_legend_corrected_item, "Status: ED, OK, problem")
     self._bind_preview_sort_tile(self.preview_list_legend_problem_item, "Status: problem, ED, OK")
     self._bind_preview_sort_tile(self.preview_list_legend_dirty_item, "Status: OK, ED, problem")
+    z2_gt_review.build_missing_gt_filter(self, preview_list_section)
     list_frame = ttk.Frame(preview_list_section)
     self.preview_list_frame = list_frame
     list_frame.pack(fill=tk.BOTH, expand=True)
-    self.preview_listbox = tk.Listbox(
+    self.preview_listbox = ImageListbox(
         list_frame,
+        owner=self,
         font=("Consolas", 9),
         height=9,
         activestyle="none",

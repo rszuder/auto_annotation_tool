@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import tkinter as tk
 
 from ..plate_ground_truth import normalize_plate_ground_truth_text
@@ -17,6 +18,77 @@ from .z3_gt_contract import (
 GT_ASSIST_SCHEMA = "alpr.pz2.gt_assist.v1"
 GT_ASSIST_SOURCE = "gt_assisted"
 GT_ASSIST_CONFIRMED_SOURCE = "gt_assist_confirmed"
+
+
+def apply_live_gt_assist(host, data: dict | None) -> dict:
+    """Label current REVIEW geometry from explicit GT, never change RAW or boxes."""
+    if not isinstance(data, dict):
+        return {"changed": False, "reason": "no_plate"}
+    state = data.get("review_state") or {}
+    if state.get("status") != "in_progress":
+        return {"changed": False, "reason": "not_editing"}
+    gt = normalize_plate_ground_truth_text(host._get_preview_ground_truth_text(data))
+    chars = data.get("characters") or []
+    result = {"schema": "alpr.pz2.live_gt_assist.v1", "ground_truth_text": gt,
+              "source_gt_revision_ids": revision_ids_from_data(data, "source_gt_revision_ids", "source_gt_revision_id"),
+              "source_gt_hash": data.get("source_gt_hash"), "box_count": len(chars), "changed": False}
+    reason = "ready"
+    if not gt:
+        reason = "missing_gt"
+    elif len(chars) != len(gt):
+        reason = "box_count_mismatch"
+    else:
+        try:
+            for rec in chars:
+                x1, y1, x2, y2 = map(float, rec["bbox"][:4])
+                if not all(math.isfinite(v) for v in (x1, y1, x2, y2)) or x2 <= x1 or y2 <= y1:
+                    raise ValueError("invalid box")
+            if host._preview_layout_separator_conflicts_with_chars(data, chars):
+                reason = "layout_conflict"
+            elif str(data.get("plate_layout", "")) == "two_row_candidate" and not data.get("plate_layout_override"):
+                reason = "layout_uncertain"
+        except (TypeError, ValueError, KeyError):
+            reason = "invalid_geometry"
+    if reason == "ready":
+        ordered = host._sort_character_records_by_x(chars, data=data)
+        for rec, symbol in zip(ordered, gt):
+            if str(rec.get("character") or "") != symbol:
+                rec.setdefault("gt_assist_original_character", rec.get("character", ""))
+                rec.setdefault("gt_assist_original_sign_source", rec.get("sign_source", ""))
+                rec["character"] = symbol
+                rec["correction_source"] = GT_ASSIST_SOURCE
+                rec["sign_source"] = GT_ASSIST_SOURCE
+                result["changed"] = True
+        if result["changed"]:
+            data["correction_source"] = GT_ASSIST_SOURCE
+    result["reason"] = reason
+    data["live_gt_assist"] = {key: value for key, value in result.items() if key != "changed"}
+    return result
+
+
+def get_live_gt_assist_presentation(host, data: dict | None = None) -> dict:
+    if data is None:
+        data = host._get_preview_active_data(create=False)
+    data = data if isinstance(data, dict) else {}
+    gt = normalize_plate_ground_truth_text(data.get("ground_truth_text"))
+    if not gt:
+        getter = getattr(host, "_get_preview_ground_truth_text", None)
+        gt = getter(data) if callable(getter) else ""
+    chars = data.get("characters") or []
+    editing = (data.get("review_state") or {}).get("status") == "in_progress"
+    text, tone = "Asysta GT: aktywna podczas korekty", "info"
+    if not gt:
+        text, tone = "Asysta GT: brak GT tablicy w Z2", "warning"
+    elif not editing:
+        text = f"GT: {gt} · asysta aktywna podczas korekty"
+    elif len(chars) != len(gt):
+        action = "Dodaj brakujące ramki" if len(chars) < len(gt) else "Usuń nadmiarowe ramki"
+        text, tone = f"GT: {gt} · ramki {len(chars)}/{len(gt)}. {action}.", "warning"
+    elif (data.get("live_gt_assist") or {}).get("reason") in {"invalid_geometry", "layout_conflict", "layout_uncertain"}:
+        text, tone = f"GT: {gt} · sprawdź geometrię i układ ramek", "warning"
+    else:
+        text = f"GT: {gt} · asysta znaków aktywna"
+    return {"text": text, "tone": tone, "status": "automatic", "can_accept": False, "can_reject": False}
 
 
 def _canonical_raw_fingerprint(
@@ -613,7 +685,7 @@ def get_gt_assist_presentation(
 
 
 def refresh_gt_assist_controls(host) -> dict:
-    presentation = get_gt_assist_presentation(host)
+    presentation = get_live_gt_assist_presentation(host)
 
     busy = bool(
         getattr(host, "fast_test_running", False)

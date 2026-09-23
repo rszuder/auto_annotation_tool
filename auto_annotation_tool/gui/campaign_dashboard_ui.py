@@ -67,6 +67,7 @@ from . import campaign_stage_logic
 from . import campaign_navigation
 from . import campaign_iteration_flow
 from . import campaign_graph_actions
+from .campaign_gate_fields import gate_field_copy, field_layout, draw_field, text_height
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
@@ -19309,13 +19310,30 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             gate_prefix = str(gate_id or "").strip().upper()
             if gate_prefix and gate_title_body.upper().startswith(gate_prefix):
                 gate_title_body = gate_title_body[len(gate_prefix) :].lstrip(" |:-")
-            gate_title_text = f"{gate_id} {gate_title_body}".strip().upper()
-            long_gate_title = len(gate_title_text) > 34
+            gate_title_text = f"{gate_id} · {gate_title_body}".strip()
             completed = bool(_edge_completed(edge))
             local_zoom = _gate_local_zoom(edge.key)
             resource_status_value = _edge_resource_badge_status(edge)
             work_status_value = _edge_work_compact_status(edge) if _edge_fields_enabled(edge) else ""
             approve_display_label = _edge_approve_label(edge) if _edge_approve_enabled(edge) else "ZATWIERDŹ"
+            gate_work_interrupted = bool(gate_active and _is_t07_graph_edge(edge.key)
+                and _get_t07_repair_interruption_state() and not _current_t07_training_finish_state())
+            gate_step4_interrupted = bool(gate_active and _is_t07_graph_edge(edge.key)
+                and _current_step4_work_interruption_state() and not _current_t07_training_finish_state())
+            gate_training_candidate = bool(gate_active and _is_t07_graph_edge(edge.key)
+                and _current_t07_training_candidate_state() and not _current_t07_training_finish_state())
+            gate_t06_interrupted = bool(gate_active and edge.key == "e3_to_e4" and _t06_interrupted_work_state())
+            # Resolve dynamic copy before measuring it, including interrupted work.
+            if gate_work_interrupted or gate_step4_interrupted or gate_t06_interrupted:
+                pending_state = (_t06_interrupted_work_state() if gate_t06_interrupted
+                    else _get_t07_pending_repair_approved_state() if gate_work_interrupted else {})
+                try:
+                    pending_images = int(pending_state.get("unpromoted_approved_images", 0) or 0)
+                except Exception:
+                    pending_images = 0
+                work_status_value = f"PRZERWANE +{pending_images} OK" if pending_images > 0 else "PRZERWANE"
+            elif gate_training_candidate:
+                work_status_value = "WYBIERZ WYNIK"
             rows = (
                 ("BRAMKA", status_text, None, False),
                 ("ZASOBY", resource_status_value, f"gate:{edge.key}:resources", _edge_resources_enabled(edge)),
@@ -19323,104 +19341,34 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 ("ZATWIERDŹ", "", f"gate:{edge.key}:approve", _edge_approve_enabled(edge)),
             )
 
-            title_font = _gate_font(9, local_zoom, "bold")
+            title_font = _gate_font(10, local_zoom, "bold")
             row_label_font = _gate_font(8, local_zoom)
-            row_value_font = _gate_font(8, local_zoom, "bold")
-            detail_label_font = _gate_font(8, local_zoom, "bold")
-            title_layout_font = _gate_layout_font(9, local_zoom, "bold")
+            row_value_font = _gate_font(10, local_zoom, "bold")
+            detail_label_font = _gate_font(8, local_zoom)
+            title_layout_font = _gate_layout_font(10, local_zoom, "bold")
             row_label_layout_font = _gate_layout_font(8, local_zoom)
-            row_value_layout_font = _gate_layout_font(8, local_zoom, "bold")
-            detail_label_layout_font = _gate_layout_font(8, local_zoom, "bold")
-
-            def _measure_text_width(text: object, font_spec) -> float:
-                parts = str(text or "").splitlines() or [""]
-                try:
-                    font_obj = tkfont.Font(root=canvas, font=font_spec)
-                    return float(max((font_obj.measure(part.strip()) for part in parts), default=0))
-                except Exception:
-                    scale = max(1.0, float(local_zoom or 1.0))
-                    return float(max((len(part.strip()) * 5.2 * scale for part in parts), default=0))
-
-            def _measure_text_world_width(text: object, font_spec) -> float:
-                return _measure_text_width(text, font_spec)
-
-            def _font_linespace_world(font_spec, fallback: float) -> float:
-                try:
-                    return float(tkfont.Font(root=canvas, font=font_spec).metrics("linespace"))
-                except Exception:
-                    return float(fallback)
-
-            def _inline_row_width(label: str, value: object, *, approve: bool = False) -> float:
-                clean_value = str(value or "").strip()
-                if approve:
-                    return _measure_text_world_width(approve_display_label, detail_label_layout_font) + 24 * local_zoom
-                if clean_value and clean_value.upper() not in {"OK", "WYBIERZ"}:
-                    return max(
-                        _measure_text_world_width(label, detail_label_layout_font),
-                        _measure_text_world_width(clean_value, row_value_layout_font),
-                    ) + 24 * local_zoom
-                if clean_value:
-                    return (
-                        _measure_text_world_width(label, row_label_layout_font)
-                        + _measure_text_world_width(clean_value.upper(), row_value_layout_font)
-                        + 38 * local_zoom
-                    )
-                return _measure_text_world_width(label, row_label_layout_font) + 24 * local_zoom
-
-            content_widths = [
-                _measure_text_world_width(gate_title_text, title_layout_font) + 26 * local_zoom,
-                _inline_row_width("BRAMKA", status_text),
-                _inline_row_width("ZASOBY", resource_status_value),
-                _inline_row_width("PRACA", work_status_value),
-                _inline_row_width("ZATWIERDŹ", "", approve=True),
-            ]
-            min_gate_w = 104 * local_zoom
-            # Card geometry is in world units. Resizing the viewport (including
-            # the project drawer animation) must not reflow its contents.
-            max_gate_w = 260 * local_zoom
-            gate_w = max(min_gate_w, min(max_gate_w, max(content_widths or [min_gate_w])))
-            title_line_h = _font_linespace_world(title_layout_font, 11 * local_zoom)
-            row_line_h = _font_linespace_world(row_label_layout_font, 10 * local_zoom)
-            detail_line_h = _font_linespace_world(row_value_layout_font, 9 * local_zoom)
-            row_h = max(20 * local_zoom, row_line_h + 7 * local_zoom)
-            title_text_width = max(54, (gate_w - 30 * local_zoom) * graph_zoom_scale)
-            row_text_width = max(1, (gate_w - 24 * local_zoom) * graph_zoom_scale)
-
-            def _wrapped_line_count(text: object, *, chars_per_line: int) -> int:
-                clean_lines = str(text or "").splitlines() or [""]
-                total = 0
-                for clean_line in clean_lines:
-                    length = len(clean_line.strip())
-                    total += max(1, int((length + max(1, chars_per_line) - 1) / max(1, chars_per_line)))
-                return max(1, total)
-
-            try:
-                avg_char_width = max(4.4, tkfont.Font(root=canvas, font=row_value_layout_font).measure("MMMMMMMMMM") / 10)
-            except Exception:
-                avg_char_width = 5.6 * max(1.0, float(local_zoom or 1.0))
-            row_text_width_world = max(1.0, gate_w - 24 * local_zoom)
-            inline_value_chars = max(17, int(max(1.0, row_text_width_world - 54 * local_zoom) / avg_char_width))
-            chars_per_line = max(12, int(max(1.0, row_text_width_world) / avg_char_width))
-            title_lines = _wrapped_line_count(gate_title_text, chars_per_line=chars_per_line)
-            title_h = max(28 * local_zoom, 7 * local_zoom + title_lines * title_line_h)
-
-            def _field_row_height(label: str, value: object, *, is_approve: bool = False) -> float:
-                if is_approve:
-                    approve_lines = _wrapped_line_count(approve_display_label, chars_per_line=chars_per_line)
-                    return max(28 * local_zoom, 7 * local_zoom + approve_lines * detail_line_h)
-                value_text = str(value or "").strip()
-                if value_text and value_text.upper() not in {"OK", "WYBIERZ"}:
-                    value_lines = _wrapped_line_count(value_text, chars_per_line=chars_per_line)
-                    return max(row_h, 7 * local_zoom + (1 + value_lines) * detail_line_h)
-                return row_h
-
-            row_heights = {
-                "BRAMKA": row_h,
-                "ZASOBY": _field_row_height("ZASOBY", resource_status_value),
-                "PRACA": _field_row_height("PRACA", work_status_value),
-                "ZATWIERDŹ": _field_row_height("ZATWIERDŹ", "", is_approve=True),
-            }
-            gate_h = title_h + sum(row_heights.get(str(label).strip().upper(), row_h) for label, _value, _tag, _enabled in rows)
+            row_value_layout_font = _gate_layout_font(10, local_zoom, "bold")
+            detail_label_layout_font = _gate_layout_font(8, local_zoom)
+            field_copies = {label: gate_field_copy(label, value, enabled=enabled,
+                approve_label=approve_display_label) for label, value, _tag, enabled in rows}
+            title_measure = tkfont.Font(root=canvas, font=title_layout_font)
+            primary_measure = tkfont.Font(root=canvas, font=row_value_layout_font)
+            content_widths = [title_measure.measure(gate_title_text) + 32 * local_zoom]
+            content_widths.extend(primary_measure.measure(copy.primary) + 36 * local_zoom
+                                  for copy in field_copies.values())
+            # World geometry stays independent of sidebar and viewport resizing.
+            min_gate_w = 216 * local_zoom
+            max_gate_w = 280 * local_zoom
+            gate_w = max(min_gate_w, min(max_gate_w, max(content_widths)))
+            title_text_width = max(1, (gate_w - 32 * local_zoom) * graph_zoom_scale)
+            title_h = text_height(canvas, gate_title_text, title_layout_font,
+                                  gate_w - 32 * local_zoom) + 18 * local_zoom
+            field_layouts = {label: field_layout(canvas, copy, width=gate_w, scale=local_zoom,
+                caption_font=row_label_layout_font, primary_font=row_value_layout_font,
+                detail_font=detail_label_layout_font) for label, copy in field_copies.items()}
+            row_heights = {label: item["height"] for label, item in field_layouts.items()}
+            row_h = row_heights["BRAMKA"]
+            gate_h = title_h + sum(row_heights[label] for label, _value, _tag, _enabled in rows)
             default_x_shift = 0
             post_clear_x_shift = 0.0
             forced_y_after_clear: float | None = None
@@ -19706,53 +19654,25 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         row_width = 2
                     else:
                         row_fill = blend_hex_colors(fill, graph_card_disabled, 0.04)
-                work_interrupted = bool(
-                    _is_t07_graph_edge(edge.key)
-                    and str(tag or "").endswith(":actions")
-                    and _get_t07_repair_interruption_state()
-                    and not _current_t07_training_finish_state()
-                )
-                step4_work_interrupted = bool(
-                    _is_t07_graph_edge(edge.key)
-                    and str(tag or "").endswith(":actions")
-                    and _current_step4_work_interruption_state()
-                    and not _current_t07_training_finish_state()
-                )
-                step4_training_candidate_action = bool(
-                    _is_t07_graph_edge(edge.key)
-                    and str(tag or "").endswith(":actions")
-                    and _current_t07_training_candidate_state()
-                    and not _current_t07_training_finish_state()
-                )
-                resource_review_action = bool(
-                    str(tag or "").endswith(":actions")
-                    and str(work_status_value or "").strip()
-                )
-                t06_work_interrupted = bool(
-                    edge.key == "e3_to_e4"
-                    and str(tag or "").endswith(":actions")
-                    and _t06_interrupted_work_state()
-                )
-                if work_interrupted or t06_work_interrupted or step4_work_interrupted:
-                    pending_state = (
-                        _t06_interrupted_work_state()
-                        if t06_work_interrupted
-                        else (_get_t07_pending_repair_approved_state() if work_interrupted else {})
-                    )
-                    try:
-                        pending_images = int(pending_state.get("unpromoted_approved_images", 0) or 0)
-                    except Exception:
-                        pending_images = 0
-                    value = f"PRZERWANE +{pending_images} OK" if pending_images > 0 else "PRZERWANE"
-                elif step4_training_candidate_action:
-                    value = "WYBIERZ WYNIK"
+                is_work_row = bool(tag and str(tag).endswith(":actions"))
+                work_interrupted = is_work_row and gate_work_interrupted
+                step4_work_interrupted = is_work_row and gate_step4_interrupted
+                step4_training_candidate_action = is_work_row and gate_training_candidate
+                t06_work_interrupted = is_work_row and gate_t06_interrupted
+                resource_review_action = is_work_row and bool(work_status_value)
+                if step4_training_candidate_action:
                     row_fill = blend_hex_colors(fill, warning, 0.10)
                     row_outline = blend_hex_colors(warning, card_bg, 0.30)
-                    row_width = 1
                 elif resource_review_action:
                     row_fill = blend_hex_colors(fill, warning, 0.08)
                     row_outline = blend_hex_colors(warning, card_bg, 0.26)
-                    row_width = 1
+                copy = field_copies[label]
+                if enabled and copy.tone == "success":
+                    row_fill = blend_hex_colors(fill, graph_card_success, 0.10)
+                    row_outline = blend_hex_colors(graph_card_success, card_bg, 0.25)
+                elif is_work_row and not copy.tone:
+                    row_fill = blend_hex_colors(fill, graph_card_accent, 0.04)
+                    row_outline = outline
                 row_tags = (group_tag,)
                 if tag and enabled:
                     row_tags = (group_tag, tag, "gate_button")
@@ -19802,23 +19722,6 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 row_text_color = graph_card_text if operable else graph_card_disabled
                 if tag and not enabled:
                     row_text_color = graph_card_disabled
-                value_color = _graph_card_contrast_color(status_color)
-                if is_resource_row:
-                    value_color = graph_card_success if str(value or "").strip().upper() == "OK" else graph_card_warning
-                if work_interrupted or t06_work_interrupted or step4_work_interrupted:
-                    value_color = graph_card_error
-                if step4_training_candidate_action:
-                    value_color = graph_card_warning
-                if resource_review_action:
-                    value_color = graph_card_warning
-                if str(value or "").strip().upper().startswith("PRZERWANE"):
-                    value_color = graph_card_error
-                resource_detail_layout = bool(
-                    (is_resource_row or str(label or "").strip().upper() == "PRACA")
-                    and value
-                    and str(value).strip().upper() not in {"OK", "WYBIERZ"}
-                    and current_row_h > row_h + 1
-                )
                 if tag and enabled:
                     gate_field_geometry[str(tag)] = {
                         "x0": float(x),
@@ -19827,94 +19730,17 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "y1": float(y0 + current_row_h),
                         "color": str(row_color),
                     }
-                display_label = str(label or "")
-                if is_approve_row:
-                    display_label = approve_display_label or "ZATWIERDŹ"
-                if resource_detail_layout:
-                    canvas.create_text(
-                        x + 16 * local_zoom,
-                        y0 + 4 * local_zoom,
-                        text=display_label,
-                        fill=row_text_color,
-                        anchor="nw",
-                        font=detail_label_font,
-                        width=row_text_width,
-                        justify=tk.LEFT,
-                        tags=text_tags,
-                    )
-                    canvas.create_text(
-                        x + 16 * local_zoom,
-                        y0 + 4 * local_zoom + detail_line_h,
-                        text=str(value).strip(),
-                        fill=value_color,
-                        anchor="nw",
-                        font=row_value_font,
-                        width=row_text_width,
-                        justify=tk.LEFT,
-                        tags=text_tags,
-                    )
-                elif is_approve_row and "\n" in display_label:
-                    approve_title, approve_detail = display_label.split("\n", 1)
-                    canvas.create_text(
-                        x + 16 * local_zoom,
-                        y0 + 5 * local_zoom,
-                        text=approve_title.strip(),
-                        fill=row_text_color,
-                        anchor="nw",
-                        font=detail_label_font,
-                        width=max(1, row_text_width),
-                        justify=tk.LEFT,
-                        tags=text_tags,
-                    )
-                    canvas.create_text(
-                        x + 16 * local_zoom,
-                        y0 + 5 * local_zoom + detail_line_h,
-                        text=approve_detail.strip(),
-                        fill=graph_card_muted,
-                        anchor="nw",
-                        font=row_value_font,
-                        width=max(1, row_text_width),
-                        justify=tk.LEFT,
-                        tags=text_tags,
-                    )
-                else:
-                    canvas.create_text(
-                        x + 16 * local_zoom,
-                        y0 + current_row_h / 2,
-                        text=display_label,
-                        fill=row_text_color,
-                        anchor="w",
-                        font=detail_label_font if is_approve_row else row_label_font,
-                        width=max(1, row_text_width),
-                        justify=tk.LEFT,
-                        tags=text_tags,
-                    )
-                if value and not resource_detail_layout:
-                    if idx == 0:
-                        status_value = str(value).strip().upper()
-                        if status_value == "WYBIERZ":
-                            status_value = "DO WYBORU"
-                        # The row already provides its background and border.
-                        # A second filled rectangle masks the row's outline.
-                        canvas.create_text(
-                            x + gate_w - 12 * local_zoom,
-                            y0 + current_row_h / 2,
-                            text=status_value,
-                            fill=graph_card_muted if status_value == "DO WYBORU" else value_color,
-                            anchor="e",
-                            font=_gate_font(8, local_zoom),
-                            tags=row_tags,
-                        )
-                    else:
-                        canvas.create_text(
-                            x + gate_w - 5 * local_zoom,
-                            y0 + current_row_h / 2,
-                            text=shorten(str(value).upper(), width=inline_value_chars, placeholder="..."),
-                            fill=value_color,
-                            anchor="e",
-                            font=row_value_font,
-                            tags=row_tags,
-                        )
+                primary_color = row_text_color
+                if copy.tone and (enabled or idx == 0):
+                    primary_color = {"success": graph_card_success, "warning": graph_card_warning,
+                                     "error": graph_card_error}.get(copy.tone, row_text_color)
+                draw_field(canvas, copy, field_layouts[label], x=x, y=y0, width=gate_w,
+                    scale=local_zoom, zoom=graph_zoom_scale,
+                    fonts={"caption": row_label_font, "primary": row_value_font, "detail": detail_label_font},
+                    colors={"caption": graph_card_muted if operable else graph_card_disabled,
+                            "primary": primary_color,
+                            "detail": graph_card_muted if operable else graph_card_disabled},
+                    tags=text_tags, enabled=bool(tag and enabled))
                 row_y += current_row_h
 
             _draw_corner_drag_handle(

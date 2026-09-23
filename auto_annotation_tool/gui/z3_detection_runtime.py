@@ -624,13 +624,14 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
 
     try:
         if hasattr(self, "preview_box_mode_var"):
-            final_box_mode_label = (
-                self._get_preview_box_mode_label("FINAL")
+            result_box_mode = "RAW_RESULT" if raw_only else "FINAL"
+            result_box_mode_label = (
+                self._get_preview_box_mode_label(result_box_mode)
                 if hasattr(self, "_get_preview_box_mode_label")
-                else "FINAL"
+                else result_box_mode
             )
-            self.preview_box_mode_var.set(final_box_mode_label)
-            self._save_local_setting("char_preview_box_mode", "FINAL")
+            self.preview_box_mode_var.set(result_box_mode_label)
+            self._save_local_setting("char_preview_box_mode", result_box_mode)
     except Exception:
         pass
 
@@ -1829,4 +1830,3 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
             self.frame.after(0, finalize)
 
     threading.Thread(target=worker, daemon=True).start()
-

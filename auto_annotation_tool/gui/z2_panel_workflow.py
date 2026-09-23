@@ -1518,7 +1518,9 @@ def _merge_pre_run_visible_state_after_auto(self, run_dir: Path) -> int:
     return restored_count
 
 
-def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_template: bool = False) -> None:
+def _finalize_successful_annotation_run_ui(
+    self, run_dir: Path, *, manual_template: bool = False, result_loaded: bool = False,
+) -> None:
     try:
         pending_summary_snapshot = dict(getattr(self, "_campaign_pending_batch_summary", {}) or {})
         reuse_filenames_snapshot = set(getattr(self, "_campaign_reuse_manual_filenames", set()) or set())
@@ -1567,8 +1569,15 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
         restored_preview = False
         if not manual_template:
             # Publish the list only after restoring and merging the entire result.
-            restored_preview = self._restore_preview_from_annotation_run(run_dir, defer_ui_restore=True)
-            if restored_preview:
+            restored_preview = result_loaded or self._restore_preview_from_annotation_run(run_dir, defer_ui_restore=True)
+            if result_loaded:
+                self._preview_dirty_images.clear()
+                source_dir = getattr(self, "_annotation_source_input_dir", None)
+                if source_dir is not None:
+                    self.current_input_dir = Path(source_dir)
+                    self.input_dir_var.set(str(source_dir))
+                    self.plate_dataset_images_var.set(str(source_dir))
+            if restored_preview and not result_loaded:
                 self._campaign_pending_batch_summary = pending_summary_snapshot
                 self._campaign_reuse_manual_filenames = reuse_filenames_snapshot
                 self._campaign_reuse_manual_summary = reuse_summary_snapshot
@@ -1683,9 +1692,20 @@ def _finalize_successful_annotation_run_ui(self, run_dir: Path, *, manual_templa
 
         if not manual_template:
             try:
-                _merge_pre_run_visible_state_after_auto(self, run_dir)
+                if not result_loaded:
+                    _merge_pre_run_visible_state_after_auto(self, run_dir)
             except Exception as exc:
                 logger.debug(f"Nie udało się scalić listy po autoanotacji zakresu Z2: {exc}")
+            if getattr(self, "_current_run_vehicle_assist", None) is False:
+                from .z2_auto_run_result import remove_vehicle_assistance
+
+                # The full-view/rollback merge can reintroduce old vehicle boxes
+                # even though the worker used only the plate model.
+                if remove_vehicle_assistance(self.current_annotations):
+                    CVATExporter().export(
+                        self.current_annotations, Path(run_dir) / "annotations.xml",
+                        include_confidence=True, only_successful=False,
+                    )
             self._mark_auto_plate_origin_for_annotations(self.current_annotations)
             self._invalidate_preview_runtime_caches()
             if approved_filenames_snapshot:
@@ -1984,7 +2004,7 @@ def _render_compact_info_table(
                 host_width = int(host.winfo_reqwidth() or 0)
             except Exception:
                 host_width = 0
-        target_wrap = max(140, int(host_width) - int(value_col_width) - 28)
+        target_wrap = max(80, int(host_width) - int(value_col_width) - 28)
         for widget in list(row_label_widgets):
             try:
                 widget.configure(wraplength=target_wrap)
@@ -2102,7 +2122,7 @@ def _render_compact_info_table(
             highlightthickness=0,
             padx=8,
             pady=2,
-            wraplength=max(140, int(host.winfo_width() or 0) - value_col_width - 28),
+            wraplength=max(80, int(host.winfo_width() or 0) - value_col_width - 28),
         )
         label_widget.grid(row=0, column=0, sticky="nsew")
         row_label_widgets.append(label_widget)
@@ -3059,6 +3079,8 @@ def _refresh_z2_miniflow_progress(self):
         )
 
 def _apply_main_pane_layout(self, *, force_defaults: bool = False):
+    if getattr(getattr(self, "_preview_workspace_drawers", None), "detached", False):
+        return
     if bool(getattr(self, "_main_pane_layout_in_progress", False)):
         self._main_pane_layout_pending_force_defaults = bool(
             getattr(self, "_main_pane_layout_pending_force_defaults", False) or force_defaults
@@ -3140,7 +3162,7 @@ def _apply_main_pane_layout(self, *, force_defaults: bool = False):
             current_second = max(left_min + center_min, total_width - right_min)
 
         default_left = min(max_left, max(left_min, min(int(total_width * 0.20), 304)))
-        default_right_width = max(right_min, min(int(total_width * 0.18), 320))
+        default_right_width = max(right_min, min(int(total_width * 0.16), 280))
         default_second = max(default_left + center_min, total_width - default_right_width)
         default_second = min(default_second, max_second)
 

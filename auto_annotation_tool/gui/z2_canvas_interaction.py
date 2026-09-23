@@ -246,8 +246,7 @@ def _refresh_preview_plate_context_overlays(self) -> None:
     except Exception:
         pass
     try:
-        self._preview_metrics_overlay_render_key = None
-        self._update_preview_canvas_metrics_overlay(force_render=True)
+        self._update_preview_canvas_metrics_overlay(force_render=False)
     except Exception:
         pass
     try:
@@ -321,10 +320,13 @@ def _focus_preview_plate(
             return False
         mark_phase("set_view")
         try:
+            canvas._navigation_rendering = True
             canvas._update_display(interaction_fast=True)
             canvas._schedule_final_quality_display(delay_ms=900)
         except Exception:
             canvas.refresh_overlay_only(skip_info=True)
+        finally:
+            canvas._navigation_rendering = False
         mark_phase("fast_render")
     else:
         try:
@@ -1280,8 +1282,11 @@ def _on_preview_toggle_image_approval_shortcut(self, event=None):
     )
     next_approved = not currently_approved
     if next_approved and not self._preview_annotation_can_be_approved_for_export(ann):
+        from .z2_gt_readiness import approval_block_reason
+        from .z2_gt_review import refresh_annotation_gt_review
+        refresh_annotation_gt_review(self, ann)
         self._update_preview_edit_status(
-            "Nie można zatwierdzić zdjęcia spacją: najpierw dodaj ramkę tablicy."
+            "Nie można oznaczyć zdjęcia jako OK. " + approval_block_reason(self, ann)
         )
         try:
             self._update_preview_canvas_metrics_overlay(force_render=True)
@@ -1569,6 +1574,9 @@ def _place_preview_legend_overlay(
         return
 
     fullscreen = bool(getattr(self, "_preview_fullscreen_active", False))
+    if not fullscreen:
+        self._hide_preview_controls_legend_overlay()
+        return
     if width_override is not None:
         overlay_width = float(width_override or 0.0)
     elif fullscreen and self._is_preview_controls_legend_expanded():
@@ -1749,6 +1757,11 @@ def _set_preview_fullscreen(self, active: bool):
         self._update_preview_edit_status("Pełny ekran jest dostępny po załadowaniu obrazu podglądu.")
         return
 
+    from .z2_workspace_drawers import workspace_drawers
+
+    drawers = workspace_drawers(self)
+    new_fullscreen_session = next_state and not drawers.detached
+    self._cancel_preview_layout_restore_jobs()
     self._preview_fullscreen_transition_active = True
     self._preview_fullscreen_overlay_ready = False
 
@@ -1771,24 +1784,22 @@ def _set_preview_fullscreen(self, active: bool):
     self._preview_fullscreen_transition_seq = transition_seq
 
     if next_state:
-        self._preview_fullscreen_restore_log_visible = bool(getattr(self, "_annotation_log_visible", False))
-        try:
-            self._preview_fullscreen_restore_root_state = bool(root.attributes("-fullscreen")) if root is not None else False
-        except Exception:
-            self._preview_fullscreen_restore_root_state = False
-        try:
-            self._preview_fullscreen_restore_window_state = str(root.state()) if root is not None else "normal"
-        except Exception:
-            self._preview_fullscreen_restore_window_state = "normal"
-        try:
-            self._preview_fullscreen_restore_geometry = str(root.geometry()) if root is not None else ""
-        except Exception:
-            self._preview_fullscreen_restore_geometry = ""
+        if new_fullscreen_session:
+            self._preview_fullscreen_restore_log_visible = bool(getattr(self, "_annotation_log_visible", False))
+            try:
+                self._preview_fullscreen_restore_root_state = bool(root.attributes("-fullscreen")) if root is not None else False
+            except Exception:
+                self._preview_fullscreen_restore_root_state = False
+            try:
+                self._preview_fullscreen_restore_window_state = str(root.state()) if root is not None else "normal"
+            except Exception:
+                self._preview_fullscreen_restore_window_state = "normal"
+            try:
+                self._preview_fullscreen_restore_geometry = str(root.geometry()) if root is not None else ""
+            except Exception:
+                self._preview_fullscreen_restore_geometry = ""
 
-        if self._pane_has_child(self.main_pane, self.main_left_frame):
-            self.main_pane.forget(self.main_left_frame)
-        if self._pane_has_child(self.main_pane, self.main_right_frame):
-            self.main_pane.forget(self.main_right_frame)
+        drawers.enter()
         self._set_annotation_process_log_visibility(False)
         if root is not None:
             try:
@@ -1838,14 +1849,8 @@ def _set_preview_fullscreen(self, active: bool):
         self._preview_polygon_focus_restore_state = None
         self._preview_focus_target = None
         self._preview_force_fit_after_resize = True
-        # _should_show_right_panel() celowo zwraca False w fullscreen,
-        # więc najpierw zdejmujemy flagę, dopiero potem odtwarzamy panele.
+        # Return the same panels to their saved column widths after sliding in.
         self._preview_fullscreen_active = False
-        if not self._pane_has_child(self.main_pane, self.main_left_frame):
-            self.main_pane.insert(0, self.main_left_frame, weight=2)
-        if self._should_show_right_panel() and not self._pane_has_child(self.main_pane, self.main_right_frame):
-            self.main_pane.add(self.main_right_frame, weight=1)
-
         self._set_annotation_process_log_visibility(bool(getattr(self, "_preview_fullscreen_restore_log_visible", False)))
         self._preview_controls_legend_current_width = 0.0
         self._preview_controls_legend_current_height = 0.0
@@ -1857,13 +1862,6 @@ def _set_preview_fullscreen(self, active: bool):
         "fullscreen",
         f"active={int(bool(self._preview_fullscreen_active))} mode={'native' if use_native_root_fullscreen else 'zoomed'} ws={windowing_system or '-'}"
     )
-    self._schedule_preview_layout_restore_after_resize()
-    if not self._preview_fullscreen_active:
-        self._sync_main_pane_right_panel_visibility()
-        self._schedule_right_panel_content_restore_after_fullscreen(delay_ms=180)
-        self._schedule_main_pane_layout_refresh(force_defaults=True, delay_ms=120)
-    refresh_delay_ms = 210 if bool(getattr(self, "_preview_fullscreen_active", False)) else 230
-
     def _refresh_after_fullscreen_transition():
         if transition_seq != int(getattr(self, "_preview_fullscreen_transition_seq", 0) or 0):
             return
@@ -1944,26 +1942,15 @@ def _set_preview_fullscreen(self, active: bool):
         except Exception:
             pass
 
-        # Na Windows po callbacku przejścia potrafi przyjść jeszcze
-        # jeden Configure/resize. Drugi redraw jest tani i idempotentny.
-        try:
-            self.frame.after(
-                90,
-                lambda: z2_plate_gt_inline.refresh_gt_overlay_after_layout(self),
-            )
-        except Exception:
-            pass
+        self._schedule_preview_layout_restore_after_resize()
 
-    def _schedule_transition_refresh(delay_ms: int) -> None:
-        try:
-            self.frame.after(int(delay_ms), _refresh_after_fullscreen_transition)
-        except Exception:
-            _refresh_after_fullscreen_transition()
+    def _drawer_transition_complete():
+        if transition_seq != int(getattr(self, "_preview_fullscreen_transition_seq", 0) or 0):
+            return
+        # Let Tk settle the final pane geometry once; no content reconstruction.
+        self.frame.after_idle(_refresh_after_fullscreen_transition)
 
-    try:
-        _schedule_transition_refresh(refresh_delay_ms)
-    except Exception:
-        _refresh_after_fullscreen_transition()
+    drawers.animate_mode(next_state, _drawer_transition_complete)
     try:
         self.preview_canvas.focus_set()
     except Exception:

@@ -1840,12 +1840,16 @@ def _build_campaign_plate_approved_entries_from_run(
         for name in set(extra_included_filenames or set())
         if str(name or "").strip()
     }
-    input_dir = (
-        self._resolve_existing_dir(manifest.get("source_input_dir"))
-        or self._resolve_existing_dir(manifest.get("input_dir"))
-        or self._resolve_existing_dir(self.current_input_dir)
-    )
     run_images_dir = safe_run_dir / "images"
+    # A source root can exist while its images live in subdirectories. Resolve
+    # each image against all known roots, including the prepared run scope.
+    input_dirs = []
+    for raw_dir in (manifest.get("source_input_dir"), manifest.get("input_dir"),
+                    self.current_input_dir, run_images_dir):
+        directory = self._resolve_existing_dir(raw_dir)
+        if directory is not None and directory not in input_dirs:
+            input_dirs.append(directory)
+    preview_map = getattr(self, "_preview_image_path_map", {}) or {}
     source_xml_path = safe_run_dir / "annotations.xml"
     manual_origin = bool(self._annotation_run_manifest_has_manual_value(manifest))
     approved_at = datetime.datetime.now().isoformat(timespec="seconds")
@@ -1881,7 +1885,6 @@ def _build_campaign_plate_approved_entries_from_run(
             continue
 
         source_image_path = None
-        preview_map = dict(getattr(self, "_preview_image_path_map", {}) or {})
         try:
             preview_source = preview_map.get(image_name)
             if preview_source:
@@ -1891,15 +1894,12 @@ def _build_campaign_plate_approved_entries_from_run(
         except Exception:
             source_image_path = None
 
-        if source_image_path is None and input_dir is not None:
-            candidate = Path(input_dir) / image_name
-            if candidate.exists():
-                source_image_path = candidate
-
-        if source_image_path is None and run_images_dir.exists():
-            candidate = run_images_dir / image_name
-            if candidate.exists():
-                source_image_path = candidate
+        if source_image_path is None:
+            for directory in input_dirs:
+                candidate = Path(directory) / image_name
+                if candidate.is_file():
+                    source_image_path = candidate
+                    break
 
         if source_image_path is None or not Path(source_image_path).exists():
             continue
@@ -3783,7 +3783,7 @@ def _build_campaign_z2_gate_overlay_state(self) -> dict:
         )
         detail = (
             f"GT kompletne: {char_gt_count}/{effective_plates}. "
-            "W Z2 wybierz każdą brakującą tablicę i wpisz jej numer GT."
+            "W Z2 włącz filtr „Brak GT”, uzupełnij czerwone pozycje i oznacz je jako OK."
         )
         tone = "warning"
     elif iteration_target == "char":

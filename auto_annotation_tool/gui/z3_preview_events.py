@@ -1850,6 +1850,8 @@ def _render_preview_zoom_frame(host) -> bool:
     pid = str(state.get("plate_id", "") or getattr(self, "_preview_active_pid", "") or "").strip()
     if not pid:
         return False
+    if pid != str(getattr(self, "_preview_active_pid", "") or "").strip():
+        return False
     try:
         img_path = Path(str(self.preview_dir_var.get() or "").strip()) / "images" / f"{pid}.jpg"
     except Exception:

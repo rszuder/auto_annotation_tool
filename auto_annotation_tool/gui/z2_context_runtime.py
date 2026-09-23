@@ -625,6 +625,7 @@ def _begin_campaign_step2_transition(self) -> None:
     self._campaign_step2_transition_in_progress = True
     self._campaign_step2_transition_refresh_pending = False
     self._campaign_step2_transition_skip_heavy_finalize = False
+    self._campaign_step2_transition_defer_source_preview = False
     try:
         workflow_shell = getattr(self, "workflow_entry_shell", None)
         if workflow_shell is not None:
@@ -653,6 +654,8 @@ def _end_campaign_step2_transition(self) -> None:
             pass
 
     self._campaign_step2_transition_in_progress = False
+    defer_source_preview = bool(getattr(self, "_campaign_step2_transition_defer_source_preview", False))
+    self._campaign_step2_transition_defer_source_preview = False
     if not bool(getattr(self, "_campaign_step2_transition_refresh_pending", False)):
         self._campaign_step2_transition_skip_heavy_finalize = False
         return
@@ -660,6 +663,11 @@ def _end_campaign_step2_transition(self) -> None:
     self._campaign_step2_transition_refresh_pending = False
     skip_heavy_finalize = bool(getattr(self, "_campaign_step2_transition_skip_heavy_finalize", False))
     self._campaign_step2_transition_skip_heavy_finalize = False
+    if defer_source_preview:
+        # The deferred source loader refreshes actions after publishing its
+        # payload. Scanning the same sources here blocks navigation to Z2.
+        _mark_finalize_phase("defer_action_states_until_source_preview")
+        return
     try:
         graph_context = dict(getattr(self, "_campaign_graph_entry_context", {}) or {})
     except Exception:

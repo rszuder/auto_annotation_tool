@@ -646,6 +646,7 @@ def get_preview_badge_component_style(host, component_key: str) -> dict:
         "manual": ("manual", "M", "Reczne"),
         "manual_box": ("manual", "MB", "Manual box"),
         "manual_sign": ("manual", "MS", "Manual znak"),
+        "gt_assisted": ("manual", "GT", "Znak z GT"),
         "generated_box": ("ocr", "GB", "Box segmentowany"),
         "ocr_symbol": ("ocr", "OS", "OCR znak"),
         "yolo_box": ("yolo_box", "YB", "YOLO box"),
@@ -707,7 +708,9 @@ def get_preview_source_badge_layers(
         elif normalized_box == "generated_box":
             layers.append(_build_layer("generated_box", "GB"))
 
-        if normalized_sign == "manual_sign":
+        if normalized_sign == "gt_assisted":
+            layers.append(_build_layer("gt_assisted", "GT"))
+        elif normalized_sign == "manual_sign":
             layers.append(_build_layer("manual_sign", "MS"))
         elif normalized_sign == "yolo_symbol":
             layers.append(_build_layer("yolo_symbol", "YS", confidence))

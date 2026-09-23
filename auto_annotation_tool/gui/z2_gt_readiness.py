@@ -3,9 +3,54 @@
 from __future__ import annotations
 
 from typing import Any
+import os
 
 from ..campaign_manager import CAMPAIGN
+from ..config import CONFIG
 from ..plate_ground_truth import normalize_plate_ground_truth_text
+
+
+def gt_required_for_current_route(host, *, campaign=None) -> bool:
+    """Use the same character-route requirement as the Z2 exit gate."""
+    try:
+        if host._is_free_mode_session_context():
+            return False
+        manager = CAMPAIGN if campaign is None else campaign
+        return str(manager.get_iteration_target() or "").strip().lower() == "char"
+    except (AttributeError, TypeError):
+        return False
+
+
+def annotation_gt_readiness(ann) -> dict:
+    """Read only explicit per-polygon GT; no filenames, packs or image I/O."""
+    plates = [
+        det for det in getattr(ann, "detections", []) or []
+        if str(getattr(det, "label", "") or "").strip().lower() in CONFIG.PLATE_LABELS
+    ]
+    missing = [
+        index for index, det in enumerate(plates)
+        if not normalize_plate_ground_truth_text(
+            (getattr(det, "attributes", None) or {}).get("ground_truth_text")
+        )
+    ]
+    return {"total": len(plates), "filled": len(plates) - len(missing),
+            "missing": len(missing), "missing_indices": missing}
+
+
+def missing_required_gt(host, ann) -> int:
+    if not gt_required_for_current_route(host):
+        return 0
+    return annotation_gt_readiness(ann)["missing"]
+
+
+def approval_block_reason(host, ann) -> str:
+    state = annotation_gt_readiness(ann)
+    if not state["total"]:
+        return "Najpierw dodaj ramkę tablicy."
+    if state["missing"] and gt_required_for_current_route(host):
+        indices = ", ".join(str(i + 1) for i in state["missing_indices"])
+        return f"Uzupełnij GT dla {state['missing']} z {state['total']} ramek (ramki: {indices})."
+    return ""
 
 
 def _entry_identity(entry: dict, fallback_index: int) -> str:
@@ -90,6 +135,48 @@ def summarize_char_gt_entries(
     }
 
 
+def _path_identity(value):
+    return os.path.normcase(os.path.abspath(str(value))) if value else ""
+
+
+def _live_char_gt_entries(host, run_dir, project_entries):
+    """GT is annotation metadata: do not resolve/stat every image to count it."""
+    current_run = getattr(host, "current_annotation_run_dir", None)
+    annotations = getattr(host, "current_annotations", None)
+    if not current_run or not run_dir or not annotations:
+        return None
+    run_key = _path_identity(run_dir)
+    if _path_identity(current_run) != run_key:
+        return None
+    approved = {str(name).strip().lower() for name in host._get_preview_approved_filenames()}
+    image_map = getattr(host, "_preview_image_path_map", {}) or {}
+    by_name = {}
+    for entry in project_entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("image_name") or "").strip().lower()
+        by_name.setdefault(name, []).append(entry)
+    result = []
+    for ann in annotations:
+        name = str(getattr(ann, "filename", "") or "").strip()
+        if name.lower() not in approved:
+            continue
+        mapped_path = image_map.get(name)
+        mapped_key = _path_identity(mapped_path)
+        matches = [entry for entry in by_name.get(name.lower(), [])
+                   if _path_identity(entry.get("approved_from_run")) == run_key
+                   or (mapped_key and _path_identity(entry.get("source_image_path")) == mapped_key)]
+        identity = matches[0] if matches else {
+            "entry_key": mapped_key or f"run:{run_key}|{name.lower()}",
+            "source_image_path": str(mapped_path or ""),
+        }
+        result.append({**identity, "image_name": name, "plates": [
+            {"attributes": dict(getattr(det, "attributes", {}) or {})}
+            for det in host._get_plate_detections(ann)
+        ]})
+    return result
+
+
 def build_char_gt_readiness(
     host,
     *,
@@ -103,6 +190,11 @@ def build_char_gt_readiness(
         )
     except Exception:
         project_entries = []
+
+    if not force_parse_xml:
+        live_entries = _live_char_gt_entries(host, run_dir, project_entries)
+        if live_entries is not None:
+            return summarize_char_gt_entries(project_entries, live_entries)
 
     run_entries = []
     if run_dir is not None:

@@ -249,6 +249,29 @@ def _dhash64(image: Image.Image) -> str:
     return f"{value:016x}"
 
 
+def fingerprint_image_identity(path: Path | str) -> dict:
+    """Exact file identity and oriented dimensions, without decoding pixel hashes.
+
+    PZ1 already decodes the image for cropping. Its provenance only needs the
+    exact identity; recovery fingerprints remain part of fingerprint_image().
+    """
+    image_path = Path(path)
+    source_file_sha256 = _file_sha256(image_path)
+    try:
+        with Image.open(image_path) as source:
+            width, height = source.size
+            if source.getexif().get(274) in {5, 6, 7, 8}:
+                width, height = height, width
+    except Exception as exc:
+        raise GTPackError(f"Nie można odczytać obrazu {image_path}: {exc}") from exc
+    return {
+        "image_id": f"{IMAGE_ID_PREFIX}{source_file_sha256}",
+        "source_file_sha256": source_file_sha256,
+        "width": int(width),
+        "height": int(height),
+    }
+
+
 def fingerprint_image(path: Path | str) -> dict:
     """Return cross-program exact identity plus recovery fingerprints.
 
@@ -798,7 +821,13 @@ class ALPRGTPack:
             )
         )
         result: dict[str, dict] = {}
-        for record in self.list_revisions():
+        records = (
+            (self.get_revision(record_id) for record_id in sorted(allowed))
+            if restrict else self.list_revisions()
+        )
+        for record in records:
+            if not isinstance(record, dict):
+                continue
             record_id = str(record.get("revision_id") or "")
             if not record_id:
                 continue
@@ -818,7 +847,13 @@ class ALPRGTPack:
             )
         )
         result: dict[str, dict] = {}
-        for record in self.list_layout_revisions():
+        records = (
+            (self.get_layout_revision(record_id) for record_id in sorted(allowed))
+            if restrict else self.list_layout_revisions()
+        )
+        for record in records:
+            if not isinstance(record, dict):
+                continue
             record_id = str(record.get("layout_revision_id") or "")
             if not record_id:
                 continue
@@ -842,7 +877,13 @@ class ALPRGTPack:
             )
         )
         result: dict[str, dict] = {}
-        for record in self.list_geometries():
+        records = (
+            (self.get_geometry(record_id) for record_id in sorted(allowed))
+            if restrict else self.list_geometries()
+        )
+        for record in records:
+            if not isinstance(record, dict):
+                continue
             record_id = str(record.get("geometry_id") or "")
             if not record_id:
                 continue

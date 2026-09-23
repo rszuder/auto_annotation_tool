@@ -91,6 +91,7 @@ from .z2_shared_ui import (
 )
 from .z2_view_models import Step2CtaViewModel, Step2ViewModel
 from .z2_gt_readiness import build_char_gt_readiness
+from .z2_auto_run_result import remove_vehicle_assistance, merge_completed_view, protected_view_bundle
 from .zoomable_canvas import ZoomableCanvas
 from .z2_panel_workflow import (
     _refresh_free_mode_workflow_ui,
@@ -2576,6 +2577,8 @@ def _refresh_step2_action_states(self, *, lightweight: bool = False):
             logger.debug(f"Nie udało się wymusić prawego panelu bramki grafu Z2: {exc}")
 
 def _start_annotation(self):
+    from .z2_preview_autosave import wait_for_pending_save
+    wait_for_pending_save(self)
     route = self._get_workflow_route()
     manual_entry_mode = self._get_manual_entry_mode()
     try:
@@ -2657,7 +2660,9 @@ def _start_annotation(self):
                 source_plan = self._collect_campaign_auto_annotation_sources(
                     effective_input_dir,
                     include_previous=(bool(self.campaign_reuse_manual_var.get()) if not manual_template else False),
-                    exclude_manual_touched=True,
+                    # Protection is selected in the scope modal. Filtering here
+                    # made disabling it unable to include imported/manual rows.
+                    exclude_manual_touched=bool(route != "auto" or manual_template),
                 )
                 pending_images = list(source_plan.get("image_paths") or [])
                 self._pending_source_image_map = dict(source_plan.get("image_map") or {})
@@ -2862,9 +2867,12 @@ def _start_annotation(self):
                 filenames=[Path(path).name for path in selected_scope_paths],
             )
         if route == "auto":
+            use_vehicle = bool((scope_selection or {}).get(
+                "use_vehicle", self._get_auto_vehicle_choice() == "use"
+            ))
             mode_text = (
                 "C: Pojazdy + tablice"
-                if self._get_auto_vehicle_choice() == "use"
+                if use_vehicle
                 else "B: Tylko tablice"
             )
             self.mode_var.set(mode_text)
@@ -2898,6 +2906,7 @@ def _start_annotation(self):
         self._manual_review_export_ready = False
         self._current_run_manual_template = manual_template
         self._current_run_manual_vehicle_assist = manual_vehicle_assist
+        self._current_run_vehicle_assist = bool(self._mode_uses_vehicle(mode_text) and not manual_template)
         safe_output_dir = self._coerce_annotation_output_dir(self.output_dir_var.get())
         self.output_dir_var.set(str(safe_output_dir))
         app = getattr(self, "app", None)
@@ -2985,8 +2994,10 @@ def _start_annotation(self):
         # the UI before the replacement annotations exist.
 
         if not manual_template:
-            live_manual_bundle = self._get_current_campaign_manual_preview_bundle()
-            self._campaign_auto_pre_run_snapshot = self._get_current_campaign_preview_snapshot()
+            approved_snapshot = set(self._get_preview_approved_filenames())
+            # The full rollback view below already owns an independent copy.
+            # A second full snapshot repeated IO and cloning of every image.
+            self._campaign_auto_pre_run_snapshot = {}
             self._campaign_auto_pre_run_visible_state = {
                 "annotations": copy.deepcopy(list(getattr(self, "current_annotations", []) or [])),
                 "image_map": dict(getattr(self, "_preview_image_path_map", {}) or {}),
@@ -2995,7 +3006,7 @@ def _start_annotation(self):
                 "input_dir": str(getattr(self, "current_input_dir", "") or ""),
                 "last_staging_run_dir": str(getattr(self, "last_staging_run_dir", "") or ""),
                 "preview_index": getattr(self, "current_preview_index", None),
-                "approved_filenames": set(self._get_preview_approved_filenames()),
+                "approved_filenames": set(approved_snapshot),
                 "campaign_pending_approved": set(getattr(self, "_campaign_pending_approved_filenames", set()) or set()),
                 "hidden_project_approved": set(getattr(self, "_campaign_hidden_project_approved_filenames", set()) or set()),
                 "hidden_char_effective": set(getattr(self, "_campaign_hidden_char_effective_filenames", set()) or set()),
@@ -3006,27 +3017,47 @@ def _start_annotation(self):
                 "input_dir": str(getattr(self, "current_input_dir", "") or ""),
                 "image_map": dict(getattr(self, "_preview_image_path_map", {}) or {}),
                 "preview_index": getattr(self, "current_preview_index", None),
-                "approved_filenames": set(self._get_preview_approved_filenames()),
+                "approved_filenames": set(approved_snapshot),
                 "campaign_pending_approved": set(getattr(self, "_campaign_pending_approved_filenames", set()) or set()),
             }
+            if self._campaign_auto_pre_run_visible_state["annotations"]:
+                protected_names = (scope_selection or {}).get("protected_filenames")
+                if protected_names is None:
+                    protected_names = self._get_preview_auto_scope_protected_filenames()
+                live_manual_bundle = protected_view_bundle(
+                    self._campaign_auto_pre_run_visible_state, set(protected_names),
+                )
+            else:
+                live_manual_bundle = self._get_current_campaign_manual_preview_bundle()
             persisted_overlay_bundle = dict(getattr(self, "_campaign_auto_manual_overlay_bundle", {}) or {})
             self._campaign_auto_manual_overlay_bundle = (
                 live_manual_bundle
                 if live_manual_bundle
                 else persisted_overlay_bundle
             )
+            # A selected image may intentionally overwrite a protected plate.
+            # Do not merge its old detections back over the new model result.
+            selected_names = {
+                Path(path).name.lower() for path in (scope_selection or {}).get("image_paths", [])
+            }
+            self._campaign_auto_manual_overlay_bundle = {
+                name: payload for name, payload in self._campaign_auto_manual_overlay_bundle.items()
+                if str(name).strip().lower() not in selected_names
+            }
             self._pending_preview_approved_filenames = set(
-                self._get_preview_approved_filenames()
+                approved_snapshot
             ) | set(
                 str(name or "").strip().lower()
                 for name in set(getattr(self, "_campaign_pending_approved_filenames", set()) or set())
                 if str(name or "").strip()
             )
+            if not bool((scope_selection or {}).get("protect_existing", True)):
+                self._pending_preview_approved_filenames.difference_update(selected_names)
             self._append_z2_trace(
                 "start-snapshot",
                 (
                     f"protected={len(dict(getattr(self, '_campaign_auto_manual_overlay_bundle', {}) or {}))} "
-                    f"full={len(dict(getattr(self, '_campaign_auto_pre_run_snapshot', {}) or {}))} "
+                    f"full={len(self._campaign_auto_pre_run_visible_state['annotations'])} "
                     f"approved={len(set(getattr(self, '_pending_preview_approved_filenames', set()) or set()))} "
                     f"route={route} manual_template={int(bool(manual_template))}"
                 ),
@@ -3643,8 +3674,8 @@ def _approve_annotation_stage(self, *, _run_deferred: bool = False):
                         f"GT kompletne: {gt_count}/{gt_total}.\n"
                         f"Brak GT: {gt_missing}."
                         f"{examples_line}\n\n"
-                        "Wróć do Z2, wybierz brakujące ramki tablic "
-                        "i wpisz ich numery w polu „GT tablicy”."
+                        "W Z2 włącz filtr „Brak GT”. Czerwone pozycje wskazują zdjęcia "
+                        "do poprawy. Uzupełnij GT każdej ramki, a następnie oznacz zdjęcie jako OK."
                     ),
                 )
 
@@ -4202,6 +4233,15 @@ def _process_thread(
                 logger.debug(f"Nie udało się dołączyć ręcznych poprawek do wyniku runu auto Z2: {e}")
         
         pending_image_path_map = dict(getattr(self, "_pending_source_image_map", {}) or {})
+        if not manual_template:
+            annotations, pending_image_path_map = merge_completed_view(
+                annotations, pending_image_path_map,
+                dict(getattr(self, "_campaign_auto_pre_run_visible_state", {}) or {}),
+            )
+        if not manual_template and getattr(self, "_current_run_vehicle_assist", None) is False:
+            removed = remove_vehicle_assistance(annotations)
+            if removed:
+                logger.info("[Z2 AUTO] Asysta wyłączona: pominięto %s wcześniejszych ramek pojazdów.", removed)
 
         run_dir = self._allocate_annotation_run_dir(base_out_dir)
         cvat_xml_path = run_dir / "annotations.xml"
@@ -4222,7 +4262,9 @@ def _process_thread(
             if manual_template
             else "Zapisywanie cache autoanotacji (auto_annotation_cache.xml)..."
         )
-        export_only_successful = bool(not manual_template and self._is_free_mode_session_context())
+        # Persist the same full result published in Z2, including empty/error
+        # rows. Otherwise reopening a run would lose rows shown after completion.
+        export_only_successful = False
         export_xml_path = cache_xml_path if cache_xml_path is not None else cvat_xml_path
         CVATExporter().export(
             annotations,
@@ -4323,16 +4365,6 @@ def _process_thread(
         except Exception as e:
             logger.debug(f"Nie udało się przywrócić stanu Kroku 2 z gotowego runu Z2: {e}")
 
-        try:
-            self._post_to_ui(
-                lambda run_dir=run_dir, manual_template=manual_template: self._finalize_successful_annotation_run_ui(
-                    run_dir,
-                    manual_template=manual_template,
-                )
-            )
-        except Exception as e:
-            logger.debug(f"Nie udało się zaplanować odświeżenia UI po zakończeniu Z2: {e}")
-
         logger.info(f"[OK] {message}")
         
     except KeyboardInterrupt:
@@ -4363,11 +4395,34 @@ def _process_thread(
         success = False
     finally:
         try:
-            self._post_to_ui(lambda: self._finish(success, message))
+            self._post_to_ui(lambda: self._finish(
+                success, message, run_dir=run_dir if success else None,
+                manual_template=manual_template,
+            ))
         except Exception:
             pass
 
-def _finish(self, success, msg):
+def _refresh_campaign_dashboard_when_visible(campaign_tab):
+    frame = campaign_tab.frame
+    if frame.winfo_viewable():
+        campaign_tab._refresh_dashboard()
+        return
+    if getattr(campaign_tab, "_z2_dashboard_refresh_binding", None):
+        return
+
+    def on_map(event):
+        if event.widget is not frame:
+            return
+        binding = campaign_tab._z2_dashboard_refresh_binding
+        campaign_tab._z2_dashboard_refresh_binding = None
+        if binding:
+            frame.unbind("<Map>", binding)
+        frame.after_idle(campaign_tab._refresh_dashboard)
+
+    campaign_tab._z2_dashboard_refresh_binding = frame.bind("<Map>", on_map, add="+")
+
+
+def _finish(self, success, msg, *, run_dir=None, manual_template=False):
     stop_requested = bool(getattr(self, "_annotation_stop_requested", False))
     self.is_processing = False
     self._annotation_stop_requested = False
@@ -4397,6 +4452,12 @@ def _finish(self, success, msg):
         self.app.end_exclusive_operation("z2.annotation.run")
     else:
         self.app.set_processing(False)
+    if success and run_dir is not None:
+        # Tk ignores listbox delete/insert while disabled. Unlock first, then
+        # publish the worker's complete in-memory result exactly once.
+        self._finalize_successful_annotation_run_ui(
+            Path(run_dir), manual_template=manual_template, result_loaded=True,
+        )
     self.start_btn.config(state=tk.NORMAL)
     self.stop_btn.config(state=tk.DISABLED)
     try:
@@ -4486,7 +4547,7 @@ def _finish(self, success, msg):
                 if staging_total_plates > 0:
                     self.approve_btn.config(state=tk.NORMAL)
                 if "campaign" in self.app.tabs:
-                    self.app.tabs["campaign"]._refresh_dashboard()
+                    _refresh_campaign_dashboard_when_visible(self.app.tabs["campaign"])
         except Exception as e:
             logger.debug(f"Nie udalo sie zaktualizowac stanu kroku 2: {e}")
 

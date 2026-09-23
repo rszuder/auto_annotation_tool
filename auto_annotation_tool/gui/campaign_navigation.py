@@ -119,6 +119,7 @@ def _step_goto_auto_annotation(
             on_complete(result)
 
     source_context = dict(preferred_source_context or {})
+    graph_work_entry = bool(source_context.get("graph_edge_key") or source_context.get("graph_gate_id"))
     t02_at_review = bool(
         str(source_context.get("z2_work_mode") or "").strip().lower() == "t02_at_review"
         or (
@@ -318,7 +319,7 @@ def _step_goto_auto_annotation(
     v_mod = CAMPAIGN.get_global_model("vehicle")
     p_mod = CAMPAIGN.get_global_model("plate")
     _show_nav_overlay(28.0, "Sprawdzam model tablic i źródła poprzedniej pracy.")
-    plate_source_state = {} if t02_at_review else self._get_annotation_step2_source_state("plate")
+    plate_source_state = {} if (t02_at_review or graph_work_entry) else self._get_annotation_step2_source_state("plate")
     plate_model_ready = bool(plate_source_state.get("plate_model_ready"))
     if plate_model_ready and (not p_mod or not Path(p_mod).exists()):
         try:
@@ -327,13 +328,13 @@ def _step_goto_auto_annotation(
             p_mod = str(p_mod or "").strip()
     char_source_state = {}
     char_has_existing_source = False
-    if iteration_target == "char" and not force_annotation_tab and not t02_at_review:
+    if iteration_target == "char" and not force_annotation_tab and not t02_at_review and not graph_work_entry:
         _show_nav_overlay(36.0, "Sprawdzam źródło tablic dla toru znaków.")
         char_source_state = self._get_char_route_source_state()
         char_has_existing_source = bool(char_source_state.get("has_source"))
     _mark_nav_phase("source_state")
 
-    if iteration_target == "char" and not force_annotation_tab and not t02_at_review:
+    if iteration_target == "char" and not force_annotation_tab and not t02_at_review and not graph_work_entry:
         # STEP2-P1 is an entry into Z2, not an implicit approval of E2.
         # A ready plate source only enables the wizard badge; the user can still
         # enter Z2 to add more plate annotations before closing the stage.
@@ -397,7 +398,7 @@ def _step_goto_auto_annotation(
             return _reject(t02_source["message"])
         source_context.update(t02_source["context"])
 
-    defer_preview_load = bool(force_annotation_tab or iteration_target == "plate")
+    defer_preview_load = bool(graph_work_entry or force_annotation_tab or iteration_target == "plate")
     splash_token = 0
     _show_nav_overlay(62.0, "Przygotowuję bezpieczne przełączenie widoku.")
     _mark_nav_phase("z2_splash_prepare")
@@ -427,7 +428,7 @@ def _step_goto_auto_annotation(
             result = tab_ann.open_campaign_step2_entry(
                 iteration_target=iteration_target,
                 entry_strategy=entry_strategy,
-                restore_preview=bool(not t02_at_review and not force_annotation_tab and not char_has_existing_source),
+                restore_preview=bool(not graph_work_entry and not t02_at_review and not force_annotation_tab and not char_has_existing_source),
                 open_existing_run=open_existing_run,
                 defer_preview_load=defer_preview_load,
                 source_context=dict(source_context or {}),

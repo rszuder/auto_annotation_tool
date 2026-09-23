@@ -204,7 +204,11 @@ class ZoomableCanvas(tk.Canvas):
 
         visible_left, visible_top, visible_right, visible_bottom = exact_bounds
 
-        if interaction_fast:
+        if interaction_fast and bool(getattr(self, "_navigation_rendering", False)):
+            # A jump to another plate needs the viewport immediately. The idle
+            # quality pass restores the larger buffer used for smooth panning.
+            buffer_canvas_x = buffer_canvas_y = 8.0
+        elif interaction_fast:
             buffer_canvas_x = min(max(28.0, float(canvas_width) * 0.12), 96.0)
             buffer_canvas_y = min(max(28.0, float(canvas_height) * 0.12), 96.0)
         else:
@@ -994,22 +998,31 @@ class ZoomableCanvas(tk.Canvas):
 
         # Prepare the resized frame before clearing the canvas. The old image
         # stays visible during resize, so Q/E navigation does not flash blank.
-        self.delete("all")
+        old_image_id = self.image_id
+        old_items = self.find_all()
+        reuse_image = bool(next_photo_image is not None and old_image_id in old_items)
+        if reuse_image:
+            overlays = [item for item in old_items if item != old_image_id]
+            if overlays:
+                self.delete(*overlays)
+        else:
+            self.delete("all")
         mark_phase("delete")
-        self.photo_image = None
-        self.image_id = None
         self._render_region = None
         self._pan_buffered_move_active = False
 
         if next_photo_image is not None and next_image_coords is not None:
+            if reuse_image:
+                self.itemconfigure(old_image_id, image=next_photo_image)
+                self.coords(old_image_id, *next_image_coords)
+            else:
+                self.image_id = self.create_image(
+                    *next_image_coords, image=next_photo_image, anchor="nw")
             self.photo_image = next_photo_image
-            self.image_id = self.create_image(
-                float(next_image_coords[0]),
-                float(next_image_coords[1]),
-                image=self.photo_image,
-                anchor="nw"
-            )
             self._render_region = next_render_region
+        else:
+            self.photo_image = None
+            self.image_id = None
         mark_phase("create")
 
         self.configure(
