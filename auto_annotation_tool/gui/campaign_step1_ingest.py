@@ -464,15 +464,9 @@ def _build_ingest_plan_from_manifest_for_display(
             target_path_text = str((Path(target_dir) / name).resolve())
 
         source_path_text = str(item.get("source_path", "") or "").strip() or target_path_text
-        ground_truth_texts = list(item.get("ground_truth_texts", []) or [])
-        if not ground_truth_texts:
-            ground_truth_texts = planner.extract_true_texts_from_filename(name)
-
-        char_hist = item.get("char_histogram", {}) or {}
-        if not isinstance(char_hist, dict) or not char_hist:
-            char_hist = planner.build_char_histogram(ground_truth_texts)
-        if not char_hist:
-            continue
+        text_fields = planner.normalize_text_metadata(name, item)
+        ground_truth_texts = text_fields["ground_truth_texts"]
+        char_hist = text_fields["char_histogram"]
 
         selected_hist.update(char_hist)
         selected_items.append(
@@ -482,6 +476,7 @@ def _build_ingest_plan_from_manifest_for_display(
                 "source_key": str(item.get("source_key", "") or ""),
                 "target_path": target_path_text,
                 "ground_truth_texts": list(ground_truth_texts),
+                **text_fields,
                 "char_histogram": {ch: int(value) for ch, value in char_hist.items()},
                 "score": 0.0,
                 "score_details": {},
@@ -516,6 +511,7 @@ def _build_ingest_plan_from_manifest_for_display(
         "raw_total": selected_count,
         "candidates_total": selected_count,
         "selected_total": len(selected_items),
+        **planner.gt_statistics(selected_items),
         "new_to_project_total": int((manifest.get("proposal_summary") or {}).get("new_to_project_total", len(selected_items)) or len(selected_items)),
         "skipped_used": int((manifest.get("proposal_summary") or {}).get("skipped_used", 0) or 0),
         "skipped_duplicate_filenames": int((manifest.get("proposal_summary") or {}).get("skipped_duplicate_filenames", 0) or 0),
@@ -553,10 +549,9 @@ def _build_ingest_plan_from_iteration_dir_for_display(
 
     master_pool_dir = CAMPAIGN.get_master_pool_dir()
     for image_path in image_paths:
-        ground_truth_texts = planner.extract_true_texts_from_filename(image_path.name)
-        char_hist = planner.build_char_histogram(ground_truth_texts)
-        if not char_hist:
-            continue
+        text_fields = planner.normalize_text_metadata(image_path.name)
+        ground_truth_texts = text_fields["ground_truth_texts"]
+        char_hist = text_fields["char_histogram"]
 
         selected_hist.update(char_hist)
         try:
@@ -570,6 +565,7 @@ def _build_ingest_plan_from_iteration_dir_for_display(
                 "source_key": planner.make_source_key(image_path, master_pool_dir=master_pool_dir),
                 "target_path": source_path,
                 "ground_truth_texts": list(ground_truth_texts),
+                **text_fields,
                 "char_histogram": dict(char_hist),
                 "score": 0.0,
                 "score_details": {},
@@ -596,6 +592,7 @@ def _build_ingest_plan_from_iteration_dir_for_display(
         "raw_total": len(image_paths),
         "candidates_total": len(image_paths),
         "selected_total": len(selected_items),
+        **planner.gt_statistics(selected_items),
         "new_to_project_total": len(selected_items),
         "skipped_used": 0,
         "skipped_duplicate_filenames": 0,
@@ -1604,8 +1601,8 @@ def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None
         messagebox.showwarning(
             "Brak poprawnych pozycji w wybranym folderze zdjęć",
             (
-                "Nie znaleziono zdjęć z poprawnym ground truth w nazwie pliku.\n"
-                "Sprawdź nazewnictwo plików w głównej puli."
+                "Nie znaleziono dostępnych obrazów do dodania.\n"
+                "Sprawdź folder i obsługiwane rozszerzenia plików."
             ),
         )
         return
@@ -1616,8 +1613,10 @@ def _finish_generated_ingest_plan(self, plan: dict, snapshot: dict | None = None
             status_text += f" Do planu E1 weszło {selected_total}."
         if skipped_duplicates > 0:
             status_text += f" Pominięto {skipped_duplicates} dubli po nazwie."
-        if skipped_invalid > 0:
-            status_text += f" Pominięto {skipped_invalid} plików bez poprawnego GT w nazwie."
+        gt_counts = CampaignIngestPlanner.gt_statistics(plan.get("selected") or [])
+        status_text += (f" Jawne numery: {gt_counts['explicit_gt_count']}; "
+                        f"bez numeru: {gt_counts['missing_explicit_gt_count']}; "
+                        f"podpowiedzi z nazw: {gt_counts['filename_hint_count']}.")
         self.app.update_status(status_text, "info")
     except Exception:
         pass
@@ -1866,10 +1865,9 @@ def _build_step1_source_reuse_plan(self, base_plan: dict | None = None) -> dict:
     selected_items = []
     skipped_invalid_gt = 0
     for image_path in image_paths:
-        gt_texts = planner.extract_true_texts_from_filename(image_path.name)
-        char_hist = planner.build_char_histogram(gt_texts)
-        if not gt_texts or not char_hist:
-            skipped_invalid_gt += 1
+        text_fields = planner.normalize_text_metadata(image_path.name)
+        gt_texts = text_fields["ground_truth_texts"]
+        char_hist = text_fields["char_histogram"]
         selected_hist.update(char_hist)
         try:
             source_path = str(image_path.resolve())
@@ -1881,6 +1879,7 @@ def _build_step1_source_reuse_plan(self, base_plan: dict | None = None) -> dict:
                 "source_path": source_path,
                 "source_key": planner.make_source_key(image_path, master_pool_dir=master_pool),
                 "ground_truth_texts": list(gt_texts or []),
+                **text_fields,
                 "char_histogram": dict(char_hist or {}),
                 "score": 0.0,
                 "score_details": {"source_reuse": True},
@@ -1904,6 +1903,7 @@ def _build_step1_source_reuse_plan(self, base_plan: dict | None = None) -> dict:
         "raw_total": raw_total,
         "candidates_total": raw_total,
         "selected_total": len(selected_items),
+        **planner.gt_statistics(selected_items),
         "new_to_project_total": source_new_total,
         "source_new_to_project_total": source_new_total,
         "skipped_used": 0,

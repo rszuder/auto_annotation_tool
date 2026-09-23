@@ -1024,17 +1024,9 @@ class CampaignTab:
                 _report_processed_progress(processed_count)
                 continue
 
-            gt_texts = planner.extract_true_texts_from_filename(image_path.name)
-            if not gt_texts:
-                skipped_invalid_gt += 1
-                _report_processed_progress(processed_count)
-                continue
-
-            char_hist = planner.build_char_histogram(gt_texts)
-            if not char_hist:
-                skipped_invalid_gt += 1
-                _report_processed_progress(processed_count)
-                continue
+            text_fields = planner.normalize_text_metadata(image_path.name)
+            gt_texts = text_fields["ground_truth_texts"]
+            char_hist = text_fields["char_histogram"]
 
             try:
                 source_path = str(image_path.resolve())
@@ -1048,6 +1040,7 @@ class CampaignTab:
                     "source_path": source_path,
                     "source_key": planner.make_source_key(image_path, master_pool_dir=master_pool_dir),
                     "ground_truth_texts": list(gt_texts),
+                    **text_fields,
                     "char_histogram": dict(char_hist),
                     "score": 0.0,
                     "score_details": {},
@@ -1077,6 +1070,7 @@ class CampaignTab:
             "raw_total": raw_total,
             "candidates_total": raw_total,
             "selected_total": len(selected_items),
+            **planner.gt_statistics(selected_items),
             "new_to_project_total": new_to_project_total,
             "source_new_to_project_total": source_new_to_project_total,
             "skipped_used": skipped_duplicate_filenames,

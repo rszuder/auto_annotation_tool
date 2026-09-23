@@ -3684,6 +3684,11 @@ class CampaignManager:
         manifest_path = self.get_ingest_manifest_path(iteration_num, project_name)
         if manifest_path is None:
             return None
+        from .campaign_ingest_planner import CampaignIngestPlanner
+        planner = CampaignIngestPlanner()
+        entries = [{**item, **planner.normalize_text_metadata(item.get("name", ""), item)}
+                   for item in manifest.get("selected_images", []) or [] if isinstance(item, dict)]
+        manifest = {**manifest, "selected_images": entries, **planner.gt_statistics(entries)}
         if self._write_json_file(manifest_path, manifest):
             try:
                 self._ingest_manifest_cache.clear()
@@ -4000,12 +4005,9 @@ class CampaignManager:
             meta = metadata_by_name.get(str(source_path.name or "").strip().lower())
             if meta is None:
                 meta = metadata_by_path.get(str(resolved_source_path).lower())
-            true_texts = list((meta or {}).get("ground_truth_texts") or [])
-            if not true_texts:
-                true_texts = planner.extract_true_texts_from_filename(source_path.name)
-            char_hist = dict((meta or {}).get("char_histogram") or {})
-            if not char_hist:
-                char_hist = planner.build_char_histogram(true_texts)
+            text_fields = planner.normalize_text_metadata(source_path.name, meta)
+            true_texts = text_fields["ground_truth_texts"]
+            char_hist = text_fields["char_histogram"]
             for ch, value in char_hist.items():
                 total_hist[ch] = total_hist.get(ch, 0) + int(value)
 
@@ -4019,6 +4021,7 @@ class CampaignManager:
                 "iteration_target_path": str(logical_target_path.resolve()),
                 "ground_truth_texts": true_texts,
                 "char_histogram": char_hist,
+                **text_fields,
             })
             _progress(
                 6.0 + 74.0 * (processed_count / max(1, total_files)),
