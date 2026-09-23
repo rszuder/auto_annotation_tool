@@ -116,6 +116,7 @@ def refresh_detection_review_controls(host) -> None:
     busy = bool(
         getattr(self, "fast_test_running", False)
         or getattr(self, "is_processing", False)
+        or getattr(self, "_preview_review_batch_running", False)
     )
     snapshot_exists = bool(
         get_detection_review_snapshot_path(self)
@@ -624,7 +625,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
 
     try:
         if hasattr(self, "preview_box_mode_var"):
-            result_box_mode = "RAW_RESULT" if raw_only else "FINAL"
+            result_box_mode = "GT_RESULT" if raw_only else "AUTO"
             result_box_mode_label = (
                 self._get_preview_box_mode_label(result_box_mode)
                 if hasattr(self, "_get_preview_box_mode_label")

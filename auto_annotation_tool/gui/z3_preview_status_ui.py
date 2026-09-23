@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .z3_gt_box_policy import working_characters
 
 import tkinter as tk
 from typing import TYPE_CHECKING
@@ -134,6 +135,7 @@ def apply_preview_info_stats_style(host: "CharacterAnnotationTab", progress_bar_
         ("preview_perfect_count_lbl", {"bg": bg, "fg": success_fg, "font": ("Segoe UI", 12, "bold")}),
         ("preview_error_count_lbl", {"bg": bg, "fg": error_fg, "font": ("Segoe UI", 12, "bold")}),
         ("preview_unknown_count_lbl", {"bg": bg, "fg": info_fg, "font": ("Segoe UI", 12, "bold")}),
+        ("preview_approved_char_count_lbl", {"bg": bg, "fg": success_fg, "font": ("Segoe UI", 9, "bold")}),
         ("preview_layout_summary_lbl", {"bg": bg, "fg": muted_fg, "font": ("Segoe UI", 8)}),
         ("preview_repair_progress_title_lbl", {"bg": bg, "fg": fg, "font": ("Segoe UI", 9, "bold")}),
     )
@@ -387,6 +389,7 @@ def set_preview_counts_info(
     needs_fix: int = 0,
     unknown: int = 0,
     char_boxes: int = 0,
+    approved_char_boxes: int = 0,
 ) -> None:
     ok_count = max(0, int(perfect))
     bad_count = max(0, int(needs_fix) + int(unknown))
@@ -404,6 +407,7 @@ def set_preview_counts_info(
         ("preview_perfect_count_lbl", str(ok_count)),
         ("preview_error_count_lbl", str(bad_count)),
         ("preview_unknown_count_lbl", str(total_count)),
+        ("preview_approved_char_count_lbl", f"Zatwierdzone ramki znaków: {max(0, int(approved_char_boxes))}"),
     )
     for attr_name, value_text in label_map:
         widget = getattr(host, attr_name, None)
@@ -471,7 +475,7 @@ def build_plates_list_legend_counts(host: "CharacterAnnotationTab", counts: dict
         if not isinstance(data, dict):
             continue
 
-        chars = list(data.get("characters", []) or [])
+        chars = working_characters(host, data)
         source_counts = host._count_character_sources(chars, data=data)
         manual_count = max(
             int(source_counts.get("manual", 0) or 0),
@@ -513,6 +517,7 @@ def build_plates_list_legend_counts(host: "CharacterAnnotationTab", counts: dict
         "plate_ocr": int(plate_ocr),
         "plate_hybrid": int(plate_hybrid),
         "box_total": int(box_total),
+        "box_perfect": int(status_counts.get("approved_char_boxes", 0) or 0),
         "box_manual": int(box_manual),
         "box_yolo": int(box_yolo),
         "box_ocr": int(box_ocr),
@@ -530,7 +535,7 @@ def set_plates_legend_info(host: "CharacterAnnotationTab", counts: dict | None =
         ("plates_legend_tab_ocr_lbl", str(int(snapshot.get("plate_ocr", 0) or 0))),
         ("plates_legend_tab_hybrid_lbl", str(int(snapshot.get("plate_hybrid", 0) or 0))),
         ("plates_legend_box_total_lbl", str(int(snapshot.get("box_total", 0) or 0))),
-        ("plates_legend_box_perfect_lbl", "-"),
+        ("plates_legend_box_perfect_lbl", str(int(snapshot.get("box_perfect", 0) or 0))),
         ("plates_legend_box_manual_lbl", str(int(snapshot.get("box_manual", 0) or 0))),
         ("plates_legend_box_yolo_lbl", str(int(snapshot.get("box_yolo", 0) or 0))),
         ("plates_legend_box_ocr_lbl", str(int(snapshot.get("box_ocr", 0) or 0))),
@@ -1020,6 +1025,7 @@ def update_preview_info_label(host: "CharacterAnnotationTab") -> None:
             needs_fix=counts["needs_fix"],
             unknown=counts["unknown"],
             char_boxes=counts.get("char_boxes", 0),
+            approved_char_boxes=counts.get("approved_char_boxes", 0),
         )
         host._set_preview_layout_summary_info(counts)
         host._set_plates_legend_info(counts)
@@ -1147,4 +1153,3 @@ def refresh_preview_layout_override_ui_light(host, *, message: str, tone: str = 
     host._refresh_preview_editor_toolbar()
     host._update_preview_edit_status(message, tone=tone)
     host._focus_preview_canvas()
-

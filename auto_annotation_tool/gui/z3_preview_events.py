@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 from ..config import logger
+from .z3_gt_box_policy import can_add_character_box
 from .z3_preview_ui import (
     _get_cached_preview_photo,
     _get_cached_preview_source_image,
@@ -342,99 +343,39 @@ def _apply_preview_char_geometry_inheritance(host, drag_state: dict) -> set[int]
 
 
 def on_preview_list_mouse_primary(host, event):
-    self = host
-    try:
-        self.plates_listbox.focus_set()
-    except Exception:
-        pass
-    try:
-        modifier_state = int(getattr(event, "state", 0) or 0)
-    except Exception:
-        modifier_state = 0
-
-    try:
-        target_index = int(self.plates_listbox.nearest(getattr(event, "y", 0)))
-    except Exception:
-        return None
-
-    try:
-        size = int(self.plates_listbox.size() or 0)
-    except Exception:
-        size = 0
-    if size <= 0 or target_index < 0 or target_index >= size:
+    box = host.plates_listbox
+    box.focus_set()
+    if not box.size():
         return "break"
-
-    # PZ2 is an editor for one plate at a time. Keeping range selection here
-    # makes delayed Tk events feel like an accidental Shift-click under load.
-    shift_pressed = False
-    control_pressed = False
-    preserve_index = self._get_current_preview_list_index()
-    if preserve_index is not None and not (0 <= int(preserve_index) < size):
-        preserve_index = None
-    preserve_preview = False
-
-    try:
-        if shift_pressed:
-            try:
-                anchor_index = int(self.plates_listbox.index(tk.ANCHOR))
-            except Exception:
-                anchor_index = -1
-            if anchor_index < 0 or anchor_index >= size:
-                try:
-                    anchor_index = int(self.plates_listbox.index(tk.ACTIVE))
-                except Exception:
-                    anchor_index = target_index
-            anchor_index = max(0, min(anchor_index, size - 1))
-            start_index = min(anchor_index, target_index)
-            end_index = max(anchor_index, target_index)
-            if not control_pressed:
-                self._clear_listbox_selection_fast(self.plates_listbox)
-            self.plates_listbox.selection_set(start_index, end_index)
-            if preserve_index is not None:
-                self.plates_listbox.activate(preserve_index)
-            else:
-                self.plates_listbox.activate(anchor_index)
-            self.plates_listbox.see(target_index)
-            preserve_preview = True
-        elif control_pressed:
-            if self.plates_listbox.selection_includes(target_index):
-                self.plates_listbox.selection_clear(target_index)
-            else:
-                self.plates_listbox.selection_set(target_index)
-            self.plates_listbox.selection_anchor(target_index)
-            if preserve_index is not None:
-                self.plates_listbox.activate(preserve_index)
-            else:
-                self.plates_listbox.activate(target_index)
-            self.plates_listbox.see(target_index)
-            preserve_preview = True
+    target = int(box.nearest(event.y))
+    bounds = box.bbox(target)
+    if bounds is None or not bounds[1] <= event.y < bounds[1] + bounds[3]:
+        return "break"
+    modifiers = int(getattr(event, "state", 0) or 0)
+    shift, control = bool(modifiers & 0x0001), bool(modifiers & 0x0004)
+    if shift:
+        anchor = max(0, min(int(box.index(tk.ANCHOR)), box.size() - 1))
+        if not control:
+            host._clear_listbox_selection_fast(box)
+        box.selection_set(min(anchor, target), max(anchor, target))
+    elif control:
+        if box.selection_includes(target):
+            box.selection_clear(target)
         else:
-            self._suppress_preview_reload_on_list_select = True
-            self._preview_fast_select_render = True
-            self._clear_listbox_selection_fast(self.plates_listbox)
-            self.plates_listbox.selection_set(target_index)
-            self.plates_listbox.selection_anchor(target_index)
-            self.plates_listbox.activate(target_index)
-            self.plates_listbox.see(target_index)
-    except Exception:
-        return "break"
-
-    if preserve_preview:
-        self._suppress_preview_reload_on_list_select = True
-        self._refresh_preview_editor_toolbar()
-        return "break"
-
-    try:
-        scheduler = getattr(self, "_schedule_preview_select_render", None)
-        if callable(scheduler):
-            scheduler(delay_ms=1)
-        else:
-            self._suppress_preview_reload_on_list_select = False
-            self._on_preview_select(None)
-    except Exception:
-        self._suppress_preview_reload_on_list_select = False
-        self._on_preview_select(None)
+            box.selection_set(target)
+        box.selection_anchor(target)
+    else:
+        host._clear_listbox_selection_fast(box)
+        box.selection_set(target)
+        box.selection_anchor(target)
+    box.activate(target)
+    box.see(target)
+    host._preview_last_navigation_interaction_ts = time.monotonic()
+    host._suppress_preview_reload_on_list_select = True
+    host._preview_fast_select_render = True
+    host._schedule_preview_select_render(delay_ms=1)
     return "break"
+
 
 
 def on_preview_canvas_motion(host, event=None):
@@ -631,6 +572,8 @@ def on_preview_canvas_leave(host, event=None):
 
 def on_preview_canvas_keypress(host, event=None):
     self = host
+    if getattr(self, "_preview_review_batch_running", False):
+        return "break"
     if event is None:
         return None
 
@@ -705,6 +648,8 @@ def on_preview_canvas_keypress(host, event=None):
                 self._set_preview_box_info("Najpierw wybierz tablicę z listy.", "warning")
                 return "break"
             self._ensure_preview_final_box_mode(render_preview=False)
+            if not can_add_character_box(self, self._get_preview_active_data(create=False)):
+                return "break"
             previous_selected_index = getattr(self, "_preview_char_selected_index", None)
             self._preview_char_add_click_armed = True
             self._preview_char_add_modifier_down = False
@@ -776,6 +721,8 @@ def on_preview_canvas_keyrelease(host, event=None):
 
 def on_preview_canvas_press(host, event):
     self = host
+    if getattr(self, "_preview_review_batch_running", False):
+        return "break"
     self._focus_preview_canvas()
     action_key = self._extract_preview_action_from_current_item()
     if action_key == "reset_view":
@@ -2200,6 +2147,9 @@ def finalize_preview_char_add_state(host) -> str:
         return "break"
 
     chars = self._get_preview_active_character_records(create=True)
+    if not can_add_character_box(self, self._get_preview_active_data(create=False)):
+        self.preview_canvas.delete("preview_char_add_preview")
+        return "break"
     self._push_preview_history_snapshot()
     new_record = {
         "character": "",

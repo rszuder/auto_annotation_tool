@@ -51,6 +51,7 @@ from . import z3_navigation_runtime
 from . import z3_preview_typing_runtime
 from . import z3_preview_metadata_runtime
 from . import z3_gt_assist_runtime
+from . import z3_list_review
 from . import z3_review_runtime
 from . import z3_plate_layout_runtime
 from . import z3_character_geometry
@@ -618,6 +619,7 @@ except ImportError:
 
 PREVIEW_BOX_MODE_OPTIONS = [
     ("AUTO", "Auto (wg etapu)"),
+    ("GT_RESULT", "Wynik do korekty (limit GT)"),
     ("RAW_RESULT", "RAW wynik eksperymentu"),
     ("FINAL", "Końcowe ramki treningowe"),
     ("YOLO_FILTERED", "YOLO po filtrze sekwencji"),
@@ -1323,6 +1325,9 @@ class CharacterAnnotationTab:
     _clear_listbox_selection_fast = staticmethod(z3_preview_metadata_runtime._clear_listbox_selection_fast)
 
     _on_preview_list_mouse_primary = on_preview_list_mouse_primary
+    _on_preview_list_context_menu = z3_list_review.show_context_menu
+    _select_all_preview_plates = z3_list_review.select_all
+    _run_selected_review_action = z3_list_review.run_selected_review_action
 
     _handle_preview_list_arrow_nav = z3_preview_metadata_runtime._handle_preview_list_arrow_nav
     _select_preview_relative = z3_preview_metadata_runtime._select_preview_relative

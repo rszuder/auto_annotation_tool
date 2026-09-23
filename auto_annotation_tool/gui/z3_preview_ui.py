@@ -16,6 +16,7 @@ from ..config import CONFIG, logger
 from .web_slim_scrollbar import blend_hex_colors
 from .z3_workspace_drawers import workspace_drawers
 from .z3_inline_hud import plan_inline_hud, draw_inline_hud
+from .z3_list_review import capture_selection, restore_selection
 from .z3_preview_status_ui import (
     apply_preview_source_actions_style,
     apply_preview_info_stats_style,
@@ -840,17 +841,7 @@ def rebuild_preview_listbox(
     preserve_selection: bool = True,
     schedule_render: bool = True,
 ) -> None:
-    selected_pid = None
-
-    if preserve_selection:
-        try:
-            sel = host.plates_listbox.curselection()
-            if sel:
-                idx = sel[0]
-                if 0 <= idx < len(host._listbox_pid_by_index):
-                    selected_pid = host._listbox_pid_by_index[idx]
-        except Exception:
-            selected_pid = None
+    saved_selection = capture_selection(host) if preserve_selection else {}
 
     current_order = [pid for pid in host._preview_base_plate_ids if pid in host.preview_metadata]
     current_ids = set(current_order)
@@ -914,19 +905,11 @@ def rebuild_preview_listbox(
             except Exception:
                 _style_rows_chunk()
 
-        restore_idx = None
-        if selected_pid and selected_pid in host._listbox_pid_by_index:
-            restore_idx = host._listbox_pid_by_index.index(selected_pid)
-        elif host._listbox_pid_by_index:
-            restore_idx = 0
+        restore_idx = restore_selection(host, saved_selection)
 
         if restore_idx is not None:
             host._suppress_preview_reload_on_list_select = True
             host._preview_fast_select_render = True
-            host._clear_listbox_selection_fast(host.plates_listbox)
-            host.plates_listbox.selection_set(restore_idx)
-            host.plates_listbox.activate(restore_idx)
-            host.plates_listbox.see(restore_idx)
             if schedule_render:
                 try:
                     scheduler = getattr(host, "_schedule_preview_select_render", None)
@@ -3035,6 +3018,7 @@ def set_preview_fullscreen(host, active: bool):
 
 def reset_preview_cache(host):
     mark_preview_metadata_changed(host)
+    host._preview_gt_box_cache = None
     if bool(getattr(host, "_preview_fullscreen_active", False)):
         try:
             host._set_preview_fullscreen(False)
@@ -3421,6 +3405,8 @@ def persist_active_preview_characters(
     assist_changed = bool(assist(data).get("changed")) if callable(assist) else False
     if assist_changed:
         light_redraw_indices = None
+        sorted_chars = host._annotate_preview_character_reading_positions(data["characters"], data=data)
+        data["characters"] = sorted_chars
     status_now = host._derive_preview_status_from_data(data, sorted_chars)
     if (
         status_now == "perfect"
@@ -3953,7 +3939,8 @@ def on_preview_select(host, event=None):
             return
 
     try:
-        idx = int(sel[0])
+        current = self._get_current_preview_list_index()
+        idx = int(current if current is not None else sel[0])
     except Exception:
         self._cancel_preview_char_label_interaction()
         self._preview_char_selected_index = None

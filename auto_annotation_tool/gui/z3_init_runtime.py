@@ -19,6 +19,7 @@ from .inertial_scroll import InertialScrollController
 
 PREVIEW_BOX_MODE_OPTIONS = [
     ("AUTO", "Auto (wg etapu)"),
+    ("GT_RESULT", "Wynik do korekty (limit GT)"),
     ("RAW_RESULT", "RAW wynik eksperymentu"),
     ("FINAL", "Końcowe ramki treningowe"),
     ("YOLO_FILTERED", "YOLO po filtrze sekwencji"),

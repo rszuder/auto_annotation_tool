@@ -1384,7 +1384,7 @@ def build_detection_tab(
     self.plates_listbox = tk.Listbox(
         self.preview_list_host,
         font=("Consolas", 10),
-        selectmode=tk.BROWSE,
+        selectmode=tk.EXTENDED,
         exportselection=False,
         activestyle="none",
         cursor="arrow",
@@ -1396,6 +1396,9 @@ def build_detection_tab(
 
     self.plates_listbox.config(yscrollcommand=scroll.set)
     self.plates_listbox.bind("<Button-1>", self._on_preview_list_mouse_primary, add=False)
+    self.plates_listbox.bind("<Button-3>", self._on_preview_list_context_menu, add=False)
+    self.plates_listbox.bind("<Control-a>", self._select_all_preview_plates, add=False)
+    self.plates_listbox.bind("<Control-A>", self._select_all_preview_plates, add=False)
     self.plates_listbox.bind("<B1-Motion>", lambda _event: "break", add=False)
     self.plates_listbox.bind(
         "<<ListboxSelect>>",
@@ -2497,7 +2500,7 @@ def build_detection_tab(
 
     self.preview_perfect_title_lbl = tk.Label(
         self.preview_counts_frame,
-        text="Sprawdzone",
+        text="Zatwierdzone",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
@@ -2507,7 +2510,7 @@ def build_detection_tab(
     self.preview_perfect_title_lbl.grid(row=0, column=0, sticky="w", padx=(0, 12), pady=(0, 1))
     self.preview_error_title_lbl = tk.Label(
         self.preview_counts_frame,
-        text="Do poprawy",
+        text="Pozostałe",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
@@ -2556,6 +2559,11 @@ def build_detection_tab(
         padx=0,
     )
     self.preview_unknown_count_lbl.grid(row=1, column=2, sticky="w")
+    self.preview_approved_char_count_lbl = tk.Label(
+        self.preview_counts_frame, text="Zatwierdzone ramki znaków: 0",
+        anchor="w", bd=0, highlightthickness=0,
+    )
+    self.preview_approved_char_count_lbl.grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
     self.preview_total_count_lbl = self.preview_unknown_count_lbl
     self._apply_preview_info_stats_style()
 

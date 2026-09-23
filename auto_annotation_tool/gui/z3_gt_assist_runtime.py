@@ -9,6 +9,7 @@ import math
 import tkinter as tk
 
 from ..plate_ground_truth import normalize_plate_ground_truth_text
+from .z3_gt_box_policy import limit_boxes_to_gt
 from .z3_gt_contract import (
     canonical_raw_detection_hash,
     revision_ids_from_data,
@@ -21,7 +22,7 @@ GT_ASSIST_CONFIRMED_SOURCE = "gt_assist_confirmed"
 
 
 def apply_live_gt_assist(host, data: dict | None) -> dict:
-    """Label current REVIEW geometry from explicit GT, never change RAW or boxes."""
+    """Limit the working boxes and label REVIEW from explicit GT; preserve RAW."""
     if not isinstance(data, dict):
         return {"changed": False, "reason": "no_plate"}
     state = data.get("review_state") or {}
@@ -29,9 +30,15 @@ def apply_live_gt_assist(host, data: dict | None) -> dict:
         return {"changed": False, "reason": "not_editing"}
     gt = normalize_plate_ground_truth_text(host._get_preview_ground_truth_text(data))
     chars = data.get("characters") or []
+    chars, box_limit = limit_boxes_to_gt(host, data, chars)
+    if box_limit:
+        host._update_preview_plate_layout_metadata(data, chars)
+        chars = host._annotate_preview_character_reading_positions(chars, data=data)
+        data["characters"] = chars
+        data["gt_box_limit"] = copy.deepcopy(box_limit)
     result = {"schema": "alpr.pz2.live_gt_assist.v1", "ground_truth_text": gt,
               "source_gt_revision_ids": revision_ids_from_data(data, "source_gt_revision_ids", "source_gt_revision_id"),
-              "source_gt_hash": data.get("source_gt_hash"), "box_count": len(chars), "changed": False}
+              "source_gt_hash": data.get("source_gt_hash"), "box_count": len(chars), "changed": bool(box_limit)}
     reason = "ready"
     if not gt:
         reason = "missing_gt"

@@ -9,6 +9,7 @@ from datetime import datetime
 from tkinter import messagebox
 
 from .z3_gt_contract import revision_ids_from_data
+from .z3_metadata_cache import mark_preview_metadata_changed
 
 REVIEW_SCHEMA = "alpr.pz2.review.v1"
 REVIEW_IN_PROGRESS = "in_progress"
@@ -228,6 +229,7 @@ def _resolve_plate(host, plate_id=None):
     return pid, data if isinstance(data, dict) else None
 
 def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -> None:
+    mark_preview_metadata_changed(host)
     if persist:
         host._persist_preview_metadata(
             success_message=None,
@@ -250,6 +252,10 @@ def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -
         pass
     try:
         host._refresh_detection_review_controls()
+    except Exception:
+        pass
+    try:
+        host._update_preview_info_label()
     except Exception:
         pass
     try:
@@ -382,7 +388,7 @@ def start_review_from_raw(
         "reason": "",
         "plate_id": pid,
         "review_status": REVIEW_IN_PROGRESS,
-        "character_count": len(review_chars),
+        "character_count": len(data["characters"]),
         "raw_result_hash": raw_hash,
     }
 
@@ -480,6 +486,7 @@ def confirm_review_gold(
     *,
     persist: bool = True,
     quiet: bool = False,
+    refresh: bool = True,
 ):
     """Explicit human approval. Only a valid REVIEW may become GOLD/perfect."""
     pid, data = _resolve_plate(host, plate_id)
@@ -543,7 +550,7 @@ def confirm_review_gold(
     state.pop("current_reference", None)
     data["status"] = "perfect"
 
-    if any(rec.get("correction_source") == "gt_assisted" for rec in chars if isinstance(rec, dict)):
+    if data.get("correction_source") == "gt_assisted" or any(rec.get("correction_source") == "gt_assisted" for rec in chars if isinstance(rec, dict)):
         data["review_source"] = "gt_assist_confirmed"
         for rec in chars:
             if isinstance(rec, dict) and rec.get("correction_source") == "gt_assisted":
@@ -572,12 +579,11 @@ def confirm_review_gold(
     if bucket:
         gold_state["approved_from_bucket"] = bucket
 
-    _refresh_after_change(
-        host,
-        pid,
-        persist=persist,
-        message="Tablica została sprawdzona i zatwierdzona do zbioru danych.",
-    )
+    if refresh:
+        _refresh_after_change(
+            host, pid, persist=persist,
+            message="Tablica została sprawdzona i zatwierdzona do zbioru danych.",
+        )
 
     if not quiet:
         try:

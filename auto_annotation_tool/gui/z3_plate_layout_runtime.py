@@ -1269,12 +1269,10 @@ def _count_character_sources(self, chars, data=None):
     for idx, rec in enumerate(list(chars or [])):
         box_source = self._get_character_box_source_tag(rec, data=data, fallback_index=idx)
         sign_source = self._get_character_sign_source_tag(rec, data=data, fallback_index=idx)
-        if box_source in counts:
-            counts[box_source] += 1
-        if sign_source in counts:
-            counts[sign_source] += 1
         tag = self._get_character_source_tag(rec, data=data, fallback_index=idx)
-        if tag not in counts:
-            continue
-        counts[tag] += 1
+        # The combined tag can equal a component (YB with no model symbol,
+        # including a symbol assigned by GT). Count that role once per box.
+        for source in {box_source, sign_source, tag}:
+            if source in counts:
+                counts[source] += 1
     return counts

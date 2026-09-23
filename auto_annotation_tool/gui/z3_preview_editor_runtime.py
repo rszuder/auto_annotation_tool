@@ -10,6 +10,7 @@ from pathlib import Path
 from tkinter import messagebox
 
 from ..config import logger
+from .z3_gt_box_policy import can_add_character_box
 
 
 def _get_preview_selected_char_record(self):
@@ -519,6 +520,8 @@ def _toggle_preview_char_add_mode(self, event=None):
         self._set_preview_box_info("Najpierw wybierz tablicę z listy.", "warning")
         return "break"
     self._ensure_preview_final_box_mode(render_preview=False)
+    if not bool(getattr(self, "_preview_char_add_mode", False)) and not can_add_character_box(self, self._get_preview_active_data(create=False)):
+        return "break"
     self._set_preview_char_editor_modes(
         edit=False,
         add=(not bool(getattr(self, "_preview_char_add_mode", False))),

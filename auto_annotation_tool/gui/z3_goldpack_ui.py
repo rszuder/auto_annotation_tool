@@ -11,6 +11,7 @@ import tkinter as tk
 import uuid
 from pathlib import Path
 from .z3_metadata_cache import read_preview_metadata
+from .z3_gt_box_policy import working_characters
 from . import z3_dataset_provenance
 from . import z3_review_runtime
 
@@ -393,6 +394,7 @@ def _compute_statuses_in_metadata_mapping(host, metadata_map):
     needs_fix = 0
     unknown = 0
     char_boxes = 0
+    approved_char_boxes = 0
     strategy_counts = host._empty_perfect_strategy_counts()
     strategy_char_counts = host._empty_perfect_strategy_counts()
     source_counts = host._empty_gold_source_counts()
@@ -406,7 +408,7 @@ def _compute_statuses_in_metadata_mapping(host, metadata_map):
             continue
 
         try:
-            char_boxes += len(list(data.get("characters", []) or []))
+            char_boxes += len(working_characters(host, data))
         except Exception:
             pass
 
@@ -418,6 +420,7 @@ def _compute_statuses_in_metadata_mapping(host, metadata_map):
             perfect += 1
             layout_perfect_counts[layout_label] = int(layout_perfect_counts.get(layout_label, 0) or 0) + 1
             if is_gold_export_eligible_data(data):
+                approved_char_boxes += host._count_exportable_characters_in_data(data)
                 bucket = host._get_perfect_strategy_bucket(data)
                 source_bucket = host._get_plate_source_bucket(data)
                 strategy_counts[bucket] += 1
@@ -436,6 +439,7 @@ def _compute_statuses_in_metadata_mapping(host, metadata_map):
         "unknown": unknown,
         "total": perfect + needs_fix + unknown,
         "char_boxes": int(char_boxes),
+        "approved_char_boxes": int(approved_char_boxes),
         "strategy_counts": strategy_counts,
         "strategy_char_counts": strategy_char_counts,
         "source_counts": source_counts,

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from ..config import logger
 from .web_slim_scrollbar import blend_hex_colors
+from .z3_gt_box_policy import plate_gt, limit_boxes_to_gt
 
 if TYPE_CHECKING:
     from .tab_character_annotation import CharacterAnnotationTab
@@ -228,6 +229,7 @@ def get_preview_box_variants(host: "CharacterAnnotationTab", data: dict) -> dict
         yolo_filtered = host._sort_character_records_by_x(yolo_from_canonical)
 
     return {
+        "GT_RESULT": limit_boxes_to_gt(host, data, raw_result)[0],
         "RAW_RESULT": raw_result,
         "FINAL": canonical_chars,
         "YOLO_FILTERED": yolo_filtered,
@@ -249,7 +251,7 @@ def resolve_preview_box_source(data: dict, mode_key: str) -> str:
     if isinstance(data.get("raw_detection"), dict):
         # A frozen empty prediction is also a result, not a reason to show
         # intermediate proposals rejected by the pipeline.
-        return "RAW_RESULT"
+        return "GT_RESULT" if plate_gt(data) else "RAW_RESULT"
     for mode, field in (
         ("YOLO_FILTERED", "yolo_detections"),
         ("YOLO_NMS", "yolo_nms_detections"),
@@ -262,9 +264,14 @@ def resolve_preview_box_source(data: dict, mode_key: str) -> str:
 
 def restore_preview_stage_mode(host: "CharacterAnnotationTab", metadata: dict) -> None:
     """Recover old forced FINAL selection when opening an unreviewed RAW run."""
-    if host._get_preview_box_mode_key() != "FINAL":
+    mode = host._get_preview_box_mode_key()
+    if mode == "RAW_RESULT" and any(plate_gt(data) for data in metadata.values()):
+        host.preview_box_mode_var.set(host._get_preview_box_mode_label("AUTO"))
+        host._save_local_setting("char_preview_box_mode", "AUTO")
         return
-    if any(resolve_preview_box_source(data, "AUTO") == "RAW_RESULT"
+    if mode != "FINAL":
+        return
+    if any(resolve_preview_box_source(data, "AUTO") in {"RAW_RESULT", "GT_RESULT"}
            for data in metadata.values()):
         host.preview_box_mode_var.set(host._get_preview_box_mode_label("AUTO"))
         host._save_local_setting("char_preview_box_mode", "AUTO")
@@ -273,9 +280,11 @@ def restore_preview_stage_mode(host: "CharacterAnnotationTab", metadata: dict) -
 def get_preview_box_records(host: "CharacterAnnotationTab", data: dict):
     data = data if isinstance(data, dict) else {}
     mode_key = resolve_preview_box_source(data, host._get_preview_box_mode_key())
-    if mode_key == "RAW_RESULT":
+    if mode_key in {"RAW_RESULT", "GT_RESULT"}:
         raw = data.get("raw_detection")
         records = raw.get("characters", []) if isinstance(raw, dict) else []
+        if mode_key == "GT_RESULT":
+            return limit_boxes_to_gt(host, data, records)[0], mode_key
     else:
         field = {
             "FINAL": "characters",

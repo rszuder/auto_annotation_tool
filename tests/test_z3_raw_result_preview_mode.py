@@ -94,12 +94,12 @@ def raw_plate():
     }
 
 
-def test_auto_shows_pipeline_result_before_review_without_changing_metadata():
+def test_auto_shows_gt_working_result_before_review_without_changing_metadata():
     data = raw_plate()
     data["ground_truth_text"] = "DIFFERENT_GT"
     before = deepcopy(data)
     records, source = preview.get_preview_box_records(Host(mode="AUTO"), data)
-    assert source == "RAW_RESULT"
+    assert source == "GT_RESULT"
     assert records == data["raw_detection"]["characters"]
     assert data == before
 
@@ -127,7 +127,7 @@ def test_auto_supports_legacy_yolo_records_without_raw_snapshot():
     )
 
 
-@pytest.mark.parametrize("mode", ["RAW_RESULT", "FINAL", "YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"])
+@pytest.mark.parametrize("mode", ["GT_RESULT", "RAW_RESULT", "FINAL", "YOLO_FILTERED", "YOLO_NMS", "YOLO_RAW"])
 def test_explicit_mode_still_selects_only_requested_layer(mode):
     host = Host(mode=mode)
     data = raw_plate()
@@ -177,7 +177,7 @@ def test_open_reviewed_run_preserves_final_mode():
     assert host.mode == "FINAL"
 
 
-@pytest.mark.parametrize("raw_only,expected", [(True, "RAW_RESULT"), (False, "FINAL")])
+@pytest.mark.parametrize("raw_only,expected", [(True, "GT_RESULT"), (False, "AUTO")])
 def test_detection_start_selects_its_output_layer(tmp_path, raw_only, expected):
     from auto_annotation_tool.gui import z3_detection_runtime as detection
     host = mode_host("FINAL")

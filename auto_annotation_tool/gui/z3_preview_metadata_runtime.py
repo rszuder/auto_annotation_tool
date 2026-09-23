@@ -1057,25 +1057,28 @@ def _refresh_preview_listbox_row(self, plate_id: str | None = None):
     status = str(data.get("status", "unknown")).strip().lower()
 
     try:
-        selected_rows = {int(idx) for idx in listbox.curselection()}
+        row_selected = bool(listbox.selection_includes(row_index))
     except Exception:
-        selected_rows = set()
+        row_selected = False
     try:
         active_row = int(listbox.index(tk.ACTIVE))
     except Exception:
         active_row = None
-    row_selected = row_index in selected_rows
+    anchor_row = int(listbox.index(tk.ANCHOR))
+    view_top = listbox.yview()[0]
 
     try:
         listbox.delete(row_index)
         listbox.insert(row_index, label)
         self._apply_plate_listbox_row_style(row_index, status)
+        # Tk shifts the other selected indices back on insertion. Restore only
+        # the replaced row, avoiding O(selection size) Tcl calls for every row.
         if row_selected:
             listbox.selection_set(row_index)
-        if active_row == row_index:
-            listbox.activate(row_index)
-        if row_selected or active_row == row_index:
-            listbox.see(row_index)
+        listbox.selection_anchor(anchor_row)
+        if active_row is not None:
+            listbox.activate(active_row)
+        listbox.yview_moveto(view_top)
     except Exception as exc:
         logger.debug(f"Nie udało się odświeżyć pojedynczego wiersza listy tablic [{pid}]: {exc}")
 
@@ -1200,7 +1203,8 @@ def _get_current_preview_list_index(self):
     try:
         sel = listbox.curselection()
         if sel:
-            idx = int(sel[0])
+            active = int(listbox.index(tk.ACTIVE))
+            idx = active if active in sel else int(sel[0])
             if 0 <= idx < len(getattr(self, "_listbox_pid_by_index", [])):
                 return idx
     except Exception:
