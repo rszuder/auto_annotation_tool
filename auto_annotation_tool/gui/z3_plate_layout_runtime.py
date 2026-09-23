@@ -1273,6 +1273,7 @@ def _count_character_sources(self, chars, data=None):
         "manual_sign": 0,
         "generated_box": 0,
         "ocr_symbol": 0,
+        "gt_assisted": 0,
     }
     for idx, rec in enumerate(list(chars or [])):
         box_source = self._get_character_box_source_tag(rec, data=data, fallback_index=idx)

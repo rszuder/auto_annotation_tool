@@ -948,7 +948,8 @@ def format_preview_source_counts_line(host: "CharacterAnnotationTab", source_cou
         f"YB={int(counts.get('yolo_box', 0) or 0)} | "
         f"Znaki MS={int(counts.get('manual_sign', 0) or 0)} | "
         f"OS={int(counts.get('ocr_symbol', 0) or 0)} | "
-        f"YS={int(counts.get('yolo_symbol', 0) or 0)}"
+        f"YS={int(counts.get('yolo_symbol', 0) or 0)} | "
+        f"GT={int(counts.get('gt_assisted', 0) or 0)}"
     )
 
 

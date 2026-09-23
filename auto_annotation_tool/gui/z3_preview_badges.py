@@ -509,77 +509,10 @@ def get_preview_source_visual_style(host, source_tag: str):
     return styles.get(normalized, styles["ocr"])
 
 
-def get_preview_badge_component_style(host, component_key: str) -> dict:
-    normalized = str(component_key or "").strip().lower().replace("-", "_")
-    mapping = {
-        "manual": ("manual", "M", "Ręczne"),
-        "ocr_symbol": ("ocr", "O", "OCR znak"),
-        "yolo_box": ("yolo_box", "YB", "YOLO box"),
-        "yolo_symbol": ("yolo_symbol", "YS", "YOLO znak"),
-    }
-    source_key, label, legend = mapping.get(normalized, mapping["ocr_symbol"])
-    base_style = dict(get_preview_source_visual_style(host, source_key))
-    base_style["label"] = label
-    base_style["legend"] = legend
-    return base_style
 
 
-def get_preview_source_component_legend_items(host) -> list[dict]:
-    return [
-        {"component": "manual"},
-        {"component": "ocr_symbol"},
-        {"component": "yolo_box"},
-        {"component": "yolo_symbol"},
-    ]
 
 
-def get_preview_source_badge_layers(
-    host,
-    source_tag: str,
-    *,
-    confidence: float | None = None,
-    box_backend_confidence: float | None = None,
-    include_confidence: bool = True,
-    has_symbol: bool | None = None,
-    uses_yolo_box_backend: bool = False,
-) -> list[dict]:
-    normalized = host._normalize_character_source_tag(raw_tag=source_tag)
-
-    def _build_layer(component_key: str, text: str | None = None, conf_value: float | None = None) -> dict:
-        style = get_preview_badge_component_style(host, component_key)
-        layer_text = str(text or style.get("label", "") or "").strip()
-        if include_confidence and conf_value is not None:
-            try:
-                layer_text = f"{layer_text} {float(conf_value):.2f}"
-            except Exception:
-                pass
-        fill = str(style.get("badge_fill", style.get("outline", "#3c3c3c")))
-        outline = str(style.get("badge_outline", fill))
-        text_color = str(host._get_readable_text_color(fill, preferred=style.get("badge_fg", "#ffffff")))
-        return {"text": layer_text, "fill_color": fill, "outline_color": outline, "text_color": text_color}
-
-    if normalized == "yolo_box_ocr":
-        yolo_confidence = box_backend_confidence if box_backend_confidence is not None else confidence
-        if has_symbol is False:
-            return [_build_layer("yolo_box", "YB", yolo_confidence)]
-        return [_build_layer("yolo_box", "YB", yolo_confidence), _build_layer("ocr_symbol", "O")]
-    if normalized == "yolo_rescue":
-        return list(reversed([_build_layer("ocr_symbol", "O"), _build_layer("yolo_symbol", "YS", confidence)]))
-    if normalized == "yolo_box":
-        return [_build_layer("yolo_box", "YB", box_backend_confidence if box_backend_confidence is not None else confidence)]
-    if normalized == "yolo_symbol":
-        return [_build_layer("yolo_symbol", "YS", confidence)]
-    if normalized == "yolo":
-        return list(reversed([_build_layer("yolo_box", "YB"), _build_layer("yolo_symbol", "YS", confidence)]))
-    if normalized == "manual":
-        layers = [_build_layer("manual", "M")]
-        if uses_yolo_box_backend:
-            layers.insert(0, _build_layer("yolo_box", "YB", box_backend_confidence))
-        return layers
-    layers = [_build_layer("ocr_symbol", "O", confidence)]
-    if uses_yolo_box_backend:
-        layers.insert(0, _build_layer("yolo_box", "YB", box_backend_confidence))
-    return layers
 
 
 def draw_preview_source_legend(host, canvas, x: float, y: float):
