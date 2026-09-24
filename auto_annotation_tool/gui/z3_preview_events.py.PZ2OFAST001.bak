@@ -16,7 +16,6 @@ from .z3_preview_ui import (
     _get_cached_preview_source_image,
     _preview_char_record_trace_fields,
     _style_preview_character_edit_grips_fast,
-    refresh_preview_canvas_info_overlay_only,
 )
 
 
@@ -724,52 +723,12 @@ def on_preview_canvas_keypress(host, event=None):
                 )
                 return "break"
 
-            # Fast keyboard path: mutate REVIEW/GOLD now, but do not block
-            # the Tk event loop on full metadata write + PZ3 readiness refresh.
-            result = self._confirm_review_gold(
-                quiet=True,
-                persist=False,
-                refresh=False,
-            )
+            result = self._confirm_review_gold(quiet=True)
             if isinstance(result, dict) and result.get("ok"):
                 data = self._get_preview_active_data(create=False)
                 gold_state = data.get("gold_state") if isinstance(data, dict) else {}
                 excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
                 suffix = " Nadal jest wykluczona przez N." if excluded else ""
-
-                pid = str(result.get("plate_id", "") or getattr(self, "_preview_active_pid", "") or "").strip()
-
-                # Immediate visual feedback: row colour/label and canvas badge.
-                try:
-                    self._refresh_preview_listbox_row(pid)
-                except Exception:
-                    pass
-                try:
-                    refresh_preview_canvas_info_overlay_only(self, data=data)
-                except Exception:
-                    pass
-
-                # Durable save and expensive counters/readiness are deliberately
-                # deferred. Autosave already tracks the active pid and flushes
-                # pending work on shutdown.
-                try:
-                    self._schedule_preview_metadata_save(delay_ms=90)
-                except Exception:
-                    pass
-                try:
-                    self._schedule_preview_info_refresh(delay_ms=900)
-                except Exception:
-                    pass
-
-                # Button state is cheap enough, but still keep it out of the
-                # keypress critical path when Tk has an event loop available.
-                try:
-                    frame = getattr(self, "frame", None)
-                    if frame is not None:
-                        frame.after_idle(self._refresh_detection_review_controls)
-                except Exception:
-                    pass
-
                 self._update_preview_edit_status(
                     f"O: tablica otrzymała status OK.{suffix}",
                     tone="success",

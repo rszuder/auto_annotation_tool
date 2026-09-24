@@ -218,33 +218,16 @@ def test_o_shortcut_uses_existing_gold_confirmation():
         "gold_state": {},
     }
     host = _status_shortcut_host()
-    host._preview_active_pid = "plate_1"
     host._get_preview_active_data = lambda **_kwargs: data
-    host._confirm_review_gold = Mock(
-        return_value={"ok": True, "status": "perfect", "plate_id": "plate_1"}
-    )
-    host._refresh_preview_listbox_row = Mock()
-    host._schedule_preview_metadata_save = Mock()
-    host._schedule_preview_info_refresh = Mock()
-    host._refresh_detection_review_controls = Mock()
-    host.frame = SimpleNamespace(after_idle=lambda callback: callback())
+    host._confirm_review_gold = Mock(return_value={"ok": True, "status": "perfect"})
 
-    with patch.object(preview_events, "refresh_preview_canvas_info_overlay_only") as overlay:
-        result = preview_events.on_preview_canvas_keypress(
-            host,
-            SimpleNamespace(keysym="o", char="o", state=0),
-        )
+    result = preview_events.on_preview_canvas_keypress(
+        host,
+        SimpleNamespace(keysym="o", char="o", state=0),
+    )
 
     assert result == "break"
-    host._confirm_review_gold.assert_called_once_with(
-        quiet=True,
-        persist=False,
-        refresh=False,
-    )
-    host._refresh_preview_listbox_row.assert_called_once_with("plate_1")
-    host._schedule_preview_metadata_save.assert_called_once_with(delay_ms=90)
-    host._schedule_preview_info_refresh.assert_called_once_with(delay_ms=900)
-    overlay.assert_called_once_with(host, data=data)
+    host._confirm_review_gold.assert_called_once_with(quiet=True)
 
 
 def test_toggle_review_excluded_preserves_gold_and_is_reversible():

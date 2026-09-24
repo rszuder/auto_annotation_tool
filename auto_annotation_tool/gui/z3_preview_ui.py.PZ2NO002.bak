@@ -1009,8 +1009,6 @@ def get_preview_status_presentation(
             pass
     gold_state = source_data.get("gold_state") if isinstance(source_data, dict) else {}
     excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
-    if excluded:
-        ready_for_approval = False
 
     severity = "muted"
     canvas_text = "Nieocenione"
@@ -1809,8 +1807,7 @@ def _get_preview_character_edit_grip_style(host: "CharacterAnnotationTab") -> di
         idle_fill_alpha = 0.42
         active_fill_alpha = 0.72
     else:
-        # Explicit orange: theme warning can be olive/brown.
-        active_outline = "#ff8a00"
+        active_outline = str(palette.get("warning", "#ff9f1a"))
         grip_fill_base = str(palette.get("info", palette.get("accent_alt", "#38bdf8")))
         idle_fill_alpha = 0.36
         active_fill_alpha = 0.68
@@ -1823,8 +1820,8 @@ def _get_preview_character_edit_grip_style(host: "CharacterAnnotationTab") -> di
 
 
 def _get_preview_selected_character_box_color(host: "CharacterAnnotationTab") -> str:
-    # Unmistakable orange in every theme.
-    return "#ff8a00"
+    palette = getattr(getattr(host, "app", None), "palette", {}) or {}
+    return str(palette.get("warning", "#ff9f1a"))
 
 
 def _draw_preview_new_character_box(canvas, x1, y1, x2, y2):

@@ -431,17 +431,8 @@ def format_preview_record_source_label(host: "CharacterAnnotationTab", data: dic
 
 
 def _review_ready(host, data) -> bool:
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or (data.get("review_state") or {}).get("status") != "in_progress":
         return False
-
-    gold_state = data.get("gold_state")
-    if isinstance(gold_state, dict) and bool(gold_state.get("excluded", False)):
-        # N is terminal in the PZ2 presentation and must suppress ZATWIERDŹ.
-        return False
-
-    if (data.get("review_state") or {}).get("status") != "in_progress":
-        return False
-
     check = getattr(host, "_get_review_quality_status", None)
     return bool(callable(check) and check(data) == "perfect")
 
@@ -486,9 +477,8 @@ def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, da
     prefix = f"{ordinal}. " if ordinal is not None else ""
     flags = []
     if excluded:
-        # N overrides both ZATWIERDŹ and OK in the visible list state.
         flags.append("N")
-    elif status == "perfect":
+    if status == "perfect":
         flags.append("OK")
     elif ready:
         flags.append("ZATWIERDŹ")
@@ -513,8 +503,7 @@ def get_plate_row_foreground(host: "CharacterAnnotationTab", status: str) -> str
     if status == "perfect":
         return palette.get("success", "#27ae60")
     if status == "ready_for_approval":
-        # "info" is olive/greenish in current themes. This role is always blue.
-        return palette.get("model_role_vehicle", "#3b82f6")
+        return palette.get("info", "#55c8ff")
     if status == "needs_fix":
         return palette.get("error", "#c0392b")
     return palette.get("muted_dim", "#444444")
@@ -531,13 +520,11 @@ def apply_plate_listbox_row_style(host: "CharacterAnnotationTab", row_index: int
             elif _review_ready(host, data):
                 status = "ready_for_approval"
         fg = get_plate_row_foreground(host, status)
-        select_bg, _select_fg = host.app.get_list_selection_colors()
+        _select_bg, select_fg = host.app.get_list_selection_colors()
         host.plates_listbox.itemconfig(
             row_index,
             foreground=fg,
-            # Keep the status colour on the active/selected list row too.
-            selectforeground=fg,
-            selectbackground=select_bg,
+            selectforeground=(fg if status == "excluded" else select_fg),
         )
     except Exception as e:
         logger.debug(f"Nie udało się ustawić stylu wiersza listy [{row_index}]: {e}")
