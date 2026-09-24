@@ -2176,6 +2176,12 @@ def is_gold_export_eligible_data(data: dict | None) -> bool:
     if not isinstance(data, dict):
         return False
 
+    # Manual PZ2 exclusion is a hard gate. It must win even for legacy
+    # perfect records without review_state, otherwise N could leak to PZ3/Z4.
+    gold_state = data.get("gold_state")
+    if isinstance(gold_state, dict) and bool(gold_state.get("excluded", False)):
+        return False
+
     status = str(data.get("status", "unknown") or "unknown").strip().lower()
     if status != "perfect":
         return False

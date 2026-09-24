@@ -46,6 +46,20 @@ def test_gold_eligibility_keeps_legacy_compatibility_but_requires_new_approval()
     bad["status"] = "needs_fix"
     assert gold.is_gold_export_eligible_data(bad) is False
 
+    excluded_legacy = _legacy_perfect()
+    excluded_legacy["gold_state"] = {
+        "candidate": False,
+        "approved": True,
+        "excluded": True,
+        "excluded_reason": "unreadable",
+    }
+    assert gold.is_gold_export_eligible_data(excluded_legacy) is False
+
+    excluded_approved = _review("approved", approved=True)
+    excluded_approved["gold_state"]["excluded"] = True
+    excluded_approved["gold_state"]["excluded_reason"] = "unreadable"
+    assert gold.is_gold_export_eligible_data(excluded_approved) is False
+
 
 def test_exportable_perfect_counter_uses_same_gold_contract():
     metadata = {

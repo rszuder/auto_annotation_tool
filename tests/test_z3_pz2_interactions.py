@@ -6,6 +6,8 @@ import pytest
 
 from auto_annotation_tool.gui import z3_preview_ui as preview
 from auto_annotation_tool.gui import z3_preview_dock_ui as dock_ui
+from auto_annotation_tool.gui import z3_preview_events as preview_events
+from auto_annotation_tool.gui import z3_review_runtime as review_runtime
 from auto_annotation_tool.gui.app_theme_definitions import get_theme_palette
 from auto_annotation_tool.gui.section_header_label import SectionHeaderLabel
 from auto_annotation_tool.gui.tab_character_annotation import CharacterAnnotationTab
@@ -165,3 +167,93 @@ def test_assistant_avoids_compass_and_stays_inside_canvas(bounds):
     x, y = typing._resolve_preview_typing_overlay_anchor(host, 180, 70)
     assert x >= bounds[2] or y >= bounds[3]
     assert 0 <= x <= 820 and 0 <= y <= 630
+
+
+def _status_shortcut_host():
+    return SimpleNamespace(
+        _preview_review_batch_running=False,
+        _preview_char_label_mode=False,
+        _preview_char_label_active_index=None,
+        _event_has_control_modifier=lambda _event: False,
+        _sanitize_preview_char_symbol=lambda value: str(value or "").strip().upper(),
+        _update_preview_edit_status=Mock(),
+    )
+
+
+def test_n_shortcut_toggles_plate_exclusion():
+    host = _status_shortcut_host()
+    host._toggle_review_excluded = Mock(return_value={"ok": True, "excluded": True})
+
+    result = preview_events.on_preview_canvas_keypress(
+        host,
+        SimpleNamespace(keysym="n", char="n", state=0),
+    )
+
+    assert result == "break"
+    host._toggle_review_excluded.assert_called_once_with()
+    assert "PZ3/Z4" in host._update_preview_edit_status.call_args.args[0]
+
+
+def test_n_remains_character_when_symbol_field_is_active():
+    host = _status_shortcut_host()
+    host._preview_char_label_active_index = 0
+    host._assign_character_to_active_preview_label = Mock(return_value=True)
+    host._toggle_review_excluded = Mock()
+
+    result = preview_events.on_preview_canvas_keypress(
+        host,
+        SimpleNamespace(keysym="n", char="n", state=0),
+    )
+
+    assert result == "break"
+    host._assign_character_to_active_preview_label.assert_called_once_with("N")
+    host._toggle_review_excluded.assert_not_called()
+
+
+def test_o_shortcut_uses_existing_gold_confirmation():
+    data = {
+        "status": "needs_fix",
+        "review_state": {"status": "in_progress"},
+        "gold_state": {},
+    }
+    host = _status_shortcut_host()
+    host._get_preview_active_data = lambda **_kwargs: data
+    host._confirm_review_gold = Mock(return_value={"ok": True, "status": "perfect"})
+
+    result = preview_events.on_preview_canvas_keypress(
+        host,
+        SimpleNamespace(keysym="o", char="o", state=0),
+    )
+
+    assert result == "break"
+    host._confirm_review_gold.assert_called_once_with(quiet=True)
+
+
+def test_toggle_review_excluded_preserves_gold_and_is_reversible():
+    data = {
+        "status": "perfect",
+        "characters": [{"character": "A", "bbox": [0, 0, 10, 20]}],
+        "gold_state": {"candidate": True, "approved": True},
+    }
+    host = SimpleNamespace(
+        _preview_active_pid="plate_1",
+        preview_metadata={"plate_1": data},
+    )
+
+    with patch.object(review_runtime, "_refresh_after_change") as refresh:
+        first = review_runtime.toggle_review_excluded(host)
+        assert first["ok"] is True
+        assert first["excluded"] is True
+        assert data["gold_state"]["excluded"] is True
+        assert data["gold_state"]["excluded_reason"] == "unreadable"
+        assert data["gold_state"]["approved"] is True
+        assert data["gold_state"]["candidate"] is False
+
+        second = review_runtime.toggle_review_excluded(host)
+        assert second["ok"] is True
+        assert second["excluded"] is False
+        assert data["gold_state"]["excluded"] is False
+        assert data["gold_state"]["approved"] is True
+        assert data["gold_state"]["candidate"] is True
+
+    assert refresh.call_count == 2

@@ -459,8 +459,13 @@ def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, da
     if ordinal is None:
         ordinal = host._get_plate_listbox_ordinal(plate_id)
 
+    gold_state = data.get("gold_state") if isinstance(data, dict) else {}
+    excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
     ready = _review_ready(host, data)
-    if status == "perfect":
+
+    if excluded:
+        icon = "⚫"
+    elif status == "perfect":
         icon = "🟢"
     elif ready:
         icon = "🔵"
@@ -471,6 +476,8 @@ def format_plate_listbox_label(host: "CharacterAnnotationTab", plate_id: str, da
 
     prefix = f"{ordinal}. " if ordinal is not None else ""
     flags = []
+    if excluded:
+        flags.append("N")
     if status == "perfect":
         flags.append("OK")
     elif ready:
@@ -491,6 +498,8 @@ def get_plate_row_foreground(host: "CharacterAnnotationTab", status: str) -> str
     status = str(status or "unknown").strip().lower()
     palette = getattr(host.app, "palette", {})
 
+    if status == "excluded":
+        return palette.get("muted", "#8b949e")
     if status == "perfect":
         return palette.get("success", "#27ae60")
     if status == "ready_for_approval":
@@ -505,14 +514,17 @@ def apply_plate_listbox_row_style(host: "CharacterAnnotationTab", row_index: int
         ids = getattr(host, "_listbox_pid_by_index", []) or []
         if 0 <= row_index < len(ids):
             data = (getattr(host, "preview_metadata", {}) or {}).get(ids[row_index])
-            if _review_ready(host, data):
+            gold_state = data.get("gold_state") if isinstance(data, dict) else {}
+            if isinstance(gold_state, dict) and bool(gold_state.get("excluded", False)):
+                status = "excluded"
+            elif _review_ready(host, data):
                 status = "ready_for_approval"
         fg = get_plate_row_foreground(host, status)
         _select_bg, select_fg = host.app.get_list_selection_colors()
         host.plates_listbox.itemconfig(
             row_index,
             foreground=fg,
-            selectforeground=select_fg,
+            selectforeground=(fg if status == "excluded" else select_fg),
         )
     except Exception as e:
         logger.debug(f"Nie udało się ustawić stylu wiersza listy [{row_index}]: {e}")

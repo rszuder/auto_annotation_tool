@@ -1282,6 +1282,7 @@ class CharacterAnnotationTab:
     _open_or_restore_review = z3_review_runtime.open_or_restore_review
     _mark_review_edit_started = z3_review_runtime.mark_review_edit_started
     _confirm_review_gold = z3_review_runtime.confirm_review_gold
+    _toggle_review_excluded = z3_review_runtime.toggle_review_excluded
     _get_review_quality_status = z3_review_runtime.get_review_quality_status
     _prepare_active_preview_review = z3_review_runtime.prepare_active_preview_review
     _apply_live_gt_assist = z3_gt_assist_runtime.apply_live_gt_assist

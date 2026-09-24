@@ -272,6 +272,65 @@ def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -
         except Exception:
             pass
 
+
+def toggle_review_excluded(
+    host,
+    plate_id=None,
+    *,
+    reason: str = "unreadable",
+    persist: bool = True,
+):
+    # Toggle manual PZ2 exclusion without deleting annotations or REVIEW/GOLD history.
+    # Excluded records stay visible in PZ2 but must never be exportable to PZ3/Z4.
+    pid, data = _resolve_plate(host, plate_id)
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "reason": "no_active_plate",
+            "plate_id": pid,
+            "excluded": False,
+        }
+
+    gold_state = data.get("gold_state")
+    if not isinstance(gold_state, dict):
+        gold_state = {}
+        data["gold_state"] = gold_state
+
+    excluded = not bool(gold_state.get("excluded", False))
+    gold_state["excluded"] = excluded
+
+    if excluded:
+        gold_state["excluded_reason"] = str(reason or "unreadable").strip() or "unreadable"
+        gold_state["excluded_at"] = _now_iso()
+        gold_state["excluded_by"] = "human"
+        gold_state["candidate"] = False
+    else:
+        gold_state["excluded_reason"] = ""
+        gold_state.pop("excluded_at", None)
+        gold_state.pop("excluded_by", None)
+
+        status = str(data.get("status", "unknown") or "unknown").strip().lower()
+        review_state = data.get("review_state")
+        if not isinstance(review_state, dict):
+            candidate = status == "perfect"
+        else:
+            candidate = bool(
+                status == "perfect"
+                and gold_state.get("approved", False)
+                and review_approval_is_current(data)
+            )
+        gold_state["candidate"] = candidate
+
+    _refresh_after_change(host, pid, persist=persist, message="")
+    return {
+        "ok": True,
+        "reason": "",
+        "plate_id": pid,
+        "excluded": excluded,
+        "excluded_reason": str(gold_state.get("excluded_reason", "") or ""),
+    }
+
+
 def _working_annotation_fingerprint(data):
     """Hash editable content, excluding display caches and serialization backfills."""
     payload = {key: data.get(key) for key in (
@@ -743,8 +802,8 @@ def confirm_review_gold(
     if not isinstance(gold_state, dict):
         gold_state = {}
         data["gold_state"] = gold_state
-    gold_state["candidate"] = True
     gold_state["approved"] = True
+    gold_state["candidate"] = not bool(gold_state.get("excluded", False))
     try:
         bucket = str(host._get_plate_source_bucket(data) or "").strip()
     except Exception:

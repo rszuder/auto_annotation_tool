@@ -489,7 +489,7 @@ def build_detection_tab(
 
     self.preview_shortcuts_lbl = tk.Label(
         self.preview_tools,
-        text="Skróty: Q/E przełącza poprzednią/następną tablicę na liście, D uzbraja rysowanie nowego boxa, S zaznacza lub odznacza hoverowany box, PPM usuwa zaznaczony box, Alt+W włącza tryb wpisywania znaków, LPM albo strzałki lewo/prawo wybierają pole, 0-9/A-Z wpisuje znak, Esc wychodzi z wpisywania, Enter przełącza pełny ekran, Ctrl+Z/Y cofa i ponawia.",
+        text="Skróty: Q/E przełącza poprzednią/następną tablicę, D uzbraja rysowanie nowego boxa, S zaznacza lub odznacza hoverowany box, N oznacza tablicę jako nieczytelną/wykluczoną, O zatwierdza jako OK, PPM usuwa zaznaczony box, Alt+W włącza tryb wpisywania znaków, LPM albo strzałki lewo/prawo wybierają pole, 0-9/A-Z wpisuje znak, Esc wychodzi z wpisywania, Enter przełącza pełny ekran, Ctrl+Z/Y cofa i ponawia.",
         anchor="w",
         justify=tk.LEFT,
         wraplength=780,
@@ -1423,6 +1423,27 @@ def build_detection_tab(
     self.plates_listbox.bind("<KeyPress-Q>", _handle_preview_list_qe_nav, add=False)
     self.plates_listbox.bind("<KeyPress-e>", _handle_preview_list_qe_nav, add=False)
     self.plates_listbox.bind("<KeyPress-E>", _handle_preview_list_qe_nav, add=False)
+
+    def _handle_preview_list_status_action(event):
+        # Resolve the row under keyboard focus synchronously to avoid a race
+        # with the delayed <<ListboxSelect>> preview render.
+        try:
+            selected = [int(i) for i in self.plates_listbox.curselection()]
+            active_row = int(self.plates_listbox.index(tk.ACTIVE))
+            row_index = active_row if active_row in selected else (selected[0] if selected else active_row)
+            ids = list(getattr(self, "_listbox_pid_by_index", []) or [])
+            if 0 <= row_index < len(ids):
+                self._preview_active_pid = str(ids[row_index])
+        except Exception:
+            pass
+
+        result = self._on_preview_canvas_keypress(event)
+        return result or "break"
+
+    self.plates_listbox.bind("<KeyPress-n>", _handle_preview_list_status_action, add=False)
+    self.plates_listbox.bind("<KeyPress-N>", _handle_preview_list_status_action, add=False)
+    self.plates_listbox.bind("<KeyPress-o>", _handle_preview_list_status_action, add=False)
+    self.plates_listbox.bind("<KeyPress-O>", _handle_preview_list_status_action, add=False)
     self.plates_listbox.bind("<Escape>", self._on_preview_escape_shortcut, add=False)
     self.plates_listbox.bind("<MouseWheel>", self._on_plates_listbox_mousewheel, add="+")
     self.plates_listbox.bind("<Button-4>", self._on_plates_listbox_mousewheel, add="+")

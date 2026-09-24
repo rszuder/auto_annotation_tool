@@ -1007,11 +1007,18 @@ def get_preview_status_presentation(
             ready_for_approval = host._get_review_quality_status(source_data, source_chars) == "perfect"
         except AttributeError:
             pass
+    gold_state = source_data.get("gold_state") if isinstance(source_data, dict) else {}
+    excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
+
     severity = "muted"
     canvas_text = "Nieocenione"
     info_text = "status: nieoceniona"
 
-    if status == "perfect":
+    if excluded:
+        severity = "muted"
+        canvas_text = "N · NIECZYTELNA"
+        info_text = "status: N — nieczytelna, wykluczona z PZ3/Z4"
+    elif status == "perfect":
         severity = "success"
         canvas_text = "Perfect"
         info_text = "status: OK"
@@ -1174,8 +1181,20 @@ def _build_preview_canvas_status_badge_specs(
         },
     ]
     if len(expected_texts) == 1:
-        states.insert(0, {"text": f"GT: {expected_texts[0]}", "ok": None, "neutral": True,
-                          "width": 160.0, "tags": ("preview_overlay",)})
+        states.insert(
+            0,
+            {
+                "text": f"GT: {expected_texts[0]}",
+                "ok": None,
+                "neutral": True,
+                "width": 160.0,
+                "tags": (
+                    "preview_overlay",
+                    "preview_overlay_action",
+                    "preview_action::edit_plate_gt",
+                ),
+            },
+        )
     evaluated_states = [item for item in states if not bool(item.get("neutral"))]
     pulse_red = bool(
         evaluated_states
@@ -1801,7 +1820,8 @@ def _get_preview_character_edit_grip_style(host: "CharacterAnnotationTab") -> di
 
 
 def _get_preview_selected_character_box_color(host: "CharacterAnnotationTab") -> str:
-    return "#d000a8"
+    palette = getattr(getattr(host, "app", None), "palette", {}) or {}
+    return str(palette.get("warning", "#ff9f1a"))
 
 
 def _draw_preview_new_character_box(canvas, x1, y1, x2, y2):

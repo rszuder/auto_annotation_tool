@@ -412,7 +412,7 @@ def on_preview_canvas_motion(host, event=None):
         return
 
     action_key = self._extract_preview_action_from_current_item()
-    if action_key in {"reset_view", "edit_source_filename", "toggle_plate_layout", "toggle_plate_rows", "toggle_fullscreen"}:
+    if action_key in {"reset_view", "edit_source_filename", "edit_plate_gt", "toggle_plate_layout", "toggle_plate_rows", "toggle_fullscreen"}:
         previous_hover_box = getattr(self, "_preview_char_hover_index", None)
         previous_hover_label = getattr(self, "_preview_char_hover_label_index", None)
         previous_hover_grip = getattr(self, "_preview_char_hover_grip", None)
@@ -676,7 +676,74 @@ def on_preview_canvas_keypress(host, event=None):
         return None
     if keysym == "n":
         if active_label_idx is None:
-            return self._toggle_preview_char_add_mode(event)
+            result = self._toggle_review_excluded()
+            if isinstance(result, dict) and result.get("ok"):
+                if bool(result.get("excluded")):
+                    self._update_preview_edit_status(
+                        "N: tablica oznaczona jako nieczytelna i wykluczona z PZ3/Z4.",
+                        tone="warning",
+                    )
+                else:
+                    self._update_preview_edit_status(
+                        "N: zdjęto wykluczenie tablicy.",
+                        tone="success",
+                    )
+            else:
+                self._update_preview_edit_status(
+                    "N: najpierw wybierz tablicę z listy.",
+                    tone="warning",
+                )
+            return "break"
+        return None
+    if keysym == "o":
+        if active_label_idx is None:
+            data = self._get_preview_active_data(create=False)
+            already_ok = False
+            excluded = False
+            if isinstance(data, dict):
+                status = str(data.get("status", "unknown") or "unknown").strip().lower()
+                review_state = data.get("review_state")
+                gold_state = data.get("gold_state")
+                if not isinstance(gold_state, dict):
+                    gold_state = {}
+                excluded = bool(gold_state.get("excluded", False))
+                already_ok = bool(
+                    status == "perfect"
+                    and (
+                        not isinstance(review_state, dict)
+                        or bool(gold_state.get("approved", False))
+                    )
+                )
+
+            if already_ok:
+                suffix = " Tablica pozostaje jednak wykluczona przez N." if excluded else ""
+                self._update_preview_edit_status(
+                    f"O: tablica ma już status OK.{suffix}",
+                    tone="success",
+                )
+                return "break"
+
+            result = self._confirm_review_gold(quiet=True)
+            if isinstance(result, dict) and result.get("ok"):
+                data = self._get_preview_active_data(create=False)
+                gold_state = data.get("gold_state") if isinstance(data, dict) else {}
+                excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
+                suffix = " Nadal jest wykluczona przez N." if excluded else ""
+                self._update_preview_edit_status(
+                    f"O: tablica otrzymała status OK.{suffix}",
+                    tone="success",
+                )
+            else:
+                reason = str((result or {}).get("reason", "") or "")
+                message = {
+                    "no_active_plate": "O: najpierw wybierz tablicę z listy.",
+                    "review_not_in_progress": "O: najpierw otwórz wynik tablicy do REVIEW.",
+                    "empty_review": "O: tablica nie ma ramek znaków do zatwierdzenia.",
+                    "review_not_perfect": "O: tablica nadal wymaga korekty; status OK nie został nadany.",
+                    "gt_write_failed": "O: nie udało się zapisać numeru tablicy.",
+                }.get(reason, "O: nie można jeszcze nadać tej tablicy statusu OK.")
+                self._update_preview_edit_status(message, tone="warning")
+            return "break"
         return None
     if keysym == "s":
         if not bool(getattr(self, "_preview_char_label_mode", False)):
@@ -734,6 +801,10 @@ def on_preview_canvas_press(host, event):
         return "break"
     if action_key == "edit_source_filename":
         return self._edit_preview_source_filename(event)
+    if action_key == "edit_plate_gt":
+        from .z3_plate_gt_runtime import edit_active_plate_ground_truth
+        edit_active_plate_ground_truth(self)
+        return "break"
     if action_key == "toggle_plate_layout":
         return self._cycle_preview_plate_layout_override(event)
     if action_key == "toggle_plate_rows":
