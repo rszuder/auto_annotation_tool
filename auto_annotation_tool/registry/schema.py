@@ -6,7 +6,7 @@ pochodzenie, relacje, sumy kontrolne i stan eksperymentów.
 
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -459,3 +459,175 @@ SCHEMA_V5_STATEMENTS: tuple[str, ...] = (
     ON dataset_members(artifact_id)
     """,
 )
+
+SCHEMA_V6_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS plate_crops (
+        crop_id TEXT PRIMARY KEY,
+        identity_sha256 TEXT NOT NULL,
+        identity_mode TEXT NOT NULL,
+        identity_schema TEXT NOT NULL DEFAULT 'alpr.crop_identity.v1',
+        source_image_id TEXT,
+        source_annotation_id TEXT,
+        source_geometry_hash TEXT,
+        crop_contract_sha256 TEXT,
+        width INTEGER,
+        height INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(source_image_id)
+            REFERENCES source_images(source_image_id)
+            ON UPDATE CASCADE ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_plate_crops_identity
+    ON plate_crops(identity_schema, identity_sha256)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_plate_crops_source_plate
+    ON plate_crops(source_image_id, source_annotation_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS crop_artifacts (
+        crop_id TEXT NOT NULL,
+        artifact_id TEXT NOT NULL,
+        is_primary INTEGER NOT NULL DEFAULT 0,
+        first_seen_at TEXT,
+        last_seen_at TEXT,
+        PRIMARY KEY(crop_id, artifact_id),
+        FOREIGN KEY(crop_id)
+            REFERENCES plate_crops(crop_id)
+            ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(artifact_id)
+            REFERENCES image_artifacts(artifact_id)
+            ON UPDATE CASCADE ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_crop_artifacts_artifact
+    ON crop_artifacts(artifact_id, crop_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS project_crop_members (
+        project_id TEXT NOT NULL,
+        crop_id TEXT NOT NULL,
+        first_seen_iteration INTEGER,
+        last_seen_iteration INTEGER,
+        first_seen_at TEXT,
+        last_seen_at TEXT,
+        source_mode TEXT,
+        PRIMARY KEY(project_id, crop_id),
+        FOREIGN KEY(project_id)
+            REFERENCES projects(project_id)
+            ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(crop_id)
+            REFERENCES plate_crops(crop_id)
+            ON UPDATE CASCADE ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_project_crop_members_crop
+    ON project_crop_members(crop_id, project_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS iteration_crop_members (
+        project_id TEXT NOT NULL,
+        iteration_num INTEGER NOT NULL,
+        crop_id TEXT NOT NULL,
+        artifact_id TEXT,
+        source_image_id TEXT,
+        source_plate_key TEXT,
+        source_at_ref TEXT,
+        first_seen_at TEXT,
+        PRIMARY KEY(project_id, iteration_num, crop_id),
+        FOREIGN KEY(project_id)
+            REFERENCES projects(project_id)
+            ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(crop_id)
+            REFERENCES plate_crops(crop_id)
+            ON UPDATE CASCADE ON DELETE RESTRICT,
+        FOREIGN KEY(artifact_id)
+            REFERENCES image_artifacts(artifact_id)
+            ON UPDATE CASCADE ON DELETE SET NULL,
+        FOREIGN KEY(source_image_id)
+            REFERENCES source_images(source_image_id)
+            ON UPDATE CASCADE ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_iteration_crop_members_crop
+    ON iteration_crop_members(crop_id, project_id, iteration_num)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_iteration_crop_members_artifact
+    ON iteration_crop_members(artifact_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_iteration_crop_members_source_image
+    ON iteration_crop_members(source_image_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS az_revisions (
+        az_revision_id TEXT PRIMARY KEY,
+        crop_id TEXT NOT NULL,
+        parent_revision_id TEXT,
+        payload_sha256 TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        source_kind TEXT NOT NULL,
+        source_status TEXT,
+        trust_state TEXT NOT NULL,
+        origin_project_id TEXT,
+        origin_iteration INTEGER,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(crop_id)
+            REFERENCES plate_crops(crop_id)
+            ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(parent_revision_id)
+            REFERENCES az_revisions(az_revision_id)
+            ON UPDATE CASCADE ON DELETE SET NULL,
+        FOREIGN KEY(origin_project_id)
+            REFERENCES projects(project_id)
+            ON UPDATE CASCADE ON DELETE SET NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_az_revisions_crop
+    ON az_revisions(crop_id, created_at)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_az_revisions_parent
+    ON az_revisions(parent_revision_id)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_az_revisions_payload
+    ON az_revisions(crop_id, payload_sha256)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS project_crop_az (
+        project_id TEXT NOT NULL,
+        crop_id TEXT NOT NULL,
+        az_revision_id TEXT NOT NULL,
+        effective_status TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(project_id, crop_id),
+        FOREIGN KEY(project_id)
+            REFERENCES projects(project_id)
+            ON UPDATE CASCADE ON DELETE CASCADE,
+        FOREIGN KEY(crop_id)
+            REFERENCES plate_crops(crop_id)
+            ON UPDATE CASCADE ON DELETE RESTRICT,
+        FOREIGN KEY(az_revision_id)
+            REFERENCES az_revisions(az_revision_id)
+            ON UPDATE CASCADE ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_project_crop_az_crop
+    ON project_crop_az(crop_id, project_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_project_crop_az_revision
+    ON project_crop_az(az_revision_id)
+    """,
+)
+

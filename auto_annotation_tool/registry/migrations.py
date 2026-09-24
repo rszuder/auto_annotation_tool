@@ -11,6 +11,7 @@ from .schema import (
     SCHEMA_V3_STATEMENTS,
     SCHEMA_V4_STATEMENTS,
     SCHEMA_V5_STATEMENTS,
+    SCHEMA_V6_STATEMENTS,
     SCHEMA_VERSION,
 )
 
@@ -49,12 +50,18 @@ def _migrate_to_v5(connection: sqlite3.Connection) -> None:
         connection.execute(statement)
 
 
+def _migrate_to_v6(connection: sqlite3.Connection) -> None:
+    for statement in SCHEMA_V6_STATEMENTS:
+        connection.execute(statement)
+
+
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_to_v1,
     2: _migrate_to_v2,
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }
 
 
