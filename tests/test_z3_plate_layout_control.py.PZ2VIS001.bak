@@ -10,8 +10,6 @@ from auto_annotation_tool.gui.tab_character_annotation import CharacterAnnotatio
 from auto_annotation_tool.gui import z3_preview_layout_control as control
 from auto_annotation_tool.gui import z3_preview_events as events
 from auto_annotation_tool.gui import z3_plate_layout_runtime as layouts
-from auto_annotation_tool.gui import z3_preview_ui as preview
-from auto_annotation_tool.gui import z3_preview_dock_ui as dock_ui
 
 
 @pytest.fixture(scope="module")
@@ -172,34 +170,3 @@ def test_layout_before_detection_still_has_frame_control(host):
     host._derive_preview_status_from_data.return_value = "unknown"
     assert host._draw_preview_plate_status_frame()
     assert host.preview_canvas.find_withtag(control.CONTROL_TAG)
-
-
-def test_plate_status_frame_uses_hud_status_colour(host):
-    canvas = host.preview_canvas
-    data = host._get_preview_active_data()
-
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(
-            preview,
-            "resolve_inline_hud_plate_status",
-            lambda _host, _data: ("ZATWIERDŹ", "#5aa8e8"),
-        )
-        assert host._draw_preview_plate_status_frame(data)
-
-    items = canvas.find_withtag("preview_plate_status_frame")
-    rectangles = [item for item in items if canvas.type(item) == "rectangle"]
-    assert rectangles
-    assert canvas.itemcget(rectangles[0], "outline").lower() == "#5aa8e8"
-
-
-def test_plate_status_row_is_not_exposed_by_dock_runtime():
-    host = SimpleNamespace(
-        _get_preview_step3_gate_overlay_state=lambda: {"visible": False},
-    )
-    state = dock_ui._get_preview_dock_row_runtime_state(
-        host,
-        "plate_status",
-        {},
-        gate_state={"visible": False},
-    )
-    assert state["visible"] is False

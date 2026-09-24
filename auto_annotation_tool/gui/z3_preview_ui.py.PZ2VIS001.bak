@@ -15,7 +15,7 @@ from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG, logger
 from .web_slim_scrollbar import blend_hex_colors
 from .z3_workspace_drawers import workspace_drawers
-from .z3_inline_hud import plan_inline_hud, draw_inline_hud, resolve_inline_hud_plate_status
+from .z3_inline_hud import plan_inline_hud, draw_inline_hud
 from .z3_list_review import capture_selection, restore_selection
 from .z3_preview_status_ui import (
     apply_preview_source_actions_style,
@@ -5183,16 +5183,17 @@ def draw_preview_plate_status_frame(host, data: dict | None = None) -> bool:
         return False
 
     palette = getattr(self.app, "palette", {})
-    try:
-        _plate_status_text, frame_color = resolve_inline_hud_plate_status(self, source_data)
-    except Exception:
-        frame_color = (
-            palette.get("success", "#2ecc71")
-            if frame_tone == "success"
-            else palette.get("error", palette.get("danger", "#ef4444"))
-        )
-        if frame_tone == "muted":
-            frame_color = palette.get("border", "#808890")
+    frame_color = (
+        palette.get("success", "#2ecc71")
+        if frame_tone == "success"
+        else palette.get("error", palette.get("danger", "#ef4444"))
+    )
+    if frame_tone == "muted":
+        frame_color = palette.get("border", "#808890")
+    if (source_data.get("review_state") or {}).get("status") == "in_progress":
+        quality = getattr(self, "_get_review_quality_status", None)
+        if callable(quality) and quality(source_data) == "perfect":
+            frame_color = palette.get("info", "#55c8ff")
     tags = ("preview_plate_status_frame",)
     try:
         handle_radius = float(self._get_preview_char_handle_radius())

@@ -887,6 +887,48 @@ def build_detection_tab(
         "label": layout_label,
         "status": layout_status,
     }
+    plate_status_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
+    plate_status_icon = tk.Label(
+        plate_status_row,
+        text="ST",
+        width=2,
+        anchor="center",
+        justify=tk.CENTER,
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        highlightthickness=0,
+        cursor="arrow",
+    )
+    plate_status_label = tk.Label(
+        plate_status_row,
+        text="Ocena tablicy",
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 8, "bold"),
+        bd=0,
+        highlightthickness=0,
+        cursor="arrow",
+    )
+    plate_status_value = tk.Label(
+        plate_status_row,
+        text="KOREKTA",
+        anchor="center",
+        justify=tk.CENTER,
+        font=("Segoe UI", 7, "bold"),
+        bd=0,
+        highlightthickness=0,
+        padx=5,
+        pady=1,
+        cursor="arrow",
+    )
+    plate_status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=4)
+    plate_status_value.pack(side=tk.RIGHT, padx=(6, 4), pady=4)
+    self._preview_overlay_dock_tool_rows["plate_status"] = {
+        "row": plate_status_row,
+        "icon": plate_status_icon,
+        "label": plate_status_label,
+        "status": plate_status_value,
+    }
     export_condition_row = tk.Frame(self.preview_overlay_dock_body, bd=0, highlightthickness=1, cursor="arrow")
     export_condition_icon = tk.Label(
         export_condition_row,
