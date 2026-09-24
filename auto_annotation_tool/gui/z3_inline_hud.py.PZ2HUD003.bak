@@ -5,54 +5,6 @@ import tkinter.font as tkfont
 from .z2_inline_hud import fit_text
 
 
-def resolve_inline_hud_plate_status(host, data: dict | None) -> tuple[str, str]:
-    source = data if isinstance(data, dict) else {}
-    palette = getattr(getattr(host, "app", None), "palette", {}) or {}
-
-    gold_state = source.get("gold_state")
-    if isinstance(gold_state, dict) and bool(gold_state.get("excluded", False)):
-        return "N", str(palette.get("muted", "#8b949e"))
-
-    chars = source.get("characters", [])
-    if not isinstance(chars, list):
-        chars = []
-
-    try:
-        presentation = host._get_preview_status_presentation(
-            data=source,
-            chars=chars,
-            plate_id=str(
-                source.get("plate_id", "")
-                or getattr(host, "_preview_active_pid", "")
-                or ""
-            ),
-        )
-    except Exception:
-        presentation = {}
-
-    status = str(
-        presentation.get("status", source.get("status", "unknown")) or "unknown"
-    ).strip().lower()
-    ready = bool(presentation.get("ready_for_approval", False))
-
-    if status == "perfect":
-        return "OK", str(palette.get("success", "#27ae60"))
-    if ready:
-        return "ZATWIERDŹ", str(palette.get("model_role_vehicle", "#3b82f6"))
-
-    return "DO KOREKTY", str(palette.get("error", "#c0392b"))
-
-
-def apply_inline_hud_plate_status(items, status_text: str, status_color: str):
-    prepared = [dict(item) for item in list(items or [])]
-    for item in prepared:
-        if str(item.get("text", "") or "").startswith("Status tablicy:"):
-            item["text"] = f"Status tablicy: {status_text}"
-            item["outline"] = str(status_color)
-            break
-    return prepared
-
-
 def plan_inline_hud(host, width, data, status_layout):
     fonts = getattr(host, "_preview_inline_hud_fonts", None)
     if fonts is None:
@@ -73,12 +25,8 @@ def plan_inline_hud(host, width, data, status_layout):
               file_font, "#7ee7ff", ("preview_inline_hud_filename", "preview_overlay_action",
                                      "preview_action::edit_source_filename"))]
     items = [{"text": f"Tablica {number}/{total}", "outline": "#b6f5ce"}]
-    items.extend(dict(item) for item in status_layout.get("neutral_badges", []))
-    items.extend(dict(item) for item in status_layout.get("badges", []))
-
-    hud_status, hud_color = resolve_inline_hud_plate_status(host, data)
-    items = apply_inline_hud_plate_status(items, hud_status, hud_color)
-
+    items.extend(status_layout.get("neutral_badges", []))
+    items.extend(status_layout.get("badges", []))
     x, y = left, top + file_font.metrics("linespace") + 5
     row_height = count_font.metrics("linespace") + 5
     for item in items:
