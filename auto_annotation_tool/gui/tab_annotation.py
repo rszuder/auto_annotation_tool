@@ -1848,6 +1848,10 @@ class AnnotationTab:
         return z2_miniflow_runtime._open_selected_manual_review_history_run(self, *args, **kwargs)
 
 
+    def _preview_selected_manual_review_history_run(self, *args, **kwargs):
+        return z2_miniflow_runtime._preview_selected_manual_review_history_run(self, *args, **kwargs)
+
+
     def _on_manual_history_selection_changed(self, *args, **kwargs):
         return z2_miniflow_runtime._on_manual_history_selection_changed(self, *args, **kwargs)
 

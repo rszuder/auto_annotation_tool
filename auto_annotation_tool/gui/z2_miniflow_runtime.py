@@ -765,7 +765,11 @@ def _format_manual_review_history_label(self, entry: dict) -> str:
             created_text = created_at.replace("T", " ").strip()
         if created_text:
             label = f"{label} | {created_text}"
-    return label
+    try:
+        _images_with_plates, total_plates = self._get_run_plate_annotation_counts(safe_run_dir)
+    except Exception:
+        total_plates = 0
+    return f"{label} | AT: {int(total_plates or 0)}"
 
 
 def _refresh_manual_review_history_ui(self):
@@ -796,14 +800,23 @@ def _open_selected_manual_review_history_run(self):
     )
 
 
+def _preview_selected_manual_review_history_run(self):
+    selected_run = self._get_selected_manual_review_history_run_dir()
+    if selected_run is None:
+        return False
+    from .z2_run_history_preview import open_run_history_preview
+    return bool(open_run_history_preview(self, selected_run, limit=6))
+
+
 def _on_manual_history_selection_changed(self, event=None):
     selected = bool(self._get_selected_manual_review_history_run_dir() is not None)
-    try:
-        self.manual_history_open_btn.configure(
-            state=(tk.NORMAL if selected else tk.DISABLED)
-        )
-    except Exception:
-        pass
+    for button_name in ("manual_history_open_btn", "manual_history_preview_btn"):
+        try:
+            button = getattr(self, button_name, None)
+            if button is not None:
+                button.configure(state=(tk.NORMAL if selected else tk.DISABLED))
+        except Exception:
+            pass
     self._refresh_step2_action_states()
     self._refresh_free_mode_workflow_ui()
     self._queue_free_mode_session_save()

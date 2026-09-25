@@ -835,6 +835,14 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     )
     self.manual_history_combo.pack(fill=tk.X, pady=(4, 4))
     self.manual_history_combo.bind("<<ComboboxSelected>>", self._on_manual_history_selection_changed)
+    self.manual_history_preview_btn = ttk.Button(
+        self.manual_history_section,
+        text="Podgląd anotacji",
+        style="WorkflowCard.TButton",
+        command=self._preview_selected_manual_review_history_run,
+        state=tk.DISABLED,
+    )
+    self.manual_history_preview_btn.pack(fill=tk.X, pady=(0, 4))
     self.manual_history_open_btn = ttk.Button(
         self.manual_history_section,
         text="Otwórz run Z2 z historii",
@@ -864,6 +872,7 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
         self.manual_history_section,
         self.manual_history_title_lbl,
         self.manual_history_combo,
+        self.manual_history_preview_btn,
         self.manual_history_open_btn,
         self.manual_history_import_btn,
         self.manual_history_hint_lbl,
