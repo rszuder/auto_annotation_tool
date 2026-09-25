@@ -294,14 +294,30 @@ def az_revision_to_pz2_metadata(
 
     gold_raw = payload.get("gold_state")
     gold_raw = gold_raw if isinstance(gold_raw, Mapping) else {}
-    result["gold_state"] = {
-        "approved": bool(gold_raw.get("approved", False)),
-        "excluded": bool(gold_raw.get("excluded", False)),
-        "candidate": bool(gold_raw.get("candidate", False)),
-    }
-    result["status"] = str(
-        payload.get("status") or "unknown"
-    ).strip().lower() or "unknown"
+    effective_status = str(
+        revision.get("effective_status") or ""
+    ).strip().lower()
+    imported_pending_review = effective_status == "imported_pending_review"
+
+    if imported_pending_review:
+        # Import między projektami przenosi zawartość anotacji, ale nie
+        # lokalną decyzję zaufania projektu źródłowego. Target musi wykonać
+        # własny REVIEW/N/O.
+        result["gold_state"] = {
+            "approved": False,
+            "excluded": False,
+            "candidate": False,
+        }
+        result["status"] = "needs_fix"
+    else:
+        result["gold_state"] = {
+            "approved": bool(gold_raw.get("approved", False)),
+            "excluded": bool(gold_raw.get("excluded", False)),
+            "candidate": bool(gold_raw.get("candidate", False)),
+        }
+        result["status"] = str(
+            payload.get("status") or "unknown"
+        ).strip().lower() or "unknown"
 
     expected_text = str(payload.get("expected_text") or "").strip().upper()
     if expected_text:
@@ -312,8 +328,13 @@ def az_revision_to_pz2_metadata(
 
     result["fusion_strategy"] = "az_reuse"
     result["fusion_details"] = {
-        "source": "az_registry",
+        "source": (
+            "az_project_import"
+            if imported_pending_review
+            else "az_registry"
+        ),
         "az_revision_id": str(revision.get("az_revision_id") or "").strip(),
+        "effective_status": effective_status or None,
     }
     result["az_reuse"] = {
         "schema": "alpr.az_reuse.v1",
@@ -326,6 +347,9 @@ def az_revision_to_pz2_metadata(
         ).strip() or None,
         "origin_iteration": revision.get("origin_iteration"),
         "created_at": str(revision.get("created_at") or "").strip(),
+        "project_id": str(revision.get("project_id") or "").strip() or None,
+        "effective_status": effective_status or None,
+        "requires_review": bool(imported_pending_review),
     }
 
     return result

@@ -335,5 +335,109 @@ class PZ2AZAdapterTests(unittest.TestCase):
 
 
 
+    def test_project_import_pending_review_keeps_content_but_resets_local_decisions(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        payload = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-IMPORT",
+            "crop_id": "CROP-1",
+            "payload_sha256": "2" * 64,
+            "payload": payload,
+            "source_kind": "local_manual",
+            "trust_state": "local_manual",
+            "origin_project_id": "PRJ-A",
+            "origin_iteration": 2,
+            "project_id": "PRJ-B",
+            "effective_status": "imported_pending_review",
+        }
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=64,
+        )
+
+        self.assertEqual(
+            [rec["character"] for rec in restored["characters"]],
+            ["A", "B"],
+        )
+        self.assertEqual(restored["plate_layout"], "single_row")
+        self.assertEqual(restored["ground_truth_text"], "AB")
+        self.assertFalse(restored["gold_state"]["approved"])
+        self.assertFalse(restored["gold_state"]["candidate"])
+        self.assertFalse(restored["gold_state"]["excluded"])
+        self.assertEqual(restored["status"], "needs_fix")
+        self.assertNotIn("review_state", restored)
+        self.assertEqual(restored["fusion_strategy"], "az_reuse")
+        self.assertEqual(
+            restored["fusion_details"]["source"],
+            "az_project_import",
+        )
+        self.assertEqual(
+            restored["az_reuse"]["effective_status"],
+            "imported_pending_review",
+        )
+        self.assertEqual(restored["az_reuse"]["project_id"], "PRJ-B")
+        self.assertTrue(restored["az_reuse"]["requires_review"])
+
+    def test_project_import_pending_review_does_not_inherit_source_exclusion(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        base["gold_state"] = {
+            "approved": False,
+            "excluded": True,
+            "candidate": False,
+        }
+        base["status"] = "needs_fix"
+        payload = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-IMPORT-N",
+            "crop_id": "CROP-1",
+            "payload": payload,
+            "project_id": "PRJ-B",
+            "effective_status": "imported_pending_review",
+        }
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=64,
+        )
+
+        self.assertFalse(restored["gold_state"]["excluded"])
+        self.assertFalse(restored["gold_state"]["approved"])
+        self.assertFalse(restored["gold_state"]["candidate"])
+        self.assertEqual(restored["status"], "needs_fix")
+        self.assertTrue(restored["az_reuse"]["requires_review"])
+
+    def test_project_binding_approved_preserves_normal_reuse_semantics(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        payload = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-SAME-PROJECT",
+            "crop_id": "CROP-1",
+            "payload": payload,
+            "project_id": "PRJ-A",
+            "effective_status": "approved",
+        }
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=64,
+        )
+
+        self.assertTrue(restored["gold_state"]["approved"])
+        self.assertTrue(restored["gold_state"]["candidate"])
+        self.assertFalse(restored["gold_state"]["excluded"])
+        self.assertEqual(restored["status"], "perfect")
+        self.assertFalse(restored["az_reuse"]["requires_review"])
+
+
 if __name__ == "__main__":
     unittest.main()

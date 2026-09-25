@@ -428,5 +428,46 @@ def test_registry_az_reuse_after_load_does_not_write_when_no_change(tmp_path):
     host._atomic_write_json.assert_not_called()
 
 
+    def test_campaign_import_pending_review_materializes_for_review(self):
+        revision = self.store.save_revision(
+            crop_id=self.crop_id,
+            payload=self.payload("I"),
+            source_kind="local_manual",
+            trust_state="local_manual",
+            origin_project_id="PRJ-A",
+            origin_iteration=1,
+            bind_project_id="PRJ-B",
+            effective_status="imported_pending_review",
+        )
+        metadata = {"plate_000001": self.fresh_metadata()}
+
+        summary = apply_reusable_az_to_metadata(
+            self.registry,
+            metadata,
+            project_id="PRJ-B",
+        )
+
+        row = metadata["plate_000001"]
+        self.assertEqual(summary.applied, 1)
+        self.assertEqual(row["characters"][0]["character"], "I")
+        self.assertEqual(row["status"], "needs_fix")
+        self.assertFalse(row["gold_state"]["approved"])
+        self.assertFalse(row["gold_state"]["candidate"])
+        self.assertFalse(row["gold_state"]["excluded"])
+        self.assertEqual(
+            row["az_reuse"]["az_revision_id"],
+            revision.az_revision_id,
+        )
+        self.assertEqual(
+            row["az_reuse"]["effective_status"],
+            "imported_pending_review",
+        )
+        self.assertTrue(row["az_reuse"]["requires_review"])
+        self.assertEqual(
+            row["fusion_details"]["source"],
+            "az_project_import",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
