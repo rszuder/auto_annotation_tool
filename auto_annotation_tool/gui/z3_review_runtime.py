@@ -273,6 +273,104 @@ def _refresh_after_change(host, pid: str, *, persist: bool, message: str = "") -
             pass
 
 
+
+def _persist_review_az_revision_best_effort(
+    host,
+    plate_id: str,
+    data: dict,
+    *,
+    event: str,
+) -> dict:
+    """Zapisz trwałą rewizję AZ po jawnej decyzji PZ2; nigdy nie blokuj UI."""
+    try:
+        from ..campaign_manager import CAMPAIGN
+        from ..config import CONFIG, logger
+        from ..registry.az_registry import AZRegistry, ensure_campaign_project
+        from ..registry.pz2_revision_registry import save_pz2_revision
+
+        registry = AZRegistry.for_workspace(CONFIG.WORKSPACE_DIR)
+
+        project_id = None
+        iteration_num = None
+        active_project = str(
+            CAMPAIGN.get_active_project_name() or ""
+        ).strip()
+        in_campaign = bool(
+            getattr(host, "_step3_linear_mode", False)
+            and active_project
+        )
+
+        if in_campaign:
+            project_data = dict(
+                (CAMPAIGN.state.get("projects", {}) or {}).get(
+                    active_project,
+                    {},
+                )
+                or {}
+            )
+            folder_name = str(
+                project_data.get("folder_name") or ""
+            ).strip()
+            if not folder_name:
+                raise RuntimeError(
+                    "Aktywny projekt kampanii nie ma folder_name."
+                )
+
+            project_id = ensure_campaign_project(
+                registry,
+                project_name=active_project,
+                folder_name=folder_name,
+            )
+            iteration_num = int(
+                CAMPAIGN.get_current_iteration_num() or 1
+            )
+
+        saved = save_pz2_revision(
+            registry,
+            data,
+            project_id=project_id,
+            iteration_num=iteration_num,
+        )
+
+        logger.info(
+            "[AZ][PZ2] revision event=%s plate=%s revision=%s created=%s "
+            "project=%s iteration=%s status=%s",
+            str(event or ""),
+            str(plate_id or ""),
+            saved.revision.az_revision_id,
+            bool(saved.revision.created),
+            project_id or "FREE",
+            iteration_num or 0,
+            saved.effective_status,
+        )
+        return {
+            "ok": True,
+            "event": str(event or ""),
+            "plate_id": str(plate_id or ""),
+            "az_revision_id": saved.revision.az_revision_id,
+            "created": bool(saved.revision.created),
+            "project_id": project_id,
+            "iteration_num": iteration_num,
+            "effective_status": saved.effective_status,
+        }
+    except Exception as exc:
+        try:
+            from ..config import logger
+            logger.warning(
+                "[AZ][PZ2] Nie udało się zapisać rewizji event=%s plate=%s: %s",
+                str(event or ""),
+                str(plate_id or ""),
+                exc,
+            )
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "event": str(event or ""),
+            "plate_id": str(plate_id or ""),
+            "error": str(exc),
+        }
+
 def toggle_review_excluded(
     host,
     plate_id=None,
@@ -322,6 +420,13 @@ def toggle_review_excluded(
         gold_state["candidate"] = candidate
 
     _refresh_after_change(host, pid, persist=persist, message="")
+    if persist:
+        _persist_review_az_revision_best_effort(
+            host,
+            pid,
+            data,
+            event="exclude_toggle",
+        )
     return {
         "ok": True,
         "reason": "",
@@ -820,6 +925,14 @@ def confirm_review_gold(
         _refresh_after_change(
             host, pid, persist=persist,
             message="Tablica została sprawdzona i zatwierdzona do zbioru danych.",
+        )
+
+    if persist and refresh:
+        _persist_review_az_revision_best_effort(
+            host,
+            pid,
+            data,
+            event="review_approved",
         )
 
     if not quiet:
