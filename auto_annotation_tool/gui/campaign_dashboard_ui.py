@@ -11921,9 +11921,13 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             return bool(count > 0), str(source_label or "Nie wskazano"), int(count)
 
         def _annotation_dependency_message(row_key: str) -> str:
-            resource_code = "AZ" if str(row_key or "").strip() == "char_run" else "AT"
+            if str(row_key or "").strip() == "char_run":
+                return (
+                    "Najpierw przygotuj wyodrębnione tablice PZ1 dla projektu. "
+                    "AZ można importować wyłącznie dla zgodnych logical crop_id."
+                )
             return (
-                f"Najpierw wskaż obrazy O. {resource_code} jest zależne od aktualnej puli obrazów "
+                "Najpierw wskaż obrazy O. AT jest zależne od aktualnej puli obrazów "
                 "i musi zostać zweryfikowane względem tej bazy."
             )
 
@@ -13784,10 +13788,395 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 pass
             return True
 
+        def _active_az_registry_context():
+            active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+            if not active_project:
+                raise RuntimeError("Brak aktywnego projektu kampanii.")
+            project_data = dict(
+                (CAMPAIGN.state.get("projects", {}) or {}).get(
+                    active_project,
+                    {},
+                )
+                or {}
+            )
+            folder_name = str(project_data.get("folder_name") or "").strip()
+            if not folder_name:
+                raise RuntimeError("Aktywny projekt nie ma folder_name.")
+
+            from ..registry.az_registry import AZRegistry, project_id_from_folder_name
+
+            project_id = project_id_from_folder_name(folder_name)
+            if not project_id:
+                raise RuntimeError("Nie udało się wyliczyć project_id dla aktywnego projektu.")
+
+            registry = AZRegistry.for_workspace(CONFIG.WORKSPACE_DIR)
+            registry.initialize()
+            return registry, project_id
+
+        def _open_az_project_import_browser() -> bool:
+            from ..registry.az_project_import import (
+                import_project_az_bindings,
+                list_project_az_import_sources,
+            )
+
+            try:
+                registry, target_project_id = _active_az_registry_context()
+                candidates = list(
+                    list_project_az_import_sources(
+                        registry,
+                        target_project_id=target_project_id,
+                    )
+                    or ()
+                )
+            except Exception as exc:
+                try:
+                    self.app.themed_error(
+                        "Import AZ",
+                        f"Nie udało się przygotować listy projektów źródłowych AZ.\n\n{exc}",
+                        parent=dialog,
+                    )
+                except Exception:
+                    messagebox.showerror(
+                        "Import AZ",
+                        str(exc),
+                        parent=dialog,
+                    )
+                return False
+
+            if not candidates:
+                try:
+                    self.app.themed_info(
+                        "Import AZ",
+                        "Brak projektów z AZ w registry.",
+                        parent=dialog,
+                        tone="info",
+                    )
+                except Exception:
+                    messagebox.showinfo(
+                        "Import AZ",
+                        "Brak projektów z AZ w registry.",
+                        parent=dialog,
+                    )
+                return False
+
+            browser = tk.Toplevel(dialog)
+            try:
+                self.app.style_dialog_window(
+                    browser,
+                    title="Import AZ z projektu",
+                    geometry="1040x560",
+                    parent=dialog,
+                )
+            except Exception:
+                browser.title("Import AZ z projektu")
+
+            build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
+            if callable(build_surface):
+                browser_body = build_surface(browser, tone="info")
+            else:
+                browser_body = tk.Frame(browser, bg=card_bg)
+                browser_body.pack(fill=tk.BOTH, expand=True)
+            browser_bg = str(browser_body.cget("bg") or card_bg)
+
+            tk.Label(
+                browser_body,
+                text="Wybierz projekt źródłowy AZ",
+                fg=fg,
+                bg=browser_bg,
+                font=("Segoe UI", 12, "bold"),
+                anchor="w",
+            ).pack(fill=tk.X, padx=14, pady=(14, 4))
+            tk.Label(
+                browser_body,
+                text=(
+                    "Program importuje wyłącznie AZ dla identycznych logical crop_id. "
+                    "Konflikty nie są nadpisywane, a nowe bindingi trafiają do kontroli PZ2."
+                ),
+                fg=muted,
+                bg=browser_bg,
+                font=("Segoe UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=990,
+            ).pack(fill=tk.X, padx=14, pady=(0, 10))
+
+            table_shell = tk.Frame(
+                browser_body,
+                bg=browser_bg,
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=border,
+                highlightcolor=border,
+            )
+            table_shell.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 10))
+
+            columns = (
+                "project",
+                "source_az",
+                "importable",
+                "already",
+                "conflicts",
+                "missing",
+                "status",
+            )
+            headings = (
+                "Projekt",
+                "AZ źródła",
+                "Do importu",
+                "Już przypięte",
+                "Konflikty",
+                "Brak cropa targetu",
+                "Status",
+            )
+            widths = (260, 90, 90, 105, 90, 135, 180)
+
+            tree = ttk.Treeview(
+                table_shell,
+                columns=columns,
+                show="headings",
+                selectmode="browse",
+                height=13,
+            )
+            scroll = ttk.Scrollbar(
+                table_shell,
+                orient=tk.VERTICAL,
+                command=tree.yview,
+            )
+            tree.configure(yscrollcommand=scroll.set)
+            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0), pady=8)
+            scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 8), pady=8)
+
+            for column, heading, width in zip(columns, headings, widths):
+                tree.heading(column, text=heading)
+                tree.column(
+                    column,
+                    width=width,
+                    minwidth=70,
+                    anchor=(tk.W if column in {"project", "status"} else tk.CENTER),
+                    stretch=(column in {"project", "status"}),
+                )
+
+            candidate_by_iid = {}
+            selected_state = {"candidate": None}
+            summary_var = tk.StringVar(value="Wybierz projekt z listy.")
+            import_button_ref = {"button": None}
+
+            def _candidate_status(candidate) -> str:
+                if bool(candidate.can_import):
+                    if int(candidate.conflict_count) > 0:
+                        return "Można importować częściowo"
+                    return "Można importować"
+                if int(candidate.already_bound_count) > 0 and int(candidate.conflict_count) == 0:
+                    return "AZ już przypięte"
+                if int(candidate.conflict_count) > 0:
+                    return "Konflikty"
+                if int(candidate.target_missing_crop_count) > 0:
+                    return "Brak zgodnych cropów targetu"
+                return "Brak bezpiecznego importu"
+
+            for index, candidate in enumerate(candidates, start=1):
+                iid = f"az-source-{index}"
+                candidate_by_iid[iid] = candidate
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=(
+                        str(candidate.source_display_name or candidate.source_project_id),
+                        int(candidate.source_az_count),
+                        int(candidate.importable_count),
+                        int(candidate.already_bound_count),
+                        int(candidate.conflict_count),
+                        int(candidate.target_missing_crop_count),
+                        _candidate_status(candidate),
+                    ),
+                )
+
+            def _refresh_selection(_event=None) -> None:
+                selected = list(tree.selection() or ())
+                candidate = candidate_by_iid.get(selected[0]) if selected else None
+                selected_state["candidate"] = candidate
+                button = import_button_ref.get("button")
+                if candidate is None:
+                    summary_var.set("Wybierz projekt z listy.")
+                    if button is not None:
+                        button.config(state=tk.DISABLED)
+                    return
+
+                summary_var.set(
+                    (
+                        f"Do importu: {int(candidate.importable_count)} | "
+                        f"już przypięte: {int(candidate.already_bound_count)} | "
+                        f"konflikty: {int(candidate.conflict_count)} | "
+                        f"brak cropa targetu: {int(candidate.target_missing_crop_count)} | "
+                        f"nieprawidłowe źródło: {int(candidate.invalid_source_count)}"
+                    )
+                )
+                if button is not None:
+                    button.config(
+                        state=(
+                            tk.NORMAL
+                            if bool(candidate.can_import)
+                            else tk.DISABLED
+                        )
+                    )
+
+            def _restore_parent_grab() -> None:
+                try:
+                    if dialog.winfo_exists():
+                        dialog.grab_set()
+                except Exception:
+                    pass
+
+            def _close_browser() -> None:
+                try:
+                    browser.grab_release()
+                except Exception:
+                    pass
+                try:
+                    browser.destroy()
+                finally:
+                    _restore_parent_grab()
+
+            def _perform_import() -> None:
+                candidate = selected_state.get("candidate")
+                if candidate is None or not bool(candidate.can_import):
+                    return
+
+                try:
+                    confirmed = messagebox.askyesno(
+                        "Import AZ",
+                        (
+                            f"Zaimportować {int(candidate.importable_count)} AZ "
+                            f"z projektu „{candidate.source_display_name}”?\n\n"
+                            "Importowane AZ trafią do projektu docelowego jako "
+                            "imported_pending_review i będą wymagały kontroli w PZ2. "
+                            "Istniejące konflikty nie zostaną nadpisane."
+                        ),
+                        parent=browser,
+                    )
+                except Exception:
+                    confirmed = True
+                if not confirmed:
+                    return
+
+                button = import_button_ref.get("button")
+                if button is not None:
+                    button.config(state=tk.DISABLED)
+                try:
+                    result = import_project_az_bindings(
+                        registry,
+                        source_project_id=candidate.source_project_id,
+                        target_project_id=target_project_id,
+                    )
+                except Exception as exc:
+                    if button is not None:
+                        button.config(state=tk.NORMAL)
+                    try:
+                        self.app.themed_error(
+                            "Import AZ",
+                            f"Nie udało się zaimportować AZ.\n\n{exc}",
+                            parent=browser,
+                        )
+                    except Exception:
+                        messagebox.showerror(
+                            "Import AZ",
+                            str(exc),
+                            parent=browser,
+                        )
+                    return
+
+                result_text = (
+                    f"Zaimportowano: {int(result.imported)}\n"
+                    f"Już przypięte: {int(result.already_bound)}\n"
+                    f"Konflikty: {int(result.conflicts)}\n"
+                    f"Brak cropa targetu: {int(result.target_missing_crop)}\n"
+                    f"Nieprawidłowe źródło: {int(result.invalid_source)}"
+                )
+                try:
+                    self.app.themed_info(
+                        "Import AZ zakończony",
+                        result_text
+                        + "\n\nZaimportowane AZ będą wymagały kontroli w PZ2.",
+                        parent=browser,
+                        tone="success" if int(result.imported) > 0 else "info",
+                    )
+                except Exception:
+                    messagebox.showinfo(
+                        "Import AZ zakończony",
+                        result_text,
+                        parent=browser,
+                    )
+
+                try:
+                    browser.grab_release()
+                except Exception:
+                    pass
+                try:
+                    browser.destroy()
+                except Exception:
+                    pass
+
+                try:
+                    _invalidate_graph_resource_snapshot()
+                    _refresh_rows()
+                    _schedule_resource_modal_refreshes()
+                finally:
+                    _restore_parent_grab()
+
+            tree.bind("<<TreeviewSelect>>", _refresh_selection, add="+")
+            tree.bind("<Double-1>", lambda _event: _perform_import(), add="+")
+
+            tk.Label(
+                browser_body,
+                textvariable=summary_var,
+                fg=muted,
+                bg=browser_bg,
+                font=("Segoe UI", 8),
+                anchor="w",
+                justify=tk.LEFT,
+            ).pack(fill=tk.X, padx=14, pady=(0, 8))
+
+            footer = tk.Frame(browser_body, bg=browser_bg)
+            footer.pack(fill=tk.X, padx=14, pady=(0, 14))
+            import_button = tk.Button(
+                footer,
+                text="Importuj",
+                command=_perform_import,
+                cursor="hand2",
+                bg=blend_hex_colors(field_bg, success, 0.18),
+                fg=fg,
+                relief=tk.FLAT,
+                padx=10,
+                pady=6,
+                state=tk.DISABLED,
+            )
+            import_button.pack(side=tk.RIGHT, padx=(8, 0))
+            import_button_ref["button"] = import_button
+            tk.Button(
+                footer,
+                text="Zamknij",
+                command=_close_browser,
+                cursor="hand2",
+                bg=field_bg,
+                fg=fg,
+                relief=tk.FLAT,
+                padx=10,
+                pady=6,
+            ).pack(side=tk.RIGHT)
+
+            try:
+                browser.protocol("WM_DELETE_WINDOW", _close_browser)
+                browser.transient(dialog)
+                browser.grab_set()
+            except Exception:
+                pass
+            return True
+
         def _run_action(row_key: str, action_kind: str) -> None:
             before_windows = _resource_modal_toplevels()
             refresh_parent_rows = action_kind == "clear"
-            if action_kind == "primary" and row_key in {"plate_run", "char_run"}:
+            if action_kind == "primary" and row_key == "plate_run":
                 base_ready, _image_source_label, _expected_count = _annotation_base_ready_for_import()
                 if not base_ready:
                     try:
@@ -13810,6 +14199,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         refresh_parent_rows = bool(self._choose_master_pool_dir(parent=dialog))
                     elif row_key == "plate_run":
                         _open_annotation_candidate_browser(row_key)
+                        refresh_parent_rows = False
+                    elif row_key == "char_run":
+                        _open_az_project_import_browser()
                         refresh_parent_rows = False
                     elif row_key == "plate_model":
                         self._choose_project_start_model("plate", parent=dialog)
@@ -14959,31 +15351,49 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         fulfillment = "Do kontroli"
                         fulfillment_color = tone_colors.get("warning", warning)
                 annotation_dependency_blocked = False
-                if row_key in {"plate_run", "char_run"}:
+                if row_key == "plate_run":
                     if annotation_base_state is None:
                         annotation_base_state = _annotation_base_ready_for_import()
                     base_ready, _image_source_label, _expected_count = annotation_base_state
                     annotation_dependency_blocked = not base_ready
-                    if annotation_dependency_blocked:
-                        pending_contract_review = False
-                        present = False
-                        fulfillment = _fulfillment_text(
-                            enabled=bool(spec_enabled),
-                            required=bool(required),
-                            present=False,
-                        )
-                        status_badge = _status_badge_text(
-                            enabled=bool(spec_enabled),
-                            required=bool(required),
-                            present=False,
-                        )
-                        fulfillment_color = tone_colors.get(_fulfillment_tone(fulfillment), muted)
-                primary_enabled = (
-                    spec_enabled
-                    and row_key != "char_run"
-                    and _button_enabled(old_buttons.get(row_key))
-                    and not annotation_dependency_blocked
-                )
+                elif row_key == "char_run":
+                    try:
+                        az_meta = dict(getattr(snap_obj, "meta", {}) or {})
+                    except Exception:
+                        az_meta = {}
+                    az_target_crop_count = int(az_meta.get("crop_count", 0) or 0)
+                    az_target_project_id = str(az_meta.get("project_id") or "").strip()
+                    annotation_dependency_blocked = not (
+                        az_target_project_id
+                        and az_target_crop_count > 0
+                    )
+
+                if annotation_dependency_blocked:
+                    pending_contract_review = False
+                    present = False
+                    fulfillment = _fulfillment_text(
+                        enabled=bool(spec_enabled),
+                        required=bool(required),
+                        present=False,
+                    )
+                    status_badge = _status_badge_text(
+                        enabled=bool(spec_enabled),
+                        required=bool(required),
+                        present=False,
+                    )
+                    fulfillment_color = tone_colors.get(_fulfillment_tone(fulfillment), muted)
+
+                if row_key == "char_run":
+                    primary_enabled = bool(
+                        spec_enabled
+                        and not annotation_dependency_blocked
+                    )
+                else:
+                    primary_enabled = bool(
+                        spec_enabled
+                        and _button_enabled(old_buttons.get(row_key))
+                        and not annotation_dependency_blocked
+                    )
                 more_enabled = spec_enabled
                 clear_enabled = spec_enabled and self._is_project_start_asset_clearable(row_key)
                 tree_actions[(row_key, "primary")] = bool(primary_enabled)
