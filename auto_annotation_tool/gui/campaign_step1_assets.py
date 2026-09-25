@@ -3463,6 +3463,69 @@ def _get_project_start_adoptable_normalized_image_names(self, images_dir: Path |
     approved_names = self._get_project_start_approved_normalized_image_names()
     return set(all_names) - set(approved_names)
 
+def _get_project_start_az_resource_state(self) -> dict:
+    '''Read-only AZ resource state for the active campaign project.'''
+    active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+    if not active_project:
+        return {
+            "project_id": "",
+            "project_exists": False,
+            "crop_count": 0,
+            "az_count": 0,
+            "usable_count": 0,
+            "ready_count": 0,
+            "pending_review_count": 0,
+            "excluded_count": 0,
+            "other_count": 0,
+            "missing_count": 0,
+            "contract_ready": False,
+            "coverage_status": "no_project",
+            "latest_updated_at": "",
+        }
+
+    try:
+        project_data = dict(
+            (CAMPAIGN.state.get("projects", {}) or {}).get(
+                active_project,
+                {},
+            )
+            or {}
+        )
+        folder_name = str(project_data.get("folder_name") or "").strip()
+        if not folder_name:
+            raise RuntimeError("Aktywny projekt nie ma folder_name.")
+
+        from ..registry.az_campaign_resource import summarize_project_az_resource
+        from ..registry.az_registry import AZRegistry, project_id_from_folder_name
+
+        project_id = project_id_from_folder_name(folder_name)
+        if not project_id:
+            raise RuntimeError("Nie udało się wyliczyć project_id.")
+
+        registry = AZRegistry.for_workspace(CONFIG.WORKSPACE_DIR)
+        return summarize_project_az_resource(
+            registry,
+            project_id=project_id,
+        ).to_dict()
+    except Exception as exc:
+        logger.debug("Nie udało się odczytać stanu AZ projektu: %s", exc)
+        return {
+            "project_id": "",
+            "project_exists": False,
+            "crop_count": 0,
+            "az_count": 0,
+            "usable_count": 0,
+            "ready_count": 0,
+            "pending_review_count": 0,
+            "excluded_count": 0,
+            "other_count": 0,
+            "missing_count": 0,
+            "contract_ready": False,
+            "coverage_status": "error",
+            "latest_updated_at": "",
+            "error": str(exc),
+        }
+
 def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
     row_key = str(row_key or "").strip()
     if not row_key:
@@ -3548,16 +3611,36 @@ def _show_project_start_asset_details(self, row_key: str, parent=None) -> None:
         )
     elif row_key == "char_run":
         title = "AZ - anotacje znaków"
-        body_lines.append("Źródło: Nie wskazano")
-        body_lines.append("")
+        az_state = _get_project_start_az_resource_state(self)
+        crop_count = int(az_state.get("crop_count", 0) or 0)
+        az_count = int(az_state.get("az_count", 0) or 0)
+        usable_count = int(az_state.get("usable_count", 0) or 0)
+        ready_count = int(az_state.get("ready_count", 0) or 0)
+        pending_count = int(az_state.get("pending_review_count", 0) or 0)
+        excluded_count = int(az_state.get("excluded_count", 0) or 0)
         body_lines.append(
-            "AZ oznacza gotowe anotacje znaków. To piąty możliwy zasób wejściowy iteracji, "
-            "obok obrazów, modeli i anotacji tablic."
+            "Źródło: Registry projektu"
+            if az_count > 0
+            else "Źródło: Brak AZ przypisanej do projektu"
         )
         body_lines.append("")
         body_lines.append(
-            "Import anotacji znaków nie jest jeszcze podłączony jako operacja E1. "
-            "Na tym etapie zasób jest widoczny w grafie jako element przyszłego modelu warunków wejściowych."
+            f"Logiczne cropy projektu: {crop_count}. "
+            f"AZ przypisane: {az_count}. Używalne: {usable_count}."
+        )
+        body_lines.append(
+            f"Gotowe: {ready_count} | do kontroli: {pending_count} | "
+            f"wykluczone: {excluded_count}."
+        )
+        body_lines.append("")
+        body_lines.append(
+            "AZ jest odczytywane bezpośrednio z registry projektu. "
+            "Boxy i etykiety są powiązane z logical crop_id, nie z nazwą pliku."
+        )
+        body_lines.append("")
+        body_lines.append(
+            "Import AZ z innego projektu zostanie obsłużony przez tę samą pozycję zasobów; "
+            "nie powstaje osobna ścieżka PZ2 ani nowa bramka."
         )
     elif row_key in {"plate_model", "char_model"}:
         is_plate = row_key == "plate_model"
@@ -5799,24 +5882,85 @@ def _refresh_project_start_panel(self) -> None:
         requirement=char_model_requirement,
     )
 
-    char_run_validation_text = "Planowane | import AZ nie jest jeszcze dostępny w zasobach bramki."
-    char_run_validation_tone = "muted"
+    az_state = _get_project_start_az_resource_state(self)
+    az_project_id = str(az_state.get("project_id") or "").strip()
+    az_crop_count = int(az_state.get("crop_count", 0) or 0)
+    az_count = int(az_state.get("az_count", 0) or 0)
+    az_usable_count = int(az_state.get("usable_count", 0) or 0)
+    az_ready_count = int(az_state.get("ready_count", 0) or 0)
+    az_pending_count = int(az_state.get("pending_review_count", 0) or 0)
+    az_excluded_count = int(az_state.get("excluded_count", 0) or 0)
+    az_other_count = int(az_state.get("other_count", 0) or 0)
+    az_missing_count = int(az_state.get("missing_count", 0) or 0)
+    coverage_status = str(az_state.get("coverage_status") or "")
+    az_contract_ready = bool(az_state.get("contract_ready"))
+
+    if coverage_status == "error":
+        char_run_validation_text = "Registry AZ niedostępne | nie udało się odczytać stanu zasobu."
+        char_run_validation_tone = "warning"
+    elif az_crop_count <= 0:
+        char_run_validation_text = (
+            "Brak cropów PZ1 w projekcie | AZ może zostać użyte po wyodrębnieniu tablic."
+        )
+        char_run_validation_tone = "muted"
+    elif az_count <= 0:
+        char_run_validation_text = (
+            f"Brak AZ | 0/{az_crop_count} logicznych cropów projektu ma anotacje znaków."
+        )
+        char_run_validation_tone = "muted"
+    elif az_usable_count <= 0:
+        char_run_validation_text = (
+            f"AZ istnieje | {az_count}/{az_crop_count} cropów, ale wszystkie przypisane AZ są wykluczone."
+        )
+        char_run_validation_tone = "warning"
+    elif coverage_status == "partial":
+        char_run_validation_text = (
+            f"Częściowe | {az_count}/{az_crop_count} cropów ma AZ; "
+            f"używalne {az_usable_count}, do kontroli {az_pending_count}, "
+            f"wykluczone {az_excluded_count}."
+        )
+        char_run_validation_tone = "info"
+    else:
+        char_run_validation_text = (
+            f"Jest | {az_count}/{az_crop_count} cropów ma AZ; "
+            f"gotowe {az_ready_count}, do kontroli {az_pending_count}, "
+            f"wykluczone {az_excluded_count}."
+        )
+        char_run_validation_tone = "success"
+
     char_run_requirement = ""
     char_run_meta = build_resource_contract_meta(
         "O/AT->AZ",
-        contract_ready=False,
+        contract_ready=az_contract_ready,
         requires_rematch=False,
-        source_mode="",
+        source_mode=("project_registry" if az_count > 0 else ""),
         iteration_path=current_iteration_path,
+        project_id=az_project_id,
+        crop_count=az_crop_count,
+        az_count=az_count,
+        usable_count=az_usable_count,
+        ready_count=az_ready_count,
+        pending_review_count=az_pending_count,
+        excluded_count=az_excluded_count,
+        other_count=az_other_count,
+        missing_count=az_missing_count,
+        coverage_status=coverage_status,
+        review_required=bool(az_pending_count > 0),
+        latest_updated_at=str(az_state.get("latest_updated_at") or ""),
+        contract_message=char_run_validation_text,
     )
     self._set_project_start_asset_row_state(
         "char_run",
-        source_text="Nie wskazano",
+        source_text=("Registry projektu" if az_count > 0 else "Nie wskazano"),
         source_path="",
         validation_text=char_run_validation_text,
         tone=char_run_validation_tone,
         requirement=char_run_requirement,
-        counter_text="0",
+        counter_text=(
+            f"{az_usable_count}/{az_crop_count}"
+            if az_crop_count > 0
+            else str(az_usable_count)
+        ),
         meta=char_run_meta,
     )
 
