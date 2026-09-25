@@ -1,6 +1,7 @@
 import unittest
 
 from auto_annotation_tool.registry.pz2_az_adapter import (
+    az_revision_to_pz2_metadata,
     derive_pz2_revision_context,
     pz2_metadata_to_az_payload,
 )
@@ -172,6 +173,166 @@ class PZ2AZAdapterTests(unittest.TestCase):
         self.assertEqual(context.source_kind, "pz2_detect")
         self.assertEqual(context.trust_state, "auto")
         self.assertEqual(context.effective_status, "ready")
+
+
+    def test_az_revision_restores_pixel_boxes_without_mutating_base(self):
+        base = self.base()
+        original_first_bbox = list(base["characters"][0]["bbox"])
+        payload = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-1",
+            "crop_id": "CROP-1",
+            "payload_sha256": "f" * 64,
+            "payload": payload,
+            "source_kind": "local_manual",
+            "trust_state": "local_manual",
+        }
+        base["crop_id"] = "CROP-1"
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=64,
+        )
+
+        self.assertEqual(
+            restored["characters"][0]["bbox"],
+            [20.0, 8.0, 60.0, 56.0],
+        )
+        self.assertEqual(
+            restored["characters"][1]["bbox"],
+            [100.0, 8.0, 140.0, 56.0],
+        )
+        self.assertEqual(base["characters"][0]["bbox"], original_first_bbox)
+        self.assertEqual(restored["characters"][0]["reading_row"], 1)
+        self.assertEqual(restored["characters"][0]["reading_col"], 1)
+        self.assertEqual(restored["characters"][0]["reading_index"], 1)
+
+    def test_az_revision_restores_layout_gold_expected_text_and_provenance(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        base["review_state"] = {
+            "status": "approved",
+            "approved_reference": {"stale": True},
+        }
+        payload = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-ABC",
+            "crop_id": "CROP-1",
+            "payload_sha256": "1" * 64,
+            "payload": payload,
+            "source_kind": "local_manual",
+            "trust_state": "local_manual",
+            "origin_project_id": "PRJ-A",
+            "origin_iteration": 3,
+            "created_at": "2026-09-25T12:00:00+00:00",
+        }
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=64,
+        )
+
+        self.assertEqual(restored["plate_layout"], "single_row")
+        self.assertEqual(restored["plate_layout_override"], "single_row")
+        self.assertEqual(restored["layout_source"], "manual_override")
+        self.assertTrue(restored["gold_state"]["approved"])
+        self.assertFalse(restored["gold_state"]["excluded"])
+        self.assertEqual(restored["status"], "perfect")
+        self.assertEqual(restored["ground_truth_text"], "AB")
+        self.assertNotIn("review_state", restored)
+        self.assertEqual(restored["fusion_strategy"], "az_reuse")
+        self.assertEqual(
+            restored["az_reuse"]["az_revision_id"],
+            "AZR-ABC",
+        )
+        self.assertEqual(restored["az_reuse"]["origin_project_id"], "PRJ-A")
+        self.assertEqual(restored["az_reuse"]["origin_iteration"], 3)
+
+    def test_az_revision_restores_two_row_order(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        base["plate_image_height"] = 128
+        base["plate_layout"] = "two_row"
+        base["plate_layout_override"] = "two_row"
+        base["characters"][0]["bbox"] = [100, 70, 140, 120]
+        base["characters"][0]["reading_row"] = 2
+        base["characters"][0]["reading_col"] = 1
+        base["characters"][1]["bbox"] = [20, 8, 60, 56]
+        base["characters"][1]["reading_row"] = 1
+        base["characters"][1]["reading_col"] = 1
+
+        payload = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-2R",
+            "crop_id": "CROP-1",
+            "payload": payload,
+        }
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=128,
+        )
+
+        self.assertEqual(restored["plate_layout"], "two_row")
+        self.assertEqual(restored["layout_row_count"], 2)
+        self.assertEqual(
+            [rec["reading_row"] for rec in restored["characters"]],
+            [1, 2],
+        )
+        self.assertEqual(
+            [rec["reading_col"] for rec in restored["characters"]],
+            [1, 1],
+        )
+
+    def test_az_revision_rejects_other_crop_identity(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        payload = pz2_metadata_to_az_payload(base)
+        payload["crop_identity_sha256"] = "b" * 64
+        revision = {
+            "az_revision_id": "AZR-BAD",
+            "crop_id": "CROP-1",
+            "payload": payload,
+        }
+
+        with self.assertRaises(ValueError):
+            az_revision_to_pz2_metadata(
+                base,
+                revision,
+                image_width=256,
+                image_height=64,
+            )
+
+    def test_pz2_to_az_to_pz2_to_az_roundtrip_is_semantically_stable(self):
+        base = self.base()
+        base["crop_id"] = "CROP-1"
+        first = pz2_metadata_to_az_payload(base)
+        revision = {
+            "az_revision_id": "AZR-ROUNDTRIP",
+            "crop_id": "CROP-1",
+            "payload": first,
+        }
+
+        restored = az_revision_to_pz2_metadata(
+            base,
+            revision,
+            image_width=256,
+            image_height=64,
+        )
+        second = pz2_metadata_to_az_payload(
+            restored,
+            image_width=256,
+            image_height=64,
+        )
+
+        self.assertEqual(first, second)
+
 
 
 if __name__ == "__main__":

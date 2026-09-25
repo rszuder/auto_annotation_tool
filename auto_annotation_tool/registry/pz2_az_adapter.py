@@ -183,6 +183,164 @@ def derive_pz2_revision_context(
     )
 
 
+def az_revision_to_pz2_metadata(
+    base_data: Mapping[str, Any],
+    revision: Mapping[str, Any],
+    *,
+    image_width: float | int,
+    image_height: float | int,
+) -> dict[str, Any]:
+    """Nałóż trwałą rewizję AZ na kopię rekordu PZ2.
+
+    Funkcja nie mutuje ``base_data``. Warstwa pochodzenia cropa/PZ1 zostaje
+    zachowana, natomiast semantyczny stan anotacji znaków pochodzi z AZ.
+
+    ``review_state`` nie jest odtwarzany z AZ, bo canonical AZ nie przechowuje
+    sesyjnego kontraktu REVIEW (approved_reference, timestamps itd.). Dzięki
+    temu nie fabrykujemy nowej decyzji człowieka podczas reuse.
+    """
+    import copy
+
+    if not isinstance(base_data, Mapping):
+        raise TypeError("base_data musi być mapowaniem.")
+    if not isinstance(revision, Mapping):
+        raise TypeError("revision musi być mapowaniem.")
+
+    payload_raw = revision.get("payload")
+    if not isinstance(payload_raw, Mapping):
+        raise ValueError("Rewizja AZ nie zawiera payload.")
+
+    payload = canonicalize_az_payload(payload_raw)
+    width = _dimension(image_width, "image_width", required=True)
+    height = _dimension(image_height, "image_height", required=True)
+
+    base_crop_id = str(base_data.get("crop_id") or "").strip()
+    revision_crop_id = str(revision.get("crop_id") or "").strip()
+    if base_crop_id and revision_crop_id and base_crop_id != revision_crop_id:
+        raise ValueError("Rewizja AZ należy do innego crop_id.")
+
+    base_identity = str(
+        base_data.get("crop_identity_sha256") or ""
+    ).strip().lower()
+    payload_identity = str(
+        payload.get("crop_identity_sha256") or ""
+    ).strip().lower()
+    if base_identity and base_identity != payload_identity:
+        raise ValueError(
+            "crop_identity_sha256 rewizji AZ nie odpowiada rekordowi PZ2."
+        )
+
+    result = copy.deepcopy(dict(base_data))
+
+    layout_raw = payload.get("layout")
+    layout_raw = layout_raw if isinstance(layout_raw, Mapping) else {}
+    layout_kind = _az_layout_kind_to_pz2(layout_raw.get("kind"))
+    layout_confirmed = bool(layout_raw.get("confirmed", False))
+
+    chars = []
+    row_counts: dict[int, int] = {}
+    for reading_index, rec in enumerate(payload.get("characters") or [], start=1):
+        if not isinstance(rec, Mapping):
+            raise ValueError("Nieprawidłowy rekord characters w AZ.")
+
+        bbox = rec.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            raise ValueError("Rekord AZ characters nie ma poprawnego bbox.")
+
+        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+        pixel_bbox = [
+            round(x1 * width, 6),
+            round(y1 * height, 6),
+            round(x2 * width, 6),
+            round(y2 * height, 6),
+        ]
+
+        row = _int_or_zero(rec.get("row"))
+        if row <= 0:
+            row = 1
+        row_counts[row] = row_counts.get(row, 0) + 1
+
+        chars.append(
+            {
+                "character": str(rec.get("character") or "").strip().upper(),
+                "bbox": pixel_bbox,
+                "confidence": _float_or_default(rec.get("confidence"), 1.0),
+                "method": str(rec.get("method") or "").strip(),
+                "source_kind": str(rec.get("source_kind") or "").strip(),
+                "reading_row": row,
+                "reading_col": row_counts[row],
+                "reading_index": reading_index,
+            }
+        )
+
+    result["characters"] = chars
+    result["plate_image_width"] = width
+    result["plate_image_height"] = height
+
+    if layout_kind:
+        result["plate_layout"] = layout_kind
+        result["layout_row_count"] = 2 if layout_kind == "two_row" else 1
+        if layout_confirmed:
+            result["plate_layout_override"] = layout_kind
+            result["layout_source"] = "manual_override"
+            result["layout_confidence"] = 1.0
+        else:
+            result.pop("plate_layout_override", None)
+            result.pop("layout_override_source", None)
+            result["layout_source"] = "az_reuse"
+    else:
+        result.pop("plate_layout_override", None)
+        result.pop("layout_override_source", None)
+
+    gold_raw = payload.get("gold_state")
+    gold_raw = gold_raw if isinstance(gold_raw, Mapping) else {}
+    result["gold_state"] = {
+        "approved": bool(gold_raw.get("approved", False)),
+        "excluded": bool(gold_raw.get("excluded", False)),
+        "candidate": bool(gold_raw.get("candidate", False)),
+    }
+    result["status"] = str(
+        payload.get("status") or "unknown"
+    ).strip().lower() or "unknown"
+
+    expected_text = str(payload.get("expected_text") or "").strip().upper()
+    if expected_text:
+        result["ground_truth_text"] = expected_text
+
+    # REVIEW jest stanem sesyjnym PZ2, a nie częścią canonical AZ.
+    result.pop("review_state", None)
+
+    result["fusion_strategy"] = "az_reuse"
+    result["fusion_details"] = {
+        "source": "az_registry",
+        "az_revision_id": str(revision.get("az_revision_id") or "").strip(),
+    }
+    result["az_reuse"] = {
+        "schema": "alpr.az_reuse.v1",
+        "az_revision_id": str(revision.get("az_revision_id") or "").strip(),
+        "payload_sha256": str(revision.get("payload_sha256") or "").strip(),
+        "source_kind": str(revision.get("source_kind") or "").strip(),
+        "trust_state": str(revision.get("trust_state") or "").strip(),
+        "origin_project_id": str(
+            revision.get("origin_project_id") or ""
+        ).strip() or None,
+        "origin_iteration": revision.get("origin_iteration"),
+        "created_at": str(revision.get("created_at") or "").strip(),
+    }
+
+    return result
+
+
+def _az_layout_kind_to_pz2(value: Any) -> str:
+    kind = str(value or "").strip().lower()
+    if kind in {"single_row", "1r", "1_row"}:
+        return "single_row"
+    if kind in {"two_row", "2r", "2_row", "two_row_candidate"}:
+        return "two_row"
+    return ""
+
+
+
 def _dimension(value: Any, name: str, *, required: bool) -> float:
     if value is None or str(value).strip() == "":
         if required:
