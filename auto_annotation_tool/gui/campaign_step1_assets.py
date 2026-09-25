@@ -5893,6 +5893,9 @@ def _refresh_project_start_panel(self) -> None:
     az_other_count = int(az_state.get("other_count", 0) or 0)
     az_missing_count = int(az_state.get("missing_count", 0) or 0)
     coverage_status = str(az_state.get("coverage_status") or "")
+    az_reviewed_count = int(az_state.get("reviewed_count", 0) or 0)
+    az_review_required = bool(az_state.get("review_required"))
+    az_review_complete = bool(az_state.get("review_complete"))
     az_contract_ready = bool(az_state.get("contract_ready"))
 
     if coverage_status == "error":
@@ -5908,25 +5911,37 @@ def _refresh_project_start_panel(self) -> None:
             f"Brak AZ | 0/{az_crop_count} logicznych cropów projektu ma anotacje znaków."
         )
         char_run_validation_tone = "muted"
-    elif az_usable_count <= 0:
+    elif az_pending_count > 0 or az_other_count > 0:
         char_run_validation_text = (
-            f"AZ istnieje | {az_count}/{az_crop_count} cropów, ale wszystkie przypisane AZ są wykluczone."
+            f"Do kontroli | {az_count}/{az_crop_count} cropów ma AZ; "
+            f"gotowe {az_ready_count}, do kontroli {az_pending_count}, "
+            f"inne {az_other_count}, wykluczone {az_excluded_count}, "
+            f"brakujące {az_missing_count}."
+        )
+        char_run_validation_tone = "warning"
+    elif az_ready_count <= 0:
+        char_run_validation_text = (
+            f"AZ istnieje | {az_count}/{az_crop_count} cropów, "
+            "ale brak gotowych anotacji do ponownego użycia."
         )
         char_run_validation_tone = "warning"
     elif coverage_status == "partial":
         char_run_validation_text = (
             f"Częściowe | {az_count}/{az_crop_count} cropów ma AZ; "
-            f"używalne {az_usable_count}, do kontroli {az_pending_count}, "
-            f"wykluczone {az_excluded_count}."
+            f"gotowe {az_ready_count}, wykluczone {az_excluded_count}, "
+            f"brakujące {az_missing_count}."
         )
         char_run_validation_tone = "info"
     else:
         char_run_validation_text = (
             f"Jest | {az_count}/{az_crop_count} cropów ma AZ; "
-            f"gotowe {az_ready_count}, do kontroli {az_pending_count}, "
-            f"wykluczone {az_excluded_count}."
+            f"gotowe {az_ready_count}, wykluczone {az_excluded_count}."
         )
-        char_run_validation_tone = "success"
+        char_run_validation_tone = (
+            "success"
+            if az_contract_ready
+            else "info"
+        )
 
     char_run_requirement = ""
     char_run_meta = build_resource_contract_meta(
@@ -5944,8 +5959,10 @@ def _refresh_project_start_panel(self) -> None:
         excluded_count=az_excluded_count,
         other_count=az_other_count,
         missing_count=az_missing_count,
+        reviewed_count=az_reviewed_count,
         coverage_status=coverage_status,
-        review_required=bool(az_pending_count > 0),
+        review_required=az_review_required,
+        review_complete=bool(az_state.get("review_complete")),
         latest_updated_at=str(az_state.get("latest_updated_at") or ""),
         contract_message=char_run_validation_text,
     )

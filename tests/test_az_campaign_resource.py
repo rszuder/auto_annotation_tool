@@ -160,7 +160,8 @@ class AZCampaignResourceTests(unittest.TestCase):
         self.assertEqual(state.pending_review_count, 1)
         self.assertEqual(state.missing_count, 1)
         self.assertEqual(state.coverage_status, "partial")
-        self.assertTrue(state.contract_ready)
+        self.assertTrue(state.review_required)
+        self.assertFalse(state.contract_ready)
 
     def test_full_project_az_counts_ready_and_excluded(self):
         crop_a, identity_a = self._create_crop("one")
@@ -222,6 +223,108 @@ def test_char_run_row_is_registry_backed_not_planowane_placeholder():
     assert "Planowane | import AZ nie jest jeszcze dostępny w zasobach bramki." not in source
     assert "_get_project_start_az_resource_state" in source
     assert 'coverage_status = str(az_state.get("coverage_status") or "")' in source
+
+
+    def test_full_pending_review_is_visible_but_not_contract_ready(self):
+        crop_a, identity_a = self._create_crop("pending-one")
+        crop_b, identity_b = self._create_crop("pending-two")
+
+        for crop_id, identity, char in (
+            (crop_a, identity_a, "A"),
+            (crop_b, identity_b, "B"),
+        ):
+            self.store.save_revision(
+                crop_id=crop_id,
+                payload=self._payload(identity, char),
+                source_kind="project_import",
+                trust_state="external_pending_review",
+                bind_project_id="PRJ-A",
+                effective_status="imported_pending_review",
+                created_at="2026-09-26T00:03:00+00:00",
+            )
+
+        state = summarize_project_az_resource(
+            self.registry,
+            project_id="PRJ-A",
+        )
+
+        self.assertEqual(state.coverage_status, "full")
+        self.assertEqual(state.az_count, 2)
+        self.assertEqual(state.pending_review_count, 2)
+        self.assertEqual(state.ready_count, 0)
+        self.assertEqual(state.reviewed_count, 0)
+        self.assertTrue(state.review_required)
+        self.assertFalse(state.contract_ready)
+
+    def test_partial_reviewed_az_is_not_full_contract(self):
+        crop_a, identity_a = self._create_crop("reviewed-one")
+        self._create_crop("reviewed-two")
+
+        self.store.save_revision(
+            crop_id=crop_a,
+            payload=self._payload(identity_a, "A"),
+            source_kind="local_manual",
+            trust_state="local_manual",
+            bind_project_id="PRJ-A",
+            effective_status="approved",
+            created_at="2026-09-26T00:04:00+00:00",
+        )
+
+        state = summarize_project_az_resource(
+            self.registry,
+            project_id="PRJ-A",
+        )
+
+        self.assertEqual(state.coverage_status, "partial")
+        self.assertEqual(state.ready_count, 1)
+        self.assertEqual(state.missing_count, 1)
+        self.assertEqual(state.reviewed_count, 1)
+        self.assertFalse(state.review_required)
+        self.assertFalse(state.contract_ready)
+
+    def test_pending_snapshot_cannot_satisfy_required_char_run_contract(self):
+        from auto_annotation_tool.campaign_resource_contracts import (
+            resource_contract_ready,
+        )
+        from auto_annotation_tool.campaign_resource_state import (
+            CampaignResourceSnapshot,
+        )
+
+        snapshot = CampaignResourceSnapshot(
+            key="char_run",
+            canonical_key="char_run",
+            code="AZ",
+            label="AZ - anotacje znaków",
+            source="Registry projektu",
+            validation="Do kontroli",
+            tone="warning",
+            counter_text="2/2",
+            meta={
+                "contract_ready": False,
+                "contract_enforced": True,
+                "review_required": True,
+                "pending_review_count": 2,
+            },
+        )
+
+        self.assertFalse(
+            resource_contract_ready(snapshot, required=True)
+        )
+
+
+def test_char_run_pending_review_is_warning_not_success():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "auto_annotation_tool"
+        / "gui"
+        / "campaign_step1_assets.py"
+    )
+    source = path.read_text(encoding="utf-8-sig")
+
+    assert 'elif az_pending_count > 0 or az_other_count > 0:' in source
+    assert 'Do kontroli |' in source
+    assert 'char_run_validation_tone = "warning"' in source
+    assert 'review_complete=bool(az_state.get("review_complete"))' in source
 
 
 if __name__ == "__main__":

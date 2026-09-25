@@ -53,12 +53,41 @@ class AZCampaignResourceState:
         return max(0, int(self.crop_count) - int(self.az_count))
 
     @property
+    def reviewed_count(self) -> int:
+        return int(self.ready_count) + int(self.excluded_count)
+
+    @property
+    def review_required(self) -> bool:
+        return bool(
+            int(self.pending_review_count) > 0
+            or int(self.other_count) > 0
+        )
+
+    @property
+    def review_complete(self) -> bool:
+        return bool(
+            int(self.crop_count) > 0
+            and self.missing_count == 0
+            and not self.review_required
+            and self.reviewed_count == int(self.crop_count)
+        )
+
+    @property
     def contract_ready(self) -> bool:
-        return int(self.usable_count) > 0
+        # AZ może być kontraktowo gotowe dopiero po zakończonym review
+        # całego targetowego zbioru cropów. Świadome excluded liczy się jako
+        # zakończona decyzja, ale projekt musi mieć co najmniej jedną gotową AZ.
+        return bool(
+            self.review_complete
+            and int(self.ready_count) > 0
+        )
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["missing_count"] = self.missing_count
+        payload["reviewed_count"] = self.reviewed_count
+        payload["review_required"] = self.review_required
+        payload["review_complete"] = self.review_complete
         payload["contract_ready"] = self.contract_ready
         return payload
 
