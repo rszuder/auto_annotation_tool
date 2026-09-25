@@ -311,5 +311,95 @@ class AZProjectImportTests(unittest.TestCase):
             )
 
 
+    def test_list_import_sources_summarizes_source_against_target(self):
+        from auto_annotation_tool.registry.az_project_import import (
+            list_project_az_import_sources,
+        )
+
+        candidates = list_project_az_import_sources(
+            self.registry,
+            target_project_id="PRJ-B",
+        )
+
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0]
+        self.assertEqual(candidate.source_project_id, "PRJ-A")
+        self.assertEqual(candidate.target_project_id, "PRJ-B")
+        self.assertEqual(candidate.source_display_name, "PRJ-A")
+        self.assertEqual(candidate.source_az_count, 4)
+        self.assertEqual(candidate.importable_count, 1)
+        self.assertEqual(candidate.already_bound_count, 1)
+        self.assertEqual(candidate.conflict_count, 1)
+        self.assertEqual(candidate.target_missing_crop_count, 1)
+        self.assertEqual(candidate.invalid_source_count, 0)
+        self.assertTrue(candidate.can_import)
+
+    def test_list_import_sources_is_read_only(self):
+        from auto_annotation_tool.registry.az_project_import import (
+            list_project_az_import_sources,
+        )
+
+        with self.db.read_connection() as con:
+            before = {
+                "projects": con.execute(
+                    "SELECT COUNT(*) FROM projects"
+                ).fetchone()[0],
+                "bindings": con.execute(
+                    "SELECT COUNT(*) FROM project_crop_az"
+                ).fetchone()[0],
+                "revisions": con.execute(
+                    "SELECT COUNT(*) FROM az_revisions"
+                ).fetchone()[0],
+            }
+
+        candidates = list_project_az_import_sources(
+            self.registry,
+            target_project_id="PRJ-B",
+        )
+        self.assertTrue(candidates)
+
+        with self.db.read_connection() as con:
+            after = {
+                "projects": con.execute(
+                    "SELECT COUNT(*) FROM projects"
+                ).fetchone()[0],
+                "bindings": con.execute(
+                    "SELECT COUNT(*) FROM project_crop_az"
+                ).fetchone()[0],
+                "revisions": con.execute(
+                    "SELECT COUNT(*) FROM az_revisions"
+                ).fetchone()[0],
+            }
+
+        self.assertEqual(before, after)
+
+    def test_list_import_sources_reports_no_match_for_target_without_crops(self):
+        from auto_annotation_tool.registry.az_project_import import (
+            list_project_az_import_sources,
+        )
+
+        with self.db.transaction() as con:
+            con.execute(
+                """
+                INSERT INTO projects(project_id, display_name)
+                VALUES (?, ?)
+                """,
+                ("PRJ-C", "C"),
+            )
+
+        candidates = list_project_az_import_sources(
+            self.registry,
+            target_project_id="PRJ-C",
+        )
+
+        source_a = next(
+            item for item in candidates
+            if item.source_project_id == "PRJ-A"
+        )
+        self.assertEqual(source_a.importable_count, 0)
+        self.assertEqual(source_a.target_missing_crop_count, 4)
+        self.assertFalse(source_a.can_import)
+
+
 if __name__ == "__main__":
     unittest.main()

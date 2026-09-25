@@ -77,6 +77,29 @@ class AZProjectImportResult:
     effective_status: str
 
 
+@dataclass(frozen=True)
+class AZProjectImportSourceCandidate:
+    source_project_id: str
+    target_project_id: str
+    source_display_name: str
+    source_folder_name: str
+    source_campaign_key: str
+    source_az_count: int
+    importable_count: int
+    already_bound_count: int
+    conflict_count: int
+    target_missing_crop_count: int
+    invalid_source_count: int
+
+    @property
+    def can_import(self) -> bool:
+        return int(self.importable_count) > 0
+
+    @property
+    def compatible_count(self) -> int:
+        return int(self.importable_count) + int(self.already_bound_count)
+
+
 def analyze_project_az_import(
     registry: AZRegistry,
     *,
@@ -195,6 +218,86 @@ def analyze_project_az_import(
         target_project_id=target_project_id,
         items=tuple(items),
     )
+
+
+def list_project_az_import_sources(
+    registry: AZRegistry,
+    *,
+    target_project_id: str,
+) -> tuple[AZProjectImportSourceCandidate, ...]:
+    # Read-only discovery of projects that already own AZ.
+    registry.initialize()
+    target_project_id = _required_text(
+        "target_project_id",
+        target_project_id,
+    )
+
+    with registry.database.read_connection() as connection:
+        _require_project(connection, target_project_id)
+        rows = connection.execute(
+            """
+            SELECT
+                p.project_id,
+                p.display_name,
+                p.folder_name,
+                p.campaign_key,
+                COUNT(pca.crop_id) AS az_count
+            FROM projects p
+            JOIN project_crop_az pca
+              ON pca.project_id = p.project_id
+            WHERE p.project_id <> ?
+            GROUP BY
+                p.project_id,
+                p.display_name,
+                p.folder_name,
+                p.campaign_key
+            HAVING COUNT(pca.crop_id) > 0
+            ORDER BY
+                COALESCE(p.display_name, p.folder_name, p.project_id),
+                p.project_id
+            """,
+            (target_project_id,),
+        ).fetchall()
+
+    candidates: list[AZProjectImportSourceCandidate] = []
+    for row in rows:
+        source_project_id = str(row["project_id"])
+        plan = analyze_project_az_import(
+            registry,
+            source_project_id=source_project_id,
+            target_project_id=target_project_id,
+        )
+        candidates.append(
+            AZProjectImportSourceCandidate(
+                source_project_id=source_project_id,
+                target_project_id=target_project_id,
+                source_display_name=(
+                    str(row["display_name"] or "").strip()
+                    or str(row["folder_name"] or "").strip()
+                    or source_project_id
+                ),
+                source_folder_name=str(row["folder_name"] or "").strip(),
+                source_campaign_key=str(row["campaign_key"] or "").strip(),
+                source_az_count=int(row["az_count"] or 0),
+                importable_count=plan.importable_count,
+                already_bound_count=plan.already_bound_count,
+                conflict_count=plan.conflict_count,
+                target_missing_crop_count=plan.target_missing_crop_count,
+                invalid_source_count=plan.invalid_source_count,
+            )
+        )
+
+    candidates.sort(
+        key=lambda item: (
+            -int(item.importable_count),
+            -int(item.already_bound_count),
+            int(item.conflict_count),
+            int(item.target_missing_crop_count),
+            item.source_display_name.casefold(),
+            item.source_project_id,
+        )
+    )
+    return tuple(candidates)
 
 
 def import_project_az_bindings(
