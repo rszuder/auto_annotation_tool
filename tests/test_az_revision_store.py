@@ -326,6 +326,116 @@ class AZRevisionStoreTests(unittest.TestCase):
             self.identity_sha,
         )
 
+    def test_free_reuse_returns_latest_crop_revision(self):
+        first = self.store.save_revision(
+            crop_id=self.crop_id,
+            payload=self.payload("A"),
+            source_kind="local_manual",
+            trust_state="free_mode",
+            created_at="2026-09-25T00:01:00+00:00",
+        )
+        second = self.store.save_revision(
+            crop_id=self.crop_id,
+            payload=self.payload("B"),
+            source_kind="local_manual",
+            trust_state="free_mode",
+            created_at="2026-09-25T00:02:00+00:00",
+        )
+
+        resolved = self.store.resolve_reusable_az(crop_id=self.crop_id)
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved["az_revision_id"], second.az_revision_id)
+        self.assertNotEqual(resolved["az_revision_id"], first.az_revision_id)
+        self.assertEqual(resolved["payload"]["characters"][0]["character"], "B")
+        self.assertIsNone(resolved["project_id"])
+        self.assertIsNone(resolved["effective_status"])
+
+    def test_project_reuse_prefers_bound_revision_over_newer_global_revision(self):
+        project_revision = self.store.save_revision(
+            crop_id=self.crop_id,
+            payload=self.payload("A"),
+            source_kind="local_manual",
+            trust_state="local",
+            origin_project_id="PRJ-A",
+            origin_iteration=1,
+            bind_project_id="PRJ-A",
+            effective_status="approved",
+            created_at="2026-09-25T00:01:00+00:00",
+        )
+        self.store.save_revision(
+            crop_id=self.crop_id,
+            payload=self.payload("B"),
+            source_kind="local_manual",
+            trust_state="free_mode",
+            created_at="2026-09-25T00:02:00+00:00",
+        )
+
+        resolved = self.store.resolve_reusable_az(
+            crop_id=self.crop_id,
+            project_id="PRJ-A",
+        )
+
+        self.assertIsNotNone(resolved)
+        self.assertEqual(
+            resolved["az_revision_id"],
+            project_revision.az_revision_id,
+        )
+        self.assertEqual(
+            resolved["payload"]["characters"][0]["character"],
+            "A",
+        )
+        self.assertEqual(resolved["project_id"], "PRJ-A")
+        self.assertEqual(resolved["effective_status"], "approved")
+
+    def test_project_reuse_does_not_fall_back_to_global_revision(self):
+        self.store.save_revision(
+            crop_id=self.crop_id,
+            payload=self.payload("A"),
+            source_kind="local_manual",
+            trust_state="free_mode",
+            created_at="2026-09-25T00:01:00+00:00",
+        )
+
+        resolved = self.store.resolve_reusable_az(
+            crop_id=self.crop_id,
+            project_id="PRJ-B",
+        )
+
+        self.assertIsNone(resolved)
+
+    def test_free_reuse_returns_none_when_crop_has_no_az_revision(self):
+        second_file = self.workspace / "run" / "images" / "plate_000099.jpg"
+        second_file.write_bytes(b"crop-without-az")
+        second_identity_payload = build_pz1_crop_identity(
+            source_image_id="img-sha256-" + ("e" * 64),
+            source_annotation_id="plate-ann-99",
+            source_geometry_hash="f" * 64,
+            interpolation="lanczos4",
+            output_width=256,
+            output_height=64,
+        )
+        second_identity = compute_crop_identity_sha256(second_identity_payload)
+        second_crop = self.registry.register_crop_artifact(
+            crop_identity_sha256=second_identity,
+            identity_mode=second_identity_payload["identity_mode"],
+            source_file_sha256="e" * 64,
+            artifact_path=second_file,
+            artifact_sha256=hashlib.sha256(second_file.read_bytes()).hexdigest(),
+            size_bytes=second_file.stat().st_size,
+            width=256,
+            height=64,
+            source_annotation_id="plate-ann-99",
+            source_geometry_hash="f" * 64,
+        )
+
+        resolved = self.store.resolve_reusable_az(
+            crop_id=second_crop.crop_id,
+        )
+
+        self.assertIsNone(resolved)
+
+
 
 if __name__ == "__main__":
     unittest.main()

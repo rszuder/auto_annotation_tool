@@ -350,6 +350,71 @@ class AZRevisionStore:
         result["payload"] = json.loads(str(result["payload_json"]))
         return result
 
+    def get_latest_crop_az(
+        self,
+        *,
+        crop_id: str,
+    ) -> dict[str, Any] | None:
+        """Zwróć najnowszą znaną rewizję AZ dla cropa.
+
+        To jest resolver trybu swobodnego: AZ jest zasobem globalnym,
+        bez project binding. Pochodzenie rewizji pozostaje zachowane w
+        origin_project_id/origin_iteration i nie wpływa na wybór.
+        """
+        self.initialize()
+        crop_id = _required_text("crop_id", crop_id)
+        with self.database.read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    ar.az_revision_id,
+                    ar.crop_id,
+                    ar.parent_revision_id,
+                    ar.payload_sha256,
+                    ar.payload_json,
+                    ar.source_kind,
+                    ar.source_status,
+                    ar.trust_state,
+                    ar.origin_project_id,
+                    ar.origin_iteration,
+                    ar.created_at
+                FROM az_revisions ar
+                WHERE ar.crop_id = ?
+                ORDER BY ar.created_at DESC, ar.rowid DESC
+                LIMIT 1
+                """,
+                (crop_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["payload"] = json.loads(str(result["payload_json"]))
+        result["project_id"] = None
+        result["effective_status"] = None
+        return result
+
+    def resolve_reusable_az(
+        self,
+        *,
+        crop_id: str,
+        project_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Wybierz AZ do automatycznego reuse w PZ2.
+
+        Kampania jest ściśle project-scoped: używamy wyłącznie jawnego
+        project_crop_az i nie wykonujemy cichego fallbacku do rewizji
+        globalnej/innego projektu. Tryb swobodny używa najnowszej rewizji
+        znanej dla logicznego cropa.
+        """
+        crop_id = _required_text("crop_id", crop_id)
+        normalized_project_id = _optional_text(project_id)
+        if normalized_project_id:
+            return self.get_project_az(
+                project_id=normalized_project_id,
+                crop_id=crop_id,
+            )
+        return self.get_latest_crop_az(crop_id=crop_id)
+
 
 def _canonicalize_character(value: Any, index: int) -> dict[str, Any]:
     if not isinstance(value, Mapping):
