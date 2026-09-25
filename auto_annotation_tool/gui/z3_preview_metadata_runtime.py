@@ -691,7 +691,11 @@ def _persist_preview_metadata(
         self._preview_autosave_writer = None
     perf_start = time.perf_counter()
     write_ms = refresh_ms = sync_ms = info_ms = 0.0
-    meta_path = self._get_preview_metadata_path()
+    # Zapis należy do datasetu faktycznie załadowanego w pamięci.
+    # preview_dir_var może już wskazywać inny run (np. po wyborze historycznego
+    # źródła albo podczas przełączania runów), więc synchronizowany zapis musi
+    # używać tej samej zasady co autosave: _loaded_meta_path ma pierwszeństwo.
+    meta_path = getattr(self, "_loaded_meta_path", None) or self._get_preview_metadata_path()
     if meta_path is None:
         raise RuntimeError("Brak aktywnego preview runu do zapisania.")
 
