@@ -2028,6 +2028,22 @@ def _refresh_preview_workspace_visibility(self, *, manual_review_active: bool | 
         padx=5,
         pady=0,
     )
+    show_history_preview = bool(
+        free_mode_context
+        and free_mode_screen == "workflow"
+        and free_mode_route == "manual"
+        and free_mode_step == "manual_history"
+        and not show_preview
+        and bool(getattr(self, "_manual_history_preview_loaded", False))
+    )
+    self._set_widget_packed(
+        getattr(self, "manual_history_preview_host", None),
+        show_history_preview,
+        fill=tk.BOTH,
+        expand=True,
+        padx=5,
+        pady=0,
+    )
     if free_mode_context and free_mode_route == "manual":
         try:
             self._sync_main_pane_right_panel_visibility()

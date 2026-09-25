@@ -1748,6 +1748,59 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     self.preview_host = preview_host
     preview_host.pack(fill=tk.BOTH, expand=True, padx=5, pady=0)
 
+    self.manual_history_preview_host = tk.Frame(
+        center_frame,
+        bg=panel_bg,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.manual_history_preview_title_var = tk.StringVar(
+        value="Wybierz run i kliknij „Podgląd anotacji”."
+    )
+    self.manual_history_preview_title_lbl = tk.Label(
+        self.manual_history_preview_host,
+        textvariable=self.manual_history_preview_title_var,
+        bg=panel_bg,
+        fg=palette.get("fg", "#f3f3f3"),
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 11, "bold"),
+    )
+    self.manual_history_preview_title_lbl.pack(
+        fill=tk.X,
+        padx=12,
+        pady=(10, 2),
+    )
+    self.manual_history_preview_hint_lbl = tk.Label(
+        self.manual_history_preview_host,
+        text="Reprezentatywne AT są pokazane jako cropy z niewielkim marginesem.",
+        bg=panel_bg,
+        fg=palette.get("muted", "#c7c7c7"),
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 8),
+    )
+    self.manual_history_preview_hint_lbl.pack(
+        fill=tk.X,
+        padx=12,
+        pady=(0, 4),
+    )
+    self.manual_history_preview_grid = tk.Frame(
+        self.manual_history_preview_host,
+        bg=panel_bg,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.manual_history_preview_grid.pack(
+        fill=tk.BOTH,
+        expand=True,
+        padx=6,
+        pady=(0, 6),
+    )
+    self.manual_history_preview_host.pack_forget()
+    self._manual_history_preview_loaded = False
+    self._manual_history_preview_photo_refs = []
+
     list_lf = ttk.LabelFrame(
         self.preview_left_list_host,
         text=" Lista wyników anotacji ",

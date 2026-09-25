@@ -804,12 +804,17 @@ def _preview_selected_manual_review_history_run(self):
     selected_run = self._get_selected_manual_review_history_run_dir()
     if selected_run is None:
         return False
-    from .z2_run_history_preview import open_run_history_preview
-    return bool(open_run_history_preview(self, selected_run, limit=6))
+    from .z2_run_history_preview import render_run_history_preview_inline
+    return bool(render_run_history_preview_inline(self, selected_run, limit=8))
 
 
 def _on_manual_history_selection_changed(self, event=None):
     selected = bool(self._get_selected_manual_review_history_run_dir() is not None)
+    try:
+        from .z2_run_history_preview import clear_run_history_preview_inline
+        clear_run_history_preview_inline(self, hide=True)
+    except Exception:
+        pass
     for button_name in ("manual_history_open_btn", "manual_history_preview_btn"):
         try:
             button = getattr(self, button_name, None)
