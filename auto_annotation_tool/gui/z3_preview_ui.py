@@ -3610,6 +3610,89 @@ def persist_active_preview_characters(
     )
 
 
+def _apply_registry_az_reuse_best_effort(host, metadata: dict) -> dict:
+    """Nałóż istniejące AZ przy ładowaniu PZ2; awaria registry nie blokuje UI."""
+    try:
+        from ..registry.az_registry import AZRegistry, ensure_campaign_project
+        from ..registry.pz2_az_reuse import apply_reusable_az_to_metadata
+
+        registry = AZRegistry.for_workspace(CONFIG.WORKSPACE_DIR)
+
+        project_id = None
+        active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+        in_campaign = bool(
+            getattr(host, "_step3_linear_mode", False)
+            and active_project
+        )
+
+        if in_campaign:
+            project_data = dict(
+                (CAMPAIGN.state.get("projects", {}) or {}).get(
+                    active_project,
+                    {},
+                )
+                or {}
+            )
+            folder_name = str(
+                project_data.get("folder_name") or ""
+            ).strip()
+            if not folder_name:
+                raise RuntimeError(
+                    "Aktywny projekt kampanii nie ma folder_name."
+                )
+            project_id = ensure_campaign_project(
+                registry,
+                project_name=active_project,
+                folder_name=folder_name,
+            )
+
+        summary = apply_reusable_az_to_metadata(
+            registry,
+            metadata,
+            project_id=project_id,
+        )
+        logger.info(
+            "[AZ][REUSE] scanned=%s resolved=%s applied=%s current=%s "
+            "protected=%s missing=%s invalid=%s errors=%s project=%s",
+            summary.scanned,
+            summary.resolved,
+            summary.applied,
+            summary.already_current,
+            summary.protected,
+            summary.missing_revision,
+            summary.invalid_crop,
+            summary.errors,
+            project_id or "FREE",
+        )
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "scanned": summary.scanned,
+            "resolved": summary.resolved,
+            "applied": summary.applied,
+            "already_current": summary.already_current,
+            "protected": summary.protected,
+            "missing_revision": summary.missing_revision,
+            "invalid_crop": summary.invalid_crop,
+            "errors": summary.errors,
+        }
+    except Exception as exc:
+        logger.warning("[AZ][REUSE] Nie udało się zastosować AZ przy ładowaniu PZ2: %s", exc)
+        return {
+            "ok": False,
+            "project_id": None,
+            "scanned": 0,
+            "resolved": 0,
+            "applied": 0,
+            "already_current": 0,
+            "protected": 0,
+            "missing_revision": 0,
+            "invalid_crop": 0,
+            "errors": 1,
+            "error": str(exc),
+        }
+
+
 def load_preview_data(host, quiet=False):
     self = host
     load_started = time.perf_counter()
@@ -3726,6 +3809,17 @@ def load_preview_data(host, quiet=False):
             phase_started = time.perf_counter()
             changed = False
             review_contract_changed = False
+            az_reuse_changed = False
+            try:
+                az_reuse_summary = _apply_registry_az_reuse_best_effort(self, loaded)
+                az_reuse_changed = bool(
+                    isinstance(az_reuse_summary, dict)
+                    and int(az_reuse_summary.get("applied", 0) or 0) > 0
+                )
+                if az_reuse_changed:
+                    changed = True
+            except Exception:
+                az_reuse_changed = False
             if self._backfill_preview_expected_texts_from_sources(loaded):
                 changed = True
             from .z3_plate_gt_runtime import refresh_working_ground_truth
@@ -3808,7 +3902,7 @@ def load_preview_data(host, quiet=False):
                     pass
             normalize_ms = (time.perf_counter() - phase_started) * 1000.0
 
-            if changed and (not quiet or review_contract_changed):
+            if changed and (not quiet or review_contract_changed or az_reuse_changed):
                 phase_started = time.perf_counter()
                 self._atomic_write_json(meta_path, loaded)
                 current_mtime = meta_path.stat().st_mtime
