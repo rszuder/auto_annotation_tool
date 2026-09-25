@@ -705,7 +705,7 @@ def build_step3_extract_workflow_view_model(
             )
             source_hint = (
                 "Sprawdź tabelę i przejdź do PZ2. Jeśli chcesz świadomie przygotować inny zestaw wyodrębnionych tablic, wróć do wyboru "
-                "i użyj kafla 'Wskaż anotacje do wyodrębnienia'."
+                "i użyj kafla 'Wskaż własne źródło'."
             )
         else:
             source_intro = (
@@ -713,12 +713,18 @@ def build_step3_extract_workflow_view_model(
                 "Nie wskazujesz tutaj ręcznie folderu runu, XML ani obrazów; PZ1 tylko pokazuje, co zostało przejęte."
             )
             source_hint = (
-                "Jeśli chcesz pracować na innym XML lub innym katalogu obrazów, wróć do wyboru i użyj kafla "
-                "'Wskaż anotacje do wyodrębnienia'."
+                "Jeśli chcesz pracować na innym gotowym runie PZ1, XML albo innym katalogu obrazów, wróć do wyboru i użyj kafla "
+                "'Wskaż własne źródło'."
             )
     else:
-        source_intro = "W tym trybie wskazujesz annotations.xml oraz oryginalny katalog obrazów. System dopilnuje zgodności XML z katalogiem."
-        source_hint = "Po wskazaniu XML mogę dodatkowo spróbować dopasować katalog obrazów z Workspace/1_raw_images/."
+        source_intro = (
+            "Własne źródło ma dwa niezależne warianty: gotowe cropy tablic albo "
+            "annotations.xml + obrazy źródłowe."
+        )
+        source_hint = (
+            "Wybierz jeden tor poniżej. Nie trzeba wykonywać obu: gotowy run PZ1 "
+            "przechodzi bezpośrednio do PZ2, a XML + obrazy służą do utworzenia nowego runu cropów."
+        )
 
     if linear_mode:
         if has_preview:
@@ -798,7 +804,10 @@ def build_step3_extract_workflow_view_model(
             )
             run_hint_tone = "muted"
     else:
-        run_hint = "Ten tryb nie wymaga folderu runu anotacji. Wystarczy annotations.xml oraz zgodny katalog obrazów."
+        run_hint = (
+            "Gotowy run PZ1 nie wymaga XML ani pełnych obrazów. "
+            "Jeśli wybierzesz XML + obrazy, PZ1 utworzy nowy zestaw cropów."
+        )
         run_hint_tone = "muted"
 
     step_state = {
@@ -834,7 +843,9 @@ def build_step3_extract_workflow_view_model(
         elif route == "continue":
             entry_card_description = "Kontynuacja po runie anotacji Z2 bez ręcznego wybierania źródeł."
         else:
-            entry_card_description = "Wskażesz annotations.xml i obrazy."
+            entry_card_description = (
+                "Wybierzesz gotowe wyodrębnione tablice albo annotations.xml + obrazy."
+            )
         if route == "continue" and has_preview:
             source_card_description = (
                 "Tabela pokazuje, z którego runu Z2 powstał aktywny zestaw wyodrębnionych tablic "
@@ -845,7 +856,9 @@ def build_step3_extract_workflow_view_model(
         elif route == "continue":
             source_card_description = "Podłącz run Z2; XML i obrazy zostaną wyprowadzone automatycznie."
         else:
-            source_card_description = "Powiąż annotations.xml z katalogiem obrazów."
+            source_card_description = (
+                "Wybierz istniejący run PZ1 albo przygotuj nowy z XML + obrazów."
+            )
         if route == "continue":
             start_card_description = (
                 "Wyodrębnianie zostało już wykonane. Przejdź do PZ2, aby oznaczać znaki na wyodrębnionych tablicach." if has_preview

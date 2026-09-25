@@ -23,6 +23,7 @@ from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z3_extraction_sources import read_xml_plate_attributes
 from .z3_extraction_progress import ExtractionProgress
+from . import z3_preview_run_browser
 
 
 def _is_live_widget(widget) -> bool:
@@ -780,8 +781,8 @@ def refresh_extract_entry_cards(host) -> None:
 
     descriptions = {
         "manual": (
-            "Podaj annotations.xml oraz folder oryginalnych obrazów, z których mam "
-            "wyodrębnić tablice. To dobry tor dla importu z zewnątrz."
+            "Wybierz gotowy run wyodrębnionych tablic albo użyj annotations.xml "
+            "i obrazów źródłowych. Gotowe tablice mogą przejść bezpośrednio do PZ2."
         ),
         "continue": (
             "Tablice są już wyodrębnione. Otwórz kafel, aby zobaczyć tabelę "
@@ -833,7 +834,7 @@ def refresh_extract_entry_cards(host) -> None:
             elif mode == "continue":
                 badge.configure(text="WEJŚCIE Z Z2", fg=muted)
             elif mode == "manual":
-                badge.configure(text="XML + OBRAZY", fg=muted)
+                badge.configure(text="WŁASNE ŹRÓDŁO", fg=muted)
             else:
                 badge.configure(text="WYBIERZ", fg=muted)
         except Exception:
@@ -1815,6 +1816,50 @@ def refresh_extract_start_summary(host, *, lightweight: bool = False):
     self._refresh_extract_action_state(lightweight=lightweight)
 
 
+def normalize_manual_source_kind(host, value: str | None = None) -> str:
+    try:
+        raw = (
+            value
+            if value is not None
+            else host.extract_manual_source_kind_var.get()
+        )
+    except Exception:
+        raw = value or ""
+    normalized = str(raw or "").strip().lower()
+    return normalized if normalized in {"crops", "xml"} else ""
+
+
+def select_manual_source_kind(host, kind: str) -> None:
+    normalized = normalize_manual_source_kind(host, kind)
+    if not normalized:
+        return
+
+    try:
+        host.extract_manual_source_kind_var.set(normalized)
+    except Exception:
+        return
+
+    if normalized == "crops":
+        try:
+            host._extract_last_source_binding_result = {"ok": False}
+        except Exception:
+            pass
+        try:
+            host._set_source_binding_status("", "warning")
+        except Exception:
+            pass
+    else:
+        try:
+            host._refresh_source_binding_status(allow_autofind=False)
+        except Exception:
+            pass
+
+    try:
+        host._refresh_extract_workflow_ui()
+    except Exception:
+        pass
+
+
 def refresh_extract_workflow_ui(host):
     self = host
     workflow_vm = self._get_step3_extract_workflow_view_model()
@@ -1882,17 +1927,141 @@ def refresh_extract_workflow_ui(host):
         except Exception:
             pass
 
+    if hasattr(self, "extract_manual_source_choice_frame"):
+        try:
+            choice_visible = bool(
+                workflow_vm.show_source
+                and route == "manual"
+                and not workflow_vm.linear_mode
+            )
+            if choice_visible:
+                if not str(
+                    self.extract_manual_source_choice_frame.winfo_manager()
+                ):
+                    self.extract_manual_source_choice_frame.pack(
+                        fill=tk.X,
+                        pady=(0, 12),
+                        after=getattr(
+                            self,
+                            "extract_source_intro_lbl",
+                            None,
+                        ),
+                    )
+            elif str(
+                self.extract_manual_source_choice_frame.winfo_manager()
+            ):
+                self.extract_manual_source_choice_frame.pack_forget()
+        except Exception:
+            pass
+
+    manual_source_kind = normalize_manual_source_kind(self)
+
+    try:
+        crops_btn = getattr(self, "extract_manual_crops_btn", None)
+        xml_btn = getattr(self, "extract_manual_xml_btn", None)
+        if crops_btn is not None:
+            crops_btn.configure(
+                style=(
+                    "WorkflowCardPrimary.TButton"
+                    if manual_source_kind == "crops"
+                    else "WorkflowCard.TButton"
+                )
+            )
+        if xml_btn is not None:
+            xml_btn.configure(
+                style=(
+                    "WorkflowCardPrimary.TButton"
+                    if manual_source_kind == "xml"
+                    else "WorkflowCard.TButton"
+                )
+            )
+    except Exception:
+        pass
+
+    if hasattr(self, "extract_preview_run_frame"):
+        try:
+            browser_visible = bool(
+                workflow_vm.show_source
+                and route == "manual"
+                and not workflow_vm.linear_mode
+                and manual_source_kind == "crops"
+            )
+            if browser_visible:
+                if not str(self.extract_preview_run_frame.winfo_manager()):
+                    self.extract_preview_run_frame.pack(
+                        fill=tk.X,
+                        pady=(0, 12),
+                        after=getattr(
+                            self,
+                            "extract_manual_source_choice_frame",
+                            None,
+                        ),
+                    )
+                right_panel = getattr(
+                    self,
+                    "extract_preview_run_right_panel",
+                    None,
+                )
+                if right_panel is not None:
+                    try:
+                        right_panel.grid()
+                    except Exception:
+                        pass
+                z3_preview_run_browser.refresh_preview_run_browser(
+                    self,
+                    force=False,
+                )
+            else:
+                if str(self.extract_preview_run_frame.winfo_manager()):
+                    self.extract_preview_run_frame.pack_forget()
+                right_panel = getattr(
+                    self,
+                    "extract_preview_run_right_panel",
+                    None,
+                )
+                if right_panel is not None:
+                    try:
+                        right_panel.grid_remove()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     if hasattr(self, "extract_source_fields_frame"):
         try:
-            fields_visible = bool(workflow_vm.show_source and route == "manual")
+            fields_visible = bool(
+                workflow_vm.show_source
+                and route == "manual"
+                and not workflow_vm.linear_mode
+                and manual_source_kind == "xml"
+            )
             if fields_visible:
                 if not str(self.extract_source_fields_frame.winfo_manager()):
                     self.extract_source_fields_frame.pack(
                         fill=tk.X,
-                        after=getattr(self, "extract_source_intro_lbl", None),
+                        after=getattr(
+                            self,
+                            "extract_manual_source_choice_frame",
+                            None,
+                        ),
                     )
             elif str(self.extract_source_fields_frame.winfo_manager()):
                 self.extract_source_fields_frame.pack_forget()
+        except Exception:
+            pass
+
+    if manual_source_kind != "xml":
+        try:
+            status_frame = getattr(
+                self,
+                "source_binding_status_frame",
+                None,
+            )
+            if (
+                status_frame is not None
+                and str(status_frame.winfo_manager())
+            ):
+                status_frame.pack_forget()
         except Exception:
             pass
 
@@ -2639,7 +2808,8 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
 
     parent.grid_rowconfigure(0, weight=1)
     parent.grid_rowconfigure(1, weight=0)
-    parent.grid_columnconfigure(0, weight=1)
+    parent.grid_columnconfigure(0, weight=0)
+    parent.grid_columnconfigure(1, weight=1)
 
     self._extract_content_inset = 14
     self._extract_content_max_width = 760
@@ -2649,7 +2819,18 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     left_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 5))
     self.extract_main_left_frame = left_frame
     self.extract_main_pane = None
-    self.extract_main_right_frame = None
+
+    right_frame = ttk.Frame(parent, style="Panel.TFrame")
+    right_frame.grid(
+        row=0,
+        column=1,
+        sticky="nsew",
+        padx=(0, 10),
+        pady=(10, 5),
+    )
+    right_frame.grid_rowconfigure(0, weight=1)
+    right_frame.grid_columnconfigure(0, weight=1)
+    self.extract_main_right_frame = right_frame
 
     left_frame.grid_rowconfigure(0, weight=1)
     left_frame.grid_rowconfigure(1, weight=0)
@@ -2827,7 +3008,7 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     manual_card.pack(fill=tk.X)
     manual_badge = tk.Label(
         manual_card,
-        text="XML + OBRAZY",
+        text="WŁASNE ŹRÓDŁO",
         anchor="w",
         justify=tk.LEFT,
         font=("Segoe UI", 9, "bold"),
@@ -2838,7 +3019,7 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     manual_badge.pack(anchor=tk.W, fill=tk.X)
     manual_title = tk.Label(
         manual_card,
-        text="Wskaż anotacje do wyodrębnienia",
+        text="Wskaż własne źródło",
         anchor="w",
         justify=tk.LEFT,
         font=("Segoe UI Semibold", 11),
@@ -2850,8 +3031,8 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     manual_desc = tk.Label(
         manual_card,
         text=(
-            "Podaj annotations.xml oraz folder oryginalnych obrazów, z których mam "
-            "wyciąć tablice. To dobry tor dla importu z zewnątrz."
+            "Wybierz gotowy run wyodrębnionych tablic albo użyj annotations.xml "
+            "i obrazów źródłowych. Gotowe tablice mogą przejść bezpośrednio do PZ2."
         ),
         anchor="w",
         justify=tk.LEFT,
@@ -3002,9 +3183,211 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     ensure_wrap(self.extract_continue_images_value_lbl, self.extract_continue_summary_frame, padding=120, min_wrap=220)
     self._refresh_continue_source_summary()
 
+    self.extract_manual_source_kind_var = tk.StringVar(value="")
+
+    self.extract_manual_source_choice_frame = ttk.LabelFrame(
+        self.extract_source_section,
+        text=" Wybierz rodzaj własnego źródła ",
+        padding=12,
+    )
+    self.extract_manual_source_choice_frame.pack(fill=tk.X, pady=(0, 12))
+    self.extract_manual_source_choice_frame.pack_forget()
+
+    self.extract_manual_source_choice_hint_lbl = tk.Label(
+        self.extract_manual_source_choice_frame,
+        text="To dwa niezależne tory. Wybierz jeden — drugi zostanie ukryty.",
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=720,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.extract_manual_source_choice_hint_lbl.pack(
+        anchor=tk.W,
+        fill=tk.X,
+        pady=(0, 8),
+    )
+    self._set_inline_status_label_state(
+        self.extract_manual_source_choice_hint_lbl,
+        text=self.extract_manual_source_choice_hint_lbl.cget("text"),
+        tone="muted",
+        emphasis=False,
+    )
+    ensure_wrap(
+        self.extract_manual_source_choice_hint_lbl,
+        self.extract_manual_source_choice_frame,
+        padding=28,
+        min_wrap=240,
+    )
+
+    self.extract_manual_source_choice_row = ttk.Frame(
+        self.extract_manual_source_choice_frame
+    )
+    self.extract_manual_source_choice_row.pack(fill=tk.X)
+    self.extract_manual_source_choice_row.grid_columnconfigure(
+        0, weight=1, uniform="z3_manual_source"
+    )
+    self.extract_manual_source_choice_row.grid_columnconfigure(
+        1, weight=1, uniform="z3_manual_source"
+    )
+
+    self.extract_manual_crops_btn = ttk.Button(
+        self.extract_manual_source_choice_row,
+        text="Gotowe tablice\nUżyj istniejącego runu PZ1",
+        style="WorkflowCard.TButton",
+        command=lambda: select_manual_source_kind(self, "crops"),
+    )
+    self.extract_manual_crops_btn.grid(
+        row=0, column=0, sticky="ew", padx=(0, 6)
+    )
+
+    self.extract_manual_xml_btn = ttk.Button(
+        self.extract_manual_source_choice_row,
+        text="XML + obrazy\nUtwórz nowy run cropów",
+        style="WorkflowCard.TButton",
+        command=lambda: select_manual_source_kind(self, "xml"),
+    )
+    self.extract_manual_xml_btn.grid(
+        row=0, column=1, sticky="ew", padx=(6, 0)
+    )
+
+    self.extract_preview_run_frame = ttk.LabelFrame(
+        self.extract_source_section,
+        text=" Gotowe tablice — istniejący run PZ1 ",
+        padding=12,
+    )
+    self.extract_preview_run_frame.pack(fill=tk.X, pady=(0, 12))
+    self.extract_preview_run_frame.pack_forget()
+
+    self.extract_preview_run_var = tk.StringVar(value="")
+    self.extract_preview_run_combo = ttk.Combobox(
+        self.extract_preview_run_frame,
+        textvariable=self.extract_preview_run_var,
+        state="readonly",
+    )
+    self.extract_preview_run_combo.pack(fill=tk.X)
+    self.extract_preview_run_combo.bind(
+        "<<ComboboxSelected>>",
+        lambda event: z3_preview_run_browser.on_preview_run_selection_changed(
+            self,
+            event,
+        ),
+    )
+
+    self.extract_preview_run_actions = ttk.Frame(
+        self.extract_preview_run_frame
+    )
+    self.extract_preview_run_actions.pack(fill=tk.X, pady=(8, 0))
+
+    self.extract_preview_run_use_btn = ttk.Button(
+        self.extract_preview_run_actions,
+        text="Użyj tego runu i przejdź do PZ2",
+        command=lambda: z3_preview_run_browser.use_selected_preview_run(self),
+        state=tk.DISABLED,
+    )
+    self.extract_preview_run_use_btn.pack(
+        side=tk.LEFT,
+        fill=tk.X,
+        expand=True,
+    )
+
+    self.extract_preview_run_refresh_btn = ttk.Button(
+        self.extract_preview_run_actions,
+        text="Odśwież listę",
+        command=lambda: z3_preview_run_browser.refresh_preview_run_browser(
+            self,
+            force=True,
+        ),
+    )
+    self.extract_preview_run_refresh_btn.pack(
+        side=tk.LEFT,
+        padx=(8, 0),
+    )
+
+    self.extract_preview_run_external_btn = ttk.Button(
+        self.extract_preview_run_frame,
+        text="Wskaż run spoza listy…",
+        command=lambda: z3_preview_run_browser.pick_external_preview_run(self),
+    )
+    self.extract_preview_run_external_btn.pack(
+        anchor=tk.W,
+        pady=(8, 0),
+    )
+
+    self.extract_preview_run_right_panel = tk.Frame(
+        right_frame,
+        bg=panel_bg,
+        bd=0,
+        highlightthickness=0,
+    )
+    self.extract_preview_run_right_panel.grid(
+        row=0,
+        column=0,
+        sticky="nsew",
+    )
+    self.extract_preview_run_right_panel.grid_remove()
+
+    self.extract_preview_run_right_title_lbl = tk.Label(
+        self.extract_preview_run_right_panel,
+        text="Podgląd wybranego runu PZ1",
+        bg=panel_bg,
+        fg=palette.get("fg", "#f3f3f3"),
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI Semibold", 12),
+        bd=0,
+        highlightthickness=0,
+    )
+    self.extract_preview_run_right_title_lbl.pack(
+        fill=tk.X,
+        padx=10,
+        pady=(8, 2),
+    )
+
+    self.extract_preview_run_summary_var = tk.StringVar(
+        value="Wybierz run po lewej stronie."
+    )
+    self.extract_preview_run_summary_lbl = tk.Label(
+        self.extract_preview_run_right_panel,
+        textvariable=self.extract_preview_run_summary_var,
+        bg=panel_bg,
+        fg=palette.get("muted", "#c7c7c7"),
+        anchor="w",
+        justify=tk.LEFT,
+        wraplength=900,
+        bd=0,
+        highlightthickness=0,
+        font=("Segoe UI", 9),
+    )
+    self.extract_preview_run_summary_lbl.pack(
+        anchor=tk.W,
+        fill=tk.X,
+        padx=10,
+        pady=(0, 8),
+    )
+    ensure_wrap(
+        self.extract_preview_run_summary_lbl,
+        self.extract_preview_run_right_panel,
+        padding=28,
+        min_wrap=320,
+    )
+
+    self.extract_preview_run_grid = tk.Frame(
+        self.extract_preview_run_right_panel,
+        bd=0,
+        highlightthickness=0,
+        bg=panel_bg,
+    )
+    self.extract_preview_run_grid.pack(
+        fill=tk.BOTH,
+        expand=True,
+        padx=4,
+        pady=(0, 6),
+    )
+
     self.extract_source_fields_frame = ttk.LabelFrame(
         self.extract_source_section,
-        text=" annotations.xml i katalog obrazów ",
+        text=" XML + obrazy — utwórz nowy run cropów ",
         padding=12,
     )
     self.extract_source_fields_frame.pack(fill=tk.X)
@@ -3497,7 +3880,14 @@ def build_extraction_tab(host, parent, SlimProgressBar, nav_button_width):
     self.extract_step_next_btn.config(text="Dalej", padding=(8, 2), width=NAV_BUTTON_WIDTH)
 
     self.extract_main_nav_panel = ttk.Frame(parent, style="Panel.TFrame")
-    self.extract_main_nav_panel.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+    self.extract_main_nav_panel.grid(
+        row=1,
+        column=0,
+        columnspan=2,
+        sticky="ew",
+        padx=10,
+        pady=(0, 10),
+    )
     self.extract_main_nav_panel.grid_remove()
 
     self.extract_nav_divider = tk.Frame(
