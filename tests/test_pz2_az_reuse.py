@@ -353,5 +353,80 @@ class PZ2AZReusePolicyTests(unittest.TestCase):
         self.assertEqual(reason, "manual_source")
 
 
+def test_registry_az_reuse_after_load_persists_when_applied(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+
+    from auto_annotation_tool.gui import z3_preview_ui
+
+    meta_path = tmp_path / "metadata.json"
+    meta_path.write_text('{"plate": {}}', encoding="utf-8")
+
+    host = SimpleNamespace(
+        preview_metadata={"plate": {}},
+        _loaded_meta_path=meta_path,
+        _loaded_meta_mtime=None,
+        _atomic_write_json=Mock(
+            side_effect=lambda path, payload: Path(path).write_text(
+                __import__("json").dumps(payload),
+                encoding="utf-8",
+            )
+        ),
+    )
+
+    with patch.object(
+        z3_preview_ui,
+        "_apply_registry_az_reuse_best_effort",
+        return_value={"ok": True, "applied": 1},
+    ) as apply_reuse:
+        result = z3_preview_ui._apply_registry_az_reuse_after_load(
+            host,
+            meta_path,
+        )
+
+    self_payload = __import__("json").loads(
+        meta_path.read_text(encoding="utf-8")
+    )
+    assert result["applied"] == 1
+    assert apply_reuse.call_count == 1
+    host._atomic_write_json.assert_called_once_with(
+        meta_path,
+        host.preview_metadata,
+    )
+    assert self_payload == host.preview_metadata
+    assert host._loaded_meta_path == meta_path
+    assert host._loaded_meta_mtime is not None
+
+
+def test_registry_az_reuse_after_load_does_not_write_when_no_change(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import Mock, patch
+
+    from auto_annotation_tool.gui import z3_preview_ui
+
+    meta_path = tmp_path / "metadata.json"
+    meta_path.write_text('{"plate": {}}', encoding="utf-8")
+
+    host = SimpleNamespace(
+        preview_metadata={"plate": {}},
+        _loaded_meta_path=meta_path,
+        _loaded_meta_mtime=meta_path.stat().st_mtime,
+        _atomic_write_json=Mock(),
+    )
+
+    with patch.object(
+        z3_preview_ui,
+        "_apply_registry_az_reuse_best_effort",
+        return_value={"ok": True, "applied": 0},
+    ):
+        result = z3_preview_ui._apply_registry_az_reuse_after_load(
+            host,
+            meta_path,
+        )
+
+    assert result["applied"] == 0
+    host._atomic_write_json.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3693,6 +3693,35 @@ def _apply_registry_az_reuse_best_effort(host, metadata: dict) -> dict:
         }
 
 
+
+def _apply_registry_az_reuse_after_load(host, meta_path: Path) -> dict:
+    """Uruchom AZ reuse niezależnie od tego, czy metadata wymagało reloadu."""
+    metadata = getattr(host, "preview_metadata", None)
+    if not isinstance(metadata, dict) or not metadata:
+        return {"ok": True, "applied": 0}
+
+    result = _apply_registry_az_reuse_best_effort(host, metadata)
+    applied = (
+        int(result.get("applied", 0) or 0)
+        if isinstance(result, dict)
+        else 0
+    )
+    if applied <= 0:
+        return (
+            result
+            if isinstance(result, dict)
+            else {"ok": False, "applied": 0}
+        )
+
+    host._atomic_write_json(meta_path, metadata)
+    host._loaded_meta_path = meta_path
+    try:
+        host._loaded_meta_mtime = meta_path.stat().st_mtime
+    except Exception:
+        host._loaded_meta_mtime = None
+    return result
+
+
 def load_preview_data(host, quiet=False):
     self = host
     load_started = time.perf_counter()
@@ -3809,17 +3838,6 @@ def load_preview_data(host, quiet=False):
             phase_started = time.perf_counter()
             changed = False
             review_contract_changed = False
-            az_reuse_changed = False
-            try:
-                az_reuse_summary = _apply_registry_az_reuse_best_effort(self, loaded)
-                az_reuse_changed = bool(
-                    isinstance(az_reuse_summary, dict)
-                    and int(az_reuse_summary.get("applied", 0) or 0) > 0
-                )
-                if az_reuse_changed:
-                    changed = True
-            except Exception:
-                az_reuse_changed = False
             if self._backfill_preview_expected_texts_from_sources(loaded):
                 changed = True
             from .z3_plate_gt_runtime import refresh_working_ground_truth
@@ -3902,7 +3920,7 @@ def load_preview_data(host, quiet=False):
                     pass
             normalize_ms = (time.perf_counter() - phase_started) * 1000.0
 
-            if changed and (not quiet or review_contract_changed or az_reuse_changed):
+            if changed and (not quiet or review_contract_changed):
                 phase_started = time.perf_counter()
                 self._atomic_write_json(meta_path, loaded)
                 current_mtime = meta_path.stat().st_mtime
@@ -3913,6 +3931,17 @@ def load_preview_data(host, quiet=False):
             self.preview_metadata = loaded
             self._loaded_meta_path = meta_path
             self._loaded_meta_mtime = current_mtime
+
+        # AZ reuse musi działać także wtedy, gdy preview_metadata było już
+        # załadowane i need_reload=False. Resolver jest idempotentny:
+        # ta sama rewizja daje already_current, a praca człowieka jest chroniona.
+        try:
+            _apply_registry_az_reuse_after_load(self, meta_path)
+        except Exception as reuse_exc:
+            logger.warning(
+                "[AZ][REUSE] Nie udało się utrwalić reuse po load PZ2: %s",
+                reuse_exc,
+            )
 
         phase_started = time.perf_counter()
         self._apply_preview_metadata_update(
