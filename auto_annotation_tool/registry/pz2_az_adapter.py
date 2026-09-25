@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Adapter realnego metadata PZ2 do przenośnego canonical AZ payload."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from .az_revision_store import canonicalize_az_payload
+
+
+@dataclass(frozen=True)
+class PZ2AZRevisionContext:
+    source_kind: str
+    trust_state: str
+    source_status: str
+    effective_status: str
+
+
+def pz2_metadata_to_az_payload(
+    data: Mapping[str, Any],
+    *,
+    image_width: float | int | None = None,
+    image_height: float | int | None = None,
+) -> dict[str, Any]:
+    """Przekształć jeden rekord metadata.json PZ2 do canonical AZ payload.
+
+    Bboxy PZ2 są w pikselach. Adapter normalizuje je do [0, 1].
+    Wymiary można podać jawnie albo pobrać z plate_image_width/height.
+    """
+    if not isinstance(data, Mapping):
+        raise TypeError("PZ2 metadata row musi być mapowaniem.")
+
+    crop_identity_sha256 = str(
+        data.get("crop_identity_sha256") or ""
+    ).strip().lower()
+    if not crop_identity_sha256:
+        raise ValueError(
+            "Brak crop_identity_sha256. Rekord musi pochodzić z AZ003C."
+        )
+
+    chars = data.get("characters")
+    chars = chars if isinstance(chars, list) else []
+
+    width = _dimension(
+        image_width if image_width is not None else data.get("plate_image_width"),
+        "image_width",
+        required=bool(chars),
+    )
+    height = _dimension(
+        image_height if image_height is not None else data.get("plate_image_height"),
+        "image_height",
+        required=bool(chars),
+    )
+
+    canonical_chars = []
+    for index, rec in enumerate(chars):
+        if not isinstance(rec, Mapping):
+            raise ValueError(f"characters[{index}] musi być mapowaniem.")
+
+        bbox = rec.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+            raise ValueError(f"characters[{index}].bbox musi mieć 4 wartości.")
+
+        try:
+            x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"characters[{index}].bbox zawiera nieprawidłowe liczby."
+            ) from exc
+
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+
+        row = _int_or_zero(rec.get("reading_row"))
+        if row <= 0:
+            row = 0
+
+        canonical_chars.append(
+            {
+                "character": str(
+                    rec.get("character")
+                    or rec.get("text")
+                    or rec.get("char")
+                    or ""
+                ).strip().upper(),
+                "bbox": [
+                    x1 / width,
+                    y1 / height,
+                    x2 / width,
+                    y2 / height,
+                ],
+                "row": row,
+                "method": str(rec.get("method") or "").strip(),
+                "source_kind": _character_source_kind(rec),
+                "confidence": _float_or_default(
+                    rec.get("confidence"),
+                    1.0,
+                ),
+            }
+        )
+
+    gold_raw = data.get("gold_state")
+    gold_raw = gold_raw if isinstance(gold_raw, Mapping) else {}
+
+    payload = {
+        "crop_identity_sha256": crop_identity_sha256,
+        "characters": canonical_chars,
+        "layout": {
+            "kind": _layout_kind(data),
+            "confirmed": _layout_confirmed(data),
+        },
+        "gold_state": {
+            "approved": bool(gold_raw.get("approved", False)),
+            "excluded": bool(gold_raw.get("excluded", False)),
+            "candidate": bool(gold_raw.get("candidate", False)),
+        },
+        "status": str(data.get("status") or "unknown").strip().lower()
+        or "unknown",
+    }
+
+    expected_text = _expected_text(data)
+    if expected_text:
+        payload["expected_text"] = expected_text
+
+    return canonicalize_az_payload(payload)
+
+
+def derive_pz2_revision_context(
+    data: Mapping[str, Any],
+) -> PZ2AZRevisionContext:
+    """Wyznacz kontekst rewizji bez zależności od GUI."""
+    if not isinstance(data, Mapping):
+        raise TypeError("PZ2 metadata row musi być mapowaniem.")
+
+    status = str(data.get("status") or "unknown").strip().lower() or "unknown"
+
+    gold_raw = data.get("gold_state")
+    gold_raw = gold_raw if isinstance(gold_raw, Mapping) else {}
+    excluded = bool(gold_raw.get("excluded", False))
+    approved = bool(gold_raw.get("approved", False))
+
+    source_info = data.get("source_info")
+    source_info = source_info if isinstance(source_info, Mapping) else {}
+    bucket = str(source_info.get("bucket") or "").strip().lower()
+    origin = str(source_info.get("origin") or "").strip().lower()
+
+    char_kinds = {
+        _character_source_kind(rec)
+        for rec in (data.get("characters") or [])
+        if isinstance(rec, Mapping)
+    }
+
+    if "cvat_manual" in char_kinds or bucket == "cvat_manual" or origin == "cvat_import":
+        source_kind = "cvat_manual"
+        trust_state = "external_reviewed"
+    elif "local_manual" in char_kinds or bucket == "local_manual" or origin == "preview_editor":
+        source_kind = "local_manual"
+        trust_state = "local_manual"
+    else:
+        source_kind = "pz2_detect"
+        trust_state = "auto"
+
+    if excluded:
+        effective_status = "excluded"
+    elif approved:
+        effective_status = "approved"
+    elif status == "perfect":
+        effective_status = "ready"
+    elif status in {"needs_fix", "unknown"}:
+        effective_status = status
+    else:
+        effective_status = status
+
+    return PZ2AZRevisionContext(
+        source_kind=source_kind,
+        trust_state=trust_state,
+        source_status=status,
+        effective_status=effective_status,
+    )
+
+
+def _dimension(value: Any, name: str, *, required: bool) -> float:
+    if value is None or str(value).strip() == "":
+        if required:
+            raise ValueError(
+                f"Brak {name}; nie można normalizować bboxów PZ2."
+            )
+        return 1.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} musi być liczbą dodatnią.") from exc
+    if number <= 0:
+        raise ValueError(f"{name} musi być > 0.")
+    return number
+
+
+def _character_source_kind(rec: Mapping[str, Any]) -> str:
+    explicit = str(rec.get("source_kind") or "").strip().lower().replace("-", "_")
+    if explicit:
+        return explicit
+
+    method = str(rec.get("method") or "").strip().lower().replace("-", "_")
+    tag = str(rec.get("source_tag") or "").strip().lower().replace("-", "_")
+
+    if method == "cvat_manual":
+        return "cvat_manual"
+    if method == "manual" or tag in {"manual", "manual_correction"}:
+        return "local_manual"
+    if method in {"yolo", "yolo_box", "yolo_symbol", "yolo_ocr"}:
+        return "yolo_box_ocr" if method == "yolo_ocr" else method
+    if method == "ocr" or tag == "ocr":
+        return "ocr"
+    return explicit or method or tag or "unknown"
+
+
+def _layout_kind(data: Mapping[str, Any]) -> str:
+    override = str(data.get("plate_layout_override") or "").strip().lower()
+    if override in {"single_row", "two_row"}:
+        return override
+
+    layout = str(data.get("plate_layout") or "").strip().lower()
+    if layout in {"single_row", "two_row"}:
+        return layout
+    if layout in {"1r", "1_row"}:
+        return "single_row"
+    if layout in {"2r", "2_row", "two_row_candidate"}:
+        return "two_row"
+    return "unknown"
+
+
+def _layout_confirmed(data: Mapping[str, Any]) -> bool:
+    override = str(data.get("plate_layout_override") or "").strip().lower()
+    source = str(data.get("layout_source") or "").strip().lower()
+    return bool(
+        override in {"single_row", "two_row"}
+        or source == "manual_override"
+    )
+
+
+def _expected_text(data: Mapping[str, Any]) -> str:
+    direct = str(data.get("ground_truth_text") or "").strip()
+    if direct:
+        return direct.upper()
+
+    attrs = data.get("plate_attributes")
+    if isinstance(attrs, Mapping):
+        nested = str(attrs.get("ground_truth_text") or "").strip()
+        if nested:
+            return nested.upper()
+
+    source_expected = str(data.get("source_expected_text") or "").strip()
+    return source_expected.upper()
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _float_or_default(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
