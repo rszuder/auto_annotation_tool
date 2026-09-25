@@ -646,6 +646,65 @@ class AZRegistry:
         )
 
 
+
+def project_id_from_folder_name(folder_name: str) -> str:
+    """Stabilny project_id zgodny z historycznym registry eksperymentów."""
+    normalized = str(folder_name or "").strip().replace("\\", "/").casefold()
+    if not normalized:
+        return ""
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest().upper()
+    return f"PRJ-{digest[:20]}"
+
+
+def ensure_campaign_project(
+    registry: AZRegistry,
+    *,
+    project_name: str,
+    folder_name: str,
+) -> str:
+    """Zapewnij rekord projektu kampanii w SQLite i zwróć stabilny project_id."""
+    display_name = str(project_name or "").strip()
+    folder = str(folder_name or "").strip()
+    if not display_name:
+        raise ValueError("project_name nie może być puste")
+    if not folder:
+        raise ValueError("folder_name nie może być puste")
+
+    project_id = project_id_from_folder_name(folder)
+    if not project_id:
+        raise ValueError("Nie udało się wyliczyć project_id")
+
+    registry.initialize()
+    now = _utc_now_iso()
+    with registry.database.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO projects (
+                project_id,
+                campaign_key,
+                folder_name,
+                display_name,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(project_id) DO UPDATE SET
+                campaign_key = excluded.campaign_key,
+                folder_name = excluded.folder_name,
+                display_name = excluded.display_name,
+                created_at = COALESCE(projects.created_at, excluded.created_at),
+                updated_at = excluded.updated_at
+            """,
+            (
+                project_id,
+                display_name,
+                folder,
+                display_name,
+                now,
+                now,
+            ),
+        )
+    return project_id
+
 def source_image_id_from_sha256(sha256: str) -> str:
     """Id zgodny z historycznym registry eksperymentów."""
     digest = _require_sha256("sha256", sha256)

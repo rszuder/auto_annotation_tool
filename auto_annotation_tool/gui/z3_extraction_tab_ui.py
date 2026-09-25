@@ -2112,6 +2112,97 @@ def _continue_campaign_pz1_to_pz2(host) -> bool:
     return False
 
 
+
+def _register_completed_pz1_run_in_az_registry(
+    host,
+    run_dir: Path,
+    *,
+    interpolation: str,
+    source_at_ref: str = "",
+) -> dict:
+    """Best-effort rejestracja finalnego runu PZ1 w registry AZ.
+
+    Awaria registry nie może przerwać istniejącego workflow PZ1/PZ2.
+    """
+    try:
+        from ..registry.az_registry import (
+            AZRegistry,
+            ensure_campaign_project,
+        )
+        from ..registry.pz1_run_registry import register_pz1_preview_run
+
+        registry = AZRegistry.for_workspace(CONFIG.WORKSPACE_DIR)
+
+        project_id = None
+        iteration_num = None
+        active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+        in_campaign = bool(
+            getattr(host, "_step3_linear_mode", False)
+            and active_project
+        )
+
+        if in_campaign:
+            project_data = dict(
+                (CAMPAIGN.state.get("projects", {}) or {}).get(
+                    active_project,
+                    {},
+                )
+                or {}
+            )
+            folder_name = str(
+                project_data.get("folder_name") or ""
+            ).strip()
+            if not folder_name:
+                raise RuntimeError(
+                    "Aktywny projekt kampanii nie ma folder_name."
+                )
+
+            project_id = ensure_campaign_project(
+                registry,
+                project_name=active_project,
+                folder_name=folder_name,
+            )
+            iteration_num = int(
+                CAMPAIGN.get_current_iteration_num() or 1
+            )
+
+        report = register_pz1_preview_run(
+            registry,
+            run_dir,
+            interpolation=interpolation,
+            project_id=project_id,
+            iteration_num=iteration_num,
+            source_mode="pz1",
+            source_at_ref=str(source_at_ref or "").strip() or None,
+        )
+        payload = report.to_dict()
+        payload["ok"] = True
+        payload["project_id"] = project_id
+        payload["iteration_num"] = iteration_num
+
+        logger.info(
+            "[AZ][PZ1] registry: total=%s new_crops=%s reused_crops=%s "
+            "new_artifacts=%s project=%s iteration=%s",
+            payload.get("total", 0),
+            payload.get("new_crops", 0),
+            payload.get("reused_crops", 0),
+            payload.get("new_artifacts", 0),
+            project_id or "FREE",
+            iteration_num or 0,
+        )
+        return payload
+    except Exception as exc:
+        logger.warning(
+            "[AZ][PZ1] Nie udało się zarejestrować runu %s: %s",
+            run_dir,
+            exc,
+        )
+        return {
+            "ok": False,
+            "preview_dir": str(run_dir or ""),
+            "error": str(exc),
+        }
+
 def run_extraction(host) -> None:
     self = host
     campaign_step3_active = _campaign_step3_context_active(self)
@@ -2408,6 +2499,15 @@ def run_extraction(host) -> None:
                 logger.debug(f"Nie udało się zachować poprzednich boxów przy reextractcie Z3: {merge_exc}")
             finally:
                 self._campaign_step3_reextract_seed_metadata = {}
+
+            if generated_count > 0:
+                _register_completed_pz1_run_in_az_registry(
+                    self,
+                    run_dir,
+                    interpolation=interpolation,
+                    source_at_ref=str(xml_path),
+                )
+
             if self.is_processing and session_token == self._project_reset_token:
                 campaign_step3_active = bool(
                     getattr(self, "_step3_linear_mode", False)
