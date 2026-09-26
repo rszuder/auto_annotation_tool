@@ -2,6 +2,9 @@
 from time import perf_counter
 import tkinter as tk
 
+from .app_theme_definitions import get_runtime_palette
+from .campaign_sidebar import ProjectSidebarToggle
+
 
 class WorkspaceDrawers:
     duration = .18
@@ -21,13 +24,35 @@ class WorkspaceDrawers:
         self.target = dict(self.visible)
         self.buttons = {}
         self._job = self._restore_job = self._complete = None
+        palette = get_runtime_palette(owner)
         for side, parent in self.parents.items():
-            self.buttons[side] = tk.Button(
-                parent, command=lambda key=side: self.toggle(key), takefocus=False,
-                bd=0, padx=7, pady=4, cursor="hand2", bg="#233342", fg="#b8edff",
-                activebackground="#344e64", activeforeground="#ffffff",
-                font=("Segoe UI", 9, "bold"),
-            )
+            if side in {"left", "right"}:
+                label = "Tablice" if side == "left" else "Ustawienia"
+                self.buttons[side] = ProjectSidebarToggle(
+                    parent,
+                    palette,
+                    lambda key=side: self.toggle(key),
+                    collapsed_text=label,
+                    expanded_text=label,
+                    orientation="vertical",
+                    side=side,
+                )
+                self.buttons[side].place_forget()
+            else:
+                self.buttons[side] = tk.Button(
+                    parent,
+                    command=lambda key=side: self.toggle(key),
+                    takefocus=False,
+                    bd=0,
+                    padx=7,
+                    pady=4,
+                    cursor="hand2",
+                    bg="#233342",
+                    fg="#b8edff",
+                    activebackground="#344e64",
+                    activeforeground="#ffffff",
+                    font=("Segoe UI", 9, "bold"),
+                )
             parent.bind("<Configure>", self._configure, add="+")
         self.host.bind("<Destroy>", self._destroy, add="+")
 
@@ -108,12 +133,24 @@ class WorkspaceDrawers:
                 extent = min(saved["extent"], max(180, width - 80))
                 x = round(-extent * (1 - fraction)) if side == "left" else round(width - extent * fraction)
                 panel.place(x=x, y=0, width=extent, height=height)
+
+                panel_visible_target = bool(self.target[side])
+                button.set_collapsed(not panel_visible_target)
+
                 if side == "left":
-                    button.configure(text="‹ Tablice" if self.target[side] else "Tablice ›")
-                    button.place(x=max(0, x + extent), rely=.52, anchor="w")
+                    boundary = max(0, x + extent)
+                    button.place(
+                        x=boundary - 2 if panel_visible_target else boundary + 2,
+                        rely=.52,
+                        anchor="e" if panel_visible_target else "w",
+                    )
                 else:
-                    button.configure(text="Ustawienia ›" if self.target[side] else "‹ Ustawienia")
-                    button.place(x=min(width, x), rely=.52, anchor="e")
+                    boundary = min(width, x)
+                    button.place(
+                        x=boundary + 2 if panel_visible_target else boundary - 2,
+                        rely=.52,
+                        anchor="w" if panel_visible_target else "e",
+                    )
             panel.lift()
             button.lift()
             if not getattr(self.owner, "_preview_fullscreen_active", False):

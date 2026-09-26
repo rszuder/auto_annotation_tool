@@ -1158,8 +1158,15 @@ def build_detection_tab(
     self.preview_list_intro_lbl = tk.Label(
         list_lf,
         text=(
-            "Tutaj sprawdzasz znaki na wyodrębnionych tablicach: poprawiasz ramki, wpisujesz znaki "
-            "i zatwierdzasz gotowe tablice. Gdy masz wystarczającą liczbę zatwierdzonych tablic, utwórz zbiór znaków."
+            "1. Wybierz tablicę z listy i kliknij „Sprawdź i popraw”, jeśli wynik nie jest jeszcze otwarty do korekty.\n"
+            "2. Popraw boxy znaków. Aby wpisać lub poprawić znaki, użyj Alt+W, wybierz aktywny box "
+            "i wpisuj 0-9/A-Z.\n"
+            "3. Jeśli widzisz „Numer z Z2: …”, jest to numer zapisany wcześniej. Edycja boxów i znaków "
+            "nie zmienia go automatycznie — odczyt powinien się z nim zgadzać.\n"
+            "4. Jeśli numeru jeszcze nie ma, po sprawdzeniu całej tablicy naciśnij O. Program zapisze "
+            "aktualny odczyt jako numer tablicy i nada status OK.\n"
+            "5. Jeśli zapisany numer z Z2 jest błędny, użyj „Zmień numer”.\n"
+            "6. Po przygotowaniu wymaganej liczby tablic wybierz „Krok 2: dataset PZ3”."
         ),
         anchor="w",
         justify=tk.LEFT,
@@ -2448,6 +2455,39 @@ def build_detection_tab(
     preview_status_lf.grid_columnconfigure(0, weight=1)
     self.preview_status_lf = preview_status_lf
 
+    def _sync_preview_status_panel_wrap(event=None):
+        try:
+            width = int(
+                getattr(event, "width", 0)
+                or preview_status_lf.winfo_width()
+                or 0
+            )
+        except Exception:
+            width = 0
+        wrap = max(170, width - 34) if width > 0 else 250
+        for attr_name in (
+            "preview_load_note_lbl",
+            "preview_layout_summary_lbl",
+            "preview_repair_progress_title_lbl",
+            "preview_repair_progress_status_lbl",
+            "preview_fusion_info_lbl",
+            "preview_box_mode_info_lbl",
+        ):
+            widget = getattr(self, attr_name, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(wraplength=wrap)
+            except Exception:
+                pass
+
+    self._sync_preview_status_panel_wrap = _sync_preview_status_panel_wrap
+    preview_status_lf.bind(
+        "<Configure>",
+        _sync_preview_status_panel_wrap,
+        add="+",
+    )
+
     self.preview_status_title_lbl = SectionHeaderLabel(
         preview_status_lf,
         self.app,
@@ -2549,9 +2589,9 @@ def build_detection_tab(
     from .z3_plate_gt_runtime import edit_active_plate_ground_truth
     plate_gt_row = ttk.Frame(self.preview_counts_frame)
     plate_gt_row.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-    self.preview_plate_gt_label = ttk.Label(plate_gt_row, text="Numer tablicy: brak", font=("Segoe UI", 10, "bold"))
+    self.preview_plate_gt_label = ttk.Label(plate_gt_row, text="Zapisany numer: brak", font=("Segoe UI", 10, "bold"))
     self.preview_plate_gt_label.pack(anchor="w")
-    self.preview_plate_gt_button = ttk.Button(plate_gt_row, text="Ustaw numer", style="WorkflowCard.TButton",
+    self.preview_plate_gt_button = ttk.Button(plate_gt_row, text="Ustaw numer ręcznie", style="WorkflowCard.TButton",
                                               command=lambda: edit_active_plate_ground_truth(self))
     self.preview_plate_gt_button.pack(anchor="w", pady=(3, 0))
     self.preview_total_count_lbl = self.preview_unknown_count_lbl

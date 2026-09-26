@@ -91,6 +91,11 @@ def review_approval_is_current(data: dict | None) -> bool:
     if str(state.get("status", "") or "").strip().lower() != REVIEW_APPROVED:
         return False
 
+    # GOLD/perfect wymaga jawnego GT. Sam REVIEW=approved nie może
+    # podtrzymywać zatwierdzenia, jeśli GT nie istnieje albo zostało usunięte.
+    if not plate_gt(data):
+        return False
+
     approved_reference = state.get("approved_reference")
     if not isinstance(approved_reference, dict):
         return False
@@ -801,11 +806,13 @@ def get_review_quality_status(host, data: dict, chars=None) -> str:
                 return "needs_fix"
     except (TypeError, ValueError):
         return "needs_fix"
-    # A human may author the first GT by approving fully labelled geometry.
-    # This is a validation probe only: persistence happens after it succeeds.
+    # Brak zapisanego numeru nie blokuje gotowości do O.
+    # Pierwszy numer zostanie zapisany dopiero przez świadome zatwierdzenie operatora.
     if not plate_gt(data):
         from ..plate_ground_truth import normalize_plate_ground_truth_text
-        text = normalize_plate_ground_truth_text(host._characters_to_text(records, data=data))
+        text = normalize_plate_ground_truth_text(
+            host._characters_to_text(records, data=data)
+        )
         if not text or len(text) != len(records):
             return "needs_fix"
         probe["ground_truth_text"] = text
@@ -849,6 +856,42 @@ def confirm_review_gold(
             )
         return result
 
+    from ..plate_ground_truth import normalize_plate_ground_truth_text
+
+    candidate_text = normalize_plate_ground_truth_text(
+        host._characters_to_text(chars, data=data)
+    )
+    saved_text = plate_gt(data)
+
+    attrs = data.get("plate_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    number_source = str(
+        data.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+    inherited_from_z2 = bool(saved_text and number_source == "manual_z2")
+
+    if saved_text and candidate_text and candidate_text != saved_text:
+        data["status"] = "needs_fix"
+        result = {
+            "ok": False,
+            "reason": "number_mismatch",
+            "plate_id": pid,
+            "resolved_status": "needs_fix",
+            "saved_text": saved_text,
+            "candidate_text": candidate_text,
+            "inherited_from_z2": inherited_from_z2,
+        }
+        if not quiet:
+            source_label = "numerem z Z2" if inherited_from_z2 else "zapisanym numerem"
+            messagebox.showwarning(
+                "Odczyt różni się od zapisanego numeru",
+                f"Wpisane znaki nie zgadzają się z {source_label}: {saved_text}. "
+                "Popraw znaki albo użyj „Zmień numer”, jeśli zapisany numer jest błędny.",
+            )
+        return result
+
     try:
         resolved_status = get_review_quality_status(host, data, chars)
     except Exception:
@@ -870,14 +913,28 @@ def confirm_review_gold(
             )
         return result
 
-    if not plate_gt(data):
+    # Pierwsze O jest jawną decyzją operatora: potwierdza, że sprawdzone boxy
+    # i wpisane znaki przedstawiają prawidłowy numer tej tablicy.
+    if not saved_text:
+        if not candidate_text:
+            return {
+                "ok": False,
+                "reason": "empty_number",
+                "plate_id": pid,
+                "resolved_status": "needs_fix",
+            }
         try:
             from .z3_plate_gt_runtime import save_plate_ground_truth
-            save_plate_ground_truth(host, data, host._characters_to_text(chars, data=data), prepare=False)
+            save_plate_ground_truth(host, data, candidate_text, prepare=False)
         except Exception as exc:
             if not quiet:
                 messagebox.showerror("Nie zapisano numeru tablicy", str(exc))
-            return {"ok": False, "reason": "gt_write_failed", "error": str(exc), "plate_id": pid}
+            return {
+                "ok": False,
+                "reason": "number_write_failed",
+                "error": str(exc),
+                "plate_id": pid,
+            }
 
     now = _now_iso()
     state["schema"] = REVIEW_SCHEMA

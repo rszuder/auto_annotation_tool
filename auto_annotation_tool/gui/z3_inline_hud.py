@@ -72,7 +72,41 @@ def plan_inline_hud(host, width, data, status_layout):
              (fit_text(filename, file_font, file_limit), left + file_font.measure(prefix), top,
               file_font, "#7ee7ff", ("preview_inline_hud_filename", "preview_overlay_action",
                                      "preview_action::edit_source_filename"))]
-    items = [{"text": f"Tablica {number}/{total}", "outline": "#b6f5ce"}]
+    attrs = data.get("plate_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    number_source = str(
+        data.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+    try:
+        saved_number = str(host._get_preview_ground_truth_text(data) or "").strip()
+    except Exception:
+        saved_number = str(
+            data.get("ground_truth_text")
+            or attrs.get("ground_truth_text")
+            or ""
+        ).strip()
+
+    if saved_number and number_source == "manual_z2":
+        number_text = f"Numer z Z2: {saved_number} · kliknij, aby zmienić"
+    elif saved_number:
+        number_text = f"Zapisany numer: {saved_number} · kliknij, aby zmienić"
+    else:
+        number_text = "Numer: brak · O zapisze"
+
+    palette = getattr(getattr(host, "app", None), "palette", {}) or {}
+    items = [
+        {"text": f"Tablica {number}/{total}", "outline": "#b6f5ce"},
+        {
+            "text": number_text,
+            "outline": str(palette.get("accent_alt", "#7ee7ff")),
+            "tags": (
+                "preview_overlay_action",
+                "preview_action::edit_plate_gt",
+            ),
+        },
+    ]
     items.extend(dict(item) for item in status_layout.get("neutral_badges", []))
     items.extend(dict(item) for item in status_layout.get("badges", []))
 

@@ -39,6 +39,41 @@ def _is_preview_char_record_selected(self, record, *, fallback_index: int | None
     except Exception:
         return False
 
+def _preview_inherited_z2_number(self) -> str:
+    data = self._get_preview_active_data(create=False)
+    if not isinstance(data, dict):
+        return ""
+    attrs = data.get("plate_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    source = str(
+        data.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+    if source != "manual_z2":
+        return ""
+    try:
+        return str(self._get_preview_ground_truth_text(data) or "").strip()
+    except Exception:
+        return str(
+            data.get("ground_truth_text")
+            or attrs.get("ground_truth_text")
+            or ""
+        ).strip()
+
+
+def _with_preview_inherited_z2_notice(self, message: str) -> str:
+    number = _preview_inherited_z2_number(self)
+    if not number:
+        return str(message or "")
+    return (
+        f"{str(message or '').strip()} "
+        f"Numer zapisany wcześniej w Z2: {number}. "
+        "Edycja boxów i znaków nie zmienia tego numeru. "
+        "Po korekcie naciśnij O. Jeśli numer z Z2 jest błędny, użyj „Zmień numer”."
+    ).strip()
+
+
 def _preview_char_add_requested(self) -> bool:
     return bool(
         getattr(self, "_preview_char_add_state", None) is not None
@@ -511,7 +546,10 @@ def _toggle_preview_char_edit_mode(self, event=None):
     self._set_preview_char_editor_modes(
         edit=(not bool(getattr(self, "_preview_char_edit_mode", False))),
         add=False,
-        message="Tryb korekty boxów znaków działa na wyniku końcowym.",
+        message=_with_preview_inherited_z2_notice(
+            self,
+            "Tryb korekty boxów znaków działa na wyniku końcowym.",
+        ),
     )
     return "break"
 
@@ -525,7 +563,10 @@ def _toggle_preview_char_add_mode(self, event=None):
     self._set_preview_char_editor_modes(
         edit=False,
         add=(not bool(getattr(self, "_preview_char_add_mode", False))),
-        message="Narysuj nowy box na znaku w podglądzie tablicy.",
+        message=_with_preview_inherited_z2_notice(
+            self,
+            "Narysuj nowy box na znaku w podglądzie tablicy.",
+        ),
     )
     return "break"
 
@@ -551,7 +592,11 @@ def _toggle_preview_char_label_mode(self, event=None):
             self._preview_char_hover_label_index = int(target_idx)
             self._preview_char_label_active_index = int(target_idx)
         self._update_preview_edit_status(
-            "Tryb wpisywania znaków aktywny. Kliknij box LPM albo użyj strzałek lewo/prawo, a potem wpisz znak z klawiatury.",
+            _with_preview_inherited_z2_notice(
+                self,
+                "Tryb wpisywania znaków aktywny. Kliknij box LPM albo użyj strzałek lewo/prawo, "
+                "a potem wpisz znak z klawiatury.",
+            ),
             tone="info",
         )
     else:
@@ -585,7 +630,11 @@ def _edit_selected_preview_char_symbol(self, event=None):
         return "break"
     self._activate_preview_char_label_input(
         idx,
-        status_message="Pole znaku jest aktywne tymczasowo. Wpisz 0-9 lub A-Z, aby nadpisać etykietę, albo Esc aby wyjść.",
+        status_message=_with_preview_inherited_z2_notice(
+            self,
+            "Pole znaku jest aktywne tymczasowo. Wpisz 0-9 lub A-Z, aby nadpisać etykietę, "
+            "albo Esc aby wyjść.",
+        ),
     )
     return "break"
 

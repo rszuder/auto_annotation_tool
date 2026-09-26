@@ -89,7 +89,7 @@ def test_selection_stays_on_same_character_after_reordering(host):
     assert host._get_preview_active_data()["characters"][host._preview_char_selected_index]["character"] == "B"
 
 
-def test_frame_control_is_retained_and_anchored_to_frame_corner(host):
+def test_frame_control_is_retained_vertical_and_right_of_frame(host):
     canvas = host.preview_canvas
     data = host._get_preview_active_data()
 
@@ -98,8 +98,9 @@ def test_frame_control_is_retained_and_anchored_to_frame_corner(host):
     initial_callbacks = len(canvas._tclCommands)
 
     x1, y1, x2, y2 = canvas.bbox(control.CONTROL_TAG)
-    assert abs(float(x2) - 420.0) <= 2.0
-    assert abs(float(y2) - 90.0) <= 2.0
+    assert float(x1) >= 425.0
+    assert abs(float(y1) - 90.0) <= 2.0
+    assert (float(y2) - float(y1)) > (float(x2) - float(x1))
 
     texts = {
         str(canvas.itemcget(item, "text"))
@@ -108,19 +109,29 @@ def test_frame_control_is_retained_and_anchored_to_frame_corner(host):
     }
     assert {"1R", "2R"}.issubset(texts)
 
+    text_items = {
+        str(canvas.itemcget(item, "text")): canvas.coords(item)
+        for item in initial_items
+        if canvas.type(item) == "text"
+    }
+    assert text_items["1R"][1] < text_items["2R"][1]
+
     for _ in range(15):
         control.draw_plate_layout_control(host, data, right=450, top=115)
 
     assert canvas.find_withtag(control.CONTROL_TAG) == initial_items
     assert len(canvas._tclCommands) == initial_callbacks
 
-    _x1, _y1, moved_x2, moved_y2 = canvas.bbox(control.CONTROL_TAG)
-    assert abs(float(moved_x2) - 450.0) <= 2.0
-    assert abs(float(moved_y2) - 115.0) <= 2.0
+    moved_x1, moved_y1, moved_x2, moved_y2 = canvas.bbox(control.CONTROL_TAG)
+    assert float(moved_x1) >= 455.0
+    assert abs(float(moved_y1) - 115.0) <= 2.0
+    assert (float(moved_y2) - float(moved_y1)) > (float(moved_x2) - float(moved_x1))
 
     anchor = host._preview_layout_control_anchor
     assert anchor["right"] == 450.0
     assert anchor["top"] == 115.0
+    assert anchor["left"] > anchor["right"]
+    assert anchor["height"] > anchor["width"]
 
     for item in canvas.find_withtag(control.CONTROL_TAG):
         assert "preview_action::toggle_plate_rows" in canvas.gettags(item)

@@ -32,18 +32,23 @@ def draw_plate_layout_control(host, data, *, right, top):
     inactive_fill = blend_hex_colors(background, foreground, 0.06)
     active_fill = blend_hex_colors(background, accent, 0.44)
 
-    width = 96.0
-    height = 28.0
+    # Pionowy przełącznik siedzi po PRAWEJ stronie ramki tablicy.
+    # Dzięki temu nie przykrywa badge'y nad ramką.
+    width = 44.0
+    height = 58.0
+    gap = 6.0
 
-    # `right` and `top` are the top-right corner of the status frame.
-    # Do not clamp to the viewport: clamping detached the control from the
-    # frame during pan/zoom. If the frame goes off-screen, its selector follows.
-    anchor_right = float(right)
+    # `right` i `top` to prawy-górny narożnik ramki statusu.
+    # Nie przycinamy do viewportu: podczas pan/zoom kontrolka ma pozostać
+    # fizycznie przyklejona do ramki tablicy.
+    frame_right = float(right)
     anchor_top = float(top)
-    left = anchor_right - width
-    upper = anchor_top - height
-    lower = anchor_top
-    middle = left + (width / 2.0)
+    left = frame_right + gap
+    upper = anchor_top
+    control_right = left + width
+    lower = upper + height
+    middle_y = upper + (height / 2.0)
+    center_x = left + (width / 2.0)
 
     two_rows = bool(host._should_preview_use_two_row_layers(data))
     row_count = 2 if two_rows else 1
@@ -77,7 +82,7 @@ def draw_plate_layout_control(host, data, *, right, top):
         shell = canvas.create_rectangle(
             left,
             upper,
-            anchor_right,
+            control_right,
             lower,
             fill=background,
             outline=border,
@@ -87,41 +92,41 @@ def draw_plate_layout_control(host, data, *, right, top):
         left_fill = canvas.create_rectangle(
             left + 2,
             upper + 2,
-            middle - 1,
-            lower - 2,
+            control_right - 2,
+            middle_y - 1,
             fill=inactive_fill,
             outline="",
             tags=tags,
         )
         right_fill = canvas.create_rectangle(
-            middle + 1,
-            upper + 2,
-            anchor_right - 2,
+            left + 2,
+            middle_y + 1,
+            control_right - 2,
             lower - 2,
             fill=inactive_fill,
             outline="",
             tags=tags,
         )
         divider = canvas.create_line(
-            middle,
-            upper + 4,
-            middle,
-            lower - 4,
+            left + 4,
+            middle_y,
+            control_right - 4,
+            middle_y,
             fill=border,
             width=1,
             tags=tags,
         )
         left_text = canvas.create_text(
-            left + (width * 0.25),
-            upper + (height / 2.0),
+            center_x,
+            upper + (height * 0.25),
             text="1R",
             fill=foreground,
             font=("Segoe UI", 9, "bold"),
             tags=tags,
         )
         right_text = canvas.create_text(
-            left + (width * 0.75),
-            upper + (height / 2.0),
+            center_x,
+            upper + (height * 0.75),
             text="2R",
             fill=foreground,
             font=("Segoe UI", 9, "bold"),
@@ -148,7 +153,7 @@ def draw_plate_layout_control(host, data, *, right, top):
                 tip_y = lower + 7.0
                 anchor = tk.NE
             text_id = canvas.create_text(
-                anchor_right,
+                control_right,
                 tip_y,
                 text=(
                     f"Układ tablicy: {'2 rzędy' if two_rows else '1 rząd'}\n"
@@ -208,37 +213,37 @@ def draw_plate_layout_control(host, data, *, right, top):
         ]
 
     # Retained-mode update: same item IDs, only geometry and state change.
-    canvas.coords(items["shell"], left, upper, anchor_right, lower)
+    canvas.coords(items["shell"], left, upper, control_right, lower)
     canvas.coords(
         items["left_fill"],
         left + 2,
         upper + 2,
-        middle - 1,
-        lower - 2,
+        control_right - 2,
+        middle_y - 1,
     )
     canvas.coords(
         items["right_fill"],
-        middle + 1,
-        upper + 2,
-        anchor_right - 2,
+        left + 2,
+        middle_y + 1,
+        control_right - 2,
         lower - 2,
     )
     canvas.coords(
         items["divider"],
-        middle,
-        upper + 4,
-        middle,
-        lower - 4,
+        left + 4,
+        middle_y,
+        control_right - 4,
+        middle_y,
     )
     canvas.coords(
         items["left_text"],
-        left + (width * 0.25),
-        upper + (height / 2.0),
+        center_x,
+        upper + (height * 0.25),
     )
     canvas.coords(
         items["right_text"],
-        left + (width * 0.75),
-        upper + (height / 2.0),
+        center_x,
+        upper + (height * 0.75),
     )
 
     canvas.itemconfigure(
@@ -272,7 +277,7 @@ def draw_plate_layout_control(host, data, *, right, top):
     host._preview_layout_control_signature = (
         id(canvas),
         id(data),
-        float(anchor_right),
+        float(frame_right),
         float(anchor_top),
         int(row_count),
         active_fill,
@@ -282,12 +287,15 @@ def draw_plate_layout_control(host, data, *, right, top):
         border,
     )
     host._preview_layout_control_anchor = {
-        "right": float(anchor_right),
+        "right": float(frame_right),
         "top": float(anchor_top),
         "left": float(left),
         "upper": float(upper),
+        "control_right": float(control_right),
+        "lower": float(lower),
         "width": float(width),
         "height": float(height),
+        "gap": float(gap),
     }
     canvas.tag_raise(CONTROL_TAG)
     canvas.tag_raise(TIP_TAG)

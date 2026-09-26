@@ -15515,7 +15515,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 path_match = bool(
                     edge.source == "E1"
                     and edge_spec is not None
-                    and normalize_iteration_path(getattr(edge_spec, "path_key", "")) == current_path
+                    and is_transition_path_active(edge_spec, current_path)
                 )
                 stage_status_for_gate = _get_graph_wizard_stage_status("step1") if path_match else None
                 review_pending = any(

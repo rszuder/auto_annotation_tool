@@ -1403,12 +1403,6 @@ def build_z2_cta_state_campaign(
         )
     except Exception:
         t04_plate_work_entry = bool(graph_gate_id == "T04")
-    manual_auto_bootstrap = bool(
-        manual_setup
-        and input_dir_ready
-        and not manual_run_already_created
-        and not t04_plate_work_entry
-    )
     campaign_auto_start_ready = bool(
         route == "auto"
         and current_step == "auto_start"
@@ -1466,13 +1460,13 @@ def build_z2_cta_state_campaign(
             start_text = "Wybierz obrazy"
             start_command = host._select_input_dir
         else:
-            if t04_plate_work_entry:
-                start_enabled = not host.is_processing
-                start_text = "Przygotuj roboczy XML Z2"
-                start_command = host._start_annotation
-            else:
-                start_enabled = False
-                start_text = "Przygotowuję Z2"
+            # Ręczny run kampanijny bez XML musi zawsze zostawić użytkownikowi
+            # jawną drogę utworzenia roboczego annotations.xml. Automatyczny
+            # bootstrap może nadal zadziałać wcześniej, ale jego brak/awaria
+            # nie może pozostawić Z2 w stanie tylko-do-podglądu bez CTA.
+            start_enabled = not host.is_processing
+            start_text = "Przygotuj roboczy XML Z2"
+            start_command = host._start_annotation
 
     if route == "auto" and input_dir_ready:
         start_command = _start_campaign_auto_action
@@ -1488,8 +1482,7 @@ def build_z2_cta_state_campaign(
         next_text="Dalej",
         suppress_duplicate_start_cta=bool(
             not host.is_processing and start_text in {"Wybierz tor", "Run istnieje"}
-        )
-        or manual_auto_bootstrap,
+        ),
     )
 
 

@@ -19,8 +19,13 @@ class PreviewDrawerSlide:
         self._geometry = None
         self._destroyed = False
         self.button = ProjectSidebarToggle(
-            self.host, get_runtime_palette(owner), self.toggle,
-            collapsed_text="Szuflada", expanded_text="Ukryj szufladę",
+            self.host,
+            get_runtime_palette(owner),
+            self.toggle,
+            collapsed_text="Narzędzia",
+            expanded_text="Narzędzia",
+            orientation="vertical",
+            side="right",
         )
         self.button.place_forget()
         self.panel.bind("<Destroy>", self._destroy, add="+")
@@ -33,7 +38,7 @@ class PreviewDrawerSlide:
     def place(self, frame_width, x, y, width, height, *, fullscreen, toggle_y=6):
         if self._destroyed:
             return
-        if fullscreen:
+        if fullscreen and getattr(self.button, "orientation", "horizontal") != "vertical":
             y = max(y, toggle_y + 6 + self.button._height)
         self._geometry = (frame_width, x, y, width, height)
         if fullscreen != self.active:
@@ -45,7 +50,14 @@ class PreviewDrawerSlide:
             self.button.set_palette(palette)
         if fullscreen:
             self.button.set_collapsed(self.hidden)
-            self.button.place(relx=1, x=-10, y=toggle_y, anchor="ne")
+            if getattr(self.button, "orientation", "horizontal") == "vertical":
+                self.button.place(
+                    x=max(2, int(round(x)) - 4),
+                    y=max(4, int(round(y)) + 8),
+                    anchor="ne",
+                )
+            else:
+                self.button.place(relx=1, x=-10, y=toggle_y, anchor="ne")
             self.button.lift()
         else:
             self.button.place_forget()

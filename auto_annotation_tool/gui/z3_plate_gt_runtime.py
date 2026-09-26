@@ -175,10 +175,51 @@ def edit_active_plate_ground_truth(host):
     data = host._get_preview_active_data(create=False)
     if not isinstance(data, dict):
         return
-    text = simpledialog.askstring("Numer tablicy", "Wpisz prawidłowy numer tablicy:",
-                                  initialvalue=host._get_preview_ground_truth_text(data), parent=host.frame.winfo_toplevel())
+    current_text = str(host._get_preview_ground_truth_text(data) or "").strip()
+    attrs = data.get("plate_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    number_source = str(
+        data.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+    inherited_from_z2 = bool(current_text and number_source == "manual_z2")
+
+    prompt = "Wpisz prawidłowy numer tablicy:"
+    if inherited_from_z2:
+        prompt = (
+            f"Numer odziedziczony z Z2: {current_text}\n\n"
+            "Zmiana tutaj utworzy nową wersję numeru w PZ2. "
+            "Boxy i wpisane znaki nie zmieniają numeru z Z2 automatycznie.\n\n"
+            "Wpisz nowy prawidłowy numer:"
+        )
+
+    text = simpledialog.askstring(
+        "Numer tablicy",
+        prompt,
+        initialvalue=current_text,
+        parent=host.frame.winfo_toplevel(),
+    )
     if text is None:
         return
+
+    normalized_new = normalize_plate_ground_truth_text(text)
+    if (
+        inherited_from_z2
+        and normalized_new
+        and normalized_new != normalize_plate_ground_truth_text(current_text)
+    ):
+        if not messagebox.askyesno(
+            "Zmienić numer odziedziczony z Z2?",
+            (
+                f"Numer z Z2: {current_text}\n"
+                f"Nowy numer: {normalized_new}\n\n"
+                "Ta operacja zapisze nową wersję numeru w PZ2. Kontynuować?"
+            ),
+            parent=host.frame.winfo_toplevel(),
+        ):
+            return
+
     host._push_preview_history_snapshot()
     try:
         # Materialization is an explicit consequence of setting the number.
@@ -195,6 +236,23 @@ def refresh_plate_ground_truth_ui(host):
         return
     data = host._get_preview_active_data(create=False)
     text = host._get_preview_ground_truth_text(data) if data else ""
-    widget.configure(text=f"Numer tablicy: {text or 'brak'}")
-    host.preview_plate_gt_button.configure(text="Zmień numer" if text else "Ustaw numer",
-                                           state="normal" if data else "disabled")
+    attrs = data.get("plate_attributes") if isinstance(data, dict) else {}
+    attrs = attrs if isinstance(attrs, dict) else {}
+    number_source = str(
+        (data or {}).get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+
+    if text and number_source == "manual_z2":
+        label_text = f"Numer z Z2: {text}"
+    elif text:
+        label_text = f"Zapisany numer: {text}"
+    else:
+        label_text = "Zapisany numer: brak"
+
+    widget.configure(text=label_text)
+    host.preview_plate_gt_button.configure(
+        text="Zmień numer" if text else "Ustaw numer ręcznie",
+        state="normal" if data else "disabled",
+    )

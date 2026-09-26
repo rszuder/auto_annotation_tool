@@ -776,13 +776,28 @@ def on_preview_canvas_keypress(host, event=None):
                 )
             else:
                 reason = str((result or {}).get("reason", "") or "")
-                message = {
-                    "no_active_plate": "O: najpierw wybierz tablicę z listy.",
-                    "review_not_in_progress": "O: najpierw otwórz wynik tablicy do REVIEW.",
-                    "empty_review": "O: tablica nie ma ramek znaków do zatwierdzenia.",
-                    "review_not_perfect": "O: tablica nadal wymaga korekty; status OK nie został nadany.",
-                    "gt_write_failed": "O: nie udało się zapisać numeru tablicy.",
-                }.get(reason, "O: nie można jeszcze nadać tej tablicy statusu OK.")
+                if reason == "number_mismatch" and bool((result or {}).get("inherited_from_z2")):
+                    saved = str((result or {}).get("saved_text", "") or "")
+                    message = (
+                        f"O: wpisane znaki różnią się od numeru z Z2: {saved}. "
+                        "Popraw znaki albo użyj „Zmień numer”."
+                    )
+                else:
+                    message = {
+                        "no_active_plate": "O: najpierw wybierz tablicę z listy.",
+                        "review_not_in_progress": "O: najpierw kliknij „Sprawdź i popraw”.",
+                        "empty_review": "O: tablica nie ma ramek znaków do zatwierdzenia.",
+                        "empty_number": "O: wpisz znaki do boxów przed zatwierdzeniem.",
+                        "number_mismatch": (
+                            "O: wpisane znaki nie zgadzają się z zapisanym numerem. "
+                            "Popraw znaki albo użyj „Zmień numer”."
+                        ),
+                        "review_not_perfect": (
+                            "O: sprawdź boxy, znaki i układ tablicy; status OK nie został nadany."
+                        ),
+                        "number_write_failed": "O: nie udało się zapisać numeru tablicy.",
+                        "gt_write_failed": "O: nie udało się zapisać numeru tablicy.",
+                    }.get(reason, "O: nie można jeszcze nadać tej tablicy statusu OK.")
                 self._update_preview_edit_status(message, tone="warning")
             return "break"
         return None
@@ -1344,6 +1359,8 @@ def on_preview_canvas_drag(host, event):
         "preview_fast_detail",
         "preview_badge",
         "preview_plate_status_frame",
+        "preview_plate_layout_control",
+        "preview_plate_layout_tip",
         "preview_layout_separator",
         "preview_char_drag_preview",
         "preview_char_add_preview",

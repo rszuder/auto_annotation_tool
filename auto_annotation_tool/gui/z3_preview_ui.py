@@ -1001,6 +1001,27 @@ def get_preview_status_presentation(
                 filled_boxes += 1
 
     candidate_text = host._characters_to_text(source_chars, data=source_data).strip().upper()
+
+    attrs = source_data.get("plate_attributes") if isinstance(source_data, dict) else {}
+    attrs = attrs if isinstance(attrs, dict) else {}
+    number_source = str(
+        (source_data or {}).get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+    try:
+        saved_number = str(host._get_preview_ground_truth_text(source_data) or "").strip().upper()
+    except Exception:
+        saved_number = str(
+            (source_data or {}).get("ground_truth_text")
+            or attrs.get("ground_truth_text")
+            or ""
+        ).strip().upper()
+    inherited_z2_number = saved_number if number_source == "manual_z2" else ""
+    inherited_z2_mismatch = bool(
+        inherited_z2_number and candidate_text and candidate_text != inherited_z2_number
+    )
+
     ready_for_approval = False
     if isinstance(source_data, dict) and (source_data.get("review_state") or {}).get("status") == "in_progress":
         try:
@@ -1024,10 +1045,17 @@ def get_preview_status_presentation(
         severity = "success"
         canvas_text = "Perfect"
         info_text = "status: OK"
+    elif inherited_z2_mismatch:
+        severity = "error"
+        canvas_text = "Różni się od numeru z Z2"
+        info_text = (
+            f"status: wpisane znaki różnią się od numeru z Z2: {inherited_z2_number}; "
+            "popraw znaki albo użyj „Zmień numer”"
+        )
     elif ready_for_approval:
         severity = "success"
         canvas_text = "Gotowa do zatwierdzenia"
-        info_text = "status: zgodna z GT, zatwierdź tablicę"
+        info_text = "status: sprawdź odczyt i naciśnij O"
     elif total_boxes <= 0:
         severity = "warning"
         canvas_text = "Brak ramek"
@@ -1073,6 +1101,8 @@ def get_preview_status_presentation(
         "count_resolved": bool(count_resolved),
         "filled_boxes": int(filled_boxes),
         "total_boxes": int(total_boxes),
+        "inherited_z2_number": inherited_z2_number,
+        "inherited_z2_mismatch": bool(inherited_z2_mismatch),
     }
 
 
