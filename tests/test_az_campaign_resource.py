@@ -210,21 +210,6 @@ class AZCampaignResourceTests(unittest.TestCase):
             "2026-09-26T00:02:00+00:00",
         )
 
-
-def test_char_run_row_is_registry_backed_not_planowane_placeholder():
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "auto_annotation_tool"
-        / "gui"
-        / "campaign_step1_assets.py"
-    )
-    source = path.read_text(encoding="utf-8-sig")
-
-    assert "Planowane | import AZ nie jest jeszcze dostępny w zasobach bramki." not in source
-    assert "_get_project_start_az_resource_state" in source
-    assert 'coverage_status = str(az_state.get("coverage_status") or "")' in source
-
-
     def test_full_pending_review_is_visible_but_not_contract_ready(self):
         crop_a, identity_a = self._create_crop("pending-one")
         crop_b, identity_b = self._create_crop("pending-two")
@@ -310,6 +295,20 @@ def test_char_run_row_is_registry_backed_not_planowane_placeholder():
         self.assertFalse(
             resource_contract_ready(snapshot, required=True)
         )
+
+
+def test_char_run_row_is_registry_backed_not_planowane_placeholder():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "auto_annotation_tool"
+        / "gui"
+        / "campaign_step1_assets.py"
+    )
+    source = path.read_text(encoding="utf-8-sig")
+
+    assert "Planowane | import AZ nie jest jeszcze dostępny w zasobach bramki." not in source
+    assert "_get_project_start_az_resource_state" in source
+    assert 'coverage_status = str(az_state.get("coverage_status") or "")' in source
 
 
 def test_char_run_pending_review_is_warning_not_success():
