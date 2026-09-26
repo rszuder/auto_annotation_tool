@@ -4479,7 +4479,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     fallback_label=campaign_resource_label(row_key),
                     fallback_requirement="optional",
                     fallback_validation=(
-                        "Opcjonalne | import anotacji znaków jest zasobem planowanym."
+                        "Opcjonalne | stan AZ jest odczytywany z registry projektu."
                         if row_key == "char_run" and row is None
                         else "Brak"
                     ),
@@ -11585,7 +11585,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     None,
                     fallback_label=fallback_label or campaign_resource_label("char_run"),
                     fallback_requirement="optional",
-                    fallback_validation="Opcjonalne | import anotacji znaków jest zasobem planowanym.",
+                    fallback_validation="Opcjonalne | stan AZ jest odczytywany z registry projektu.",
                     fallback_tone="muted",
                 )
             return build_campaign_resource_snapshot(

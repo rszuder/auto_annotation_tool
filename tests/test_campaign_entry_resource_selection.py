@@ -155,11 +155,35 @@ class EntryResourceSelectionTests(unittest.TestCase):
             self.refresh_rows()
         self.campaign.set_iteration_path.assert_not_called()
 
-    def test_az_is_honestly_planned_not_blocked_by_route(self):
-        rows = self.refresh_rows()
-        self.assertIn("Planowane", rows["char_run"]["validation_text"])
-        self.assertNotIn("wybierz", rows["char_run"]["validation_text"].lower())
+    def test_az_registry_state_is_not_blocked_by_route(self):
+        az_state = {
+            "project_id": "PRJ-DEMO",
+            "project_exists": True,
+            "crop_count": 0,
+            "az_count": 0,
+            "usable_count": 0,
+            "ready_count": 0,
+            "pending_review_count": 0,
+            "excluded_count": 0,
+            "other_count": 0,
+            "missing_count": 0,
+            "reviewed_count": 0,
+            "review_required": False,
+            "review_complete": False,
+            "contract_ready": False,
+            "coverage_status": "no_crops",
+            "latest_updated_at": "",
+        }
+        with patch.object(
+            assets,
+            "_get_project_start_az_resource_state",
+            return_value=az_state,
+        ):
+            rows = self.refresh_rows()
+
+        self.assertIn("Brak cropów PZ1", rows["char_run"]["validation_text"])
         self.assertFalse(rows["char_run"]["meta"]["contract_ready"])
+        self.campaign.set_iteration_path.assert_not_called()
 
     def test_model_picker_does_not_require_route(self):
         self.owner._open_project_start_model_candidate_browser.return_value = True
