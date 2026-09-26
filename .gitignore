@@ -28,3 +28,14 @@ Workspace/
 .pytest_tmp/
 .pytest_cache/
 .pt*/
+
+# lokalne backupy i artefakty deweloperskie
+*.bak
+backups/
+
+# dane wejsciowe / eksperymentalne nie naleza do repo kodu
+data/
+
+# gotowe pakiety modeli mobilnych
+*.alprmodel
+calibration_image_sample_data_20x128x128x3_float32.npy
