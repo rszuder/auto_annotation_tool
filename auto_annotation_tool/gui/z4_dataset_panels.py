@@ -1055,7 +1055,7 @@ def _build_splitter_ui(self):
     self._step4_char_split_details_visible = False
     self.btn_step4_split_toggle = ttk.Button(
         f,
-        text="Popraw split",
+        text="Dostosuj wariant",
         command=self._toggle_step4_char_split_details,
         style="WorkflowCard.TButton"
     )
@@ -1190,27 +1190,260 @@ def _build_splitter_ui(self):
         self._split_campaign_summary_rows[key] = (label_cell, id_cell, details_cell)
 
     def _show_split_source_technical_details():
-        message = str(
+        raw = str(
             getattr(
                 self,
                 "_split_source_technical_text",
                 "Brak szczegółów technicznych dla bieżącego źródła.",
             )
             or "Brak szczegółów technicznych dla bieżącego źródła."
-        )
+        ).strip()
+
+        intro = ""
+        rows = []
+        for line in raw.splitlines():
+            cleaned = str(line or "").strip()
+            if not cleaned:
+                continue
+            if ":" not in cleaned:
+                if not intro:
+                    intro = cleaned
+                continue
+            key, value = cleaned.split(":", 1)
+            rows.append((key.strip(), value.strip()))
+
+        if not rows:
+            try:
+                self.app.themed_info(
+                    "Szczegóły techniczne źródła",
+                    raw,
+                    parent=f,
+                    tone="info",
+                )
+            except Exception:
+                messagebox.showinfo("Szczegóły techniczne źródła", raw, parent=f)
+            return
+
         try:
-            self.app.themed_info(
-                "Szczegóły techniczne źródła",
-                message,
-                parent=f,
-                tone="info",
+            palette = dict(getattr(self.app, "palette", {}) or {})
+            colors = _get_step4_table_colors(self)
+            panel = colors["panel"]
+            field = colors["row"]
+            row_alt = colors["row_alt"]
+            border = colors["border"]
+            fg = colors["fg"]
+            muted = colors["muted"]
+            success = colors["accent"]
+            warning = colors["warning"]
+            accent = palette.get("accent", success)
+            error = palette.get("error", "#b94a48")
+
+            values_by_key = {key: value for key, value in rows}
+            equivalent_text = str(values_by_key.get("Równoważne eksporty", "") or "").strip()
+            has_equivalent = bool(equivalent_text and equivalent_text.lower() != "brak")
+
+            dialog = tk.Toplevel(f)
+            dialog._campaign_graph_dialog = False
+            try:
+                self.app.style_dialog_window(
+                    dialog,
+                    title="Szczegóły techniczne źródła",
+                    geometry="930x680",
+                    parent=f,
+                )
+            except Exception:
+                dialog.title("Szczegóły techniczne źródła")
+                dialog.geometry("930x680")
+            try:
+                dialog.minsize(820, 560)
+                dialog.resizable(True, True)
+            except Exception:
+                pass
+
+            surface_builder = getattr(self.app, "_build_themed_dialog_surface", None)
+            if callable(surface_builder):
+                surface = surface_builder(dialog, tone="info")
+            else:
+                surface = tk.Frame(dialog, bg=panel, bd=0, highlightthickness=0)
+                surface.pack(fill=tk.BOTH, expand=True)
+            surface_bg = str(surface.cget("bg") or panel)
+
+            shell = tk.Frame(surface, bg=surface_bg, bd=0, highlightthickness=0)
+            shell.pack(fill=tk.BOTH, expand=True, padx=18, pady=16)
+
+            header = tk.Frame(shell, bg=surface_bg, bd=0, highlightthickness=0)
+            header.pack(fill=tk.X, pady=(0, 10))
+
+            badge_bg = blend_hex_colors(surface_bg, success if has_equivalent else accent, 0.20)
+            tk.Label(
+                header,
+                text="✓" if has_equivalent else "i",
+                bg=badge_bg,
+                fg=fg,
+                font=("Segoe UI Semibold", 12),
+                width=2,
+                pady=3,
+            ).pack(side=tk.LEFT, anchor=tk.N, padx=(0, 10))
+
+            header_text = tk.Frame(header, bg=surface_bg, bd=0, highlightthickness=0)
+            header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            tk.Label(
+                header_text,
+                text="Szczegóły techniczne źródła",
+                bg=surface_bg,
+                fg=fg,
+                font=("Segoe UI Semibold", 13),
+                anchor="w",
+            ).pack(fill=tk.X)
+
+            if has_equivalent:
+                lead = "Powtórny eksport — ten sam materiał logiczny."
+                lead_fg = success
+            else:
+                lead = "Identyfikatory i ślad techniczny źródła używanego przez PZ1."
+                lead_fg = accent
+
+            tk.Label(
+                header_text,
+                text=lead,
+                bg=surface_bg,
+                fg=lead_fg,
+                font=("Segoe UI", 10, "bold"),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=780,
+            ).pack(fill=tk.X, pady=(4, 0))
+
+            if intro:
+                tk.Label(
+                    shell,
+                    text=intro,
+                    bg=surface_bg,
+                    fg=muted,
+                    font=("Segoe UI", 9),
+                    anchor="w",
+                    justify=tk.LEFT,
+                    wraplength=860,
+                ).pack(fill=tk.X, pady=(0, 10))
+
+            table = tk.Frame(
+                shell,
+                bg=border,
+                bd=0,
+                highlightthickness=1,
+                highlightbackground=border,
+                highlightcolor=border,
             )
+            table.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+            table.grid_columnconfigure(0, weight=0, minsize=225)
+            table.grid_columnconfigure(1, weight=1)
+
+            header_bg = blend_hex_colors(field, border, 0.18)
+            for col, text_value in enumerate(("Pole", "Wartość")):
+                tk.Label(
+                    table,
+                    text=text_value,
+                    bg=header_bg,
+                    fg=muted,
+                    font=("Segoe UI Semibold", 9),
+                    anchor="w",
+                    padx=10,
+                    pady=7,
+                    relief="solid",
+                    bd=1,
+                ).grid(row=0, column=col, sticky="nsew")
+
+            def _row_tone(key: str, value: str):
+                normalized = key.casefold()
+                if "pełna ścieżka" in normalized:
+                    return muted
+                if "równoważne eksporty" in normalized:
+                    return success if value and value.casefold() != "brak" else muted
+                if "materiału logicznego" in normalized or "liczba source_pid" in normalized:
+                    return success
+                if "kontrakt" in normalized or "fingerprint" in normalized:
+                    return accent
+                if "folder eksportu" in normalized:
+                    return success
+                if "projekt" in normalized or "iteracja" in normalized:
+                    return accent
+                if "artefaktu" in normalized:
+                    return warning
+                return fg
+
+            for row_index, (key, value) in enumerate(rows, start=1):
+                tone = _row_tone(key, value)
+                base_bg = field if row_index % 2 else row_alt
+                row_bg = (
+                    blend_hex_colors(base_bg, tone, 0.08)
+                    if tone not in {fg, muted}
+                    else base_bg
+                )
+                key_fg = tone if tone != fg else muted
+
+                tk.Label(
+                    table,
+                    text=key,
+                    bg=row_bg,
+                    fg=key_fg,
+                    font=("Segoe UI Semibold", 9),
+                    anchor="nw",
+                    justify=tk.LEFT,
+                    padx=10,
+                    pady=7,
+                    relief="solid",
+                    bd=1,
+                ).grid(row=row_index, column=0, sticky="nsew")
+
+                tk.Label(
+                    table,
+                    text=value or "-",
+                    bg=row_bg,
+                    fg=fg if tone != muted else muted,
+                    font=("Segoe UI", 9),
+                    anchor="nw",
+                    justify=tk.LEFT,
+                    wraplength=625,
+                    padx=10,
+                    pady=7,
+                    relief="solid",
+                    bd=1,
+                ).grid(row=row_index, column=1, sticky="nsew")
+
+            actions = tk.Frame(shell, bg=surface_bg, bd=0, highlightthickness=0)
+            actions.pack(fill=tk.X)
+            tk.Button(
+                actions,
+                text="OK",
+                command=dialog.destroy,
+                bg=blend_hex_colors(field, success if has_equivalent else accent, 0.18),
+                fg=fg,
+                activebackground=blend_hex_colors(field, success if has_equivalent else accent, 0.28),
+                activeforeground=fg,
+                relief=tk.FLAT,
+                font=("Segoe UI", 10),
+                padx=18,
+                pady=7,
+                cursor="hand2",
+            ).pack(side=tk.RIGHT)
+
+            try:
+                dialog.transient(f.winfo_toplevel())
+                dialog.grab_set()
+                dialog.focus_set()
+            except Exception:
+                pass
         except Exception:
-            messagebox.showinfo(
-                "Szczegóły techniczne źródła",
-                message,
-                parent=f,
-            )
+            try:
+                self.app.themed_info(
+                    "Szczegóły techniczne źródła",
+                    raw,
+                    parent=f,
+                    tone="info",
+                )
+            except Exception:
+                messagebox.showinfo("Szczegóły techniczne źródła", raw, parent=f)
 
     self.split_source_technical_row = ttk.Frame(f)
     self.split_source_technical_row.pack(fill=tk.X, pady=(5, 3))

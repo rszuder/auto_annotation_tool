@@ -845,7 +845,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             host._set_training_widget_text(host.split_intro_lbl, str(vm.split_intro or ""))
             try:
                 if bool(vm.show_split_toggle):
-                    host._set_training_widget_text(host.btn_step4_split_toggle, str(vm.split_toggle_label or "Popraw split"))
+                    host._set_training_widget_text(host.btn_step4_split_toggle, str(vm.split_toggle_label or "Dostosuj wariant"))
                     if str(host.btn_step4_split_toggle.winfo_manager()) != "pack":
                         host.btn_step4_split_toggle.pack(anchor=tk.W, pady=(0, 8))
                 elif str(host.btn_step4_split_toggle.winfo_manager()) == "pack":

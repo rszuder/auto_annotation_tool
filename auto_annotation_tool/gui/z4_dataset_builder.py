@@ -2959,17 +2959,21 @@ def _format_step4_mz_completion_label(status: str, deficits: dict | None = None,
     normalized = str(status or "").strip().upper()
     deficits = dict(deficits or {})
     warnings = list(warnings or [])
+    if normalized == "SOURCE_ONLY_READY_WITH_REPRESENTATION_WARNING":
+        return "Niepełne — wariant dopuszczony"
+    if normalized == "SOURCE_ONLY_READY":
+        return "Wystarczające"
     if normalized == "REPRESENTATION_OK":
-        return "OK - próg AUTO spełniony"
+        return "Wystarczające"
     if normalized == "REPRESENTATION_OK_WITH_DIVERSITY_WARNING":
-        return "OK - próg spełniony, ale sprawdź różnorodność: " + (", ".join(map(str, warnings)) or "wybrane klasy")
+        return "Wystarczające, ale mała różnorodność: " + (", ".join(map(str, warnings)) or "wybrane znaki")
     if normalized == "PLAN_NOT_FEASIBLE":
-        return "Nieosiągalna przy aktualnym materiale"
+        return "Nie można osiągnąć ustawionego progu"
     if normalized == "TARGET_NOT_REACHED":
-        return "Nie osiągnięto progu: " + (", ".join(f"{key}: {value}" for key, value in sorted(deficits.items())) or "pozostały braki")
+        return "Nie osiągnięto ustawionego progu"
     if normalized == "VAL_TEST_CHANGED":
-        return "Błąd freeze - zmienił się split val/test"
-    return "Status zapisany w manifeście"
+        return "Błąd: zmienił się podział val/test"
+    return "Stan nieokreślony"
 
 
 def _invalidate_pending_character_balance_plan(self, message: str | None = None) -> None:
@@ -3063,6 +3067,7 @@ def _finalize_step4_mz_representation_variant(
     requested_extra: int = 0,
     augmented: bool = False,
     pending_real_sources: dict | None = None,
+    representation_required: bool = True,
 ) -> dict:
     dataset_dir = Path(dataset_path)
     counts = dict(counts or self._get_dataset_split_image_counts(dataset_dir))
@@ -3078,23 +3083,35 @@ def _finalize_step4_mz_representation_variant(
     representation_status, remaining_deficits, diversity_warnings = _step4_mz_completion_status_from_distribution(after_distribution)
     freeze_status = _step4_mz_freeze_status(val_test_guard)
     plan_feasible = bool(_step4_plan_attr(plan, "feasible", True))
-    if not plan_feasible and remaining_deficits and generated <= 0:
-        execution_status = "NOT_RUN"
+
+    if representation_required:
+        if not plan_feasible and remaining_deficits and generated <= 0:
+            execution_status = "NOT_RUN"
+        else:
+            execution_status = _step4_mz_execution_status(generated, requested_extra)
+        completion_status = _step4_mz_final_completion_status(
+            representation_status=representation_status,
+            freeze_status=freeze_status,
+            execution_status=execution_status,
+            plan_feasible=plan_feasible,
+            generated=generated,
+            deficits=remaining_deficits,
+        )
+        ready_for_training = _step4_mz_ready_for_training(
+            execution_status=execution_status,
+            representation_status=representation_status,
+            freeze_status=freeze_status,
+        )
     else:
-        execution_status = _step4_mz_execution_status(generated, requested_extra)
-    completion_status = _step4_mz_final_completion_status(
-        representation_status=representation_status,
-        freeze_status=freeze_status,
-        execution_status=execution_status,
-        plan_feasible=plan_feasible,
-        generated=generated,
-        deficits=remaining_deficits,
-    )
-    ready_for_training = _step4_mz_ready_for_training(
-        execution_status=execution_status,
-        representation_status=representation_status,
-        freeze_status=freeze_status,
-    )
+        # Przy syntetykach = 0 pokrycie klas jest diagnostyką jakości,
+        # a nie warunkiem utworzenia zwykłego wariantu train/val/test.
+        execution_status = "NOT_REQUESTED"
+        completion_status = (
+            "SOURCE_ONLY_READY_WITH_REPRESENTATION_WARNING"
+            if remaining_deficits or diversity_warnings
+            else "SOURCE_ONLY_READY"
+        )
+        ready_for_training = bool(str(freeze_status or "").upper() == "UNCHANGED")
 
     analysis_dir = dataset_dir / "analysis"
     before_refs = save_character_distribution_artifacts(
@@ -3122,7 +3139,7 @@ def _finalize_step4_mz_representation_variant(
         },
         base_dataset_sha_or_fingerprint=base_fingerprint,
         val_test_unchanged=val_test_guard,
-        augmentation_mode="mz_auto_representation",
+        augmentation_mode=("mz_auto_representation" if representation_required else "source_only"),
         requested_images=requested_extra,
         planned_images=max(0, int(_step4_plan_attr(plan, "planned_images", requested_extra) or 0)),
         generated_images=generated,
@@ -3132,7 +3149,9 @@ def _finalize_step4_mz_representation_variant(
     manifest["augmentation"]["randomness_mode"] = str(getattr(profile, "randomness_mode", "") or "")
     manifest["deficit_after"] = dict(remaining_deficits)
     manifest["diversity_warnings"] = list(diversity_warnings)
-    manifest["approved_balance_plan"] = True
+    manifest["approved_balance_plan"] = bool(representation_required)
+    manifest["representation_required"] = bool(representation_required)
+    manifest["representation_policy"] = "blocking" if representation_required else "advisory"
     manifest["execution_status"] = execution_status
     manifest["representation_status"] = representation_status
     manifest["freeze_status"] = freeze_status
@@ -3143,19 +3162,38 @@ def _finalize_step4_mz_representation_variant(
     )
 
     ok = bool(ready_for_training)
-    if completion_status == "REPRESENTATION_OK":
-        status_message = "Reprezentacja MZ: OK"
-    elif completion_status == "REPRESENTATION_OK_WITH_DIVERSITY_WARNING":
-        status_message = "Reprezentacja MZ: OK, ale sprawdź różnorodność klas " + ", ".join(diversity_warnings)
-    elif completion_status == "PLAN_NOT_FEASIBLE":
-        status_message = "Reprezentacja MZ: nieosiągalna przy aktualnym materiale"
+    if not representation_required:
+        status_message = "Wariant źródłowy gotowy bez syntetycznego uzupełniania"
+        if remaining_deficits:
+            missing_text = ", ".join(
+                f"{symbol}: {count}"
+                for symbol, count in sorted(remaining_deficits.items())
+            )
+            message = (
+                f"{status_message}. Pokrycie znaków MZ jest niepełne: {missing_text}. "
+                "To ostrzeżenie jakościowe, nie blokada wariantu."
+            )
+        elif diversity_warnings:
+            message = (
+                f"{status_message}. Niska różnorodność klas: {', '.join(diversity_warnings)}. "
+                "To ostrzeżenie jakościowe, nie blokada wariantu."
+            )
+        else:
+            message = f"{status_message}. Pokrycie znaków MZ nie wymaga dodatkowego ostrzeżenia."
     else:
-        status_message = "Reprezentacja MZ: wymaga poprawy"
-    if remaining_deficits:
-        missing_text = ", ".join(f"{symbol}: {count}" for symbol, count in sorted(remaining_deficits.items()))
-        message = f"{status_message}. Pozostałe braki: {missing_text}."
-    else:
-        message = f"{status_message}. Próg AUTO: {int(_step4_plan_attr(plan, 'target_count', 0) or 0)}."
+        if completion_status == "REPRESENTATION_OK":
+            status_message = "Reprezentacja MZ: OK"
+        elif completion_status == "REPRESENTATION_OK_WITH_DIVERSITY_WARNING":
+            status_message = "Reprezentacja MZ: OK, ale sprawdź różnorodność klas " + ", ".join(diversity_warnings)
+        elif completion_status == "PLAN_NOT_FEASIBLE":
+            status_message = "Reprezentacja MZ: nieosiągalna przy aktualnym materiale"
+        else:
+            status_message = "Reprezentacja MZ: wymaga poprawy"
+        if remaining_deficits:
+            missing_text = ", ".join(f"{symbol}: {count}" for symbol, count in sorted(remaining_deficits.items()))
+            message = f"{status_message}. Pozostałe braki: {missing_text}."
+        else:
+            message = f"{status_message}. Próg AUTO: {int(_step4_plan_attr(plan, 'target_count', 0) or 0)}."
     if not bool(val_test_guard.get("unchanged")):
         message += " Walidacja freeze: split val/test zmienił się podczas finalizacji."
 
@@ -3750,6 +3788,8 @@ def _handle_step4_dataset_success_result(
     elif total_count > 0:
         summary_rows.append(("Razem", f"{total_count} obrazów"))
     mz_manifest = result_meta.get("mz_training_variant_manifest") if isinstance(result_meta, dict) else None
+    source_only_variant = False
+    source_only_has_warning = False
     if CONFIG.normalize_task_target(target) == "char" and isinstance(mz_manifest, dict) and mz_manifest:
         status = str(mz_manifest.get("completion_status") or "").strip()
         target_count = int(mz_manifest.get("target_count", 0) or 0)
@@ -3757,35 +3797,66 @@ def _handle_step4_dataset_success_result(
         generated_images = int(mz_manifest.get("generated_images", 0) or 0)
         deficits_after = dict(mz_manifest.get("deficit_after") or {})
         diversity_warnings = list(mz_manifest.get("diversity_warnings") or [])
+        representation_required = bool(mz_manifest.get("representation_required", True))
+        source_only_variant = not representation_required
+        source_only_has_warning = bool(deficits_after or diversity_warnings)
+
         summary_rows.append((
-            "Reprezentacja MZ",
+            "Pokrycie znaków",
             _format_step4_mz_completion_label(status, deficits_after, diversity_warnings),
         ))
-        if target_count > 0:
-            summary_rows.append(("Miarka reprezentacji", f"{target_count} przykładów znaku w train"))
-        summary_rows.append(("Uzupełnienie train", f"ustawiono +{planned_images} | wygenerowano +{generated_images}"))
+        if representation_required and target_count > 0:
+            summary_rows.append(("Próg pokrycia", f"{target_count} przykładów każdego znaku w train"))
+        if representation_required:
+            summary_rows.append((
+                "Syntetyczne uzupełnienie",
+                f"ustawiono +{planned_images} | wygenerowano +{generated_images}",
+            ))
+        else:
+            summary_rows.append(("Syntetyczne uzupełnienie", "wyłączone (0 obrazów)"))
     if path_text:
         summary_rows.append(("Lokalizacja", path_text))
 
     if augmented and generated > 0:
-        hero_text = "WARIANT UTWORZONO"
+        hero_text = "WARIANT GOTOWY"
         hero_subtitle = (
             f"Dodano +{generated} syntetycznych obrazów train. "
-            f"Wariant ma teraz {augmented_total or total_count} obrazów i jest wejściem treningu. "
+            f"Wariant ma teraz {augmented_total or total_count} obrazów i jest gotowy do dalszej pracy. "
             "Syntetyki nie zasilają puli projektu ani kolejnej iteracji."
         )
+    elif source_only_variant:
+        hero_text = "WARIANT GOTOWY"
+        hero_subtitle = (
+            f"Utworzono podział train {train_count} / val {val_count} / test {test_count} "
+            f"z {total_count} obrazów. Syntetyczne uzupełnienie jest wyłączone."
+        )
     else:
-        hero_text = "WARIANT UTWORZONO"
-        hero_subtitle = f"Wariant ma {total_count} obrazów i jest ustawiony jako bieżące wejście treningu." if total_count else "Wariant został zapisany i ustawiony jako bieżące wejście treningu."
+        hero_text = "WARIANT GOTOWY"
+        hero_subtitle = (
+            f"Wariant ma {total_count} obrazów i jest gotowy do dalszej pracy."
+            if total_count
+            else "Wariant został zapisany i jest gotowy do dalszej pracy."
+        )
 
-    body = "Sprawdź krótkie podsumowanie i wybierz, co zrobić z utworzonym wariantem."
-    guidance = "Jeśli wariant wygląda dobrze, możesz od razu trenować model. Jeśli nie, usuń wariant i zbuduj go ponownie."
+    body = "Wariant jest gotowy. Sprawdź podział i ewentualne ostrzeżenia."
+    if source_only_variant and source_only_has_warning:
+        guidance = (
+            "Niepełne pokrycie znaków jest ostrzeżeniem jakościowym i nie blokuje treningu. "
+            "Możesz przejść do treningu albo zamknąć podsumowanie."
+        )
+    elif source_only_variant:
+        guidance = "Wariant jest gotowy do treningu bez syntetycznego uzupełniania."
+    else:
+        guidance = (
+            "Jeśli wariant wygląda dobrze, przejdź do treningu. "
+            "Jeśli nie, usuń wariant i zbuduj go ponownie."
+        )
 
     result_action = self._show_step4_dataset_result_modal(
-        title="Wariant datasetu gotowy",
+        title="Wariant treningowy gotowy",
         body=body,
         allow_pz2=True,
-        primary_text="Trenuj na tym wariancie",
+        primary_text="Przejdź do treningu",
         secondary_text="Zamknij podsumowanie",
         preview_path=dataset_path,
         summary_rows=summary_rows,
@@ -4147,6 +4218,7 @@ def _split_dataset_thread(self):
     }
 
     augmentation_profile = self._get_step4_augmentation_profile("char")
+    augmentation_requested = bool(_step4_profile_requests_augmentation(augmentation_profile))
     try:
         profile_requested_extra = max(0, int(getattr(augmentation_profile, "extra_count", 0) or 0))
     except Exception:
@@ -4169,7 +4241,7 @@ def _split_dataset_thread(self):
     except Exception:
         pending_target_count = 0
     manual_augmentation_requested = bool(
-        _step4_profile_requests_augmentation(augmentation_profile)
+        augmentation_requested
         and (pending_balance_plan is None or profile_requested_extra != pending_planned_extra)
     )
 
@@ -4265,6 +4337,62 @@ def _split_dataset_thread(self):
                     _clear_pending_character_balance_plan(self)
                 except Exception:
                     pass
+
+                if not augmentation_requested:
+                    variant = _finalize_step4_mz_representation_variant(
+                        self,
+                        dataset_path=out,
+                        plan=exact_balance_plan,
+                        profile=augmentation_profile,
+                        counts=dataset_counts,
+                        generated=0,
+                        requested_extra=0,
+                        augmented=False,
+                        representation_required=False,
+                    )
+                    if str(variant.get("message") or "").strip():
+                        msg = f"{msg}\n{variant.get('message')}"
+                    if bool(variant.get("ok", True)):
+                        result_meta = dict(variant)
+                        final_status_message = str(variant.get("status_message") or "").strip() or None
+                        self._ui(lambda: self._style_training_success_label(self.split_status))
+                        self._ui(
+                            lambda counts=dict(dataset_counts), final_msg=final_status_message: self._set_training_widget_text(
+                                self.split_status,
+                                final_msg or (
+                                    "Wariant treningowy został przygotowany: "
+                                    f"train={int(counts.get('train', 0) or 0)}, "
+                                    f"val={int(counts.get('val', 0) or 0)}, "
+                                    f"test={int(counts.get('test', 0) or 0)}"
+                                ),
+                            )
+                        )
+                        self._ui(
+                            lambda p=str(result_dataset_path), msg=str(msg), counts=dict(dataset_counts), meta=dict(result_meta): self._handle_step4_dataset_success_result(
+                                dataset_path=p,
+                                message=msg,
+                                target="char",
+                                counts=counts,
+                                result_meta=meta,
+                            )
+                        )
+                    else:
+                        failure_msg = str(
+                            variant.get("message")
+                            or "Nie udało się zapisać zwykłego wariantu źródłowego."
+                        )
+                        self._ui(lambda: self._style_training_error_label(self.split_status))
+                        self._ui(lambda msg=failure_msg: self._set_training_widget_text(self.split_status, msg))
+                        self._ui(
+                            lambda msg=failure_msg: self._handle_step4_dataset_failure_result(
+                                message=msg,
+                                target="char",
+                                critical=False,
+                                allow_pz2_override=False,
+                            )
+                        )
+                    return
+
                 if not exact_feasible and exact_planned_images <= 0:
                     try:
                         result_meta = _finalize_step4_mz_representation_variant(

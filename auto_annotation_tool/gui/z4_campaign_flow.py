@@ -220,7 +220,7 @@ def build_step4_dataset_workflow_view_model(
     split_summary = ""
     split_action_label = "Utwórz wariant treningowy"
     show_split_toggle = False
-    split_toggle_label = "Popraw split"
+    split_toggle_label = "Dostosuj wariant"
     show_split_details = True
     char_ready_dataset = False
     char_ready_train = 0
@@ -287,12 +287,13 @@ def build_step4_dataset_workflow_view_model(
                 f"Źródłowy dataset znaków pochodzi z {char_dataset_gate_id}/PZ3.\n"
                 f"Gotowy wariant: {split_ready_value}\n"
                 f"Split: train={char_ready_train}, val={char_ready_val}, test={char_ready_test}\n"
-                "Nie musisz przygotowywać wariantu ponownie. Traktuj tę sekcję jako narzędzie awaryjne, "
-                "jeśli chcesz świadomie przebudować strukturę train / val / test."
+                "Nie musisz przygotowywać wariantu ponownie. Rozwiń ustawienia tylko wtedy, gdy chcesz "
+                "świadomie zmienić podział train / val / test, syntetyczne uzupełnienie train "
+                "albo ustawienia pokrycia znaków."
             )
             show_split_toggle = True
             show_split_details = bool(getattr(host, "_step4_char_split_details_visible", False))
-            split_toggle_label = "Ukryj opcje splitu" if show_split_details else "Popraw split"
+            split_toggle_label = "Ukryj ustawienia wariantu" if show_split_details else "Dostosuj wariant"
             split_action_label = "Przebuduj wariant treningowy znaków"
         else:
             split_src_raw = str(host.split_src_var.get() or "").strip()
