@@ -1321,8 +1321,10 @@ def run_yolo_gold_export(
                 f"Split: {split_info_text}",
                 f"Ścieżka: {yolo_out}",
                 (
-                    "Dalej: przejdź do Z4, aby przygotować wariant treningowy i split, "
-                    "albo zostań w Z3 / PZ3 i wykonaj kolejny eksport źródłowy."
+                    "Dalej: 1. Kliknij „Przekaż dataset i wróć do grafu”.\n"
+                    "2. Na grafie w bramce T05 kliknij „Zatwierdź bramkę”.\n"
+                    "3. Po zatwierdzeniu T05 projekt przejdzie do E4Z; wybierz „Otwórz Z4”, "
+                    "aby przygotować wariant treningowy i split."
                 ),
             ]
         )

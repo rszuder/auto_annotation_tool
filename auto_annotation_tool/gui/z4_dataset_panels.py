@@ -1093,7 +1093,7 @@ def _build_splitter_ui(self):
         wraplength=720
     )
     summary_colors = _get_step4_table_colors(self)
-    self.split_campaign_summary_title = _make_step4_pz1_section_title(self, f, "1. Źródło i wariant treningowy")
+    self.split_campaign_summary_title = _make_step4_pz1_section_title(self, f, "1. Dane wejściowe do wariantu")
     self.split_campaign_summary_frame = tk.Frame(
         f,
         bd=0,
@@ -1109,12 +1109,12 @@ def _build_splitter_ui(self):
         bg=summary_colors["border"],
     )
     self.split_campaign_summary_grid.pack(fill=tk.X)
-    self.split_campaign_summary_grid.grid_columnconfigure(0, weight=0, minsize=132)
-    self.split_campaign_summary_grid.grid_columnconfigure(1, weight=1, minsize=180)
-    self.split_campaign_summary_grid.grid_columnconfigure(2, weight=2, minsize=260)
+    self.split_campaign_summary_grid.grid_columnconfigure(0, weight=0, minsize=190)
+    self.split_campaign_summary_grid.grid_columnconfigure(1, weight=1, minsize=220)
+    self.split_campaign_summary_grid.grid_columnconfigure(2, weight=3, minsize=460)
     self._split_campaign_summary_header_widgets = []
     self._split_campaign_summary_rows = {}
-    for column, text in enumerate(("Element", "Identyfikator", "Szczegóły")):
+    for column, text in enumerate(("Co sprawdzam", "Stan", "Wyjaśnienie")):
         header_cell = tk.Label(
             self.split_campaign_summary_grid,
             text=text,
@@ -1133,9 +1133,9 @@ def _build_splitter_ui(self):
         self._split_campaign_summary_header_widgets.append(header_cell)
     for row_index, (key, label_text) in enumerate(
         (
-            ("source", "Źródłowy dataset"),
-            ("variant", "Wariant treningowy"),
-            ("split", "Podział wariantu"),
+            ("source", "Dane wejściowe"),
+            ("identity", "Czy dane zmieniły się od poprzedniego eksportu?"),
+            ("variant", "Wariant do treningu"),
         ),
         start=1,
     ):
@@ -1188,6 +1188,39 @@ def _build_splitter_ui(self):
         )
         details_cell.grid(row=row_index, column=2, sticky="nsew")
         self._split_campaign_summary_rows[key] = (label_cell, id_cell, details_cell)
+
+    def _show_split_source_technical_details():
+        message = str(
+            getattr(
+                self,
+                "_split_source_technical_text",
+                "Brak szczegółów technicznych dla bieżącego źródła.",
+            )
+            or "Brak szczegółów technicznych dla bieżącego źródła."
+        )
+        try:
+            self.app.themed_info(
+                "Szczegóły techniczne źródła",
+                message,
+                parent=f,
+                tone="info",
+            )
+        except Exception:
+            messagebox.showinfo(
+                "Szczegóły techniczne źródła",
+                message,
+                parent=f,
+            )
+
+    self.split_source_technical_row = ttk.Frame(f)
+    self.split_source_technical_row.pack(fill=tk.X, pady=(5, 3))
+    self.btn_split_source_technical_details = ttk.Button(
+        self.split_source_technical_row,
+        text="Szczegóły techniczne",
+        command=_show_split_source_technical_details,
+        style="WorkflowCard.TButton",
+    )
+    self.btn_split_source_technical_details.pack(side=tk.RIGHT)
 
     row2 = ttk.Frame(f); row2.pack(fill=tk.X, pady=2)
     self.split_output_row = row2

@@ -205,8 +205,10 @@ def test_t05_work_modal_uses_readable_font_floor():
             font_sizes.append(size.value)
 
     assert font_sizes
-    assert min(font_sizes) >= 8
-    assert 14 in font_sizes  # nagłówek
-    assert 11 in font_sizes  # tytuły kroków
-    assert font_sizes.count(9) >= 4  # badge/status/detale
+    assert min(font_sizes) >= 12
+    assert 20 in font_sizes  # nagłówek
+    assert 16 in font_sizes  # tytuły akcji
+    assert 14 in font_sizes  # intro / przyciski
+    assert 13 in font_sizes  # statusy / detale
+    assert 12 in font_sizes  # najmniejsze badge
 

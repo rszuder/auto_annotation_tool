@@ -263,22 +263,290 @@ def hide_pz3_status_summary_section(host: "CharacterAnnotationTab") -> None:
         pass
 
 
+def _parse_pz3_operation_summary(message: str) -> tuple[str, list[tuple[str, str]], str]:
+    """Split a PZ3 multiline summary into lead, table rows and next-step footer."""
+    lines = [str(line or "").strip() for line in str(message or "").splitlines() if str(line or "").strip()]
+    if not lines:
+        return "", [], ""
+
+    lead = lines[0]
+    rows: list[tuple[str, str]] = []
+    footer = ""
+
+    for line in lines[1:]:
+        if ":" not in line:
+            if footer:
+                footer = f"{footer}\n{line}".strip()
+            else:
+                footer = line
+            continue
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            continue
+        if key.casefold() in {"dalej", "następny krok", "nastepny krok"}:
+            footer = value
+            continue
+        rows.append((key, value))
+
+    return lead, rows, footer
+
+
+def _pz3_summary_row_tone(key: str, default_tone: str = "info") -> str:
+    normalized = str(key or "").strip().casefold()
+    if normalized in {"wyeksportowane tablice", "wyeksportowane znaki", "układ tablic"}:
+        return "success"
+    if normalized in {"strategie", "źródła", "zrodla", "split", "rozkład", "rozklad"}:
+        return "accent"
+    if normalized in {"ścieżka", "sciezka", "źródło", "zrodlo"}:
+        return "muted"
+    return str(default_tone or "info").strip().lower() or "info"
+
+
 def show_pz3_operation_summary_modal(host: "CharacterAnnotationTab", title: str, message: str, tone: str = "info") -> None:
     body = str(message or "").strip()
     if not body:
         return
-    dedupe_key = (str(title or ""), body, str(tone or "info"))
+    normalized_tone = str(tone or "info").strip().lower() or "info"
+    dedupe_key = (str(title or ""), body, normalized_tone)
     if getattr(host, "_last_pz3_operation_modal_key", None) == dedupe_key:
         return
     host._last_pz3_operation_modal_key = dedupe_key
+
+    lead, rows, footer = _parse_pz3_operation_summary(body)
+    # Short or unstructured diagnostics stay in the generic message presenter.
+    if len(rows) < 2:
+        try:
+            presenter = getattr(host.app, "themed_info", None)
+            if callable(presenter):
+                presenter(title or "PZ3", body, parent=host.frame, tone=normalized_tone)
+            else:
+                messagebox.showinfo(title or "PZ3", body)
+        except Exception:
+            pass
+        return
+
     try:
-        presenter = getattr(host.app, "themed_info", None)
-        if callable(presenter):
-            presenter(title or "PZ3", body, parent=host.frame, tone=tone or "info")
+        palette = dict(getattr(host.app, "palette", {}) or {})
+        panel = palette.get("panel", "#252526")
+        field = palette.get("field", panel)
+        fg = palette.get("fg", "#f3f4f6")
+        muted = palette.get("muted", "#a7abb3")
+        border = palette.get("panel_border", palette.get("border", "#4b5563"))
+        success = palette.get("success", "#2e8b57")
+        accent = palette.get("accent", "#4f78a8")
+        warning = palette.get("warning", "#b7791f")
+        error = palette.get("error", "#b94a48")
+        accent_text = palette.get("accent_text", fg)
+
+        tone_color = {
+            "success": success,
+            "warning": warning,
+            "danger": error,
+            "error": error,
+            "accent": accent,
+            "info": accent,
+            "muted": muted,
+        }.get(normalized_tone, accent)
+
+        dialog = tk.Toplevel(host.frame)
+        dialog._campaign_graph_dialog = False
+        try:
+            host.app.style_dialog_window(
+                dialog,
+                title=str(title or "PZ3"),
+                geometry="820x590",
+                parent=host.frame,
+            )
+        except Exception:
+            dialog.title(str(title or "PZ3"))
+            dialog.geometry("820x590")
+        try:
+            dialog.minsize(720, 500)
+            dialog.resizable(True, True)
+        except Exception:
+            pass
+
+        surface_builder = getattr(host.app, "_build_themed_dialog_surface", None)
+        if callable(surface_builder):
+            surface = surface_builder(dialog, tone=normalized_tone)
         else:
-            messagebox.showinfo(title or "PZ3", body)
-    except Exception:
-        pass
+            surface = tk.Frame(dialog, bg=panel, bd=0, highlightthickness=0)
+            surface.pack(fill=tk.BOTH, expand=True)
+        surface_bg = str(surface.cget("bg") or panel)
+
+        shell = tk.Frame(surface, bg=surface_bg, bd=0, highlightthickness=0)
+        shell.pack(fill=tk.BOTH, expand=True, padx=18, pady=16)
+
+        header = tk.Frame(shell, bg=surface_bg, bd=0, highlightthickness=0)
+        header.pack(fill=tk.X, pady=(0, 10))
+
+        badge_bg = blend_hex_colors(surface_bg, tone_color, 0.22)
+        badge = tk.Label(
+            header,
+            text="✓" if normalized_tone == "success" else "i",
+            bg=badge_bg,
+            fg=accent_text,
+            font=("Segoe UI Semibold", 12),
+            width=2,
+            pady=3,
+        )
+        badge.pack(side=tk.LEFT, anchor=tk.N, padx=(0, 10))
+
+        header_text = tk.Frame(header, bg=surface_bg, bd=0, highlightthickness=0)
+        header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            header_text,
+            text=str(title or "PZ3"),
+            bg=surface_bg,
+            fg=fg,
+            font=("Segoe UI Semibold", 14),
+            anchor="w",
+        ).pack(fill=tk.X)
+        if lead:
+            tk.Label(
+                header_text,
+                text=lead,
+                bg=surface_bg,
+                fg=tone_color if normalized_tone != "info" else fg,
+                font=("Segoe UI", 10, "bold" if normalized_tone == "success" else "normal"),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=720,
+            ).pack(fill=tk.X, pady=(4, 0))
+
+        table = tk.Frame(
+            shell,
+            bg=border,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=border,
+            highlightcolor=border,
+        )
+        table.pack(fill=tk.BOTH, expand=True, pady=(2, 10))
+        table.grid_columnconfigure(0, weight=0, minsize=185)
+        table.grid_columnconfigure(1, weight=1)
+
+        header_bg = blend_hex_colors(field, border, 0.20)
+        for col, text_value in enumerate(("Pole", "Wartość")):
+            tk.Label(
+                table,
+                text=text_value,
+                bg=header_bg,
+                fg=muted,
+                font=("Segoe UI Semibold", 9),
+                anchor="w",
+                padx=10,
+                pady=7,
+                relief="solid",
+                bd=1,
+            ).grid(row=0, column=col, sticky="nsew")
+
+        tone_palette = {
+            "success": success,
+            "accent": accent,
+            "warning": warning,
+            "error": error,
+            "danger": error,
+            "muted": muted,
+            "info": accent,
+        }
+        for row_index, (key, value) in enumerate(rows, start=1):
+            row_tone = _pz3_summary_row_tone(key, normalized_tone)
+            row_color = tone_palette.get(row_tone, accent)
+            row_bg = blend_hex_colors(field, row_color, 0.055 if row_tone == "muted" else 0.10)
+            key_fg = row_color if row_tone != "muted" else muted
+            tk.Label(
+                table,
+                text=key,
+                bg=row_bg,
+                fg=key_fg,
+                font=("Segoe UI Semibold", 9),
+                anchor="nw",
+                justify=tk.LEFT,
+                padx=10,
+                pady=8,
+                relief="solid",
+                bd=1,
+            ).grid(row=row_index, column=0, sticky="nsew")
+            tk.Label(
+                table,
+                text=value,
+                bg=row_bg,
+                fg=fg,
+                font=("Segoe UI", 9),
+                anchor="nw",
+                justify=tk.LEFT,
+                wraplength=555,
+                padx=10,
+                pady=8,
+                relief="solid",
+                bd=1,
+            ).grid(row=row_index, column=1, sticky="nsew")
+
+        if footer:
+            footer_bg = blend_hex_colors(surface_bg, accent, 0.10)
+            footer_frame = tk.Frame(
+                shell,
+                bg=footer_bg,
+                highlightthickness=1,
+                highlightbackground=blend_hex_colors(accent, surface_bg, 0.32),
+            )
+            footer_frame.pack(fill=tk.X, pady=(0, 10))
+            tk.Label(
+                footer_frame,
+                text="Następny krok",
+                bg=footer_bg,
+                fg=accent,
+                font=("Segoe UI Semibold", 9),
+                anchor="w",
+            ).pack(fill=tk.X, padx=10, pady=(7, 1))
+            tk.Label(
+                footer_frame,
+                text=footer,
+                bg=footer_bg,
+                fg=fg,
+                font=("Segoe UI", 9),
+                anchor="w",
+                justify=tk.LEFT,
+                wraplength=750,
+            ).pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        actions = tk.Frame(shell, bg=surface_bg, bd=0, highlightthickness=0)
+        actions.pack(fill=tk.X)
+        tk.Button(
+            actions,
+            text="OK",
+            command=dialog.destroy,
+            bg=blend_hex_colors(field, tone_color, 0.20),
+            fg=fg,
+            activebackground=blend_hex_colors(field, tone_color, 0.30),
+            activeforeground=fg,
+            relief=tk.FLAT,
+            font=("Segoe UI", 10),
+            padx=18,
+            pady=7,
+            cursor="hand2",
+        ).pack(side=tk.RIGHT)
+
+        try:
+            dialog.transient(host.frame)
+            dialog.grab_set()
+            dialog.focus_set()
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.debug(f"Nie udało się zbudować tabelarycznego podsumowania PZ3: {exc}")
+        try:
+            presenter = getattr(host.app, "themed_info", None)
+            if callable(presenter):
+                presenter(title or "PZ3", body, parent=host.frame, tone=normalized_tone)
+            else:
+                messagebox.showinfo(title or "PZ3", body)
+        except Exception:
+            pass
 
 
 def remember_pz3_operation_message(host: "CharacterAnnotationTab", console_widget, message: str, tone: str = "info") -> None:

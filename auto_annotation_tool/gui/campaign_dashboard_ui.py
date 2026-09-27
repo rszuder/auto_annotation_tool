@@ -7631,11 +7631,11 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         dialog = tk.Toplevel(self.frame)
         dialog._campaign_graph_dialog = True
         try:
-            self.app.style_dialog_window(dialog, title=f"Praca {display_gate_id}", geometry="700x680", parent=self.frame)
+            self.app.style_dialog_window(dialog, title=f"Praca {display_gate_id}", geometry="840x720", parent=self.frame)
         except Exception:
             dialog.title(f"Praca {display_gate_id}")
         try:
-            dialog.minsize(680, 640)
+            dialog.minsize(800, 680)
         except Exception:
             pass
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -7981,7 +7981,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=f"Praca bramki {display_gate_id}",
             fg=fg,
             bg=body_bg,
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 11, "bold"),
             anchor="w",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(
@@ -7989,7 +7989,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=display_gate_id,
             fg=palette["accent_text"],
             bg=blend_hex_colors(success, field_bg, 0.25),
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             padx=10,
             pady=4,
         ).pack(side=tk.RIGHT)
@@ -7999,16 +7999,17 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text="Wybierz akcję, która ma otworzyć bramkę.",
             fg=muted,
             bg=body_bg,
+            font=("Segoe UI", 10),
             justify=tk.LEFT,
             anchor="w",
-            wraplength=500,
+            wraplength=680,
         ).pack(fill=tk.X, padx=16, pady=(0, 6))
         tk.Label(
             body,
             text=campaign_ui_helpers._repair_polish_text(recommendation_text),
             fg=success if recommended_label else muted,
             bg=blend_hex_colors(body_bg, success, 0.09) if recommended_label else body_bg,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 10, "bold"),
             anchor="w",
             padx=10,
             pady=5,
@@ -8085,8 +8086,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 *list(buttons or []),
             ]
 
-        suggestion_frame_width = 286
-        suggestion_detail_wrap = 226
+        suggestion_frame_width = 340
+        suggestion_detail_wrap = 280
 
         for index, (label, command, tone) in enumerate(buttons, start=1):
             normalized_label = campaign_ui_helpers._repair_polish_text(str(label or "").strip())
@@ -8160,7 +8161,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 font=("Segoe UI", 10, "bold"),
                 anchor="w",
                 justify=tk.LEFT,
-                wraplength=245,
+                wraplength=310,
             ).grid(row=0, column=0, sticky="ew", padx=(12, 8), pady=7)
             status = _t07_action_status(
                 normalized_label,
@@ -8197,7 +8198,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=str(status.get("mark") or "○"),
                 fg=mark_fg,
                 bg=mark_bg,
-                font=("Segoe UI Semibold", 8),
+                font=("Segoe UI Semibold", 9),
                 anchor="center",
                 padx=0,
                 pady=0,
@@ -8207,7 +8208,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=campaign_ui_helpers._repair_polish_text(str(status.get("title") or "")),
                 fg=status_tone if is_enabled else muted,
                 bg=status_bg,
-                font=("Segoe UI Semibold", 7),
+                font=("Segoe UI Semibold", 9),
                 anchor="w",
                 justify=tk.LEFT,
                 wraplength=suggestion_detail_wrap,
@@ -8217,7 +8218,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=_format_gate_work_suggestion_text(status.get("detail")),
                 fg=fg if is_enabled else muted,
                 bg=status_bg,
-                font=("Segoe UI", 7),
+                font=("Segoe UI", 9),
                 anchor="w",
                 wraplength=suggestion_detail_wrap,
                 justify=tk.LEFT,
@@ -8230,6 +8231,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 bg=btn_bg,
                 fg=fg if is_enabled else muted,
                 relief=tk.FLAT,
+                font=("Segoe UI", 10, "bold"),
                 padx=12,
                 pady=5,
                 width=10,
@@ -8246,6 +8248,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             bg=field_bg,
             fg=fg,
             relief=tk.FLAT,
+            font=("Segoe UI", 10),
             padx=12,
             pady=6,
         ).pack(side=tk.RIGHT)
@@ -8256,8 +8259,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             pass
 
     def _open_t06_actions_modal(_body_text: str, buttons: list[tuple[str, object, str]]) -> None:
-        modal_width = 840
-        modal_height = 560
+        modal_width = 940
+        modal_height = 620
         modal_content_wrap = modal_width - 104
         dialog = tk.Toplevel(self.frame)
         dialog._campaign_graph_dialog = True
@@ -8271,7 +8274,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         except Exception:
             dialog.title(f"Praca {CHAR_WORK_GATE_DISPLAY_ID}")
         try:
-            dialog.minsize(800, 530)
+            dialog.minsize(900, 590)
         except Exception:
             pass
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -8827,7 +8830,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=f"Praca bramki {CHAR_WORK_GATE_DISPLAY_ID}",
             fg=fg,
             bg=body_bg,
-            font=("Segoe UI", 14, "bold"),
+            font=("Segoe UI", 20, "bold"),
             anchor="w",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(
@@ -8835,7 +8838,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=CHAR_WORK_GATE_DISPLAY_ID,
             fg=palette["accent_text"],
             bg=blend_hex_colors(success, field_bg, 0.25),
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 16, "bold"),
             padx=10,
             pady=4,
         ).pack(side=tk.RIGHT)
@@ -8875,7 +8878,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=campaign_ui_helpers._repair_polish_text(intro),
             fg=warning if pending_work else muted,
             bg=blend_hex_colors(body_bg, warning, 0.08) if pending_work else body_bg,
-            font=("Segoe UI", 10, "bold" if pending_work else "normal"),
+            font=("Segoe UI", 14, "bold" if pending_work else "normal"),
             justify=tk.LEFT,
             anchor="w",
             wraplength=modal_content_wrap,
@@ -8888,7 +8891,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=campaign_ui_helpers._repair_polish_text(recommendation_text),
             fg=success if recommended_label else muted,
             bg=blend_hex_colors(body_bg, success, 0.09) if recommended_label else body_bg,
-            font=("Segoe UI", 10, "bold"),
+            font=("Segoe UI", 14, "bold"),
             anchor="w",
             justify=tk.LEFT,
             wraplength=modal_content_wrap,
@@ -9144,8 +9147,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
         list_host = tk.Frame(body, bg=body_bg)
         list_host.pack(fill=tk.X, padx=16, pady=(0, 12))
-        suggestion_frame_width = 310
-        suggestion_detail_wrap = 246
+        suggestion_frame_width = 360
+        suggestion_detail_wrap = 300
 
         def _abandon_interrupted_t06_ok() -> None:
             nonlocal _t06_interrupted_work_cache
@@ -9471,7 +9474,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=f"{index}. {normalized_label}",
                 fg=fg if is_enabled else muted,
                 bg=row_bg,
-                font=("Segoe UI", 11, "bold"),
+                font=("Segoe UI", 13, "bold"),
                 anchor="w",
                 justify=tk.LEFT,
                 wraplength=330,
@@ -9484,7 +9487,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=str(completion_badge.get("text") or ""),
                 fg=badge_tone if is_enabled else muted,
                 bg=badge_bg,
-                font=("Segoe UI Semibold", 8),
+                font=("Segoe UI Semibold", 13),
                 anchor="center",
                 padx=7,
                 pady=2,
@@ -9520,7 +9523,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=str(status.get("mark") or "○"),
                 fg=mark_fg,
                 bg=mark_bg,
-                font=("Segoe UI Semibold", 9),
+                font=("Segoe UI Semibold", 12),
                 anchor="center",
                 padx=0,
                 pady=0,
@@ -9530,7 +9533,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=campaign_ui_helpers._repair_polish_text(str(status.get("title") or "")),
                 fg=status_tone if is_enabled else muted,
                 bg=status_bg,
-                font=("Segoe UI Semibold", 9),
+                font=("Segoe UI Semibold", 12),
                 anchor="w",
             ).grid(row=0, column=1, sticky="ew")
             tk.Label(
@@ -9538,7 +9541,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=_format_gate_work_suggestion_text(status.get("detail")),
                 fg=fg if is_enabled else muted,
                 bg=status_bg,
-                font=("Segoe UI", 9),
+                font=("Segoe UI", 14),
                 anchor="w",
                 wraplength=suggestion_detail_wrap,
                 justify=tk.LEFT,
@@ -9558,7 +9561,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 bg=btn_bg,
                 fg=fg if is_enabled else muted,
                 relief=tk.FLAT,
-                font=("Segoe UI", 10),
+                font=("Segoe UI", 13),
                 padx=12,
                 pady=6,
                 width=10,
@@ -9575,7 +9578,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             bg=field_bg,
             fg=fg,
             relief=tk.FLAT,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 13),
             padx=12,
             pady=7,
         ).pack(side=tk.RIGHT)
