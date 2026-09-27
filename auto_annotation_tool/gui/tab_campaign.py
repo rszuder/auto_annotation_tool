@@ -609,6 +609,8 @@ class CampaignTab:
         return campaign_step1_assets._summarize_project_start_annotation_import_origin(self, *args, **kwargs)
     def _format_project_start_annotation_import_origin_table(self, *args, **kwargs):
         return campaign_step1_assets._format_project_start_annotation_import_origin_table(self, *args, **kwargs)
+    def _show_project_start_annotation_import_modal(self, *args, **kwargs):
+        return campaign_step1_assets._show_project_start_annotation_import_modal(self, *args, **kwargs)
     def _choose_project_start_annotation_import_mode(self, *args, **kwargs):
         return campaign_step1_assets._choose_project_start_annotation_import_mode(self, *args, **kwargs)
     def _promote_project_start_annotation_import_to_approved_set(self, *args, **kwargs):

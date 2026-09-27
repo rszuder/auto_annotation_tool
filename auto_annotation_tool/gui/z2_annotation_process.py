@@ -908,8 +908,59 @@ def _force_render_campaign_graph_right_panel(self) -> bool:
         except Exception:
             t02_project_images = 0
             t02_project_plates = 0
-        effective_approved_images = max(0, int(t02_project_images or 0) + int(t02_session_images or 0))
-        effective_approved_plates = max(0, int(t02_project_plates or 0) + int(t02_session_plates or 0))
+
+        # "Nowe [OK] w kontroli" jest deltą względem puli projektu.
+        # Po ponownym otwarciu T02 ten sam run może nadal mieć approved_filenames,
+        # ale jeśli te obrazy są już w puli projektu, nie wolno liczyć ich drugi raz.
+        try:
+            project_approved_names = {
+                str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+                for name in set(self._get_campaign_plate_approved_filenames() or set())
+                if str(name or "").strip()
+            }
+            session_approved_names = {
+                str(name or "").strip().replace("\\", "/").rsplit("/", 1)[-1].lower()
+                for name in set(self._get_preview_approved_filenames() or set())
+                if str(name or "").strip()
+            }
+            session_only_names = session_approved_names - project_approved_names
+
+            session_images = 0
+            session_plates = 0
+            for ann in list(getattr(self, "current_annotations", []) or []):
+                filename = (
+                    str(getattr(ann, "filename", "") or "")
+                    .strip()
+                    .replace("\\", "/")
+                    .rsplit("/", 1)[-1]
+                    .lower()
+                )
+                if not filename or filename not in session_only_names:
+                    continue
+                try:
+                    plate_count = int(len(self._get_plate_detections(ann)))
+                except Exception:
+                    plate_count = 0
+                if plate_count <= 0:
+                    continue
+                session_images += 1
+                session_plates += plate_count
+
+            t02_session_images = int(session_images)
+            t02_session_plates = int(session_plates)
+        except Exception:
+            # Zachowaj dotychczasowe liczniki tylko jako bezpieczny fallback.
+            t02_session_images = int(approved_images or 0)
+            t02_session_plates = int(approved_plates or 0)
+
+        effective_approved_images = max(
+            0,
+            int(t02_project_images or 0) + int(t02_session_images or 0),
+        )
+        effective_approved_plates = max(
+            0,
+            int(t02_project_plates or 0) + int(t02_session_plates or 0),
+        )
         gate_state = {
             **dict(gate_state or {}),
             "approved_images": int(effective_approved_images or 0),

@@ -2050,24 +2050,24 @@ def _prompt_t02_at_review_commit_choice(self, *, approved_images: int, approved_
     parent = self.frame.winfo_toplevel()
     result = {"ok": False}
     palette = getattr(getattr(self, "app", None), "palette", {}) or {}
-    panel_bg = palette.get("panel", "#252526")
-    card_bg = palette.get("card", "#2d2d30")
-    fg = palette.get("fg", "#f3f4f6")
-    muted = palette.get("muted", "#c7c7c7")
-    warning = palette.get("warning", "#f39c12")
-    border = palette.get("border", "#3f3f46")
+    panel_bg = palette.get("panel", "#f4f6ef")
+    fg = palette.get("fg", "#20251f")
+    warning = palette.get("warning", "#a67c00")
+    success = palette.get("success", "#2f7d32")
+    accent = palette.get("accent", success)
+    border = palette.get("border", "#aeb7a8")
 
     dialog = tk.Toplevel(parent)
     dialog.withdraw()
     try:
         self.app.style_dialog_window(
             dialog,
-            title="Kontrola AT wybierze T02",
-            geometry="640x360",
+            title="Zapis kontroli AT",
+            geometry="760x360",
             parent=parent,
         )
     except Exception:
-        dialog.title("Kontrola AT wybierze T02")
+        dialog.title("Zapis kontroli AT")
         dialog.configure(bg=panel_bg)
     dialog.resizable(False, False)
     try:
@@ -2078,55 +2078,140 @@ def _prompt_t02_at_review_commit_choice(self, *, approved_images: int, approved_
     try:
         body = self.app._build_themed_dialog_surface(dialog, tone="warning")
     except Exception:
-        body = tk.Frame(dialog, bg=panel_bg, padx=18, pady=16)
+        body = tk.Frame(dialog, bg=panel_bg, bd=0, highlightthickness=0)
         body.pack(fill=tk.BOTH, expand=True)
 
-    shell = tk.Frame(body, bg=panel_bg)
-    shell.pack(fill=tk.BOTH, expand=True)
+    try:
+        surface_bg = str(body.cget("bg") or panel_bg)
+    except Exception:
+        surface_bg = panel_bg
+
+    summary_bg = blend_hex_colors(surface_bg, warning, 0.09)
+    summary_header_bg = blend_hex_colors(surface_bg, warning, 0.17)
+    success_bg = blend_hex_colors(surface_bg, success, 0.10)
+    accent_bg = blend_hex_colors(surface_bg, accent, 0.09)
+
+    shell = tk.Frame(body, bg=surface_bg, bd=0, highlightthickness=0)
+    shell.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+
+    header = tk.Frame(shell, bg=surface_bg, bd=0, highlightthickness=0)
+    header.pack(fill=tk.X, pady=(0, 12))
+
+    badge = tk.Label(
+        header,
+        text="T02",
+        bg=summary_header_bg,
+        fg=warning,
+        font=("Segoe UI Semibold", 10),
+        padx=10,
+        pady=5,
+    )
+    badge.pack(side=tk.LEFT, anchor=tk.N, padx=(0, 12))
+
+    header_text = tk.Frame(header, bg=surface_bg, bd=0, highlightthickness=0)
+    header_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
     tk.Label(
-        shell,
-        text="Zapis kontroli AT zamknie wybór toru tej iteracji",
-        bg=panel_bg,
+        header_text,
+        text="Zapis kontroli AT",
+        bg=surface_bg,
         fg=fg,
-        font=("Segoe UI Semibold", 13),
+        font=("Segoe UI Semibold", 15),
         anchor="w",
-    ).pack(fill=tk.X, pady=(0, 8))
+    ).pack(fill=tk.X)
+
     tk.Label(
+        header_text,
+        text=(
+            "Zapiszesz zatwierdzone pozycje [OK] do projektu i utrwalisz T02 "
+            "jako wybraną bramkę tej iteracji."
+        ),
+        bg=surface_bg,
+        fg=fg,
+        font=("Segoe UI", 10),
+        justify=tk.LEFT,
+        anchor="w",
+        wraplength=650,
+    ).pack(fill=tk.X, pady=(4, 0))
+
+    summary = tk.Frame(
+        shell,
+        bg=border,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground=border,
+        highlightcolor=border,
+    )
+    summary.pack(fill=tk.X, pady=(0, 12))
+    summary.grid_columnconfigure(0, weight=0, minsize=170)
+    summary.grid_columnconfigure(1, weight=1)
+
+    rows = (
+        (
+            "Do zapisania",
+            f"{int(approved_images or 0)} obrazów [OK] · {int(approved_plates or 0)} tablic",
+            success,
+            success_bg,
+        ),
+        (
+            "Po zapisie",
+            "T02 pozostanie wybraną bramką tej iteracji",
+            accent,
+            accent_bg,
+        ),
+        (
+            "Zmiana toru",
+            "Będzie wymagała osobnego cofnięcia zapisanej kontroli T02",
+            warning,
+            summary_bg,
+        ),
+    )
+
+    for row_index, (label, value, tone, row_bg) in enumerate(rows):
+        tk.Label(
+            summary,
+            text=label,
+            bg=row_bg,
+            fg=fg,
+            font=("Segoe UI Semibold", 9),
+            anchor="w",
+            padx=12,
+            pady=8,
+            relief="solid",
+            bd=1,
+        ).grid(row=row_index, column=0, sticky="nsew")
+        tk.Label(
+            summary,
+            text=value,
+            bg=row_bg,
+            fg=tone,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=500,
+            padx=12,
+            pady=8,
+            relief="solid",
+            bd=1,
+        ).grid(row=row_index, column=1, sticky="nsew")
+
+    note = tk.Label(
         shell,
         text=(
-            "Masz oznaczone pozycje [OK] w kontroli importu AT. "
-            "Jeśli je zapiszesz, bieżąca iteracja zostanie przypisana do bramki T02 "
-            "i nie przełączymy jej później na T01 bez osobnego cofnięcia tej kontroli."
+            "To zapis decyzji z bieżącej kontroli. Nie uruchamia kolejnego etapu "
+            "i nie zatwierdza jeszcze samej bramki T02."
         ),
-        bg=panel_bg,
-        fg=muted,
+        bg=surface_bg,
+        fg=fg,
         font=("Segoe UI", 9),
         justify=tk.LEFT,
         anchor="w",
-        wraplength=580,
-    ).pack(fill=tk.X, pady=(0, 12))
+        wraplength=700,
+    )
+    note.pack(fill=tk.X, pady=(0, 14))
 
-    summary = tk.Frame(shell, bg=card_bg, highlightthickness=1, highlightbackground=border, padx=12, pady=10)
-    summary.pack(fill=tk.X, pady=(0, 12))
-    tk.Label(
-        summary,
-        text=f"Do zapisania: {int(approved_images or 0)} obrazów [OK] / {int(approved_plates or 0)} tablic",
-        bg=card_bg,
-        fg=warning,
-        font=("Segoe UI", 10, "bold"),
-        anchor="w",
-    ).pack(fill=tk.X)
-    tk.Label(
-        summary,
-        text="To jest pierwszy realny wkład T02 w tej iteracji.",
-        bg=card_bg,
-        fg=muted,
-        font=("Segoe UI", 9),
-        anchor="w",
-    ).pack(fill=tk.X, pady=(4, 0))
-
-    buttons = tk.Frame(shell, bg=panel_bg)
-    buttons.pack(fill=tk.X, side=tk.BOTTOM, pady=(10, 0))
+    buttons = tk.Frame(shell, bg=surface_bg, bd=0, highlightthickness=0)
+    buttons.pack(fill=tk.X)
 
     def choose(ok: bool) -> None:
         result["ok"] = bool(ok)
@@ -2137,7 +2222,7 @@ def _prompt_t02_at_review_commit_choice(self, *, approved_images: int, approved_
 
     ttk.Button(
         buttons,
-        text="Zapisz i wybierz T02",
+        text="Zapisz kontrolę T02",
         style="Accent.TButton",
         command=lambda: choose(True),
     ).pack(side=tk.RIGHT)
@@ -2145,7 +2230,14 @@ def _prompt_t02_at_review_commit_choice(self, *, approved_images: int, approved_
         buttons,
         text="Wróć do kontroli",
         command=lambda: choose(False),
-    ).pack(side=tk.RIGHT, padx=(0, 8))
+    ).pack(side=tk.RIGHT, padx=(0, 10))
+
+    try:
+        fit = getattr(self.app, "_fit_dialog_to_content", None)
+        if callable(fit):
+            fit(dialog, parent=parent, min_width=760, min_height=330)
+    except Exception:
+        pass
 
     try:
         dialog.update_idletasks()

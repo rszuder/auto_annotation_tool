@@ -1114,6 +1114,85 @@ def _preview_annotation_passes_metric_filters(self, ann) -> bool:
     return True
 
 
+def _get_t02_review_scope_filenames(self) -> set[str]:
+    """Nazwy obrazów, które faktycznie mają AT tablicy w pakiecie kontrolowanym przez T02."""
+    try:
+        from .z2_shared_ui import is_campaign_t02_at_review_context
+
+        if not is_campaign_t02_at_review_context(self):
+            return set()
+    except Exception:
+        return set()
+
+    def _normalize_name(value) -> str:
+        text = str(value or "").strip().replace("\\", "/")
+        if not text:
+            return ""
+        return text.rsplit("/", 1)[-1].lower()
+
+    def _image_has_plate_shape(image_el) -> bool:
+        negative_label_parts = ("vehicle", "car", "pojazd")
+        positive_label_parts = ("plate", "tablic")
+        for det_el in list(image_el):
+            tag_name = str(getattr(det_el, "tag", "") or "").strip().lower()
+            if tag_name not in {"polygon", "box"}:
+                continue
+            label = str(det_el.get("label", "") or "").strip().lower()
+            if label and any(part in label for part in negative_label_parts):
+                continue
+            if not label or any(part in label for part in positive_label_parts):
+                return True
+        return False
+
+    # Kanoniczny zakres T02 to obrazy, które w źródłowym XML faktycznie mają
+    # anotację tablicy. Sam XML może zawierać setki pustych <image> z całego O.
+    try:
+        from ..campaign_manager import CAMPAIGN
+
+        source = dict(CAMPAIGN.get_project_start_plate_source() or {})
+        source_xml = str(source.get("source_xml_path") or "").strip()
+    except Exception:
+        source_xml = ""
+
+    if source_xml:
+        try:
+            xml_path = Path(source_xml)
+            if xml_path.exists() and xml_path.is_file():
+                root = ET.parse(xml_path).getroot()
+                names = {
+                    _normalize_name(image_el.get("name"))
+                    for image_el in root.findall(".//image")
+                    if _image_has_plate_shape(image_el)
+                }
+                names.discard("")
+                if names:
+                    return names
+        except Exception:
+            pass
+
+    # Fallback dla starszych/importowanych runów: jawny scope z manifestu.
+    manifest = {}
+    for run_dir in (
+        getattr(self, "current_annotation_run_dir", None),
+        getattr(self, "last_staging_run_dir", None),
+    ):
+        if run_dir is None:
+            continue
+        try:
+            payload = self._load_annotation_run_manifest(run_dir)
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict) and payload:
+            manifest = payload
+            break
+
+    result = {
+        _normalize_name(raw_name)
+        for raw_name in list(manifest.get("input_scope_filenames") or [])
+    }
+    result.discard("")
+    return result
+
 def _filter_preview_list_entries(
     self,
     entries: list[tuple[int, ImageAnnotation]],
@@ -1121,6 +1200,20 @@ def _filter_preview_list_entries(
     from .z2_gt_readiness import annotation_gt_readiness, missing_required_gt
     from .z2_gt_review import missing_gt_filter_active
     filtered_entries = list(entries or [])
+
+    t02_scope_filenames = _get_t02_review_scope_filenames(self)
+    if t02_scope_filenames:
+        filtered_entries = [
+            (actual_idx, ann)
+            for actual_idx, ann in filtered_entries
+            if str(getattr(ann, "filename", "") or "")
+            .strip()
+            .replace("\\", "/")
+            .rsplit("/", 1)[-1]
+            .lower()
+            in t02_scope_filenames
+        ]
+
     if missing_gt_filter_active(self):
         # The repair filter must also reveal previously approved rows and must
         # not hide missing GT behind confidence/fit thresholds.

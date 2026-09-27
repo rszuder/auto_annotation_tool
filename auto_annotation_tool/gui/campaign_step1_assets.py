@@ -1995,12 +1995,11 @@ def _clear_project_start_asset(self, row_key: str) -> None:
                 pass
             self._set_project_start_asset_scope("char_model", "", persist=True)
 
-        if self._get_iteration_target() == "char" and self._get_step1_char_route_block_reason():
-            try:
-                CAMPAIGN.clear_iteration_target()
-            except Exception:
-                pass
-
+        # Usunięcie albo podmiana zasobu E1 nie może kasować jawnego wyboru
+        # bramki/toru. Wybrana bramka pozostaje aktywna i po prostu wraca do
+        # stanu „warunki niespełnione”, dopóki operator nie uzupełni braków.
+        # Zmiana toru jest osobną, świadomą akcją („Zmień tor” / wybór innej
+        # bramki), więc tylko ona może wyczyścić iteration_target/path.
         try:
             self._clear_dashboard_perf_cache()
         except Exception:
@@ -2014,7 +2013,10 @@ def _clear_project_start_asset(self, row_key: str) -> None:
 
         self._refresh_dashboard()
         try:
-            self.app.update_status(f"Wyczyszczono wybór {label} w E1.", "info")
+            self.app.update_status(
+                f"Wyczyszczono wybór {label} w E1. Wybrana bramka pozostaje aktywna; uzupełnij brakujący zasób.",
+                "info",
+            )
         except Exception:
             pass
     except Exception as e:

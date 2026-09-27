@@ -2714,6 +2714,11 @@ def _refresh_preview_list_summary(self, *, lightweight: bool = False):
     annotations = list(self.current_annotations or [])
     visible_entries = list(getattr(self, "_preview_list_display_indices", []) or [])
     visible_count = int(len(visible_entries))
+    try:
+        t02_scope_filenames = set(self._get_t02_review_scope_filenames() or set())
+    except Exception:
+        t02_scope_filenames = set()
+    summary_total_images = len(t02_scope_filenames) if t02_scope_filenames else len(annotations)
     campaign_context = not self._is_free_mode_session_context()
     approval_context = self._get_campaign_step2_approval_context() if campaign_context else {}
     approval_current_step = int(approval_context.get("current_step") or 0) if isinstance(approval_context, dict) else 0
@@ -2872,7 +2877,7 @@ def _refresh_preview_list_summary(self, *, lightweight: bool = False):
             visible_problem_images = problem_images if visible_count == len(annotations) else 0
             visible_approved_images = approved_images if visible_count == len(annotations) else 0
     left_summary_parts: list[str] = []
-    left_summary_parts.append(f"Zdjęcia: {visible_count}/{len(annotations)}")
+    left_summary_parts.append(f"Zdjęcia: {visible_count}/{summary_total_images}")
     left_summary_parts.append(f"Tablice: {visible_plate_count}/{total_plate_count}")
     if filter_text:
         left_summary_parts.append(f"Filtr jakości: {filter_text}")
@@ -3019,12 +3024,20 @@ def _refresh_preview_list_summary(self, *, lightweight: bool = False):
             pass
     try:
         total_widget = getattr(self, "preview_list_legend_total_count_lbl", None)
-        if total_widget is not None:
-            total_text = f"{visible_count} / {len(annotations)}"
-            total_widget.configure(text=total_text, width=max(7, len(total_text)))
         total_label = getattr(self, "preview_list_legend_total_lbl", None)
+        if t02_scope_filenames:
+            total_text = (
+                f"{visible_count}/{summary_total_images} · "
+                f"Pula O: {len(annotations)}"
+            )
+            total_label_text = "Zakres kontroli"
+        else:
+            total_text = f"{visible_count} / {len(annotations)}"
+            total_label_text = "Zdjęcia"
+        if total_widget is not None:
+            total_widget.configure(text=total_text, width=max(7, len(total_text)))
         if total_label is not None:
-            total_label.configure(text="Zdjęcia")
+            total_label.configure(text=total_label_text)
     except Exception:
         pass
     try:

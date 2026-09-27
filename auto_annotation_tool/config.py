@@ -197,7 +197,12 @@ class Config:
     # ==========================================
     # LOGICZNA STRUKTURA KATALOGÓW (WORKSPACE)
     # ==========================================
-    WORKSPACE_DIR: Path = Path("Workspace").resolve()
+    # Kanoniczna ścieżka aplikacji ma zachować logiczny alias Workspace.
+    # Na Windows Workspace może być junctionem; .resolve() zamieniał wtedy
+    # widoczne i zapisywane ścieżki na fizyczny katalog docelowy junctiona.
+    # Fizyczne .resolve() nadal stosujemy lokalnie tam, gdzie porównujemy
+    # tożsamość dwóch ścieżek, ale nie przy definiowaniu rootu aplikacji.
+    WORKSPACE_DIR: Path = Path("Workspace").absolute()
     
     DIR_1_RAW: Path         = WORKSPACE_DIR / "1_raw_images"
     DIR_2_AUTO_ANN: Path    = WORKSPACE_DIR / "2_auto_annotations"
