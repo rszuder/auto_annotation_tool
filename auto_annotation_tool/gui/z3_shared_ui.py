@@ -1415,6 +1415,15 @@ def refresh_pz3_dataset_mode_ui(host: "CharacterAnnotationTab"):
             tone=str(vm.action_hint_tone or "muted"),
             emphasis=False,
         )
+        # Źródło/gotowość PZ3 mogły właśnie zmienić się po wczytaniu preview
+        # albo po zmianie filtrów. Lewy panel i prawy Status PZ3 muszą być
+        # odświeżane w tej samej transakcji UI.
+        refresh_status = getattr(host, "_refresh_pz3_status_panel_ui", None)
+        if callable(refresh_status):
+            try:
+                refresh_status()
+            except Exception:
+                pass
         return
 
     if bool(vm.show_existing_dataset_panel) and not str(host.pz3_existing_dataset_panel.winfo_manager()):
@@ -1478,6 +1487,12 @@ def refresh_pz3_dataset_mode_ui(host: "CharacterAnnotationTab"):
         tone=str(vm.action_hint_tone or "muted"),
         emphasis=False,
     )
+    refresh_status = getattr(host, "_refresh_pz3_status_panel_ui", None)
+    if callable(refresh_status):
+        try:
+            refresh_status()
+        except Exception:
+            pass
 
 
 def refresh_pz3_dataset_card(host: "CharacterAnnotationTab"):

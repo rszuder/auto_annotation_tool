@@ -212,9 +212,17 @@ def get_campaign_step3_annotation_readiness(host) -> dict:
         source_contract_sha256 = ""
 
     try:
-        perfect_count = int(self._count_preview_statuses().get("perfect", 0) or 0)
+        preview_perfect_count = int(self._count_preview_statuses().get("perfect", 0) or 0)
     except Exception:
-        perfect_count = 0
+        preview_perfect_count = 0
+
+    # Przy bezpośrednim wejściu do PZ3 preview_metadata może nie być już
+    # załadowane w pamięci, mimo że gotowy materiał PZ2 istnieje na dysku.
+    # selected_plates pochodzi z collect_gold_export_plate_candidates(),
+    # które dopuszcza wyłącznie rekordy gold-eligible, a więc status=perfect
+    # (oraz aktualne zatwierdzenie człowieka dla nowych rekordów).
+    # Jest zatem bezpiecznym dolnym ograniczeniem liczby perfectów.
+    perfect_count = max(int(preview_perfect_count), int(selected_plates))
 
     result.update(
         exportable_plate_count=int(selected_plates),

@@ -2807,7 +2807,7 @@ def build_detection_tab(
     self.btn_return_to_graph_pz2_frame.grid(row=0, column=0, sticky="sw")
     self.btn_return_to_graph_pz2 = ttk.Button(
         self.btn_return_to_graph_pz2_frame,
-        text="Zapisz PZ2 i wróć do grafu",
+        text="Zapisz PZ2 i wróć do pracy T05",
         command=self._return_to_wizard_from_step3_pz2,
         style="WorkflowCard.TButton",
     )

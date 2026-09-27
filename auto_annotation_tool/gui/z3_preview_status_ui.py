@@ -781,17 +781,6 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
     split_ready = bool(export_ready)
     missing_for_split = max(0, int(min_required_perfect) - int(exportable_plate_count or 0))
     in_campaign = bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
-    dataset_ready = False
-    dataset_message = ""
-    if in_campaign:
-        try:
-            training_readiness = host._get_campaign_step3_training_readiness()
-            dataset_ready = bool(training_readiness.get("ok"))
-            dataset_message = str(training_readiness.get("message", "") or "").strip()
-        except Exception:
-            dataset_ready = False
-            dataset_message = ""
-
     if total <= 0:
         tone = "muted"
         summary = "Warunek eksportu PZ3: czekam na tablice."
@@ -834,13 +823,12 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
     if in_campaign:
         if not split_ready:
             if missing_for_split > 0:
-                gate_summary = f"Krok 1/2: zbiór PZ2 nie jest jeszcze gotowy. Brakuje {missing_for_split} zatwierdzonych tablic."
+                gate_summary = "PZ2 w toku: wymagane minimum zatwierdzonych tablic nie jest jeszcze spełnione."
             else:
-                gate_summary = "Krok 1/2: zbiór PZ2 nie jest jeszcze gotowy. Brakuje eksportowalnych ramek znaków."
+                gate_summary = "PZ2 w toku: brakuje kompletnych ramek znaków."
             gate_details = (
-                f"Cel PZ2: przygotować anotacje znaków do późniejszego datasetu. Masz {exportable_plate_count}/{min_required_perfect} "
-                f"eksportowalnych zatwierdzonych tablic i {exportable_char_count} znaków. "
-                "Po spełnieniu tego minimum użyj przycisku „Krok 2: dataset PZ3”; w PZ3 powstanie właściwy dataset."
+                f"Masz {exportable_plate_count}/{min_required_perfect} eksportowalnych zatwierdzonych tablic "
+                f"i {exportable_char_count} znaków. Kontynuuj sprawdzanie i poprawianie tablic w PZ2."
             )
             if perfect != exportable_plate_count:
                 gate_details += (
@@ -848,17 +836,16 @@ def get_preview_repair_progress_snapshot(host, counts: dict | None = None) -> di
                     "sprawdź wybrany zakres danych."
                 )
             summary = gate_summary
-            details = f"{gate_details} {details}".strip()
-        elif not dataset_ready:
-            summary = "Krok 1/2 gotowy: zbiór PZ2 spełnia minimum. Krok 2/2: utwórz dataset znaków w PZ3."
-            gate_details = (
-                f"Zbiór PZ2 zawiera {exportable_plate_count}/{min_required_perfect} eksportowalnych zatwierdzonych tablic "
-                f"i {exportable_char_count} znaków. To odblokowuje przejście do PZ3, ale nie otwiera jeszcze T06. "
-                "Dopiero eksport źródłowego datasetu znaków w PZ3 domyka warunek bramki."
-            )
-            if dataset_message:
-                gate_details += f" {dataset_message}"
             details = gate_details
+        else:
+            if total > 0 and perfect >= total:
+                summary = "PZ2 gotowe: wszystkie tablice zostały zatwierdzone."
+            else:
+                summary = "Minimum PZ2 spełnione: wymagany materiał został zatwierdzony."
+            details = (
+                f"Masz {exportable_plate_count}/{min_required_perfect} eksportowalnych zatwierdzonych tablic "
+                f"i {exportable_char_count} znaków. Następna akcja: „Zapisz PZ2 i wróć do pracy T05”."
+            )
 
     return {
         "perfect": perfect,

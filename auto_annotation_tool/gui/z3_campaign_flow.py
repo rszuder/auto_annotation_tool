@@ -817,8 +817,66 @@ def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
         pass
     _invalidate_step3_campaign_ui_caches()
 
+    # Preferowany kontrakt UX: Praca T05 otwiera się jeszcze nad PZ2.
+    # Nie przełączamy najpierw na kartę kampanii, więc użytkownik nie widzi
+    # po drodze samego grafu. Opener pochodzi z ostatniego renderu grafu,
+    # z którego użytkownik wszedł do PZ2.
+    campaign_tab = getattr(host.app, "tabs", {}).get("campaign")
+    immediate_modal_opened = False
+    if campaign_tab is not None:
+        try:
+            campaign_tab._campaign_graph_selected_edge_key = "e3_to_e4"
+            if hasattr(CAMPAIGN, "set_graph_selected_edge_key"):
+                CAMPAIGN.set_graph_selected_edge_key("e3_to_e4")
+        except Exception:
+            pass
+        opener = getattr(campaign_tab, "_campaign_open_gate_actions_modal", None)
+        if callable(opener):
+            try:
+                opener("e3_to_e4")
+                immediate_modal_opened = True
+            except Exception as exc:
+                logger.debug(f"Nie udało się otworzyć Praca T05 bezpośrednio nad PZ2: {exc}")
+
+    if immediate_modal_opened:
+        # Modal istnieje już nad PZ2. Teraz przełączamy kartę bazową na Wizard,
+        # więc PZ2 znika bez wcześniejszego pokazania samego grafu.
+        try:
+            host.app.open_controlled_tab("campaign")
+        except Exception as exc:
+            logger.debug(f"Nie udało się zamknąć widoku PZ2 pod modalem T05: {exc}")
+        try:
+            host.app.update_campaign_tab_access()
+        except Exception:
+            pass
+        try:
+            if pz2_ready:
+                host.app.update_status(
+                    f"PZ2 zapisane. Otworzono pracę bramki {CHAR_WORK_GATE_DISPLAY_ID}.",
+                    "success",
+                )
+            else:
+                host.app.update_status(
+                    f"PZ2 zapisane jako praca w toku. Otworzono pracę bramki {CHAR_WORK_GATE_DISPLAY_ID}.",
+                    "info",
+                )
+        except Exception:
+            pass
+        return
+
+    # Fallback tylko wtedy, gdy bieżący renderer grafu nie udostępnił jeszcze
+    # bezpośredniego openera (np. stary stan UI po nietypowym restore).
+    _request_t05_work_modal_on_campaign_graph(
+        host,
+        reason="pz2_ready_return_to_t05_work" if pz2_ready else "pz2_return_to_t05_work_pending",
+    )
     try:
-        campaign_tab = host.app.tabs.get("campaign")
+        host.app.open_controlled_tab("campaign")
+        host.app.update_campaign_tab_access()
+    except Exception as exc:
+        logger.debug(f"Nie udało się otworzyć grafu awaryjnie po PZ2: {exc}")
+
+    try:
         if campaign_tab:
             try:
                 campaign_tab.request_wizard_stage_focus(step_num=3)
@@ -827,23 +885,7 @@ def return_to_wizard_from_step3_pz2(host: "CharacterAnnotationTab") -> None:
             campaign_tab._rebuild_roadmap_ui()
             campaign_tab._refresh_dashboard()
     except Exception as exc:
-        logger.debug(f"Nie udało się odświeżyć grafu po powrocie z PZ2: {exc}")
-
-    try:
-        host.app.open_controlled_tab("campaign")
-        host.app.update_campaign_tab_access()
-        if pz2_ready:
-            host.app.update_status(
-                f"PZ2 jest zapisane. W pracy bramki {CHAR_WORK_GATE_DISPLAY_ID} wybierz krok 2: utwórz dataset znaków w PZ3.",
-                "success",
-            )
-        else:
-            host.app.update_status(
-                f"Wracasz do grafu. Praca w PZ2 bramki {CHAR_WORK_GATE_DISPLAY_ID} pozostaje w toku.",
-                "info",
-            )
-    except Exception as exc:
-        logger.debug(f"Nie udało się wrócić do grafu z PZ2: {exc}")
+        logger.debug(f"Nie udało się odświeżyć grafu w fallbacku powrotu z PZ2: {exc}")
 
 
 def return_step3_result_to_wizard(host: "CharacterAnnotationTab", summary: dict) -> None:
@@ -3620,8 +3662,12 @@ def build_step3_pz3_status_panel_view_model(
         export_summary,
         dataset_context=dataset_context,
     )
+    # Status PZ3 przed eksportem musi opisywać gotowość materiału z PZ2,
+    # a nie gotowość treningową, która z definicji wymaga już istniejącego
+    # datasetu PZ3. Inaczej lewy panel może poprawnie pokazywać "gotowy",
+    # a Status PZ3 jednocześnie fałszywie żądać powrotu do PZ2.
     try:
-        readiness = dict(host._get_campaign_step3_training_readiness() or {})
+        readiness = dict(host._get_campaign_step3_annotation_readiness() or {})
     except Exception:
         readiness = {}
     run_text, run_tone = _describe_step3_run_for_status(export_summary, host)

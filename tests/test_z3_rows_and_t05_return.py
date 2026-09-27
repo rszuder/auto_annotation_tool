@@ -118,15 +118,23 @@ def test_t05_resume_save_return_refreshes_cached_interruption_and_recommends_ste
     campaign.get_plate_approved_set_iteration_stats.return_value = {}
     campaign.get_manual_plate_stage_images_state.return_value = {}
     frame = tk.Frame(root)
+    events = []
     wizard = SimpleNamespace(frame=frame, _get_char_route_ready_source=lambda: {},
                              _get_step2_disk_approval_fallback=lambda **kw: {},
-                             _rebuild_roadmap_ui=Mock(), _refresh_dashboard=Mock(), request_wizard_stage_focus=Mock())
+                             _rebuild_roadmap_ui=Mock(), _refresh_dashboard=Mock(), request_wizard_stage_focus=Mock(),
+                             _campaign_open_gate_actions_modal=Mock(
+                                 side_effect=lambda *_args, **_kwargs: events.append("modal")
+                             ))
     wizard.app = SimpleNamespace(tabs={}, style_dialog_window=lambda dialog, **kw: dialog.title(kw["title"]))
     callbacks = graph_callbacks(wizard, campaign)
     pending = callbacks["_t06_interrupted_work_state"]
     assert pending()["interrupted_kind"] == "z3"
-    host = SimpleNamespace(app=SimpleNamespace(tabs={"campaign": wizard}, open_controlled_tab=Mock(),
-                                              update_campaign_tab_access=Mock(), update_status=Mock()),
+    host = SimpleNamespace(app=SimpleNamespace(
+        tabs={"campaign": wizard},
+        open_controlled_tab=Mock(side_effect=lambda *_args, **_kwargs: events.append("campaign")),
+        update_campaign_tab_access=Mock(),
+        update_status=Mock(),
+    ),
         _hide_campaign_detect_splash=Mock(), _cancel_preview_char_label_interaction=Mock(),
         _flush_scheduled_preview_metadata_save=Mock(), _sync_step3_access_from_preview_state=Mock(),
         _campaign_step3_pz2_current_contract_ready=lambda: True, preview_metadata={})
@@ -137,7 +145,13 @@ def test_t05_resume_save_return_refreshes_cached_interruption_and_recommends_ste
     assert state["t06_work_session"]["state"] == "ready_for_pz3"
     assert not state["t06_work_session"]["active"]
     assert not state["t06_work_session"].get("interrupted_at")
-    assert pending() == {}  # Same graph callback, no redraw or modal close required.
+    assert pending() == {}  # Kontrolowany powrót PZ2 nie jest przerwaniem pracy.
+    wizard._campaign_open_gate_actions_modal.assert_called_once_with("e3_to_e4")
+    host.app.open_controlled_tab.assert_called_once_with("campaign")
+    assert events == ["modal", "campaign"]  # modal najpierw, zamknięcie PZ2 dopiero pod nim
+    status_message = str(host.app.update_status.call_args.args[0])
+    assert "Otworzono pracę bramki T05" in status_message
+    assert "PZ3" not in status_message
     saved = copy.deepcopy(state)
     callbacks["_open_t06_actions_modal"]("", [("Popraw anotacje znaków w PZ2", Mock(), "info"),
                                                    ("Utwórz wariant datasetu", Mock(), "info")])
@@ -163,3 +177,36 @@ def test_editor_entry_closes_graph_snapshots_and_keeps_other_dialogs(root):
     assert not info.winfo_exists() and not work.winfo_exists()
     assert other.winfo_exists()
     owner.destroy()
+
+def test_campaign_graph_exposes_gate_work_modal_opener_for_editor_return():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8-sig")
+    assert "self._campaign_open_gate_actions_modal = _open_actions" in source
+def test_t05_work_modal_uses_readable_font_floor():
+    source = Path(dashboard.__file__).read_text(encoding="utf-8-sig")
+    module = ast.parse(source)
+    renderer = next(
+        node for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_render_step1_route_actions"
+    )
+    modal = next(
+        node for node in renderer.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_open_t06_actions_modal"
+    )
+
+    font_sizes = []
+    for node in ast.walk(modal):
+        if not isinstance(node, ast.keyword) or node.arg != "font":
+            continue
+        value = node.value
+        if not isinstance(value, (ast.Tuple, ast.List)) or len(value.elts) < 2:
+            continue
+        size = value.elts[1]
+        if isinstance(size, ast.Constant) and isinstance(size.value, int):
+            font_sizes.append(size.value)
+
+    assert font_sizes
+    assert min(font_sizes) >= 8
+    assert 14 in font_sizes  # nagłówek
+    assert 11 in font_sizes  # tytuły kroków
+    assert font_sizes.count(9) >= 4  # badge/status/detale
+

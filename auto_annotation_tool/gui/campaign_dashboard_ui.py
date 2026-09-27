@@ -8256,8 +8256,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             pass
 
     def _open_t06_actions_modal(_body_text: str, buttons: list[tuple[str, object, str]]) -> None:
-        modal_width = 760
-        modal_height = 520
+        modal_width = 840
+        modal_height = 560
         modal_content_wrap = modal_width - 104
         dialog = tk.Toplevel(self.frame)
         dialog._campaign_graph_dialog = True
@@ -8271,7 +8271,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         except Exception:
             dialog.title(f"Praca {CHAR_WORK_GATE_DISPLAY_ID}")
         try:
-            dialog.minsize(720, 500)
+            dialog.minsize(800, 530)
         except Exception:
             pass
         build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -8827,7 +8827,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=f"Praca bramki {CHAR_WORK_GATE_DISPLAY_ID}",
             fg=fg,
             bg=body_bg,
-            font=("Segoe UI", 12, "bold"),
+            font=("Segoe UI", 14, "bold"),
             anchor="w",
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(
@@ -8835,7 +8835,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=CHAR_WORK_GATE_DISPLAY_ID,
             fg=palette["accent_text"],
             bg=blend_hex_colors(success, field_bg, 0.25),
-            font=("Segoe UI", 8, "bold"),
+            font=("Segoe UI", 9, "bold"),
             padx=10,
             pady=4,
         ).pack(side=tk.RIGHT)
@@ -8875,7 +8875,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=campaign_ui_helpers._repair_polish_text(intro),
             fg=warning if pending_work else muted,
             bg=blend_hex_colors(body_bg, warning, 0.08) if pending_work else body_bg,
-            font=("Segoe UI", 9, "bold" if pending_work else "normal"),
+            font=("Segoe UI", 10, "bold" if pending_work else "normal"),
             justify=tk.LEFT,
             anchor="w",
             wraplength=modal_content_wrap,
@@ -8888,7 +8888,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             text=campaign_ui_helpers._repair_polish_text(recommendation_text),
             fg=success if recommended_label else muted,
             bg=blend_hex_colors(body_bg, success, 0.09) if recommended_label else body_bg,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 10, "bold"),
             anchor="w",
             justify=tk.LEFT,
             wraplength=modal_content_wrap,
@@ -9144,8 +9144,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
 
         list_host = tk.Frame(body, bg=body_bg)
         list_host.pack(fill=tk.X, padx=16, pady=(0, 12))
-        suggestion_frame_width = 276
-        suggestion_detail_wrap = 214
+        suggestion_frame_width = 310
+        suggestion_detail_wrap = 246
 
         def _abandon_interrupted_t06_ok() -> None:
             nonlocal _t06_interrupted_work_cache
@@ -9471,10 +9471,10 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=f"{index}. {normalized_label}",
                 fg=fg if is_enabled else muted,
                 bg=row_bg,
-                font=("Segoe UI", 10, "bold"),
+                font=("Segoe UI", 11, "bold"),
                 anchor="w",
                 justify=tk.LEFT,
-                wraplength=300,
+                wraplength=330,
             ).grid(row=0, column=0, sticky="ew")
             badge_tone = str(completion_badge.get("tone") or muted)
             badge_bg = blend_hex_colors(row_bg, badge_tone, float(completion_badge.get("fill", 0.10) or 0.10))
@@ -9484,7 +9484,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=str(completion_badge.get("text") or ""),
                 fg=badge_tone if is_enabled else muted,
                 bg=badge_bg,
-                font=("Segoe UI Semibold", 7),
+                font=("Segoe UI Semibold", 8),
                 anchor="center",
                 padx=7,
                 pady=2,
@@ -9520,7 +9520,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=str(status.get("mark") or "○"),
                 fg=mark_fg,
                 bg=mark_bg,
-                font=("Segoe UI Semibold", 8),
+                font=("Segoe UI Semibold", 9),
                 anchor="center",
                 padx=0,
                 pady=0,
@@ -9530,7 +9530,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=campaign_ui_helpers._repair_polish_text(str(status.get("title") or "")),
                 fg=status_tone if is_enabled else muted,
                 bg=status_bg,
-                font=("Segoe UI Semibold", 7),
+                font=("Segoe UI Semibold", 9),
                 anchor="w",
             ).grid(row=0, column=1, sticky="ew")
             tk.Label(
@@ -9538,7 +9538,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 text=_format_gate_work_suggestion_text(status.get("detail")),
                 fg=fg if is_enabled else muted,
                 bg=status_bg,
-                font=("Segoe UI", 7),
+                font=("Segoe UI", 9),
                 anchor="w",
                 wraplength=suggestion_detail_wrap,
                 justify=tk.LEFT,
@@ -9558,8 +9558,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 bg=btn_bg,
                 fg=fg if is_enabled else muted,
                 relief=tk.FLAT,
+                font=("Segoe UI", 10),
                 padx=12,
-                pady=5,
+                pady=6,
                 width=10,
                 state=tk.NORMAL if is_enabled else tk.DISABLED,
             ).grid(row=0, column=2, sticky="e", padx=(2, 10), pady=7)
@@ -9574,8 +9575,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             bg=field_bg,
             fg=fg,
             relief=tk.FLAT,
+            font=("Segoe UI", 10),
             padx=12,
-            pady=6,
+            pady=7,
         ).pack(side=tk.RIGHT)
         try:
             dialog.transient(self.frame)
@@ -16577,6 +16579,15 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 ),
             )
             return
+
+    # Udostępniamy bieżący opener modala Praca bramki także kartom roboczym.
+    # Dzięki temu kontrolowany powrót z PZ2 może otworzyć Praca T05 bez
+    # pokazywania po drodze samego grafu.
+    try:
+        self._campaign_open_gate_actions_modal = _open_actions
+    except Exception:
+        pass
+
     def _approve(edge_key: str) -> None:
         graph_wizard_stage_status_cache.clear()
         normalized_edge_key = str(edge_key or "").strip()

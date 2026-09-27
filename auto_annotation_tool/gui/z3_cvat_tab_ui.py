@@ -2418,6 +2418,17 @@ def build_cvat_tab(host, parent, nav_button_width, perfect_strategy_labels, gold
     self.import_console.grid(row=5, column=1, sticky="nsew")
     self._set_inline_status_label_state(self.import_console, text="—", tone="muted", emphasis=False)
 
+    # Status PZ3 jest zbudowany dopiero po pierwszym odświeżeniu lewej
+    # części ekranu. Wykonaj więc jawny refresh po utworzeniu wszystkich
+    # wierszy statusu, aby nie zostały w nich wartości z wcześniejszego
+    # snapshotu sprzed pełnego przywrócenia PZ2.
+    try:
+        refresh_status = getattr(self, "_refresh_pz3_status_panel_ui", None)
+        if callable(refresh_status):
+            refresh_status()
+    except Exception as exc:
+        logger.debug(f"Nie udało się wykonać początkowego odświeżenia Status PZ3: {exc}")
+
     HELP.bind_help(btn_cvat, "btn_export_cvat")
     HELP.bind_help(self._pz3_dataset_source_lf, "t2_pz3_source")
     HELP.bind_help(self.pz3_dataset_source_intro_lbl, "t2_pz3_source")
