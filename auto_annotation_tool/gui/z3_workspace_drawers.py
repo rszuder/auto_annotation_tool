@@ -39,24 +39,16 @@ class WorkspaceDrawers:
                 )
                 self.buttons[side].place_forget()
             else:
-                self.buttons[side] = tk.Button(
+                self.buttons[side] = ProjectSidebarToggle(
                     parent,
-                    command=lambda key=side: self.toggle(key),
-                    takefocus=False,
-                    bd=0,
-                    relief=tk.FLAT,
-                    padx=8,
-                    pady=2,
-                    cursor="hand2",
-                    bg=palette.get("field", "#0b140d"),
-                    fg=palette.get("fg", "#d7edcb"),
-                    activebackground=palette.get("button_hover", palette.get("panel_alt", "#162113")),
-                    activeforeground=palette.get("fg", "#d7edcb"),
-                    highlightthickness=1,
-                    highlightbackground=palette.get("accent", "#8fbf79"),
-                    highlightcolor=palette.get("accent", "#8fbf79"),
-                    font=("Segoe UI", 8, "bold"),
+                    palette,
+                    lambda key=side: self.toggle(key),
+                    collapsed_text="Akcje",
+                    expanded_text="Akcje",
+                    orientation="horizontal_tab",
+                    side="bottom",
                 )
+                self.buttons[side].place_forget()
             parent.bind("<Configure>", self._configure, add="+")
         self.host.bind("<Destroy>", self._destroy, add="+")
 
@@ -179,7 +171,7 @@ class WorkspaceDrawers:
                 extent = min(max(saved["extent"], panel.winfo_reqheight()), max(40, height - 100))
                 y = round(height - extent * fraction)
                 panel.place(x=0, y=y, width=width, height=extent)
-                button.configure(text="▼ Ukryj akcje" if self.target[side] else "▲ Akcje")
+                button.set_collapsed(not bool(self.target[side]))
                 self._place_bottom_button(button, width, height, y)
             else:
                 extent = min(saved["extent"], max(180, width - 80))
@@ -235,6 +227,15 @@ class WorkspaceDrawers:
         complete, self._complete = self._complete, None
         if complete is not None:
             complete()
+
+        if bool(getattr(self.owner, "_preview_fullscreen_active", False)):
+            legend = getattr(self.owner, "preview_badge_legend", None)
+            refresh = getattr(legend, "refresh", None)
+            if callable(refresh):
+                try:
+                    self.host.after(80, refresh)
+                except Exception:
+                    pass
 
     def attach(self):
         self._cancel()

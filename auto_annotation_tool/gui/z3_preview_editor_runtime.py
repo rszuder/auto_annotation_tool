@@ -11,6 +11,7 @@ from tkinter import messagebox
 
 from ..config import logger
 from .z3_gt_box_policy import can_add_character_box
+from .z3_preview_grip_geometry import CORNER_HANDLE_ORDER, get_corner_handle_centers
 
 
 def _get_preview_selected_char_record(self):
@@ -292,15 +293,12 @@ def _find_preview_character_handle_hit(self, canvas_x: float, canvas_y: float):
 
     cx1, cy1 = self._preview_image_to_canvas_point(bbox[0], bbox[1])
     cx2, cy2 = self._preview_image_to_canvas_point(bbox[2], bbox[3])
-    radius = self._get_preview_char_handle_radius()
-    handles = {
-        "nw": (cx1, cy1),
-        "ne": (cx2, cy1),
-        "sw": (cx1, cy2),
-        "se": (cx2, cy2),
-    }
+    radius = float(self._get_preview_char_handle_radius())
+    handles = get_corner_handle_centers(cx1, cy1, cx2, cy2, radius)
+
     best_hit = None
-    for handle_name, (hx, hy) in handles.items():
+    for handle_name in CORNER_HANDLE_ORDER:
+        hx, hy = handles[handle_name]
         dx = float(canvas_x) - float(hx)
         dy = float(canvas_y) - float(hy)
         dist_sq = (dx * dx) + (dy * dy)

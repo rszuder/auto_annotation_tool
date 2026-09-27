@@ -181,19 +181,18 @@ def _status_shortcut_host():
     )
 
 
-def test_n_shortcut_toggles_plate_exclusion():
+def test_f_shortcut_toggles_plate_exclusion():
     host = _status_shortcut_host()
     host._toggle_review_excluded = Mock(return_value={"ok": True, "excluded": True})
 
     result = preview_events.on_preview_canvas_keypress(
         host,
-        SimpleNamespace(keysym="n", char="n", state=0),
+        SimpleNamespace(keysym="f", char="f", state=0),
     )
 
     assert result == "break"
     host._toggle_review_excluded.assert_called_once_with()
     assert "PZ3/Z4" in host._update_preview_edit_status.call_args.args[0]
-
 
 def test_n_remains_character_when_symbol_field_is_active():
     host = _status_shortcut_host()
@@ -211,7 +210,7 @@ def test_n_remains_character_when_symbol_field_is_active():
     host._toggle_review_excluded.assert_not_called()
 
 
-def test_o_shortcut_uses_existing_gold_confirmation():
+def test_r_shortcut_uses_existing_gold_confirmation():
     data = {
         "status": "needs_fix",
         "review_state": {"status": "in_progress"},
@@ -232,7 +231,7 @@ def test_o_shortcut_uses_existing_gold_confirmation():
     with patch.object(preview_events, "refresh_preview_canvas_info_overlay_only") as overlay:
         result = preview_events.on_preview_canvas_keypress(
             host,
-            SimpleNamespace(keysym="o", char="o", state=0),
+            SimpleNamespace(keysym="r", char="r", state=0),
         )
 
     assert result == "break"
@@ -245,7 +244,6 @@ def test_o_shortcut_uses_existing_gold_confirmation():
     host._schedule_preview_metadata_save.assert_called_once_with(delay_ms=90)
     host._schedule_preview_info_refresh.assert_called_once_with(delay_ms=900)
     overlay.assert_called_once_with(host, data=data)
-
 
 def test_toggle_review_excluded_preserves_gold_and_is_reversible():
     data = {
@@ -369,17 +367,21 @@ def test_inline_hud_status_is_n_ok_or_approve_without_mutating_shared_layout():
     palette = {
         "muted": "#8b949e",
         "success": "#79bd73",
+        "warning": "#f59e0b",
         "model_role_vehicle": "#5aa8e8",
+        "info": "#7ee7ff",
+        "accent_alt": "#7ee7ff",
         "error": "#cf7b6a",
     }
 
-    def host_for(status="needs_fix", ready=False):
+    def host_for(status="needs_fix", ready=False, inherited_z2_number=""):
         return SimpleNamespace(
             app=SimpleNamespace(palette=palette),
             _preview_active_pid="p1",
             _get_preview_status_presentation=lambda **_kwargs: {
                 "status": status,
                 "ready_for_approval": ready,
+                "inherited_z2_number": inherited_z2_number,
             },
         )
 
@@ -391,7 +393,7 @@ def test_inline_hud_status_is_n_ok_or_approve_without_mutating_shared_layout():
     }
     assert z3_inline_hud.resolve_inline_hud_plate_status(
         host_for(), excluded
-    ) == ("N", "#8b949e")
+    ) == ("WYKLUCZONA", "#8b949e")
 
     approved = {
         "plate_id": "p1",
@@ -411,7 +413,16 @@ def test_inline_hud_status_is_n_ok_or_approve_without_mutating_shared_layout():
     }
     assert z3_inline_hud.resolve_inline_hud_plate_status(
         host_for(status="needs_fix", ready=True), ready
-    ) == ("ZATWIERDŹ", "#5aa8e8")
+    ) == ("DO KONTROLI", "#f59e0b")
+
+    assert z3_inline_hud.resolve_inline_hud_plate_status(
+        host_for(
+            status="needs_fix",
+            ready=True,
+            inherited_z2_number="RCT962EE",
+        ),
+        ready,
+    ) == ("ZATWIERDŹ", "#f59e0b")
 
     shared = [
         {
@@ -425,5 +436,6 @@ def test_inline_hud_status_is_n_ok_or_approve_without_mutating_shared_layout():
         "#79bd73",
     )
 
-    assert hud_items[0]["text"] == "Status tablicy: OK"
+    assert hud_items[0]["text"] == "Decyzja: OK"
     assert shared[0]["text"] == "Status tablicy: kompletne"
+

@@ -32,6 +32,13 @@ class ProjectSidebarToggle(tk.Canvas):
                 for text in (collapsed_text, expanded_text)
             )
             height = max(96, text_extent + 42)
+        elif self.orientation == "horizontal_tab":
+            text_extent = max(
+                self._font.measure(text)
+                for text in (collapsed_text, expanded_text)
+            )
+            width = max(86, text_extent + 46)
+            height = 30
         else:
             width = max(self._font.measure(text) for text in (collapsed_text, expanded_text)) + 66
             height = max(STYLE["button_height"], self._font.metrics("linespace") + 18)
@@ -95,6 +102,33 @@ class ProjectSidebarToggle(tk.Canvas):
                 (self._height / 2) + 10,
                 text=label,
                 angle=angle,
+                font=self._font,
+                fill=p["fg"],
+                tags=("label",),
+            )
+        elif self.orientation == "horizontal_tab":
+            self.create_rectangle(
+                1, 1, self._width - 1, self._height - 1,
+                width=1, tags=("shell",),
+            )
+            cx = 15
+            cy = self._height / 2
+            points = (
+                (cx - 6, cy + 3, cx, cy - 4, cx + 6, cy + 3)
+                if self.collapsed
+                else (cx - 6, cy - 3, cx, cy + 4, cx + 6, cy - 3)
+            )
+            self.create_polygon(
+                *points,
+                fill=p["fg"],
+                outline="",
+                tags=("direction",),
+            )
+            self.create_text(
+                30,
+                cy,
+                anchor="w",
+                text=self.collapsed_text if self.collapsed else self.expanded_text,
                 font=self._font,
                 fill=p["fg"],
                 tags=("label",),

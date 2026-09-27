@@ -17,6 +17,7 @@ from .web_slim_scrollbar import blend_hex_colors
 from .z3_workspace_drawers import workspace_drawers
 from .z3_inline_hud import plan_inline_hud, draw_inline_hud, resolve_inline_hud_plate_status
 from .z3_list_review import capture_selection, restore_selection
+from .z3_preview_grip_geometry import CORNER_HANDLE_ORDER, get_corner_handle_centers
 from .z3_preview_status_ui import (
     apply_preview_source_actions_style,
     apply_preview_info_stats_style,
@@ -974,31 +975,29 @@ def get_preview_status_presentation(
     source_chars = chars if isinstance(chars, list) else (
         source_data.get("characters", []) if isinstance(source_data, dict) else []
     )
-    status = host._get_preview_live_status(data=source_data, chars=source_chars, plate_id=plate_id)
-    expected_resolution = host._resolve_preview_expected_text_for_crop(
-        source_data if isinstance(source_data, dict) else None,
-        source_chars,
-    )
-    expected_texts = list(expected_resolution.get("expected_texts", []) or [])
-    target_len = int(expected_resolution.get("target_length", 0) or 0)
-    target_lengths = [
-        int(value)
-        for value in list(expected_resolution.get("target_lengths", []) or [])
-        if int(value or 0) > 0
-    ]
-    count_resolved = bool(expected_resolution.get("count_resolved"))
+    if not isinstance(source_chars, list):
+        source_chars = []
 
-    total_boxes = len(source_chars) if isinstance(source_chars, list) else 0
+    status = host._get_preview_live_status(
+        data=source_data,
+        chars=source_chars,
+        plate_id=plate_id,
+    )
+
+    total_boxes = len(source_chars)
     filled_boxes = 0
-    if isinstance(source_chars, list):
-        for rec in source_chars:
-            symbol = ""
-            if isinstance(rec, dict):
-                symbol = rec.get("character", "")
-            else:
-                symbol = getattr(rec, "character", "")
-            if host._sanitize_preview_char_symbol(symbol):
-                filled_boxes += 1
+    invalid_boxes = 0
+    for rec in source_chars:
+        symbol = rec.get("character", "") if isinstance(rec, dict) else getattr(rec, "character", "")
+        if host._sanitize_preview_char_symbol(symbol):
+            filled_boxes += 1
+        try:
+            bbox = rec.get("bbox") if isinstance(rec, dict) else getattr(rec, "bbox", None)
+            x1, y1, x2, y2 = map(float, bbox)
+            if x2 <= x1 or y2 <= y1:
+                invalid_boxes += 1
+        except Exception:
+            invalid_boxes += 1
 
     candidate_text = host._characters_to_text(source_chars, data=source_data).strip().upper()
 
@@ -1017,10 +1016,12 @@ def get_preview_status_presentation(
             or attrs.get("ground_truth_text")
             or ""
         ).strip().upper()
+
     inherited_z2_number = saved_number if number_source == "manual_z2" else ""
     inherited_z2_mismatch = bool(
         inherited_z2_number and candidate_text and candidate_text != inherited_z2_number
     )
+    unlabeled_boxes = max(0, int(total_boxes) - int(filled_boxes))
 
     ready_for_approval = False
     if isinstance(source_data, dict) and (source_data.get("review_state") or {}).get("status") == "in_progress":
@@ -1028,83 +1029,97 @@ def get_preview_status_presentation(
             ready_for_approval = host._get_review_quality_status(source_data, source_chars) == "perfect"
         except AttributeError:
             pass
+
     gold_state = source_data.get("gold_state") if isinstance(source_data, dict) else {}
     excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
     if excluded:
         ready_for_approval = False
 
-    severity = "muted"
-    canvas_text = "Nieocenione"
-    info_text = "status: nieoceniona"
+    decision_text = "DO KONTROLI"
+    decision_tone = "warning"
+    action_text = ""
+    frame_expected_count = len(inherited_z2_number) if inherited_z2_number else 0
 
     if excluded:
-        severity = "muted"
-        canvas_text = "N · NIECZYTELNA"
-        info_text = "status: N — nieczytelna, wykluczona z PZ3/Z4"
+        decision_text = "WYKLUCZONA"
+        decision_tone = "muted"
+        action_text = "Tablica jest wykluczona z PZ3/Z4."
     elif status == "perfect":
-        severity = "success"
-        canvas_text = "Perfect"
-        info_text = "status: OK"
+        decision_text = "OK"
+        decision_tone = "success"
+        action_text = "Tablica została sprawdzona i zatwierdzona."
+    elif total_boxes <= 0:
+        decision_text = "DO KOREKTY"
+        decision_tone = "error"
+        action_text = "Dodaj ramki znaków. Kompletność zestawu ramek ocenia operator."
+    elif invalid_boxes > 0:
+        decision_text = "DO KOREKTY"
+        decision_tone = "error"
+        action_text = f"Popraw geometrię {invalid_boxes} ramek."
+    elif unlabeled_boxes > 0:
+        decision_text = "DO KOREKTY"
+        decision_tone = "error"
+        action_text = (
+            f"Uzupełnij znaki w {unlabeled_boxes} istniejących ramkach. "
+            "Kompletność zestawu ramek ocenia operator."
+        )
+    elif inherited_z2_number and total_boxes != frame_expected_count:
+        decision_text = "DO KOREKTY"
+        decision_tone = "error"
+        action_text = (
+            f"GT z Z2 ma {frame_expected_count} znaków, a istniejących ramek jest {total_boxes}. "
+            "Popraw ramki albo jawnie zmień GT z Z2."
+        )
     elif inherited_z2_mismatch:
-        severity = "error"
-        canvas_text = "Różni się od numeru z Z2"
-        info_text = (
-            f"status: wpisane znaki różnią się od numeru z Z2: {inherited_z2_number}; "
-            "popraw znaki albo użyj „Zmień numer”"
+        decision_text = "DO KOREKTY"
+        decision_tone = "error"
+        action_text = (
+            "Odczyt różni się od GT z Z2. Popraw znaki albo jawnie zmień GT z Z2."
         )
     elif ready_for_approval:
-        severity = "success"
-        canvas_text = "Gotowa do zatwierdzenia"
-        info_text = "status: sprawdź odczyt i naciśnij O"
-    elif total_boxes <= 0:
-        severity = "warning"
-        canvas_text = "Brak ramek"
-        info_text = "status: brak ramek znaków"
-    elif filled_boxes < total_boxes:
-        severity = "warning"
-        canvas_text = f"Znaki {filled_boxes}/{total_boxes}"
-        info_text = f"status: wpisane znaki {filled_boxes}/{total_boxes}"
-    elif expected_texts:
-        if target_len > 0 and int(total_boxes) != int(target_len):
-            severity = "warning"
-            canvas_text = f"Ramki {total_boxes}/{int(target_len)}"
-            info_text = f"status: liczba ramek znaków {total_boxes}/{int(target_len)}"
-        elif candidate_text:
-            severity = "error"
-            canvas_text = "Do korekty"
-            info_text = "status: wymaga korekty"
-        elif not count_resolved and target_lengths:
-            target_label = " lub ".join(str(value) for value in target_lengths)
-            severity = "warning"
-            canvas_text = f"Ramki {total_boxes}/{target_label}"
-            info_text = f"status: oczekiwane ramki {target_label}"
+        if inherited_z2_number:
+            decision_text = "ZATWIERDŹ"
+            decision_tone = "success"
+            action_text = "Odczyt jest zgodny z GT z Z2. O zatwierdzi tablicę."
         else:
-            severity = "warning"
-            canvas_text = "Brak znaków"
-            info_text = "status: brak znaków"
-    elif candidate_text:
-        severity = "warning"
-        canvas_text = "Bez wzorca"
-        info_text = "status: brak wzorca"
+            decision_text = "DO KONTROLI"
+            decision_tone = "warning"
+            action_text = (
+                "Brak GT z Z2. Sprawdź samodzielnie kompletność ramek i znaków; "
+                "O zapisze sprawdzony odczyt jako GT Z3 i zatwierdzi tablicę."
+            )
+    else:
+        decision_text = "DO KOREKTY"
+        decision_tone = "error"
+        if inherited_z2_number:
+            action_text = "Sprawdź odczyt, geometrię ramek i układ względem GT z Z2."
+        else:
+            action_text = (
+                "Sprawdź istniejące ramki, znaki i układ. "
+                "Kompletność zestawu ramek ocenia operator."
+            )
 
     return {
         "status": status,
-        "ready_for_approval": ready_for_approval,
-        "severity": severity,
-        "canvas_text": canvas_text,
-        "info_text": info_text,
+        "ready_for_approval": bool(ready_for_approval),
+        "severity": decision_tone,
+        "canvas_text": decision_text,
+        "info_text": action_text,
+        "decision_text": decision_text,
+        "decision_tone": decision_tone,
+        "action_text": action_text,
         "candidate_text": candidate_text,
-        "expected_texts": list(expected_texts or []),
-        "expected_resolution": dict(expected_resolution or {}),
-        "target_length": int(target_len or 0),
-        "target_lengths": list(target_lengths or []),
-        "count_resolved": bool(count_resolved),
         "filled_boxes": int(filled_boxes),
         "total_boxes": int(total_boxes),
+        "unlabeled_boxes": int(unlabeled_boxes),
+        "invalid_boxes": int(invalid_boxes),
+        "saved_number": saved_number,
+        "number_source": number_source,
         "inherited_z2_number": inherited_z2_number,
         "inherited_z2_mismatch": bool(inherited_z2_mismatch),
+        "frame_expected_count": int(frame_expected_count),
+        "operator_decides_frame_completeness": not bool(inherited_z2_number),
     }
-
 
 def _build_preview_canvas_status_badge_specs(
     host: "CharacterAnnotationTab",
@@ -1119,6 +1134,8 @@ def _build_preview_canvas_status_badge_specs(
     muted_fg = palette.get("muted", "#8b949e")
     success_fg = palette.get("success", "#2ecc71")
     error_fg = palette.get("error", "#e74c3c")
+    info_fg = palette.get("info", palette.get("accent_alt", "#7ee7ff"))
+    warning_fg = palette.get("warning", "#f39c12")
 
     source_data = data if isinstance(data, dict) else {}
     source_chars = box_chars if isinstance(box_chars, list) else source_data.get("characters", [])
@@ -1130,14 +1147,8 @@ def _build_preview_canvas_status_badge_specs(
         chars=source_chars,
         plate_id=str(source_data.get("plate_id", "") or getattr(host, "_preview_active_pid", "") or ""),
     )
-    live_status = str(status_meta.get("status", "") or "").strip().lower()
-    expected_texts = [
-        str(text or "").strip().upper()
-        for text in status_meta.get("expected_texts", [])
-        if str(text or "").strip()
-    ]
-    candidate_text = str(status_meta.get("candidate_text", "") or "").strip().upper()
 
+    candidate_text = str(status_meta.get("candidate_text", "") or "").strip().upper()
     try:
         display_rows = host._characters_to_display_rows(source_chars, data=source_data)
     except Exception:
@@ -1148,130 +1159,100 @@ def _build_preview_canvas_status_badge_specs(
     reading_text = " / ".join(display_rows) if display_rows else "brak"
     two_row_display = len(display_rows) >= 2
 
-    def _valid_frame_count(records) -> int:
-        count = 0
-        for rec in records if isinstance(records, list) else []:
-            bbox = rec.get("bbox") if isinstance(rec, dict) else getattr(rec, "bbox", None)
-            if not (isinstance(bbox, (list, tuple)) and len(bbox) >= 4):
-                continue
-            try:
-                x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
-            except Exception:
-                continue
-            if x2 > x1 and y2 > y1:
-                count += 1
-        return int(count)
-
-    frame_count = _valid_frame_count(source_chars)
-
-    reading_ok = bool(live_status == "perfect" or (candidate_text and expected_texts and candidate_text in expected_texts))
-    status_ok = bool(live_status == "perfect")
+    inherited_z2_number = str(status_meta.get("inherited_z2_number", "") or "").strip().upper()
+    total_boxes = int(status_meta.get("total_boxes", len(source_chars)) or 0)
+    unlabeled_boxes = int(status_meta.get("unlabeled_boxes", 0) or 0)
+    expected_count = int(status_meta.get("frame_expected_count", 0) or 0)
+    decision_text = str(status_meta.get("decision_text", "DO KONTROLI") or "DO KONTROLI")
+    decision_tone = str(status_meta.get("decision_tone", "warning") or "warning").strip().lower()
+    action_text = str(status_meta.get("action_text", "") or "").strip()
 
     try:
-        layout_text, layout_tone = host._get_preview_plate_layout_dock_text(source_data)
+        layout_text, _layout_tone = host._get_preview_plate_layout_dock_text(source_data)
     except Exception:
-        layout_text, layout_tone = "AUTO ?", "muted"
-    normalized_layout = str(layout_text or "").strip().upper()
-    try:
-        layout_conflict = bool(host._preview_layout_separator_conflicts_with_chars(source_data, source_chars))
-    except Exception:
-        layout_conflict = False
-    layout_uncertain = (
-        not normalized_layout
-        or "?" in normalized_layout
-        or str(layout_tone or "").strip().lower() in {"error", "muted"}
-    )
-    layout_ok = bool(status_ok or (not layout_uncertain and not layout_conflict))
+        layout_text = "AUTO ?"
 
-    ready_for_approval = bool(status_meta.get("ready_for_approval"))
-    status_text = "kompletne" if status_ok else "gotowa do zatwierdzenia" if ready_for_approval else "do korekty"
-    states = [
+    tone_colors = {
+        "success": success_fg,
+        "error": error_fg,
+        "info": info_fg,
+        "warning": warning_fg,
+        "muted": muted_fg,
+    }
+    decision_color = tone_colors.get(decision_tone, muted_fg)
+
+    neutral_states = [
         {
             "text": f"Odczyt: [{reading_text}]",
-            "ok": reading_ok,
             "width": max(156.0, min(232.0, float(canvas_width) * 0.26)),
             "tags": ("preview_overlay",),
         },
         {
+            "text": (
+                f"Ramki: {total_boxes}/{expected_count}"
+                if inherited_z2_number and expected_count > 0
+                else f"Ramki: {total_boxes}"
+            ),
+            "width": max(112.0, min(160.0, float(canvas_width) * 0.15)),
+            "tags": ("preview_overlay",),
+        },
+        {
             "text": f"Układ: {layout_text}",
-            "ok": layout_ok,
             "width": max(124.0, min(174.0, float(canvas_width) * 0.17)),
-            "tags": ("preview_overlay", "preview_overlay_action", "preview_action::toggle_plate_layout"),
-        },
-        {
-            "text": f"Status tablicy: {status_text}",
-            "ok": status_ok or ready_for_approval,
-            "width": max(184.0, min(252.0, float(canvas_width) * 0.25)),
-            "tags": ("preview_overlay",),
-        },
-        {
-            "text": f"Ramki: {int(frame_count)}" + (f"/{len(expected_texts[0])}" if len(expected_texts) == 1 else ""),
-            "ok": None,
-            "neutral": True,
-            "width": max(124.0, min(168.0, float(canvas_width) * 0.16)),
-            "tags": ("preview_overlay",),
+            "tags": (
+                "preview_overlay",
+                "preview_overlay_action",
+                "preview_action::toggle_plate_layout",
+            ),
         },
     ]
-    if len(expected_texts) == 1:
-        states.insert(
-            0,
-            {
-                "text": f"GT: {expected_texts[0]}",
-                "ok": None,
-                "neutral": True,
-                "width": 160.0,
-                "tags": (
-                    "preview_overlay",
-                    "preview_overlay_action",
-                    "preview_action::edit_plate_gt",
-                ),
-            },
-        )
-    evaluated_states = [item for item in states if not bool(item.get("neutral"))]
-    pulse_red = bool(
-        evaluated_states
-        and any(bool(item["ok"]) for item in evaluated_states)
-        and not all(bool(item["ok"]) for item in evaluated_states)
-    )
-    pulse_on = bool(int(time.time() * 2.0) % 2 == 0)
 
-    badges = []
+    if unlabeled_boxes > 0:
+        neutral_states.append(
+            {
+                "text": f"Bez znaku: {unlabeled_boxes}",
+                "width": 132.0,
+                "tags": ("preview_overlay",),
+                "outline": error_fg,
+                "fill": blend_hex_colors(error_fg, panel_bg, 0.24),
+            }
+        )
+
     neutral_badges = []
-    for item in states:
-        is_neutral = bool(item.get("neutral"))
-        is_ok = bool(item["ok"])
-        if is_neutral:
-            base_color = muted_fg
-            fill = blend_hex_colors(panel_border, panel_bg, 0.28)
-        elif is_ok:
-            base_color = success_fg
-            fill = blend_hex_colors(base_color, panel_bg, 0.26)
-        elif pulse_red:
-            base_color = error_fg
-            fill = blend_hex_colors(base_color, panel_bg, 0.10 if pulse_on else 0.34)
-        else:
-            base_color = error_fg
-            fill = blend_hex_colors(base_color, panel_bg, 0.24)
-        badge_spec = {
-            "text": str(item["text"]),
-            "fill": fill,
-            "outline": base_color,
-            "width": float(item["width"]),
-            "tags": item.get("tags", ("preview_overlay",)),
-            "pulse": bool((not is_neutral) and (not is_ok) and pulse_red),
+    for item in neutral_states:
+        neutral_badges.append(
+            {
+                "text": str(item["text"]),
+                "fill": item.get("fill", blend_hex_colors(panel_border, panel_bg, 0.28)),
+                "outline": item.get("outline", muted_fg),
+                "width": float(item["width"]),
+                "tags": item.get("tags", ("preview_overlay",)),
+                "pulse": False,
+            }
+        )
+
+    badges = [
+        {
+            "text": f"Decyzja: {decision_text}",
+            "fill": blend_hex_colors(decision_color, panel_bg, 0.24),
+            "outline": decision_color,
+            "width": max(170.0, min(230.0, float(canvas_width) * 0.22)),
+            "tags": ("preview_overlay", "preview_decision_badge"),
+            "pulse": False,
         }
-        if is_neutral:
-            neutral_badges.append(badge_spec)
-        else:
-            badges.append(badge_spec)
+    ]
 
     return {
         "badges": badges,
         "neutral_badges": neutral_badges,
-        "pulse": any(bool(item.get("pulse")) for item in badges),
+        "pulse": False,
         "two_row_display": bool(two_row_display),
+        "decision_text": decision_text,
+        "decision_tone": decision_tone,
+        "decision_color": decision_color,
+        "action_text": action_text,
+        "inherited_z2_number": inherited_z2_number,
     }
-
 
 def _sync_preview_canvas_status_pulse(
     host: "CharacterAnnotationTab",
@@ -1831,26 +1812,30 @@ def _draw_preview_compact_character_signature(
 
 def _get_preview_character_edit_grip_style(host: "CharacterAnnotationTab") -> dict:
     palette = getattr(host.app, "palette", {})
-    canvas_bg = str(palette.get("panel", "#101010"))
     group_mode = bool(getattr(host, "_preview_char_geometry_inherit_down", False))
+
+    # Uchwyty muszą być czytelne zarówno na białej tablicy, jak i na ciemnym tle.
+    # Dlatego nie mieszamy już idle-fill z tłem canvasa.
     if group_mode:
-        active_outline = str(palette.get("success", palette.get("accent", "#22c55e")))
-        grip_fill_base = str(palette.get("accent_alt", "#14b8a6"))
-        idle_fill_alpha = 0.42
-        active_fill_alpha = 0.72
+        active_outline = str(
+            palette.get("success", palette.get("accent", "#22c55e"))
+        )
+        idle_fill = "#d9ff66"
+        active_fill = "#101820"
     else:
-        # Explicit orange: theme warning can be olive/brown.
+        # Stałe, nasycone kolory niezależne od motywu.
         active_outline = "#ff8a00"
-        grip_fill_base = str(palette.get("info", palette.get("accent_alt", "#38bdf8")))
-        idle_fill_alpha = 0.36
-        active_fill_alpha = 0.68
+        idle_fill = "#ffd166"
+        active_fill = "#101820"
+
     return {
         "active_outline": active_outline,
-        "idle_outline": blend_hex_colors(active_outline, canvas_bg, 0.38),
-        "idle_fill": blend_hex_colors(canvas_bg, grip_fill_base, idle_fill_alpha),
-        "active_fill": blend_hex_colors(canvas_bg, grip_fill_base, active_fill_alpha),
+        "idle_outline": "#101820",
+        "idle_fill": idle_fill,
+        "active_fill": active_fill,
+        "idle_width": 2,
+        "active_width": 3,
     }
-
 
 def _get_preview_selected_character_box_color(host: "CharacterAnnotationTab") -> str:
     # Unmistakable orange in every theme.
@@ -1892,13 +1877,13 @@ def _draw_preview_character_edit_grips(
 
     handle_radius = float(host._get_preview_char_handle_radius())
     move_radius = float(host._get_preview_char_move_handle_radius())
+    handle_centers = get_corner_handle_centers(
+        cx1, cy1, cx2, cy2, handle_radius
+    )
+
     handle_ids: list[int] = []
-    for handle_name, handle_x, handle_y in (
-        ("nw", float(cx1), float(cy1)),
-        ("ne", float(cx2), float(cy1)),
-        ("sw", float(cx1), float(cy2)),
-        ("se", float(cx2), float(cy2)),
-    ):
+    for handle_name in CORNER_HANDLE_ORDER:
+        handle_x, handle_y = handle_centers[handle_name]
         active = hover_key == f"corner:{handle_name}"
         handle_ids.append(
             canvas.create_oval(
@@ -1908,7 +1893,11 @@ def _draw_preview_character_edit_grips(
                 handle_y + handle_radius,
                 fill=active_fill if active else idle_fill,
                 outline=active_outline if active else idle_outline,
-                width=2 if active else 1,
+                width=(
+                    int(grip_style.get("active_width", 3))
+                    if active
+                    else int(grip_style.get("idle_width", 2))
+                ),
                 tags=tags,
             )
         )
@@ -1927,7 +1916,6 @@ def _draw_preview_character_edit_grips(
         tags=tags,
     )
     return handle_ids, move_handle_id
-
 
 def _preview_char_label_canvas_tags(tags) -> tuple:
     return tuple(tags or ()) + ("preview_char_label_field",)
@@ -1960,7 +1948,11 @@ def _style_preview_character_edit_grips_fast(
                 fill=active_fill if active else idle_fill,
                 stipple="",
                 outline=active_outline if active else idle_outline,
-                width=2 if active else 1,
+                width=(
+                    int(grip_style.get("active_width", 3))
+                    if active
+                    else int(grip_style.get("idle_width", 2))
+                ),
             )
         move_active = hover_key == "move:center"
         canvas.itemconfigure(

@@ -376,6 +376,76 @@ def _persist_review_az_revision_best_effort(
             "error": str(exc),
         }
 
+def reopen_review_gold(
+    host,
+    plate_id=None,
+    *,
+    persist: bool = True,
+    quiet: bool = False,
+    refresh: bool = True,
+):
+    """Cofnij świadome OK bez usuwania GT, boxów, znaków ani wykluczenia."""
+    pid, data = _resolve_plate(host, plate_id)
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "reason": "no_active_plate",
+            "plate_id": pid,
+        }
+
+    state = data.get("review_state")
+    gold_state = data.get("gold_state")
+    approved = bool(
+        isinstance(state, dict)
+        and get_review_state_status(data) == REVIEW_APPROVED
+        and isinstance(gold_state, dict)
+        and bool(gold_state.get("approved", False))
+        and str(data.get("status", "") or "").strip().lower() == "perfect"
+    )
+    if not approved:
+        return {
+            "ok": False,
+            "reason": "not_approved",
+            "plate_id": pid,
+        }
+
+    mark_review_edit_started(host, data)
+    data["status"] = "needs_fix"
+
+    if refresh:
+        _refresh_after_change(
+            host,
+            pid,
+            persist=persist,
+            message="Cofnięto OK. Tablica wróciła do kontroli.",
+        )
+
+    if persist:
+        _persist_review_az_revision_best_effort(
+            host,
+            pid,
+            data,
+            event="approval_reverted",
+        )
+
+    if not quiet:
+        try:
+            messagebox.showinfo(
+                "Cofnięto OK",
+                "Tablica wróciła do kontroli. GT, boxy i znaki pozostają bez zmian.",
+            )
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "reason": "",
+        "plate_id": pid,
+        "review_status": REVIEW_IN_PROGRESS,
+        "status": "needs_fix",
+    }
+
+
 def toggle_review_excluded(
     host,
     plate_id=None,
@@ -806,16 +876,36 @@ def get_review_quality_status(host, data: dict, chars=None) -> str:
                 return "needs_fix"
     except (TypeError, ValueError):
         return "needs_fix"
-    # Brak zapisanego numeru nie blokuje gotowości do O.
-    # Pierwszy numer zostanie zapisany dopiero przez świadome zatwierdzenie operatora.
-    if not plate_gt(data):
+    # Tylko GT odziedziczone z Z2 jest niezależną referencją, względem
+    # której PZ2 może samodzielnie oceniać kompletność/liczbę znaków.
+    # Bez takiego GT kompletność ramek jest decyzją operatora. Program
+    # sprawdza jedynie, czy istniejące ramki mają poprawną geometrię i znak.
+    attrs = data.get("plate_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    number_source = str(
+        data.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+    protected_z2_gt = bool(plate_gt(data) and number_source == "manual_z2")
+
+    if not protected_z2_gt:
         from ..plate_ground_truth import normalize_plate_ground_truth_text
         text = normalize_plate_ground_truth_text(
             host._characters_to_text(records, data=data)
         )
         if not text or len(text) != len(records):
             return "needs_fix"
+
+        # Do oceny "czy można nacisnąć O" używamy bieżącego, ręcznie
+        # sprawdzonego odczytu. To nie zapisuje GT - zapis następuje dopiero
+        # po świadomym O w confirm_review_gold().
         probe["ground_truth_text"] = text
+        probe["ground_truth_source"] = "manual_z3"
+        probe_attrs = dict(probe.get("plate_attributes") or {})
+        probe_attrs["ground_truth_text"] = text
+        probe_attrs["ground_truth_source"] = "manual_z3"
+        probe["plate_attributes"] = probe_attrs
     probe_state = dict(probe.get("review_state") or {})
     probe_state["status"] = REVIEW_APPROVED
     probe_state["approved_reference"] = build_review_reference_snapshot(probe)
@@ -871,26 +961,43 @@ def confirm_review_gold(
         or ""
     ).strip().lower()
     inherited_from_z2 = bool(saved_text and number_source == "manual_z2")
+    local_z3_number = bool(saved_text and number_source == "manual_z3")
 
     if saved_text and candidate_text and candidate_text != saved_text:
-        data["status"] = "needs_fix"
-        result = {
-            "ok": False,
-            "reason": "number_mismatch",
-            "plate_id": pid,
-            "resolved_status": "needs_fix",
-            "saved_text": saved_text,
-            "candidate_text": candidate_text,
-            "inherited_from_z2": inherited_from_z2,
-        }
-        if not quiet:
-            source_label = "numerem z Z2" if inherited_from_z2 else "zapisanym numerem"
-            messagebox.showwarning(
-                "Odczyt różni się od zapisanego numeru",
-                f"Wpisane znaki nie zgadzają się z {source_label}: {saved_text}. "
-                "Popraw znaki albo użyj „Zmień numer”, jeśli zapisany numer jest błędny.",
-            )
-        return result
+        if local_z3_number:
+            try:
+                from .z3_plate_gt_runtime import save_plate_ground_truth
+                save_plate_ground_truth(host, data, candidate_text, prepare=False)
+            except Exception as exc:
+                if not quiet:
+                    messagebox.showerror("Nie zapisano numeru tablicy", str(exc))
+                return {
+                    "ok": False,
+                    "reason": "number_write_failed",
+                    "error": str(exc),
+                    "plate_id": pid,
+                }
+            saved_text = candidate_text
+            number_source = "manual_z3"
+        else:
+            data["status"] = "needs_fix"
+            result = {
+                "ok": False,
+                "reason": "number_mismatch",
+                "plate_id": pid,
+                "resolved_status": "needs_fix",
+                "saved_text": saved_text,
+                "candidate_text": candidate_text,
+                "inherited_from_z2": inherited_from_z2,
+            }
+            if not quiet:
+                source_label = "numerem z Z2" if inherited_from_z2 else "zapisanym numerem"
+                messagebox.showwarning(
+                    "Odczyt różni się od zapisanego numeru",
+                    f"Wpisane znaki nie zgadzają się z {source_label}: {saved_text}. "
+                    "Popraw znaki albo użyj „Zmień numer”, jeśli zapisany numer jest błędny.",
+                )
+            return result
 
     try:
         resolved_status = get_review_quality_status(host, data, chars)

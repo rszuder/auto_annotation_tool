@@ -613,8 +613,6 @@ def on_preview_canvas_keypress(host, event=None):
         return self._on_preview_prev_shortcut(event)
     if keysym == "e":
         return self._on_preview_next_shortcut(event)
-    if keysym == "f":
-        return self._on_preview_fit_shortcut(event)
     if keysym == "space":
         if bool(getattr(self, "_preview_char_geometry_inherit_down", False)):
             self._update_preview_edit_status(
@@ -675,28 +673,29 @@ def on_preview_canvas_keypress(host, event=None):
                     pass
             return "break"
         return None
-    if keysym == "n":
+    if keysym == "f":
         if active_label_idx is None:
             result = self._toggle_review_excluded()
             if isinstance(result, dict) and result.get("ok"):
                 if bool(result.get("excluded")):
                     self._update_preview_edit_status(
-                        "N: tablica oznaczona jako nieczytelna i wykluczona z PZ3/Z4.",
+                        "F: tablica wykluczona z PZ3/Z4.",
                         tone="warning",
                     )
                 else:
                     self._update_preview_edit_status(
-                        "N: zdjęto wykluczenie tablicy.",
+                        "F: zdjęto wykluczenie tablicy.",
                         tone="success",
                     )
             else:
                 self._update_preview_edit_status(
-                    "N: najpierw wybierz tablicę z listy.",
+                    "F: najpierw wybierz tablicę z listy.",
                     tone="warning",
                 )
             return "break"
         return None
-    if keysym == "o":
+
+    if keysym == "r":
         if active_label_idx is None:
             data = self._get_preview_active_data(create=False)
             already_ok = False
@@ -717,15 +716,13 @@ def on_preview_canvas_keypress(host, event=None):
                 )
 
             if already_ok:
-                suffix = " Tablica pozostaje jednak wykluczona przez N." if excluded else ""
+                suffix = " Tablica pozostaje wykluczona przez F." if excluded else ""
                 self._update_preview_edit_status(
-                    f"O: tablica ma już status OK.{suffix}",
+                    f"R: tablica ma już status OK.{suffix}",
                     tone="success",
                 )
                 return "break"
 
-            # Fast keyboard path: mutate REVIEW/GOLD now, but do not block
-            # the Tk event loop on full metadata write + PZ3 readiness refresh.
             result = self._confirm_review_gold(
                 quiet=True,
                 persist=False,
@@ -735,11 +732,13 @@ def on_preview_canvas_keypress(host, event=None):
                 data = self._get_preview_active_data(create=False)
                 gold_state = data.get("gold_state") if isinstance(data, dict) else {}
                 excluded = bool(gold_state.get("excluded", False)) if isinstance(gold_state, dict) else False
-                suffix = " Nadal jest wykluczona przez N." if excluded else ""
+                suffix = " Nadal jest wykluczona przez F." if excluded else ""
+                pid = str(
+                    result.get("plate_id", "")
+                    or getattr(self, "_preview_active_pid", "")
+                    or ""
+                ).strip()
 
-                pid = str(result.get("plate_id", "") or getattr(self, "_preview_active_pid", "") or "").strip()
-
-                # Immediate visual feedback: row colour/label and canvas badge.
                 try:
                     self._refresh_preview_listbox_row(pid)
                 except Exception:
@@ -748,10 +747,6 @@ def on_preview_canvas_keypress(host, event=None):
                     refresh_preview_canvas_info_overlay_only(self, data=data)
                 except Exception:
                     pass
-
-                # Durable save and expensive counters/readiness are deliberately
-                # deferred. Autosave already tracks the active pid and flushes
-                # pending work on shutdown.
                 try:
                     self._schedule_preview_metadata_save(delay_ms=90)
                 except Exception:
@@ -760,9 +755,6 @@ def on_preview_canvas_keypress(host, event=None):
                     self._schedule_preview_info_refresh(delay_ms=900)
                 except Exception:
                     pass
-
-                # Button state is cheap enough, but still keep it out of the
-                # keypress critical path when Tk has an event loop available.
                 try:
                     frame = getattr(self, "frame", None)
                     if frame is not None:
@@ -771,7 +763,7 @@ def on_preview_canvas_keypress(host, event=None):
                     pass
 
                 self._update_preview_edit_status(
-                    f"O: tablica otrzymała status OK.{suffix}",
+                    f"R: tablica otrzymała status OK.{suffix}",
                     tone="success",
                 )
             else:
@@ -779,25 +771,76 @@ def on_preview_canvas_keypress(host, event=None):
                 if reason == "number_mismatch" and bool((result or {}).get("inherited_from_z2")):
                     saved = str((result or {}).get("saved_text", "") or "")
                     message = (
-                        f"O: wpisane znaki różnią się od numeru z Z2: {saved}. "
-                        "Popraw znaki albo użyj „Zmień numer”."
+                        f"R: wpisane znaki różnią się od GT z Z2: {saved}. "
+                        "Popraw znaki albo jawnie zmień GT z Z2."
                     )
                 else:
                     message = {
-                        "no_active_plate": "O: najpierw wybierz tablicę z listy.",
-                        "review_not_in_progress": "O: najpierw kliknij „Sprawdź i popraw”.",
-                        "empty_review": "O: tablica nie ma ramek znaków do zatwierdzenia.",
-                        "empty_number": "O: wpisz znaki do boxów przed zatwierdzeniem.",
+                        "no_active_plate": "R: najpierw wybierz tablicę z listy.",
+                        "review_not_in_progress": "R: tablica nie jest otwarta do kontroli.",
+                        "empty_review": "R: tablica nie ma ramek znaków do zatwierdzenia.",
+                        "empty_number": "R: wpisz znaki do istniejących boxów przed zatwierdzeniem.",
                         "number_mismatch": (
-                            "O: wpisane znaki nie zgadzają się z zapisanym numerem. "
-                            "Popraw znaki albo użyj „Zmień numer”."
+                            "R: odczyt nie zgadza się z chronionym GT. "
+                            "Popraw znaki albo jawnie zmień GT."
                         ),
                         "review_not_perfect": (
-                            "O: sprawdź boxy, znaki i układ tablicy; status OK nie został nadany."
+                            "R: istniejące boxy/znaki lub układ wymagają jeszcze kontroli."
                         ),
-                        "number_write_failed": "O: nie udało się zapisać numeru tablicy.",
-                        "gt_write_failed": "O: nie udało się zapisać numeru tablicy.",
-                    }.get(reason, "O: nie można jeszcze nadać tej tablicy statusu OK.")
+                        "number_write_failed": "R: nie udało się zapisać GT tablicy.",
+                        "gt_write_failed": "R: nie udało się zapisać GT tablicy.",
+                    }.get(reason, "R: nie można jeszcze nadać tej tablicy statusu OK.")
+                self._update_preview_edit_status(message, tone="warning")
+            return "break"
+        return None
+
+    if keysym == "t":
+        if active_label_idx is None:
+            result = self._reopen_review_gold(
+                persist=False,
+                quiet=True,
+                refresh=False,
+            )
+            if isinstance(result, dict) and result.get("ok"):
+                data = self._get_preview_active_data(create=False)
+                pid = str(
+                    result.get("plate_id", "")
+                    or getattr(self, "_preview_active_pid", "")
+                    or ""
+                ).strip()
+                try:
+                    self._refresh_preview_listbox_row(pid)
+                except Exception:
+                    pass
+                try:
+                    refresh_preview_canvas_info_overlay_only(self, data=data)
+                except Exception:
+                    pass
+                try:
+                    self._schedule_preview_metadata_save(delay_ms=90)
+                except Exception:
+                    pass
+                try:
+                    self._schedule_preview_info_refresh(delay_ms=250)
+                except Exception:
+                    pass
+                try:
+                    frame = getattr(self, "frame", None)
+                    if frame is not None:
+                        frame.after_idle(self._refresh_detection_review_controls)
+                except Exception:
+                    pass
+                self._update_preview_edit_status(
+                    "T: cofnięto OK. Tablica wróciła do kontroli; GT, boxy i znaki pozostają.",
+                    tone="info",
+                )
+            else:
+                reason = str((result or {}).get("reason", "") or "")
+                message = (
+                    "T: najpierw wybierz tablicę z listy."
+                    if reason == "no_active_plate"
+                    else "T: ta tablica nie ma aktywnego OK do cofnięcia."
+                )
                 self._update_preview_edit_status(message, tone="warning")
             return "break"
         return None
@@ -815,10 +858,6 @@ def on_preview_canvas_keypress(host, event=None):
             except Exception:
                 self._preview_pending_select_latency_probe = None
             return self._select_hovered_preview_char_box(event)
-        return None
-    if keysym == "t":
-        if active_label_idx is None:
-            return self._edit_selected_preview_char_symbol(event)
         return None
     return None
 
@@ -1206,14 +1245,22 @@ def on_preview_canvas_drag(host, event):
             else:
                 handle_name = str(char_drag_state.get("handle", "se") or "se").lower()
                 x1, y1, x2, y2 = bbox
+                pointer_offset_x = float(
+                    char_drag_state.get("pointer_corner_offset_img_x", 0.0) or 0.0
+                )
+                pointer_offset_y = float(
+                    char_drag_state.get("pointer_corner_offset_img_y", 0.0) or 0.0
+                )
+                corner_img_x = float(img_x) - pointer_offset_x
+                corner_img_y = float(img_y) - pointer_offset_y
                 if "w" in handle_name:
-                    x1 = float(img_x)
+                    x1 = corner_img_x
                 else:
-                    x2 = float(img_x)
+                    x2 = corner_img_x
                 if "n" in handle_name:
-                    y1 = float(img_y)
+                    y1 = corner_img_y
                 else:
-                    y2 = float(img_y)
+                    y2 = corner_img_y
                 new_bbox = [x1, y1, x2, y2]
 
             normalized_bbox = self._normalize_preview_char_bbox(new_bbox)
@@ -2167,6 +2214,12 @@ def start_preview_character_box_drag(host, char_idx, mode, event, *, handle_name
         "last_visual_at": 0.0,
         "layout_row": layout_row,
     }
+    if str(mode).lower() == "resize" and handle_name:
+        handle_key = str(handle_name or "se").lower()
+        corner_x = float(bbox[0] if "w" in handle_key else bbox[2])
+        corner_y = float(bbox[1] if "n" in handle_key else bbox[3])
+        drag_state["pointer_corner_offset_img_x"] = float(img_x) - corner_x
+        drag_state["pointer_corner_offset_img_y"] = float(img_y) - corner_y
     if isinstance(geometry_inherit_state, dict):
         drag_state["geometry_inherit"] = geometry_inherit_state
     if handle_name:
