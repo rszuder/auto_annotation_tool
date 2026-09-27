@@ -79,13 +79,23 @@ class PreviewDrawerSlide:
         if self._geometry is None:
             return
         frame_width, x, y, width, height = self._geometry
+        offset = (frame_width - x + 1) * (1 - self.visible)
+        panel_x = round(x + offset)
+
         if self.visible <= 0:
             self.panel.place_forget()
         else:
-            offset = (frame_width - x + 1) * (1 - self.visible)
-            self.panel.place(x=round(x + offset), y=y, width=width, height=height, anchor="nw")
+            self.panel.place(x=panel_x, y=y, width=width, height=height, anchor="nw")
             self.panel.lift()
+
         if self.active:
+            if getattr(self.button, "orientation", "horizontal") == "vertical":
+                tab_x = max(4, min(int(frame_width) - 4, int(panel_x) - 4))
+                self.button.place(
+                    x=tab_x,
+                    y=max(4, int(round(y)) + 8),
+                    anchor="ne",
+                )
             self.button.lift()
         drawers = getattr(self.owner, "_preview_workspace_drawers", None)
         place_status_toggle = getattr(drawers, "place_status_toggle", None)

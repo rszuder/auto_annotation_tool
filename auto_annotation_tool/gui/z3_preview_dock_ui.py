@@ -448,6 +448,26 @@ def render_preview_overlay_dock(host: "CharacterAnnotationTab", *, force_render:
     max_width = 178 if compact else 220
     min_height = 74 if compact else 136
     max_height = 210 if compact else 318
+
+    # W fullscreen nie opieramy wysokości wyłącznie na aktualnym
+    # winfo_reqheight(), bo po przejściu z widoku kompaktowego Tk może
+    # przez chwilę zwracać wysokość sprzed dopakowania dodatkowych wierszy.
+    # Skutek był widoczny jako obcięte pola MINIMUM/JAKOŚĆ/W ZBIORZE.
+    if not compact:
+        visible_row_count = 0
+        for key in (getattr(host, "_preview_overlay_dock_tool_rows", {}) or {}):
+            state = _get_preview_dock_row_runtime_state(
+                host,
+                key,
+                theme,
+                gate_state=gate_state,
+            )
+            if bool(state.get("visible")) or key in {"legend", "assistant"}:
+                visible_row_count += 1
+
+        expected_full_height = 34 + (visible_row_count * 29)
+        height = max(height, expected_full_height)
+
     width = int(max(min_width, min(max_width, width)))
     height = int(max(min_height, min(max_height, height)))
     host._preview_overlay_dock_last_width = width

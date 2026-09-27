@@ -52,8 +52,11 @@ def scene():
         frame=root, app=SimpleNamespace(root=app_root), detect_content_frame=content,
         detect_split=outer, detect_right_panel=right, preview_vertical_split=inner,
         preview_list_lf=listing, preview_lf=center, detect_footer_nav=footer,
-        preview_canvas=canvas, plates_listbox=images, _preview_render_state={"plate_id": "plate"},
+        preview_canvas=canvas, preview_canvas_host=center,
+        plates_listbox=images, _preview_render_state={"plate_id": "plate"},
         _preview_fullscreen_active=False, _get_preview_mode_overlay_default_position=lambda **kw: {},
+        _preview_controls_legend_visible=True,
+        _preview_controls_legend_current_bounds=None,
     )
     for name in ("_focus_preview_canvas", "_update_preview_edit_status", "_sync_preview_edit_status_visibility",
                  "_update_preview_toolbar_state", "_apply_preview_fullscreen_chrome",
@@ -208,3 +211,61 @@ def test_stabilized_render_waits_for_drawer_animation(scene):
     root.wait_variable(done)
     owner._on_preview_select.assert_not_called()
     assert owner._preview_stabilized_render_after_id is None
+
+def test_open_side_tabs_do_not_cover_panel_contents(scene):
+    root, owner, drawer, clock, entry = scene
+    enter(scene)
+
+    # Po wejściu w fullscreen panele są schowane. Otwieramy oba.
+    drawer.toggle("left")
+    advance(scene)
+    drawer.toggle("right")
+    advance(scene)
+    root.update_idletasks()
+
+    left_panel = owner.preview_list_lf
+    left_button = drawer.buttons["left"]
+    right_panel = owner.detect_right_panel
+    right_button = drawer.buttons["right"]
+
+    left_panel_right = left_panel.winfo_rootx() + left_panel.winfo_width()
+    left_button_left = left_button.winfo_rootx()
+    assert left_button_left >= left_panel_right
+
+    right_panel_left = right_panel.winfo_rootx()
+    right_button_right = right_button.winfo_rootx() + right_button.winfo_width()
+    assert right_button_right <= right_panel_left
+
+def test_bottom_actions_tab_centers_in_reserved_source_legend_gap(scene):
+    root, owner, drawer, clock, entry = scene
+    enter(scene)
+
+    canvas = owner.preview_canvas
+    root.update_idletasks()
+
+    # Nowy kontrakt fullscreen:
+    # legenda sama zostawia centralną szczelinę dla zakładki Akcje.
+    gap_left = 360.0
+    gap_right = 500.0
+    owner._preview_source_legend_gap_bounds = (
+        gap_left,
+        max(0.0, float(canvas.winfo_height() - 36)),
+        gap_right,
+        max(1.0, float(canvas.winfo_height() - 8)),
+    )
+
+    drawer.place_status_toggle()
+    root.update_idletasks()
+
+    button = drawer.buttons["bottom"]
+    actual_center_root = (
+        float(button.winfo_rootx())
+        + float(button.winfo_width()) / 2.0
+    )
+    expected_center_root = (
+        float(canvas.winfo_rootx())
+        + (gap_left + gap_right) / 2.0
+    )
+
+    assert abs(actual_center_root - expected_center_root) <= 2.0
+

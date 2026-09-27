@@ -525,54 +525,226 @@ def draw_preview_source_legend(host, canvas, x: float, y: float):
     badge_pad_x = 2
     badge_pad_y = 1
     item_gap = 8
-    current_x = float(x)
 
     legend_items = host._get_preview_source_component_legend_items()
+    prepared = []
+
     for item in legend_items:
         style = host._get_preview_badge_component_style(item.get("component"))
         badge_text = str(style.get("label", "") or "").strip()
         legend_text = str(style.get("legend", "") or badge_text).strip()
         badge_width, badge_height = measure_preview_text_badge(
-            host, canvas, badge_text, font=badge_font, pad_x=badge_pad_x, pad_y=badge_pad_y
-        )
-        draw_preview_text_badge(
             host,
             canvas,
-            current_x,
-            y,
             badge_text,
-            fill_color=str(style.get("badge_fill", style.get("outline", "#3c3c3c"))),
-            outline_color=str(style.get("badge_outline", style.get("badge_fill", style.get("outline", "#3c3c3c")))),
-            text_color=str(host._get_readable_text_color(
-                str(style.get("badge_fill", style.get("outline", "#3c3c3c"))),
-                preferred=style.get("badge_fg", "#ffffff"),
-            )),
             font=badge_font,
-            anchor=tk.NW,
             pad_x=badge_pad_x,
             pad_y=badge_pad_y,
-            tags=("preview_overlay", "preview_source_legend"),
         )
-        label_x = current_x + badge_width + 5
-        label_y = y + max(0, badge_height / 2.0)
-        label_id = canvas.create_text(
-            label_x,
-            label_y,
-            text=legend_text,
-            fill=text_fg,
-            font=label_font,
-            anchor=tk.W,
-            tags=("preview_overlay", "preview_source_legend"),
+        if badge_width <= 0:
+            badge_width = (
+                measure_preview_overlay_text_width(host, badge_text, badge_font)
+                + badge_pad_x * 2.0
+            )
+        label_width = measure_preview_overlay_text_width(
+            host,
+            legend_text,
+            label_font,
         )
-        label_bbox = canvas.bbox(label_id)
-        current_x = float(label_bbox[2]) + item_gap if label_bbox else label_x + item_gap
+        prepared.append(
+            {
+                "style": style,
+                "badge_text": badge_text,
+                "legend_text": legend_text,
+                "badge_width": float(badge_width),
+                "badge_height": float(badge_height),
+                "item_width": float(badge_width) + 5.0 + float(label_width),
+            }
+        )
 
+    def group_width(group):
+        if not group:
+            return 0.0
+        return (
+            sum(float(item["item_width"]) for item in group)
+            + item_gap * max(0, len(group) - 1)
+        )
+
+    def draw_group(group, start_x, group_tag):
+        pos_x = float(start_x)
+        for idx, item in enumerate(group):
+            style = item["style"]
+            badge_text = item["badge_text"]
+            legend_text = item["legend_text"]
+            badge_width = float(item["badge_width"])
+            badge_height = float(item["badge_height"])
+
+            draw_preview_text_badge(
+                host,
+                canvas,
+                pos_x,
+                y,
+                badge_text,
+                fill_color=str(
+                    style.get("badge_fill", style.get("outline", "#3c3c3c"))
+                ),
+                outline_color=str(
+                    style.get(
+                        "badge_outline",
+                        style.get(
+                            "badge_fill",
+                            style.get("outline", "#3c3c3c"),
+                        ),
+                    )
+                ),
+                text_color=str(
+                    host._get_readable_text_color(
+                        str(
+                            style.get(
+                                "badge_fill",
+                                style.get("outline", "#3c3c3c"),
+                            )
+                        ),
+                        preferred=style.get("badge_fg", "#ffffff"),
+                    )
+                ),
+                font=badge_font,
+                anchor=tk.NW,
+                pad_x=badge_pad_x,
+                pad_y=badge_pad_y,
+                tags=(
+                    "preview_overlay",
+                    "preview_source_legend",
+                    group_tag,
+                ),
+            )
+
+            label_x = pos_x + badge_width + 5.0
+            label_y = y + max(0.0, badge_height / 2.0)
+            label_id = canvas.create_text(
+                label_x,
+                label_y,
+                text=legend_text,
+                fill=text_fg,
+                font=label_font,
+                anchor=tk.W,
+                tags=(
+                    "preview_overlay",
+                    "preview_source_legend",
+                    group_tag,
+                ),
+            )
+            bbox = canvas.bbox(label_id)
+            if bbox:
+                pos_x = float(bbox[2])
+            else:
+                pos_x = (
+                    label_x
+                    + measure_preview_overlay_text_width(
+                        host,
+                        legend_text,
+                        label_font,
+                    )
+                )
+            if idx < len(group) - 1:
+                pos_x += item_gap
+        return pos_x
+
+    drawers = getattr(host, "_preview_workspace_drawers", None)
+    bottom_button = None
+    actions_tab_visible = False
+    if drawers is not None:
+        try:
+            bottom_button = drawers.buttons.get("bottom")
+            actions_tab_visible = bool(
+                bottom_button is not None
+                and str(bottom_button.winfo_manager()) == "place"
+            )
+        except Exception:
+            bottom_button = None
+            actions_tab_visible = False
+
+    # Jedyny warunek trybu podzielonego:
+    # jeśli zakładka Akcje jest faktycznie widoczna, legenda ma dla niej
+    # obowiązkowo zarezerwować środkową przestrzeń.
+    if actions_tab_visible and len(prepared) >= 7:
+        try:
+            canvas_width = float(max(1, canvas.winfo_width()))
+        except Exception:
+            canvas_width = 1.0
+
+        try:
+            button_width = float(max(1, bottom_button.winfo_reqwidth()))
+        except Exception:
+            button_width = 72.0
+
+        left_group = prepared[:4]
+        right_group = prepared[4:7]
+
+        left_width = group_width(left_group)
+        right_width = group_width(right_group)
+
+        gap_width = max(132.0, button_width + 50.0)
+        group_gap = 12.0
+        center = canvas_width / 2.0
+        gap_left = center - gap_width / 2.0
+        gap_right = center + gap_width / 2.0
+
+        left_start = gap_left - group_gap - left_width
+        right_start = gap_right + group_gap
+
+        margin = max(8.0, float(x))
+        if left_start < margin:
+            left_start = margin
+
+        right_limit = canvas_width - margin
+        if right_start + right_width > right_limit:
+            overflow = (right_start + right_width) - right_limit
+            # Zachowujemy szczelinę. Jeżeli robi się ciasno, przesuwamy
+            # cały układ lekko w lewo zamiast wciskać tekst pod Akcje.
+            left_start -= overflow
+            right_start -= overflow
+            gap_left -= overflow
+            gap_right -= overflow
+
+        draw_group(
+            left_group,
+            left_start,
+            "preview_source_legend_left",
+        )
+        current_x = draw_group(
+            right_group,
+            right_start,
+            "preview_source_legend_right",
+        )
+
+        host._preview_source_legend_gap_bounds = (
+            float(gap_left),
+            float(y),
+            float(gap_right),
+            float(y + 24.0),
+        )
+        host._preview_source_legend_layout_mode = "actions_gap"
+
+        place_status_toggle = getattr(drawers, "place_status_toggle", None)
+        if callable(place_status_toggle):
+            try:
+                place_status_toggle()
+            except Exception:
+                pass
+
+        return current_x
+
+    host._preview_source_legend_gap_bounds = None
+    host._preview_source_legend_layout_mode = "linear"
+
+    current_x = draw_group(
+        prepared,
+        float(x),
+        "preview_source_legend_linear",
+    )
     return current_x
 
-
-# Split provenance badges.  The earlier single source_tag model is kept above
-# for metadata compatibility, but UI should render box and sign provenance
-# independently when those fields are available.
 def get_preview_badge_component_style(host, component_key: str) -> dict:
     normalized = str(component_key or "").strip().lower().replace("-", "_")
     mapping = {
@@ -593,16 +765,18 @@ def get_preview_badge_component_style(host, component_key: str) -> dict:
 
 
 def get_preview_source_component_legend_items(host) -> list[dict]:
+    # Kolejność jest również kontraktem wizualnym fullscreen.
+    # Pierwsze cztery elementy trafiają na lewo od zakładki Akcje,
+    # pozostałe trzy na prawo.
     return [
-        {"component": "manual_box"},
-        {"component": "manual_sign"},
-        {"component": "generated_box"},
-        {"component": "ocr_symbol"},
         {"component": "yolo_box"},
+        {"component": "generated_box"},
+        {"component": "manual_box"},
         {"component": "yolo_symbol"},
+        {"component": "ocr_symbol"},
+        {"component": "manual_sign"},
         {"component": "gt_assisted"},
     ]
-
 
 def get_preview_source_badge_layers(
     host,

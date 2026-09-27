@@ -44,14 +44,18 @@ class WorkspaceDrawers:
                     command=lambda key=side: self.toggle(key),
                     takefocus=False,
                     bd=0,
-                    padx=7,
-                    pady=4,
+                    relief=tk.FLAT,
+                    padx=8,
+                    pady=2,
                     cursor="hand2",
-                    bg="#233342",
-                    fg="#b8edff",
-                    activebackground="#344e64",
-                    activeforeground="#ffffff",
-                    font=("Segoe UI", 9, "bold"),
+                    bg=palette.get("field", "#0b140d"),
+                    fg=palette.get("fg", "#d7edcb"),
+                    activebackground=palette.get("button_hover", palette.get("panel_alt", "#162113")),
+                    activeforeground=palette.get("fg", "#d7edcb"),
+                    highlightthickness=1,
+                    highlightbackground=palette.get("accent", "#8fbf79"),
+                    highlightcolor=palette.get("accent", "#8fbf79"),
+                    font=("Segoe UI", 8, "bold"),
                 )
             parent.bind("<Configure>", self._configure, add="+")
         self.host.bind("<Destroy>", self._destroy, add="+")
@@ -111,6 +115,54 @@ class WorkspaceDrawers:
         if event.widget in self.parents.values() and self.detached:
             self._paint()
 
+    def _place_bottom_button(self, button, width, height, drawer_y):
+        """Place Actions in the reserved gap of the fullscreen source legend."""
+        tab_y = float(min(height - 4, drawer_y - 4))
+        tab_x = float(width) / 2.0
+
+        gap = getattr(self.owner, "_preview_source_legend_gap_bounds", None)
+        canvas = getattr(self.owner, "preview_canvas", None)
+        if gap and canvas is not None:
+            try:
+                left, _top, right, _bottom = [float(value) for value in gap]
+                host_root_x = float(self.host.winfo_rootx())
+                canvas_root_x = float(canvas.winfo_rootx())
+                gap_center = (left + right) / 2.0
+                tab_x = canvas_root_x - host_root_x + gap_center
+            except (tk.TclError, TypeError, ValueError):
+                pass
+
+        tab_x = max(8.0, min(float(width) - 8.0, tab_x))
+        tab_y = max(float(max(18, button.winfo_reqheight())), tab_y)
+        button.place(x=round(tab_x), y=round(tab_y), anchor="s")
+
+    def place_status_toggle(self):
+        """Re-anchor the bottom Actions tab after canvas overlays are redrawn."""
+        if self.destroyed or not self.detached:
+            return
+        saved = getattr(self, "saved", {}).get("bottom", {})
+        if not saved or not saved.get("allowed"):
+            return
+
+        button = self.buttons.get("bottom")
+        panel = self.panels.get("bottom")
+        parent = self.parents.get("bottom")
+        if button is None or panel is None or parent is None:
+            return
+
+        try:
+            if str(button.winfo_manager()) != "place":
+                return
+            width = int(parent.winfo_width())
+            height = int(parent.winfo_height())
+            info = panel.place_info()
+            drawer_y = int(float(info.get("y", height))) if info else height
+        except (tk.TclError, TypeError, ValueError):
+            return
+
+        self._place_bottom_button(button, width, height, drawer_y)
+        button.lift()
+
     def _paint(self):
         if self.destroyed or not self.detached:
             return
@@ -128,7 +180,7 @@ class WorkspaceDrawers:
                 y = round(height - extent * fraction)
                 panel.place(x=0, y=y, width=width, height=extent)
                 button.configure(text="▼ Ukryj akcje" if self.target[side] else "▲ Akcje")
-                button.place(relx=.5, y=min(height - 2, y - 2), anchor="s")
+                self._place_bottom_button(button, width, height, y)
             else:
                 extent = min(saved["extent"], max(180, width - 80))
                 x = round(-extent * (1 - fraction)) if side == "left" else round(width - extent * fraction)
@@ -139,17 +191,23 @@ class WorkspaceDrawers:
 
                 if side == "left":
                     boundary = max(0, x + extent)
+                    # Zakładka zawsze leży POZA panelem:
+                    # - otwarty panel: po jego prawej stronie, nad workspace,
+                    # - schowany panel: przy lewej krawędzi workspace.
                     button.place(
-                        x=boundary - 2 if panel_visible_target else boundary + 2,
-                        rely=.52,
-                        anchor="e" if panel_visible_target else "w",
+                        x=boundary + 2,
+                        rely=.60,
+                        anchor="w",
                     )
                 else:
                     boundary = min(width, x)
+                    # Analogicznie po prawej:
+                    # - otwarty panel: zakładka leży po jego lewej stronie,
+                    # - schowany panel: przy prawej krawędzi workspace.
                     button.place(
-                        x=boundary + 2 if panel_visible_target else boundary - 2,
-                        rely=.52,
-                        anchor="w" if panel_visible_target else "e",
+                        x=boundary - 2,
+                        rely=.60,
+                        anchor="e",
                     )
             panel.lift()
             button.lift()
