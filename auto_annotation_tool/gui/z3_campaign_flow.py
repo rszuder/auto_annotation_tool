@@ -171,6 +171,27 @@ def mark_step3_work_interrupted_on_app_close(host: "CharacterAnnotationTab") -> 
     except Exception:
         session = {}
 
+    # Zamknięcie aplikacji nie jest "przerwaniem" zakończonego checkpointu PZ2.
+    # Jeśli operator zatwierdził cały materiał PZ2, bezpośrednim następnym
+    # krokiem pozostaje PZ3 również po restarcie.
+    if selected_work_substep and selected_substep == 2:
+        try:
+            pz2_ready_on_close = bool(
+                host._campaign_step3_pz2_current_contract_ready()
+            )
+        except Exception:
+            pz2_ready_on_close = False
+        if pz2_ready_on_close:
+            _mark_t06_z3_work_session(
+                host,
+                state="ready_for_pz3",
+                substep=2,
+                reason="app_closed_after_pz2_ready",
+                force=True,
+            )
+            _invalidate_step3_campaign_ui_caches()
+            return True
+
     session_state = str(session.get("state") or "").strip().lower()
     session_gate = str(session.get("working_gate_id") or "").strip().upper()
     session_area = str(session.get("work_area") or "").strip().lower()

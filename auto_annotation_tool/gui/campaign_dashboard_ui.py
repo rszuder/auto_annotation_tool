@@ -4183,6 +4183,53 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             session_substep = str(session.get("substep") or session.get("target_substep") or "").strip().lower()
             session_targets_pz2 = session_substep in {"2", "detect", "pz2", "z3_pz2"}
             session_targets_pz3 = session_substep in {"3", "dataset", "pz3", "z3_pz3"}
+
+            # Samonaprawa starszego stanu zapisanego już jako interrupted:
+            # jeśli PZ2 jest rozliczone, realnym następnym krokiem jest PZ3.
+            if (
+                pz2_contract_ready
+                and not pz3_export_ready_current
+                and session_gate_id in CHAR_WORK_GATE_SESSION_IDS
+                and session_work_area == "z3"
+                and session_targets_pz2
+                and session_state == "interrupted"
+                and str(session.get("reason") or "").strip().lower()
+                == "app_closed_from_z3"
+            ):
+                now = datetime.now().isoformat(timespec="seconds")
+                previous_interrupted_at = str(
+                    session.get("interrupted_at") or ""
+                ).strip()
+                session.update(
+                    {
+                        "active": False,
+                        "state": "ready_for_pz3",
+                        "working_gate_id": CHAR_WORK_GATE_DISPLAY_ID,
+                        "reason": "restore_after_app_close_pz2_ready",
+                        "interrupted_at": "",
+                        "closed_at": now,
+                        "updated_at": now,
+                    }
+                )
+                if previous_interrupted_at:
+                    session.setdefault(
+                        "resolved_interrupted_at",
+                        previous_interrupted_at,
+                    )
+                try:
+                    CAMPAIGN.upsert_iteration_state(
+                        updates={"t06_work_session": session}
+                    )
+                    CAMPAIGN.invalidate_step3_char_source_state_cache()
+                    CAMPAIGN.clear_project_iteration_ui_snapshots()
+                except Exception as exc:
+                    logger.debug(
+                        "Nie udało się znormalizować sesji T05 po "
+                        f"zakończonym PZ2: {exc}"
+                    )
+                _t06_interrupted_work_cache = {}
+                return {}
+
             controlled_pz2_return = bool(
                 session_gate_id in CHAR_WORK_GATE_SESSION_IDS
                 and session_work_area == "z3"
@@ -7825,7 +7872,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "title": "DO ROZLICZENIA",
                     "detail": f"{pending_repair_images} zdjęć [OK] czeka na pulę YOLO",
                     "tone": warning,
-                    "mark_tone": error,
+                    "mark_tone": warning,
                     "fill": 0.16,
                 }
             if is_repair_resume:
@@ -7834,7 +7881,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "title": "PRZERWANE",
                     "detail": "wróć do Z2 albo rozlicz [OK]",
                     "tone": warning,
-                    "mark_tone": error,
+                    "mark_tone": warning,
                     "fill": 0.14,
                 }
             is_dataset_variant_action = bool(
@@ -7849,7 +7896,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "title": "PRZERWANE: KROK 1",
                         "detail": "wróć do PZ1 i domknij wariant",
                         "tone": warning,
-                        "mark_tone": error,
+                        "mark_tone": warning,
                         "fill": 0.13,
                     }
                 if _t07_has_current_iteration_dataset():
@@ -7866,7 +7913,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "mark": "→",
                         "title": "ŹRÓDŁO GOTOWE",
                         "detail": "utwórz wariant train/val/test",
-                        "tone": success if is_recommended else muted,
+                        "tone": warning if is_recommended else muted,
                         "fill": 0.10 if is_recommended else 0.055,
                     }
                 return {
@@ -7883,7 +7930,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "title": "PRZERWANE: KROK 2",
                         "detail": "wróć do PZ2 i domknij trening",
                         "tone": warning,
-                        "mark_tone": error,
+                        "mark_tone": warning,
                         "fill": 0.13,
                     }
                 finish_state = _current_t07_training_finish_state()
@@ -7924,7 +7971,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "mark": "→" if is_recommended else "○",
                         "title": "GOTOWE DO STARTU" if is_recommended else "CZEKA NA START",
                         "detail": "wariant tej iteracji jest dostępny",
-                        "tone": success if is_recommended else muted,
+                        "tone": warning if is_recommended else muted,
                         "fill": 0.10 if is_recommended else 0.045,
                     }
                 return {
@@ -8007,8 +8054,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         tk.Label(
             body,
             text=campaign_ui_helpers._repair_polish_text(recommendation_text),
-            fg=success if recommended_label else muted,
-            bg=blend_hex_colors(body_bg, success, 0.09) if recommended_label else body_bg,
+            fg=warning if recommended_label else muted,
+            bg=blend_hex_colors(body_bg, warning, 0.09) if recommended_label else body_bg,
             font=("Segoe UI", 10, "bold"),
             anchor="w",
             padx=10,
@@ -8128,7 +8175,19 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 disabled_reason = str(repair_material_state.get("reason") or "Brak materiału do uzupełnienia anotacji tablic")
                 is_recommended = False
             is_enabled = not disabled_reason
-            tone_color = success if str(tone or "").strip() != "warning" else warning
+            semantic_state = (
+                "blocked"
+                if not is_enabled
+                else (
+                    "attention"
+                    if (is_repair_resume or is_repair_settlement)
+                    else ("current" if is_recommended else "neutral")
+                )
+            )
+            tone_color = campaign_ui_helpers.campaign_workflow_semantic_color(
+                palette,
+                semantic_state,
+            )
             if is_repair_resume or is_repair_settlement:
                 tone_color = warning
             row_bg = blend_hex_colors(field_bg, tone_color, 0.075 if is_recommended else 0.035)
@@ -8889,8 +8948,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         tk.Label(
             body,
             text=campaign_ui_helpers._repair_polish_text(recommendation_text),
-            fg=success if recommended_label else muted,
-            bg=blend_hex_colors(body_bg, success, 0.09) if recommended_label else body_bg,
+            fg=warning if recommended_label else muted,
+            bg=blend_hex_colors(body_bg, warning, 0.09) if recommended_label else body_bg,
             font=("Segoe UI", 10, "bold"),
             anchor="w",
             justify=tk.LEFT,
@@ -8929,7 +8988,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "title": "SZKIC: PZ2 PRZERWANE",
                     "detail": "gotowy eksport AZ nadal obowiązuje",
                     "tone": warning,
-                    "mark_tone": error,
+                    "mark_tone": warning,
                     "fill": 0.14,
                 }
             if _t06_pz2_draft_after_ready_export() and is_z3_action:
@@ -8946,7 +9005,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "title": "CEL: WZNÓW PZ2",
                     "detail": "dokończ ramki i etykiety znaków",
                     "tone": warning,
-                    "mark_tone": error,
+                    "mark_tone": warning,
                     "fill": 0.16,
                 }
             if pending_z3_work and _t06_pending_z3_targets_pz3() and is_char_pz2:
@@ -8964,7 +9023,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "title": "CEL: WZNÓW PZ3",
                     "detail": "brak eksportu AZ z PZ3" if interrupted_detail else "dokończ i wyeksportuj dataset AZ",
                     "tone": warning,
-                    "mark_tone": error,
+                    "mark_tone": warning,
                     "fill": 0.16,
                 }
             if pending_z3_work and _t06_pending_z3_targets_pz2() and is_z3_action:
@@ -8989,7 +9048,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "title": "CEL: ROZLICZ [OK]",
                     "detail": f"{pending_images} zdjęć / {pending_plates} tablic do źródła Z3",
                     "tone": warning,
-                    "mark_tone": error,
+                    "mark_tone": warning,
                     "fill": 0.16,
                 }
             if pending_ok_work and (is_z3_action or is_char_pz2):
@@ -8997,7 +9056,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "+",
                     "title": "CEL: UŻYJ [OK]",
                     "detail": f"+{pending_images} [OK] zasili źródło Z3",
-                    "tone": success,
+                    "tone": warning,
                     "fill": 0.12,
                 }
             if pending_ok_work and not is_resume:
@@ -9025,7 +9084,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "1",
                     "title": "KROK 1: ANOTACJE ZNAKÓW",
                     "detail": "uzupełnij ramki i etykiety znaków",
-                    "tone": success,
+                    "tone": warning,
                     "fill": 0.12,
                 }
             if is_z3_action and pz3_ready:
@@ -9054,7 +9113,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "2",
                     "title": "KROK 2: DATASET ZNAKÓW",
                     "detail": "utwórz i wyeksportuj AZ w PZ3",
-                    "tone": success,
+                    "tone": warning,
                     "fill": 0.12,
                 }
             if is_z3_action:
@@ -9070,7 +9129,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "+",
                     "title": "PULA DOSTĘPNA",
                     "detail": f"{pool_images} [OK] / {pool_plates} tablic jest już w źródle Z3",
-                    "tone": success,
+                    "tone": warning if is_recommended else muted,
                     "fill": 0.12,
                 }
             if "dataset" in label_lower:
@@ -9078,7 +9137,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "→",
                     "title": "CEL: DATASET ZNAKÓW",
                     "detail": "utwórz zbiór po wyodrębnieniu i detekcji",
-                    "tone": success,
+                    "tone": warning if is_recommended else muted,
                     "fill": 0.10,
                 }
             if "z3" in label_lower or "detek" in label_lower or "wyodr" in label_lower:
@@ -9086,7 +9145,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "→",
                     "title": "CEL: PRACA W Z3",
                     "detail": "wyodrębnij tablice i przygotuj znaki",
-                    "tone": success,
+                    "tone": warning if is_recommended else muted,
                     "fill": 0.10,
                 }
             if is_recommended:
@@ -9094,7 +9153,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     "mark": "→",
                     "title": "ZALECANE",
                     "detail": "najbardziej naturalny następny krok",
-                    "tone": success,
+                    "tone": warning,
                     "fill": 0.12,
                 }
             if is_resume:
@@ -9132,9 +9191,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             if disabled_reason:
                 return _badge(f"NIEDOSTĘPNE IT{current_iter}", muted, fill=0.07)
             if pending_z3_work and _t06_pending_z3_targets_pz2() and is_char_pz2:
-                return _badge(f"PRZERWANE IT{current_iter}", error, fill=0.18)
+                return _badge(f"PRZERWANE IT{current_iter}", warning, fill=0.16)
             if pending_z3_work and _t06_pending_z3_targets_pz3() and is_z3_action:
-                return _badge(f"PRZERWANE IT{current_iter}", error, fill=0.18)
+                return _badge(f"PRZERWANE IT{current_iter}", warning, fill=0.16)
             if pending_ok_work and is_resume:
                 return _badge(f"DO ROZLICZENIA IT{current_iter}", warning, fill=0.16)
             if pending_ok_work and (is_char_pz2 or is_z3_action):
@@ -9143,7 +9202,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 return _badge(f"WYKONANE IT{current_iter}", success, fill=0.18)
             if is_z3_action and _t06_pz3_contract_ready_current():
                 return _badge(f"WYKONANE IT{current_iter}", success, fill=0.18)
-            return _badge(f"DO WYKONANIA IT{current_iter}", muted, fill=0.08)
+            return _badge(f"DO WYKONANIA IT{current_iter}", warning, fill=0.12)
 
         list_host = tk.Frame(body, bg=body_bg)
         list_host.pack(fill=tk.X, padx=16, pady=(0, 12))
@@ -9420,14 +9479,34 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 disabled_reason = "Najpierw przygotuj anotacje znaków w PZ2."
             is_enabled = not disabled_reason
             is_recommended = bool(recommended_label and normalized_label == recommended_label)
-            tone_color = (
-                success
-                if (
-                    is_recommended
-                    or (pending_ok_work and is_z3_action)
-                    or (draft_after_ready_export and is_z3_action)
+            action_done = bool(
+                (is_char_pz2 and _t06_pz2_contract_ready_current())
+                or (is_z3_action and _t06_pz3_contract_ready_current())
+            )
+            semantic_state = (
+                "blocked"
+                if not is_enabled
+                else (
+                    "done"
+                    if action_done
+                    else (
+                        "attention"
+                        if pending_work
+                        else (
+                            "current"
+                            if (
+                                is_recommended
+                                or (pending_ok_work and is_z3_action)
+                                or (draft_after_ready_export and is_z3_action)
+                            )
+                            else "neutral"
+                        )
+                    )
                 )
-                else (warning if pending_work else (success if str(tone or "").strip() != "warning" else warning))
+            )
+            tone_color = campaign_ui_helpers.campaign_workflow_semantic_color(
+                palette,
+                semantic_state,
             )
             row_bg = blend_hex_colors(field_bg, tone_color, 0.10 if (pending_work or is_recommended) else 0.045)
             btn_bg = blend_hex_colors(field_bg, tone_color, 0.22 if is_enabled else 0.10)
@@ -20680,8 +20759,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 row_width = 1
                 if is_approve_row:
                     if tag and enabled:
-                        row_fill = blend_hex_colors(fill, graph_card_success, 0.16)
-                        row_outline = blend_hex_colors(graph_card_success, card_bg, 0.18)
+                        row_fill = blend_hex_colors(fill, graph_card_warning, 0.16)
+                        row_outline = blend_hex_colors(graph_card_warning, card_bg, 0.18)
                         row_width = 2
                     else:
                         row_fill = blend_hex_colors(fill, graph_card_disabled, 0.04)
@@ -20698,7 +20777,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     row_fill = blend_hex_colors(fill, warning, 0.08)
                     row_outline = blend_hex_colors(warning, card_bg, 0.26)
                 copy = field_copies[label]
-                if enabled and copy.tone == "success":
+                if enabled and copy.tone == "success" and not (is_work_row or is_approve_row):
                     row_fill = blend_hex_colors(fill, graph_card_success, 0.10)
                     row_outline = blend_hex_colors(graph_card_success, card_bg, 0.25)
                 elif is_work_row and not copy.tone:
@@ -20737,15 +20816,15 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                     tags=rect_tags,
                 )
                 if approve_blink:
-                    row_color = graph_card_success
+                    row_color = graph_card_warning
                 elif work_interrupted or t06_work_interrupted or step4_work_interrupted:
-                    row_color = graph_card_accent if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
+                    row_color = graph_card_warning if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif step4_training_candidate_action:
                     row_color = graph_card_warning if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif resource_review_action:
                     row_color = graph_card_warning if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif is_approve_row and tag and enabled:
-                    row_color = graph_card_success
+                    row_color = graph_card_warning
                 elif tag and enabled:
                     row_color = graph_card_accent
                 else:
@@ -20762,7 +20841,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "color": str(row_color),
                     }
                 primary_color = row_text_color
-                if copy.tone and (enabled or idx == 0):
+                if enabled and (is_work_row or is_approve_row):
+                    primary_color = graph_card_warning
+                elif copy.tone and (enabled or idx == 0):
                     primary_color = {"success": graph_card_success, "warning": graph_card_warning,
                                      "error": graph_card_error}.get(copy.tone, row_text_color)
                 draw_field(canvas, copy, field_layouts[label], x=x, y=y0, width=gate_w,
