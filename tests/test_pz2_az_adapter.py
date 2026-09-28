@@ -369,7 +369,10 @@ class PZ2AZAdapterTests(unittest.TestCase):
         self.assertFalse(restored["gold_state"]["candidate"])
         self.assertFalse(restored["gold_state"]["excluded"])
         self.assertEqual(restored["status"], "needs_fix")
-        self.assertNotIn("review_state", restored)
+        self.assertEqual(restored["review_state"]["status"], "in_progress")
+        self.assertEqual(restored["review_state"]["source"], "az_project_import")
+        self.assertFalse(restored["review_state"]["human_edited"])
+        self.assertIsNone(restored["review_state"]["approved_at"])
         self.assertEqual(restored["fusion_strategy"], "az_reuse")
         self.assertEqual(
             restored["fusion_details"]["source"],

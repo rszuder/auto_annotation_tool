@@ -323,8 +323,19 @@ def az_revision_to_pz2_metadata(
     if expected_text:
         result["ground_truth_text"] = expected_text
 
-    # REVIEW jest stanem sesyjnym PZ2, a nie częścią canonical AZ.
-    result.pop("review_state", None)
+    # REVIEW nie jest odtwarzany z decyzji projektu źródłowego.
+    # Dla cross-project importu tworzymy lokalny stan TARGET=in_progress.
+    # To nie jest odziedziczone OK, tylko obowiązek lokalnej kontroli.
+    if imported_pending_review:
+        result["review_state"] = {
+            "schema": "alpr.pz2.review.v1",
+            "status": "in_progress",
+            "source": "az_project_import",
+            "human_edited": False,
+            "approved_at": None,
+        }
+    else:
+        result.pop("review_state", None)
 
     result["fusion_strategy"] = "az_reuse"
     result["fusion_details"] = {

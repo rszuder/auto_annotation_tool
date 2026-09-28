@@ -43,7 +43,57 @@ def pz2_az_reuse_protection_reason(
     fusion_strategy = str(data.get("fusion_strategy") or "").strip().lower()
 
     if current_reuse_id and current_reuse_id == revision_id:
-        return "already_current"
+        effective_status = str(
+            revision.get("effective_status") or ""
+        ).strip().lower()
+
+        if effective_status != "imported_pending_review":
+            return "already_current"
+
+        same_review = data.get("review_state")
+        same_review = same_review if isinstance(same_review, Mapping) else {}
+        same_review_status = str(
+            same_review.get("status") or ""
+        ).strip().lower()
+        same_review_source = str(
+            same_review.get("source") or ""
+        ).strip().lower()
+
+        # Praca człowieka zawsze wygrywa nad automatyczną rematerializacją.
+        if bool(same_review.get("human_edited")):
+            return "human_review_edit"
+        if (
+            same_review_status == "approved"
+            or same_review.get("approved_at")
+            or same_review.get("approved_reference")
+        ):
+            return "human_review_approved"
+        if same_review_source == "manual_editor":
+            return "manual_review"
+
+        same_gold = data.get("gold_state")
+        same_gold = same_gold if isinstance(same_gold, Mapping) else {}
+        if bool(same_gold.get("excluded", False)):
+            return "local_excluded"
+        if bool(same_gold.get("approved", False)):
+            return "local_gold"
+
+        pending_materialization_current = bool(
+            str(data.get("status") or "").strip().lower() == "needs_fix"
+            and not bool(same_gold.get("candidate", False))
+            and not bool(same_gold.get("approved", False))
+            and not bool(same_gold.get("excluded", False))
+            and bool(reuse.get("requires_review", False))
+            and str(reuse.get("effective_status") or "").strip().lower()
+            == "imported_pending_review"
+            and same_review_status == "in_progress"
+            and same_review_source == "az_project_import"
+        )
+        if pending_materialization_current:
+            return "already_current"
+
+        # Ta sama rewizja, ale stary/niepełny stan TARGET: rematerializuj.
+        return ""
 
     review = data.get("review_state")
     review = review if isinstance(review, Mapping) else {}

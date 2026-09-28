@@ -10167,6 +10167,17 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 az_reuse_ui = _t05_az_reuse_ui_state()
                 pz2_next_cell_ref = {"cell": None}
 
+                pending_import_review_count = int(
+                    az_reuse_ui.get("pending_review_count", 0) or 0
+                )
+                if pending_import_review_count > 0:
+                    pz2_state = (
+                        f"Zaimportowane anotacje ({pending_import_review_count}) "
+                        "czekają na sprawdzenie."
+                    )
+                    pz2_tone = "warning"
+                    pz2_fulfillment = "Do kontroli"
+
                 rows = [
                     (
                         _contract_badge(pz2_tone),
@@ -10189,7 +10200,7 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 dialog = tk.Toplevel(self.frame)
                 dialog._campaign_graph_dialog = True
                 try:
-                    self.app.style_dialog_window(dialog, title=f"Stan pracy {CHAR_WORK_GATE_DISPLAY_ID}", geometry="1080x310", parent=self.frame)
+                    self.app.style_dialog_window(dialog, title=f"Stan pracy {CHAR_WORK_GATE_DISPLAY_ID}", geometry="1080x350", parent=self.frame)
                 except Exception:
                     dialog.title(f"Stan pracy {CHAR_WORK_GATE_DISPLAY_ID}")
                 build_surface = getattr(self.app, "_build_themed_dialog_surface", None)
@@ -10722,6 +10733,49 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         pady=7,
                         state=tk.NORMAL if action_enabled else tk.DISABLED,
                     )
+                    if pending_import_review_count > 0:
+                        def _open_t05_work_from_resources():
+                            try:
+                                dialog.grab_release()
+                            except Exception:
+                                pass
+                            try:
+                                dialog.destroy()
+                            except Exception:
+                                pass
+                            try:
+                                self.frame.after_idle(lambda: _open_actions(edge_key))
+                            except Exception:
+                                _open_actions(edge_key)
+
+                        work_button_bg = blend_hex_colors(field_bg, accent, 0.44)
+                        work_button_hover_bg = blend_hex_colors(field_bg, accent, 0.58)
+                        work_button = tk.Button(
+                            reuse_action_shell,
+                            text="Przejdź do pracy T05",
+                            command=_open_t05_work_from_resources,
+                            cursor="hand2",
+                            bg=work_button_bg,
+                            activebackground=work_button_hover_bg,
+                            fg=fg,
+                            activeforeground=fg,
+                            relief=tk.FLAT,
+                            font=("Segoe UI", 9, "bold"),
+                            padx=14,
+                            pady=7,
+                        )
+                        work_button.pack(side=tk.RIGHT, padx=(8, 0))
+                        work_button.bind(
+                            "<Enter>",
+                            lambda _event, btn=work_button: btn.configure(bg=work_button_hover_bg),
+                            add="+",
+                        )
+                        work_button.bind(
+                            "<Leave>",
+                            lambda _event, btn=work_button: btn.configure(bg=work_button_bg),
+                            add="+",
+                        )
+
                     reuse_button.pack(side=tk.RIGHT)
                     if action_enabled:
                         reuse_button.bind(

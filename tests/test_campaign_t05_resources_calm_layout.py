@@ -27,7 +27,7 @@ def _t05_resources_source() -> str:
 
 def test_t05_resources_uses_calm_material_layout():
     source = _t05_resources_source()
-    assert 'geometry="1080x310"' in source
+    assert 'geometry="1080x350"' in source
     assert "table.pack(fill=tk.X" in source
     assert "balance_lines = list" in source
     assert "fg=fg if is_total else muted" in source

@@ -25,6 +25,13 @@ class Host(SimpleNamespace):
     def _get_plate_source_bucket(self, data):
         return str((data.get("source_info") or {}).get("bucket", "auto_preview"))
 
+    def _characters_to_text(self, chars, data=None):
+        return "".join(
+            str(rec.get("character") or "")
+            for rec in list(chars or [])
+            if isinstance(rec, dict)
+        )
+
     def _persist_preview_metadata(self, **kwargs):
         return None
 

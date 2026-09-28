@@ -27,7 +27,7 @@ def _t05_resources_source() -> str:
 
 def test_t05_reuse_uses_single_cta_with_count():
     source = _t05_resources_source()
-    assert 'geometry="1080x310"' in source
+    assert 'geometry="1080x350"' in source
     assert '"Użyj wcześniejszych anotacji "' in source
     assert "importable_count" in source
     assert "Dostępne wcześniejsze anotacje:" not in source
