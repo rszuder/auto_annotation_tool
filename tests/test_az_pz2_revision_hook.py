@@ -306,6 +306,7 @@ class PZ2ReviewHookTests(unittest.TestCase):
         host._ensure_plate_source_metadata = Mock()
         host._get_plate_source_bucket.return_value = "local_manual"
 
+        host._characters_to_text.return_value = "A"
         with patch.object(
             z3_review_runtime,
             "get_review_quality_status",

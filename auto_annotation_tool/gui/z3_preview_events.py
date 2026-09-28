@@ -725,7 +725,7 @@ def on_preview_canvas_keypress(host, event=None):
 
             result = self._confirm_review_gold(
                 quiet=True,
-                persist=False,
+                persist=True,
                 refresh=False,
             )
             if isinstance(result, dict) and result.get("ok"):

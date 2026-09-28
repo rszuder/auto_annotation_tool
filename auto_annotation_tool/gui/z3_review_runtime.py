@@ -1091,7 +1091,9 @@ def confirm_review_gold(
             message="Tablica została sprawdzona i zatwierdzona do zbioru danych.",
         )
 
-    if persist and refresh:
+    # Trwały checkpoint AZ jest semantyką decyzji operatora, a nie renderowania UI.
+    # Skrót R używa lekkiej ścieżki bez pełnego refreshu, ale nadal musi zapisać AZ.
+    if persist:
         _persist_review_az_revision_best_effort(
             host,
             pid,
