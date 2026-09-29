@@ -23,7 +23,13 @@ def test_pz2_append_ui_uses_same_active_preview_not_replacement():
     assert "preview_dir=preview_dir" in source
     assert "recalculate_statuses=False" in source
     assert "_flush_scheduled_preview_metadata_save" in source
-    assert "_set_preview_import_focus(" in source
+    # AZ009G1 ustawia focus importu bezpośrednio przed jedyną
+    # przebudową listy; nie wolno wracać do _set_preview_import_focus(),
+    # bo ta ścieżka wykonywała drugą pełną przebudowę UI.
+    assert "_preview_import_focus_plate_ids" in source
+    assert "_preview_import_focus_batch_id" in source
+    assert "_preview_import_focus_active = True" in source
+    assert "preserve_selection=False" in source
     assert "Rozszerzono TEN SAM aktywny zbiór PZ2." in source
 
 

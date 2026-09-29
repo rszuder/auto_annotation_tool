@@ -666,9 +666,29 @@ def _refresh_after_append(host, metadata_path: Path, result, package_id: str) ->
     if not isinstance(payload, dict):
         raise RuntimeError("Po appendzie metadata.json nie jest obiektem JSON.")
 
+    # Ustaw fokus importu PRZED przebudową listy.
+    # _apply_preview_metadata_update() wywołuje _rebuild_preview_listbox(),
+    # który już respektuje _preview_import_focus_active. Dzięki temu po
+    # appendzie budujemy od razu krótką listę nowych rekordów zamiast:
+    #   1) pełnej listy całego PZ2,
+    #   2) drugiej listy zawężonej do importu.
+    new_plate_ids = []
+    seen_plate_ids = set()
+    for item in getattr(result, "items", ()):
+        plate_id = str(getattr(item, "plate_id", "") or "").strip()
+        if not plate_id or plate_id in seen_plate_ids:
+            continue
+        seen_plate_ids.add(plate_id)
+        new_plate_ids.append(plate_id)
+
+    if new_plate_ids:
+        host._preview_import_focus_plate_ids = list(new_plate_ids)
+        host._preview_import_focus_batch_id = str(package_id or "").strip()
+        host._preview_import_focus_active = True
+
     host._apply_preview_metadata_update(
         payload,
-        preserve_selection=True,
+        preserve_selection=False,
         render_selection=False,
         recalculate_statuses=False,
     )
@@ -677,21 +697,6 @@ def _refresh_after_append(host, metadata_path: Path, result, package_id: str) ->
         host._loaded_meta_mtime = metadata_path.stat().st_mtime
     except Exception:
         pass
-
-    new_plate_ids = [
-        str(item.plate_id)
-        for item in getattr(result, "items", ())
-        if str(getattr(item, "plate_id", "") or "").strip()
-    ]
-    if new_plate_ids:
-        try:
-            host._set_preview_import_focus(
-                new_plate_ids,
-                import_batch_id=package_id,
-                activate=True,
-            )
-        except Exception:
-            pass
 
     for refresh_name in (
         "_set_plates_legend_info",
