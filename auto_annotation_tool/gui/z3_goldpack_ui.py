@@ -1183,6 +1183,11 @@ def run_yolo_gold_export(
                 manifest_items
             )
         )
+        az_reuse_summary = (
+            z3_dataset_provenance.summarize_dataset_az_reuse(
+                manifest_items
+            )
+        )
         raw_benchmark = (
             z3_dataset_provenance.build_gt_blind_raw_benchmark(
                 benchmark_plate_records
@@ -1200,6 +1205,7 @@ def run_yolo_gold_export(
             "created_at": timestamp,
             "provenance_schema": z3_dataset_provenance.PROVENANCE_SCHEMA,
             "provenance_counts": provenance_counts,
+            "az_reuse_summary": az_reuse_summary,
             "raw_benchmark": raw_benchmark,
             "gt_contract_fingerprint_sha256": str(
                 raw_benchmark.get(

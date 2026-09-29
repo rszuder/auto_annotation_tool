@@ -11,6 +11,8 @@ from .z3_gt_contract import (
 
 
 PROVENANCE_SCHEMA = "alpr.dataset.sample_provenance.v1"
+AZ_REUSE_PROVENANCE_SCHEMA = "alpr.dataset.az_reuse_provenance.v1"
+AZ_REUSE_SUMMARY_SCHEMA = "alpr.dataset.az_reuse_summary.v1"
 
 RAW_MODEL_EXACT = "raw_model_exact"
 MANUAL = "manual"
@@ -235,6 +237,90 @@ def _is_raw_model_exact(data: dict) -> bool:
     return _final_matches_raw(data)
 
 
+
+def build_az_reuse_provenance(data: dict | None) -> dict:
+    """Portable AZ reuse snapshot, separated from current local TARGET trust."""
+    source_data = data if isinstance(data, dict) else {}
+    az_reuse = (
+        source_data.get("az_reuse")
+        if isinstance(source_data.get("az_reuse"), dict)
+        else {}
+    )
+    fusion_details = (
+        source_data.get("fusion_details")
+        if isinstance(source_data.get("fusion_details"), dict)
+        else {}
+    )
+    review_state = (
+        source_data.get("review_state")
+        if isinstance(source_data.get("review_state"), dict)
+        else {}
+    )
+    gold_state = (
+        source_data.get("gold_state")
+        if isinstance(source_data.get("gold_state"), dict)
+        else {}
+    )
+
+    fusion_source = str(fusion_details.get("source") or "").strip()
+    review_source = str(review_state.get("source") or "").strip()
+    effective_status = str(az_reuse.get("effective_status") or "").strip()
+
+    reused = bool(
+        az_reuse
+        or _norm(source_data.get("fusion_strategy")) == "az_reuse"
+        or _norm(fusion_source) in {"az_registry", "az_project_import"}
+    )
+    if not reused:
+        return {}
+
+    cross_project_import = bool(
+        _norm(fusion_source) == "az_project_import"
+        or _norm(review_source) == "az_project_import"
+        or _norm(effective_status) == "imported_pending_review"
+    )
+    local_review_status = str(review_state.get("status") or "").strip().lower()
+
+    return {
+        "schema": AZ_REUSE_PROVENANCE_SCHEMA,
+        "reused": True,
+        "cross_project_import": cross_project_import,
+        "source_schema": str(az_reuse.get("schema") or "").strip(),
+        "az_revision_id": str(
+            az_reuse.get("az_revision_id")
+            or fusion_details.get("az_revision_id")
+            or ""
+        ).strip(),
+        "payload_sha256": str(az_reuse.get("payload_sha256") or "").strip(),
+        "source_kind": str(az_reuse.get("source_kind") or "").strip(),
+        "source_trust_state": str(az_reuse.get("trust_state") or "").strip(),
+        "origin_project_id": (
+            str(az_reuse.get("origin_project_id") or "").strip() or None
+        ),
+        "origin_iteration": az_reuse.get("origin_iteration"),
+        "revision_project_id": (
+            str(az_reuse.get("project_id") or "").strip() or None
+        ),
+        "revision_created_at": str(az_reuse.get("created_at") or "").strip(),
+        "source_effective_status_at_materialization": effective_status or None,
+        "required_local_review_at_materialization": bool(
+            az_reuse.get("requires_review")
+            or _norm(effective_status) == "imported_pending_review"
+        ),
+        "fusion_source": fusion_source,
+        "local_review": {
+            "status": local_review_status,
+            "approved": local_review_status == "approved",
+            "source": review_source,
+            "human_edited": bool(review_state.get("human_edited", False)),
+            "approved_at": (
+                str(review_state.get("approved_at") or "").strip() or None
+            ),
+            "gold_approved": bool(gold_state.get("approved", False)),
+        },
+    }
+
+
 def classify_plate_dataset_provenance(
     host,
     data: dict | None,
@@ -326,6 +412,7 @@ def classify_plate_dataset_provenance(
             if meta_path is not None
             else ""
         ),
+        "az_reuse": build_az_reuse_provenance(source_data),
     }
 
 
@@ -422,6 +509,54 @@ def summarize_dataset_provenance(items) -> dict[str, int]:
         for key, value in counts.items()
         if int(value) > 0
     }
+
+
+def summarize_dataset_az_reuse(items) -> dict[str, int | str]:
+    summary = {
+        "schema": AZ_REUSE_SUMMARY_SCHEMA,
+        "total_items": 0,
+        "reused_items": 0,
+        "cross_project_import_items": 0,
+        "required_local_review_at_materialization_items": 0,
+        "local_review_approved_items": 0,
+        "local_gold_approved_items": 0,
+    }
+
+    for item in list(items or []):
+        if not isinstance(item, dict):
+            continue
+        summary["total_items"] += 1
+        provenance = (
+            item.get("provenance")
+            if isinstance(item.get("provenance"), dict)
+            else {}
+        )
+        reuse = (
+            provenance.get("az_reuse")
+            if isinstance(provenance.get("az_reuse"), dict)
+            else {}
+        )
+        if not reuse:
+            continue
+
+        summary["reused_items"] += 1
+        if bool(reuse.get("cross_project_import")):
+            summary["cross_project_import_items"] += 1
+        if bool(reuse.get("required_local_review_at_materialization")):
+            summary["required_local_review_at_materialization_items"] += 1
+
+        local_review = (
+            reuse.get("local_review")
+            if isinstance(reuse.get("local_review"), dict)
+            else {}
+        )
+        if bool(local_review.get("approved")):
+            summary["local_review_approved_items"] += 1
+        if bool(local_review.get("gold_approved")):
+            summary["local_gold_approved_items"] += 1
+
+    return summary
+
 
 RAW_BENCHMARK_SCHEMA = "alpr.pz2.raw_benchmark.v1"
 

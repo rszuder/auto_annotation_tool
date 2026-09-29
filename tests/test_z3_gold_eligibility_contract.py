@@ -19,6 +19,7 @@ def _legacy_perfect():
 def _review(status, *, approved=False):
     data = {
         "status": "perfect",
+        "ground_truth_text": "A",
         "characters": [_rec()],
         "review_state": {
             "schema": "alpr.pz2.review.v1",
