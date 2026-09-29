@@ -557,11 +557,36 @@ def refresh_preview_import_focus_ui(host: "CharacterAnnotationTab") -> None:
     known_count = len(matching_ids)
     active = bool(getattr(host, "_preview_import_focus_active", False) and matching_ids)
 
+    material_button = getattr(host, "preview_add_material_btn", None)
+    export_button = getattr(host, "preview_export_material_btn", None)
+    project_append_available = bool(
+        material_button is not None
+        and getattr(host, "_step3_linear_mode", False)
+    )
+
+    if material_button is not None:
+        try:
+            if project_append_available:
+                material_button.grid()
+            else:
+                material_button.grid_remove()
+        except Exception:
+            pass
+
+    if export_button is not None:
+        try:
+            if project_append_available:
+                export_button.grid()
+            else:
+                export_button.grid_remove()
+        except Exception:
+            pass
+
     if frame is not None:
         try:
-            if known_count:
+            if known_count or project_append_available:
                 if not str(frame.winfo_manager()):
-                    frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+                    frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 6))
             elif str(frame.winfo_manager()):
                 frame.grid_remove()
         except Exception:
@@ -571,7 +596,7 @@ def refresh_preview_import_focus_ui(host: "CharacterAnnotationTab") -> None:
         try:
             button.configure(
                 state=(tk.NORMAL if known_count else tk.DISABLED),
-                text=("Pokaż wszystkie tablice" if active else f"Pokaż tylko zaimportowane ({known_count})"),
+                text=("Pokaż wszystkie tablice" if active else f"Pokaż tylko dodane ({known_count})"),
             )
         except Exception:
             pass
@@ -580,14 +605,14 @@ def refresh_preview_import_focus_ui(host: "CharacterAnnotationTab") -> None:
         if active:
             host._set_inline_status_label_state(
                 hint,
-                text=f"Widok zawężony do ostatniego importu CVAT: {known_count} tablic.",
+                text=f"Widok zawężony do ostatnio dodanego materiału: {known_count} tablic.",
                 tone="success",
                 emphasis=False,
             )
         else:
             host._set_inline_status_label_state(
                 hint,
-                text=f"Ostatni import CVAT zaktualizował {known_count} tablic. Użyj widoku zaimportowanych, aby szybko je sprawdzić.",
+                text=f"Ostatnio dodany materiał obejmuje {known_count} tablic. Użyj tego widoku, aby szybko je sprawdzić.",
                 tone="muted",
                 emphasis=False,
             )

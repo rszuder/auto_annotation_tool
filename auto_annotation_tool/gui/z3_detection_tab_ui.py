@@ -10,6 +10,8 @@ from ..config import logger
 from .canvas_progress_overlay import CanvasProgressOverlay
 from .z3_badge_legend import CharacterBadgeLegend
 from .z3_detection_guard_dialog import prompt_pz2_detection_guard_options
+from .z3_pz2_material_append import open_pz2_add_material
+from .z3_pz2_material_export import open_pz2_export_material
 from .z3_detection_runtime import (
     confirm_last_detection_result,
     refresh_detection_review_controls,
@@ -1259,14 +1261,37 @@ def build_detection_tab(
     self.preview_import_focus_frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 6))
     self.preview_import_focus_frame.grid_columnconfigure(1, weight=1)
 
+    self.preview_add_material_btn = ttk.Button(
+        self.preview_import_focus_frame,
+        text="Dodaj materiał do zbioru…",
+        command=lambda: open_pz2_add_material(self),
+        style="WorkflowCard.TButton",
+    )
+    self.preview_add_material_btn.grid(row=0, column=0, sticky="w")
+
+    self.preview_export_material_btn = ttk.Button(
+        self.preview_import_focus_frame,
+        text="Eksportuj cropy + AZ…",
+        command=lambda: open_pz2_export_material(self),
+        style="WorkflowCard.TButton",
+    )
+    self.preview_export_material_btn.grid(
+        row=0,
+        column=1,
+        sticky="w",
+        padx=(8, 0),
+    )
+
+
+
     self.preview_import_focus_btn = ttk.Button(
         self.preview_import_focus_frame,
-        text="Pokaż tylko zaimportowane",
+        text="Pokaż tylko dodane",
         command=self._toggle_preview_import_focus,
         style="WorkflowCard.TButton",
         state=tk.DISABLED,
     )
-    self.preview_import_focus_btn.grid(row=0, column=0, sticky="w")
+    self.preview_import_focus_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
     self.preview_import_focus_hint_lbl = tk.Label(
         self.preview_import_focus_frame,
@@ -1277,7 +1302,7 @@ def build_detection_tab(
         bd=0,
         highlightthickness=0,
     )
-    self.preview_import_focus_hint_lbl.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+    self.preview_import_focus_hint_lbl.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
     self._set_inline_status_label_state(
         self.preview_import_focus_hint_lbl,
         text="",
