@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from tkinter import filedialog, messagebox
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
 from ..campaign_manager import CAMPAIGN
 from ..config import CONFIG
@@ -24,8 +25,375 @@ from ..registry.pz2_append_materializer import (
 )
 
 
+
 def open_pz2_add_material(host) -> bool:
+    """Wybierz sposób ROZSZERZENIA aktywnego zbioru projektu."""
     context = _resolve_active_project_context(host)
+    if context is None:
+        return False
+
+    mode = _choose_add_material_kind(host)
+    if mode == "az":
+        return _open_pz2_add_az_package(host, context=context)
+    if mode == "images_at":
+        return _open_pz2_add_images_at(host, context=context)
+    return False
+
+
+def _choose_add_material_kind(host) -> str | None:
+    parent = _parent(host)
+    dialog = tk.Toplevel(parent)
+    dialog.title("Dodaj materiał do zbioru")
+    dialog.transient(parent)
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    result = {"mode": None}
+
+    shell = ttk.Frame(dialog, padding=14)
+    shell.grid(row=0, column=0, sticky="nsew")
+    shell.grid_columnconfigure(0, weight=1)
+
+    ttk.Label(
+        shell,
+        text="Jak chcesz rozszerzyć bieżący zbiór?",
+        font=("Segoe UI", 10, "bold"),
+    ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+    ttk.Label(
+        shell,
+        text=(
+            "Obie opcje dodają materiał do aktualnego projektu. "
+            "Nie zastępują bieżącego zbioru PZ2."
+        ),
+        justify="left",
+        wraplength=470,
+    ).grid(row=1, column=0, sticky="ew", pady=(0, 12))
+
+    def finish(value):
+        result["mode"] = value
+        try:
+            dialog.grab_release()
+        except Exception:
+            pass
+        dialog.destroy()
+
+    ttk.Button(
+        shell,
+        text="Gotowe tablice + AZ",
+        command=lambda: finish("az"),
+    ).grid(row=2, column=0, sticky="ew", pady=(0, 5))
+
+    ttk.Label(
+        shell,
+        text=(
+            "Dopnij gotowe cropy tablic bezpośrednio do bieżącego PZ2. "
+            "AZ zostanie oznaczone do lokalnej kontroli."
+        ),
+        justify="left",
+        wraplength=470,
+    ).grid(row=3, column=0, sticky="ew", pady=(0, 12))
+
+    ttk.Button(
+        shell,
+        text="Obrazy + AT",
+        command=lambda: finish("images_at"),
+    ).grid(row=4, column=0, sticky="ew", pady=(0, 5))
+
+    ttk.Label(
+        shell,
+        text=(
+            "Dodaj nowe obrazy z annotations.xml. Najpierw sprawdzisz je w Z2 "
+            "i jawnie nadasz [OK]; dopiero potem trafią przez PZ1 do PZ2."
+        ),
+        justify="left",
+        wraplength=470,
+    ).grid(row=5, column=0, sticky="ew", pady=(0, 12))
+
+    ttk.Button(
+        shell,
+        text="Anuluj",
+        command=lambda: finish(None),
+    ).grid(row=6, column=0, sticky="e")
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: finish(None))
+    dialog.bind("<Escape>", lambda _event: finish(None), add="+")
+    dialog.wait_window()
+    return result["mode"]
+
+
+def _open_pz2_add_images_at(host, *, context: dict) -> bool:
+    """Append-safe routing nowych obrazów + AT do istniejącego Z2."""
+    parent = _parent(host)
+    app = getattr(host, "app", None)
+
+    try:
+        _flush_preview_metadata(host)
+    except Exception as exc:
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            f"Nie udało się zapisać odłożonych zmian PZ2.\n\n{exc}",
+        )
+        return False
+
+    selected_xml = filedialog.askopenfilename(
+        parent=parent,
+        initialdir=str(context.get("project_root") or context["preview_dir"]),
+        title="Wskaż annotations.xml z nowymi tablicami",
+        filetypes=[
+            ("Plik annotations.xml", "annotations.xml"),
+            ("Pliki XML", "*.xml"),
+            ("Wszystkie pliki", "*.*"),
+        ],
+    )
+    if not selected_xml:
+        return False
+
+    xml_path = Path(selected_xml)
+    if not xml_path.is_file() or xml_path.name.lower() != "annotations.xml":
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            "Wskaż właściwy plik annotations.xml.",
+        )
+        return False
+
+    images_dir = xml_path.parent / "images"
+    if not _dir_has_images(images_dir):
+        selected_images = filedialog.askdirectory(
+            parent=parent,
+            initialdir=str(xml_path.parent),
+            title="Wskaż folder obrazów zgodnych z annotations.xml",
+        )
+        if not selected_images:
+            return False
+        images_dir = Path(selected_images)
+
+    if not _dir_has_images(images_dir):
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            "W wybranym katalogu nie znaleziono obsługiwanych obrazów.",
+        )
+        return False
+
+    campaign_tab = None
+    try:
+        campaign_tab = getattr(app, "tabs", {}).get("campaign")
+    except Exception:
+        campaign_tab = None
+    if campaign_tab is None:
+        try:
+            loader = getattr(app, "_ensure_tab_loaded", None)
+            if callable(loader):
+                campaign_tab = loader("campaign", select=False)
+        except Exception:
+            campaign_tab = None
+
+    importer = getattr(campaign_tab, "_import_project_start_plate_run", None)
+    if not callable(importer):
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            "Nie udało się przygotować istniejącego importera AT projektu.",
+        )
+        return False
+
+    previous_master_pool = None
+    try:
+        previous_master_pool = CAMPAIGN.get_master_pool_dir()
+    except Exception:
+        previous_master_pool = None
+
+    import_ok = False
+    try:
+        # Istniejący importer E1 dopasowuje AT do bieżącego źródła O.
+        # Wskazujemy nowe obrazy tylko na czas przygotowania draftu.
+        if not CAMPAIGN.set_master_pool_dir(images_dir):
+            raise RuntimeError(
+                "Nie udało się tymczasowo wskazać nowych obrazów jako źródła AT."
+            )
+
+        import_ok = bool(
+            importer(
+                selected_xml_path=xml_path,
+                parent=parent,
+                refresh_dashboard_after_import=False,
+                confirm_import=True,
+            )
+        )
+    except Exception as exc:
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            f"Nie udało się przygotować draftu AT w Z2.\n\n{exc}",
+        )
+        import_ok = False
+    finally:
+        _restore_master_pool(previous_master_pool)
+
+    if not import_ok:
+        return False
+
+    try:
+        plate_source = dict(CAMPAIGN.get_project_start_plate_source() or {})
+    except Exception:
+        plate_source = {}
+
+    source_run = str(plate_source.get("source_run_path") or "").strip()
+    source_xml = str(plate_source.get("source_xml_path") or "").strip()
+    source_input = str(plate_source.get("source_input_path") or "").strip()
+
+    if not source_run and source_xml:
+        try:
+            source_run = str(Path(source_xml).parent)
+        except Exception:
+            source_run = ""
+
+    if not source_run:
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            (
+                "AT zostało przygotowane, ale nie udało się ustalić katalogu "
+                "draftu Z2 do lokalnej kontroli."
+            ),
+        )
+        return False
+
+    annotation_tab = None
+    try:
+        annotation_tab = getattr(app, "tabs", {}).get("annotation")
+    except Exception:
+        annotation_tab = None
+    if annotation_tab is None:
+        try:
+            loader = getattr(app, "_ensure_tab_loaded", None)
+            if callable(loader):
+                annotation_tab = loader("annotation", select=False)
+        except Exception:
+            annotation_tab = None
+
+    open_review = getattr(
+        annotation_tab,
+        "open_existing_run_for_campaign_review",
+        None,
+    )
+    if not callable(open_review):
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            "Draft AT jest gotowy, ale nie udało się otworzyć kontroli Z2.",
+        )
+        return False
+
+    review_context = {
+        "source": "pz2_append_images_at",
+        "graph_edge_key": "e3_to_e4",
+        "graph_gate_id": "T05",
+        "graph_visible_gate_id": "T05",
+        "graph_display_gate_id": "T05",
+        "graph_transition_source": "E3",
+        "graph_transition_target": "E4Z",
+        "graph_gate_label": "Dataset znaków",
+        "z2_work_mode": "pz2_append_images_at_review",
+        "restore_run_dir": source_run,
+        "xml_path": source_xml,
+        "input_dir": source_input or str(images_dir),
+        "input_source": "pz2_append_images_at",
+    }
+    try:
+        annotation_tab._campaign_graph_entry_context = dict(review_context)
+        annotation_tab._campaign_context_project_name = str(
+            CAMPAIGN.get_active_project_name() or ""
+        ).strip()
+    except Exception:
+        pass
+
+    try:
+        opened = bool(
+            open_review(
+                Path(source_run),
+                iteration_target="char",
+                manual_template=False,
+                defer_ui_restore=False,
+            )
+        )
+    except Exception as exc:
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            f"Draft AT jest gotowy, ale nie udało się otworzyć go w Z2.\n\n{exc}",
+        )
+        return False
+
+    if not opened:
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            "Draft AT jest gotowy, ale Z2 odmówiło jego otwarcia.",
+        )
+        return False
+
+    try:
+        app.open_controlled_tab("annotation")
+    except Exception as exc:
+        _show_error(
+            host,
+            "Dodawanie obrazów + AT",
+            f"Draft AT jest gotowy, ale nie udało się przełączyć widoku na Z2.\n\n{exc}",
+        )
+        return False
+
+    try:
+        update_status = getattr(app, "update_status", None)
+        if callable(update_status):
+            update_status(
+                "Dodano nowe obrazy + AT do kontroli w Z2. "
+                "Sprawdź nowe tablice i nadaj [OK] właściwym obrazom.",
+                "info",
+            )
+    except Exception:
+        pass
+    return True
+
+
+def _restore_master_pool(previous_master_pool) -> None:
+    try:
+        if previous_master_pool is not None:
+            CAMPAIGN.set_master_pool_dir(previous_master_pool)
+        else:
+            clear = getattr(CAMPAIGN, "clear_master_pool_dir", None)
+            if callable(clear):
+                clear()
+    except Exception:
+        pass
+
+
+def _dir_has_images(path: Path) -> bool:
+    try:
+        if not path.exists() or not path.is_dir():
+            return False
+        extensions = {
+            str(ext).lower()
+            for ext in getattr(CONFIG, "IMAGE_EXTENSIONS", ())
+        }
+        return any(
+            item.is_file()
+            and item.suffix.lower() in extensions
+            for item in path.iterdir()
+        )
+    except Exception:
+        return False
+
+
+def _open_pz2_add_az_package(
+    host,
+    *,
+    context: dict | None = None,
+) -> bool:
+    context = context or _resolve_active_project_context(host)
     if context is None:
         return False
 
