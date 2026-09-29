@@ -1108,7 +1108,16 @@ def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
         except Exception:
             ready = False
 
-    if ready:
+    try:
+        pinned_state = dict(_get_pinned_step4_result_state(self) or {})
+    except Exception:
+        pinned_state = {}
+
+    if pinned_state:
+        status = "Wynik T06 wybrany"
+        subtitle = "Model wynikowy jest przypięty. Wróć do bramki T06 i zakończ decyzję."
+        tone = "success"
+    elif ready:
         status = "Gotowe do startu"
         subtitle = "Masz wariant datasetu, zgodny model i dobrane parametry treningu."
         tone = "success"

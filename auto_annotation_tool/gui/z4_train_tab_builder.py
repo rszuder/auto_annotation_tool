@@ -1867,6 +1867,19 @@ def _build_train_tab(self):
 
     self._refresh_step4_campaign_navigation_ui()
 
+    # Historia może już istnieć na dysku zanim leniwa zakładka PZ2 zostanie
+    # zbudowana (np. po restarcie aplikacji po zakończonym treningu).
+    # Drzewo historii powstaje dopiero tutaj, więc po jego utworzeniu trzeba
+    # jawnie załadować snapshot i kandydatów wyniku bramki.
+    try:
+        self._load_history()
+    except Exception as exc:
+        logger.debug(f"Nie udało się załadować historii po zbudowaniu Z4/PZ2: {exc}")
+    try:
+        self._refresh_campaign_training_result_selector()
+    except Exception as exc:
+        logger.debug(f"Nie udało się odświeżyć kandydatów T06 po zbudowaniu Z4/PZ2: {exc}")
+
     if self.training_input_summary_frame is not None:
         HELP.bind_help(self.training_input_summary_frame, "tr_train_input_summary")
     if self.training_input_change_btn is not None:

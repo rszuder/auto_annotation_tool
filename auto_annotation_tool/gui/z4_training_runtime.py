@@ -1437,12 +1437,16 @@ def _refresh_campaign_training_result_selector(self):
     except Exception:
         selected_label = ""
     preferred_run_id = str(getattr(self, "_preferred_campaign_training_result_run_id", "") or "").strip()
-    if selected_label not in choices and finish_run_id and finish_run_id in set(choices.values()):
+
+    # Gdy wynik bramki jest już przypięty, selektor musi pokazywać właśnie ten
+    # run. Poprzednio stara, ale nadal poprawna etykieta pozostawała w polu,
+    # więc historia wskazywała nowy wynik T06, a nagłówek pokazywał inny run.
+    if finish_run_id and finish_run_id in set(choices.values()):
         for label, run_id in choices.items():
             if run_id == finish_run_id:
                 selected_label = label
                 break
-    elif not finish_run_id and preferred_run_id and preferred_run_id in set(choices.values()):
+    elif preferred_run_id and preferred_run_id in set(choices.values()):
         for label, run_id in choices.items():
             if run_id == preferred_run_id:
                 selected_label = label

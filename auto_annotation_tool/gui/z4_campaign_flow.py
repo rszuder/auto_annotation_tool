@@ -788,6 +788,14 @@ def open_campaign_step4_entry(
     except Exception:
         selected_tab = ""
     if bool(getattr(host, "_step4_train_tab_built", False)) and selected_tab == str(getattr(host, "tab_train", "")):
+        try:
+            host._load_history()
+        except Exception:
+            pass
+        try:
+            host._refresh_campaign_training_result_selector()
+        except Exception:
+            pass
         _perf_mark("train_ui")
 
     try:

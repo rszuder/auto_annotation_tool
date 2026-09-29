@@ -437,6 +437,7 @@ def build_output_checkpoint_training_snapshot(
     last_checkpoint: Path | str | None = None,
     best_epoch: int | None = None,
     best_epoch_source: str = "",
+    inspect_checkpoint_epoch: bool = True,
 ) -> dict[str, Any]:
     """Freeze output checkpoint hashes after training finishes."""
 
@@ -444,7 +445,11 @@ def build_output_checkpoint_training_snapshot(
     last_snapshot = build_checkpoint_training_snapshot(last_checkpoint, name="last.pt", kind="last_checkpoint")
     best_sha = str(best_snapshot.get("sha256") or "")
     last_sha = str(last_snapshot.get("sha256") or "")
-    checkpoint_best_epoch = _checkpoint_completed_epoch(best_checkpoint)
+    checkpoint_best_epoch = (
+        _checkpoint_completed_epoch(best_checkpoint)
+        if inspect_checkpoint_epoch
+        else None
+    )
     resolved_best_epoch = checkpoint_best_epoch if checkpoint_best_epoch is not None else _int_or_none(best_epoch)
     resolved_best_epoch_source = "checkpoint" if checkpoint_best_epoch is not None else str(best_epoch_source or "").strip()
     if not resolved_best_epoch_source:

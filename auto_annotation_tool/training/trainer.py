@@ -378,7 +378,15 @@ class YOLOPoseTrainer:
         if metrics_epoch is not None:
             candidates.append(metrics_epoch)
 
-        checkpoint_epoch = self._resolve_completed_epoch_from_checkpoint(last_checkpoint) if last_checkpoint else None
+        # Reading a YOLO checkpoint with torch.load can temporarily consume
+        # hundreds of MiB. During normal finalization runtime/metrics already
+        # provide the completed epoch count, so use the checkpoint only as a
+        # true fallback.
+        checkpoint_epoch = (
+            self._resolve_completed_epoch_from_checkpoint(last_checkpoint)
+            if last_checkpoint and not candidates
+            else None
+        )
         if checkpoint_epoch is not None:
             candidates.append(checkpoint_epoch)
 
@@ -1911,6 +1919,12 @@ class YOLOPoseTrainer:
                     self.on_training_end(False, "Wstrzymano" if self.should_pause else "Zatrzymano")
                 return
 
+            # model.train() has already returned. Release the live training
+            # model before checkpoint provenance/report/export work. On 8 GiB
+            # systems keeping the training graph alive while loading best/last
+            # checkpoints can push Windows into paging and make Tk appear hung.
+            self._reset_runtime_state()
+
             train_dir = Path(run.output_dir) / "train"
             best_weights = train_dir / "weights" / "best.pt"
             last_weights = train_dir / "weights" / "last.pt"
@@ -1941,6 +1955,7 @@ class YOLOPoseTrainer:
                     last_checkpoint=last_weights if last_weights.exists() else None,
                     best_epoch=best_epoch,
                     best_epoch_source=best_epoch_source,
+                    inspect_checkpoint_epoch=False,
                 )
                 self.history.update_run(run.id, output_checkpoint_snapshot=output_checkpoint_snapshot)
             except Exception as snapshot_err:
@@ -1989,20 +2004,82 @@ class YOLOPoseTrainer:
                     source_metadata = read_model_metadata_sidecar(best_weights)
                     if source_metadata is not None:
                         metadata_info = source_metadata[2] if len(source_metadata) >= 3 else {}
-                        write_model_metadata_sidecar(
-                            target_path,
-                            metadata_info,
-                            validation_ok=bool(source_metadata[0]),
-                            validation_message=str(source_metadata[1] or ""),
-                        )
+                        metadata_ok = bool(source_metadata[0])
+                        metadata_message = str(source_metadata[1] or "")
                     else:
-                        validate_model_file(
-                            target_path,
-                            prefer_sidecar=False,
-                            allow_heavy_load=True,
-                            write_sidecar=True,
+                        # best.pt is a successful output of the just-finished
+                        # training run. Do not instantiate YOLO(target_path)
+                        # again only to build UI metadata: that duplicates the
+                        # model in CPU RAM at the worst possible moment.
+                        task_type = "pose" if task_tag == "plate" else "detect"
+                        dataset_cfg = {}
+                        try:
+                            dataset_cfg = safe_load_yaml(Path(run.dataset_path) / "data.yaml")
+                            if not isinstance(dataset_cfg, dict):
+                                dataset_cfg = {}
+                        except Exception:
+                            dataset_cfg = {}
+                        names = dataset_cfg.get("names")
+                        if isinstance(names, dict):
+                            def _name_sort_key(value):
+                                text = str(value)
+                                return (0, int(text)) if text.isdigit() else (1, text)
+                            classes = [str(names[key]) for key in sorted(names, key=_name_sort_key)]
+                        elif isinstance(names, (list, tuple)):
+                            classes = [str(value) for value in names]
+                        else:
+                            classes = []
+                        source_model = str(getattr(run, "base_model", "") or "").strip()
+                        source_model_name = Path(source_model).name if source_model else ""
+                        identity_match = re.search(
+                            r"yolo(?:v)?(8|11|26)([nsmlx])(?:[-_ ]?(pose))?",
+                            source_model_name.lower(),
                         )
-                    logger.info(f"[OK] Zapisano metadata modelu: {target_path.name}.metadata.json")
+                        identity = {}
+                        if identity_match:
+                            version = str(identity_match.group(1) or "")
+                            size = str(identity_match.group(2) or "").lower()
+                            family = f"YOLOv{version}" if version == "8" else f"YOLO{version}"
+                            variant = f"{family}{size}"
+                            identity = {
+                                "yolo_family": family,
+                                "yolo_version": version,
+                                "yolo_size": size,
+                                "yolo_variant": variant,
+                                "architecture_label": f"{variant} {'Pose' if task_type == 'pose' else 'Detect'}",
+                            }
+                        metadata_info = {
+                            "type": task_type,
+                            "task": task_type,
+                            "classes": classes,
+                            "num_classes": len(classes),
+                            "keypoints": bool(task_type == "pose"),
+                            "kpt_shape": dataset_cfg.get("kpt_shape") if task_type == "pose" else None,
+                            "file_name": target_path.name,
+                            "source_model": source_model,
+                            "source_model_name": source_model_name,
+                            "source_architecture_label": str(identity.get("architecture_label") or ""),
+                            **identity,
+                        }
+                        try:
+                            metadata_info["file_size_mb"] = round(target_path.stat().st_size / (1024 * 1024), 2)
+                        except Exception:
+                            metadata_info["file_size_mb"] = 0
+                        metadata_ok = True
+                        metadata_message = "Model utworzony przez zakończony run treningowy"
+                    write_model_metadata_sidecar(
+                        target_path,
+                        metadata_info,
+                        validation_ok=metadata_ok,
+                        validation_message=metadata_message,
+                        extra={
+                            "source": "training_finalization",
+                            "run_id": str(run.id or ""),
+                            "training_target": task_tag,
+                            "metadata_scope": "lightweight_completed_training_output",
+                        },
+                    )
+                    logger.info(f"[OK] Zapisano lekkie metadata modelu: {target_path.name}.metadata.json")
 
                     # =========================================================
                     # AUTO-WIRING: aktualizacja modeli aktywnego projektu
