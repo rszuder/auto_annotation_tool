@@ -5785,6 +5785,11 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
         except Exception:
             pending_t06 = {}
         if pending_t06:
+            # Gotowy eksport PZ3 zamyka wymaganą pracę T05. Ewentualny
+            # przerwany PZ2 pozostaje widoczny tylko jako opcjonalny szkic
+            # w modalu pracy, nie jako stan całej bramki na grafie.
+            if bool(pending_t06.get("valid_export_exists")):
+                return "WYKONANE"
             work_area = str(pending_t06.get("work_area") or pending_t06.get("interrupted_kind") or "").strip().lower()
             try:
                 session = dict(pending_t06.get("t06_work_session") or {})
@@ -5815,7 +5820,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
             gate = {}
         ready_dataset = str(gate.get("ready_dataset") or gate.get("dataset_hint") or "").strip()
         if bool(gate.get("ok")) and ready_dataset:
-            return _edge_current_iteration_work_status(edge)
+            current_work_status = _edge_current_iteration_work_status(edge)
+            return current_work_status or "WYKONANE"
 
         try:
             current_iter = int(current_iteration or CAMPAIGN.get_current_iteration_num() or 1)
@@ -20432,10 +20438,21 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 and _current_step4_work_interruption_state() and not _current_t07_training_finish_state())
             gate_training_candidate = bool(gate_active and _is_t07_graph_edge(edge.key)
                 and _current_t07_training_candidate_state() and not _current_t07_training_finish_state())
-            gate_t06_interrupted = bool(gate_active and edge.key == "e3_to_e4" and _t06_interrupted_work_state())
-            # Resolve dynamic copy before measuring it, including interrupted work.
+            gate_t06_state = {}
+            if gate_active and edge.key == "e3_to_e4":
+                try:
+                    gate_t06_state = dict(_t06_interrupted_work_state() or {})
+                except Exception:
+                    gate_t06_state = {}
+            gate_t06_interrupted = bool(
+                gate_t06_state
+                and not bool(gate_t06_state.get("valid_export_exists"))
+            )
+            # Resolve dynamic copy before measuring it. Optional PZ2 draft after
+            # a valid PZ3 export stays available in the modal, but is not a
+            # graph-level interruption.
             if gate_work_interrupted or gate_step4_interrupted or gate_t06_interrupted:
-                pending_state = (_t06_interrupted_work_state() if gate_t06_interrupted
+                pending_state = (gate_t06_state if gate_t06_interrupted
                     else _get_t07_pending_repair_approved_state() if gate_work_interrupted else {})
                 try:
                     pending_images = int(pending_state.get("unpromoted_approved_images", 0) or 0)
@@ -20769,8 +20786,20 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 step4_work_interrupted = is_work_row and gate_step4_interrupted
                 step4_training_candidate_action = is_work_row and gate_training_candidate
                 t06_work_interrupted = is_work_row and gate_t06_interrupted
-                resource_review_action = is_work_row and bool(work_status_value)
-                if step4_training_candidate_action:
+                t06_work_done = bool(
+                    is_work_row
+                    and edge.key == "e3_to_e4"
+                    and str(work_status_value or "").strip().upper() == "WYKONANE"
+                )
+                resource_review_action = (
+                    is_work_row
+                    and bool(work_status_value)
+                    and not t06_work_done
+                )
+                if t06_work_done:
+                    row_fill = blend_hex_colors(fill, graph_card_success, 0.10)
+                    row_outline = blend_hex_colors(graph_card_success, card_bg, 0.25)
+                elif step4_training_candidate_action:
                     row_fill = blend_hex_colors(fill, warning, 0.10)
                     row_outline = blend_hex_colors(warning, card_bg, 0.30)
                 elif resource_review_action:
@@ -20817,6 +20846,8 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                 )
                 if approve_blink:
                     row_color = graph_card_warning
+                elif t06_work_done:
+                    row_color = graph_card_success
                 elif work_interrupted or t06_work_interrupted or step4_work_interrupted:
                     row_color = graph_card_warning if tag and enabled else (graph_card_muted if operable else graph_card_disabled)
                 elif step4_training_candidate_action:
@@ -20841,7 +20872,9 @@ def _render_step1_route_actions(self, frame, *, allow_pending_actions: bool = Tr
                         "color": str(row_color),
                     }
                 primary_color = row_text_color
-                if enabled and (is_work_row or is_approve_row):
+                if t06_work_done and enabled:
+                    primary_color = graph_card_success
+                elif enabled and (is_work_row or is_approve_row):
                     primary_color = graph_card_warning
                 elif copy.tone and (enabled or idx == 0):
                     primary_color = {"success": graph_card_success, "warning": graph_card_warning,

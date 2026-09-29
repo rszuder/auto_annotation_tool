@@ -86,6 +86,13 @@ def gate_field_copy(label, value, *, enabled=False, approve_label="ZATWIERDŹ"):
         return GateFieldCopy("Zasoby", primary or ("Sprawdź zasoby" if enabled else "Nie wybrano"),
                              _details(detail) if separator else "")
     if label == "PRACA":
+        if upper == "WYKONANE":
+            return GateFieldCopy(
+                "Praca",
+                "Praca wykonana",
+                "Dataset znaków jest gotowy",
+                "success",
+            )
         if upper.startswith("PRZERWANE"):
             count = re.search(r"\+(\d+)\s+OK", upper)
             detail = f"+{count[1]} obrazów oznaczonych OK" if count else ""

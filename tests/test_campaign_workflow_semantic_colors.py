@@ -113,3 +113,31 @@ def test_interrupted_attention_marks_are_not_red_errors():
             if any(token in title for token in tokens) and mark_tone.strip() == "error":
                 offenders.append((function_name, title))
     assert offenders == []
+
+
+
+def test_t05_graph_ready_export_is_done_even_with_optional_pz2_draft():
+    compact = _nested_function_source("_edge_t06_work_compact_status")
+    assert 'pending_t06.get("valid_export_exists")' in compact
+    assert 'return "WYKONANE"' in compact
+    assert 'current_work_status or "WYKONANE"' in compact
+
+
+def test_t05_graph_does_not_render_ready_export_draft_as_interruption():
+    draw_gate = _nested_function_source("_draw_gate")
+    assert 'gate_t06_state.get("valid_export_exists")' in draw_gate
+    assert "and not bool(gate_t06_state.get" in draw_gate
+    assert "t06_work_done = bool(" in draw_gate
+    assert "row_fill = blend_hex_colors(fill, graph_card_success, 0.10)" in draw_gate
+    assert "primary_color = graph_card_success" in draw_gate
+
+
+def test_t05_graph_completed_work_copy_is_green_done_state():
+    from auto_annotation_tool.gui.campaign_gate_fields import gate_field_copy
+
+    copy = gate_field_copy("PRACA", "WYKONANE", enabled=True)
+
+    assert copy.caption == "Praca"
+    assert copy.primary == "Praca wykonana"
+    assert copy.detail == "Dataset znaków jest gotowy"
+    assert copy.tone == "success"
