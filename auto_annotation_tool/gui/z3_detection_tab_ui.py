@@ -1263,24 +1263,27 @@ def build_detection_tab(
 
     self.preview_add_material_btn = ttk.Button(
         self.preview_import_focus_frame,
-        text="Dodaj materiał do zbioru…",
+        text="Dodaj tablice lub zdjęcia…",
         command=lambda: open_pz2_add_material(self),
         style="WorkflowCard.TButton",
     )
-    self.preview_add_material_btn.grid(row=0, column=0, sticky="w")
+    self.preview_add_material_btn.grid(row=0, column=0, columnspan=2, sticky="ew")
+    self.preview_add_material_btn.configure(padding=(5, 2))
 
     self.preview_export_material_btn = ttk.Button(
         self.preview_import_focus_frame,
-        text="Eksportuj cropy + AZ…",
+        text="Eksportuj wycięcia tablic…",
         command=lambda: open_pz2_export_material(self),
         style="WorkflowCard.TButton",
     )
     self.preview_export_material_btn.grid(
-        row=0,
-        column=1,
-        sticky="w",
-        padx=(8, 0),
+        row=1,
+        column=0,
+        columnspan=2,
+        sticky="ew",
+        pady=(4, 0),
     )
+    self.preview_export_material_btn.configure(padding=(5, 2))
 
 
 
@@ -1291,7 +1294,8 @@ def build_detection_tab(
         style="WorkflowCard.TButton",
         state=tk.DISABLED,
     )
-    self.preview_import_focus_btn.grid(row=1, column=0, sticky="w", pady=(4, 0))
+    self.preview_import_focus_btn.grid(row=2, column=0, sticky="w", pady=(3, 0))
+    self.preview_import_focus_btn.configure(padding=(5, 2))
 
     self.preview_import_focus_hint_lbl = tk.Label(
         self.preview_import_focus_frame,
@@ -1302,7 +1306,7 @@ def build_detection_tab(
         bd=0,
         highlightthickness=0,
     )
-    self.preview_import_focus_hint_lbl.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+    self.preview_import_focus_hint_lbl.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
     self._set_inline_status_label_state(
         self.preview_import_focus_hint_lbl,
         text="",
@@ -2810,10 +2814,13 @@ def build_detection_tab(
     self.detect_nav_row.grid_columnconfigure(1, weight=1)
     self.detect_nav_row.grid_columnconfigure(2, weight=0)
 
-    detection_action_button_padding = (10, 13)
+    # Dolny pasek PZ2 ma być kompaktowy: pionowy padding 13 px
+    # niepotrzebnie zabierał miejsce canvasowi i przy niektórych DPI
+    # pogarszał czytelność etykiet CTA.
+    detection_action_button_padding = (9, 4)
 
     self.detect_actions_row = ttk.Frame(footer_nav)
-    self.detect_actions_row.grid(row=0, column=0, sticky="ew", pady=(4, 4))
+    self.detect_actions_row.grid(row=0, column=0, sticky="ew", pady=(2, 2))
     self.detect_actions_row.grid_rowconfigure(0, weight=0)
     self.detect_actions_row.grid_columnconfigure(0, weight=0)
     self.detect_actions_row.grid_columnconfigure(1, weight=1)
@@ -2904,7 +2911,7 @@ def build_detection_tab(
     )
     self.btn_start_review_from_raw.pack(side=tk.LEFT, padx=(5, 0))
     self.btn_start_review_from_raw.configure(
-        padding=detection_action_button_padding, width=14, state=tk.DISABLED
+        padding=detection_action_button_padding, width=18, state=tk.DISABLED
     )
 
     self.btn_confirm_review_gold = ttk.Button(
@@ -2915,7 +2922,7 @@ def build_detection_tab(
     )
     self.btn_confirm_review_gold.pack(side=tk.LEFT, padx=(5, 0))
     self.btn_confirm_review_gold.configure(
-        padding=detection_action_button_padding, width=15, state=tk.DISABLED
+        padding=detection_action_button_padding, width=18, state=tk.DISABLED
     )
 
     self.btn_confirm_detection_result = None

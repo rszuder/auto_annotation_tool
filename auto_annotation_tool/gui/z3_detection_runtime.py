@@ -276,6 +276,143 @@ def build_yolo_box_only_records(host, yolo_records) -> list[dict]:
     return self._sort_character_records_by_x(prepared)
 
 
+def guard_yolo_box_candidates_for_plate_layout(
+    host,
+    data,
+    yolo_records,
+    *,
+    image_shape=None,
+) -> tuple[list, dict]:
+    """Reject YB candidates that violate a known 2R row boundary.
+
+    RAW/NMS diagnostic lists are not mutated. This guard only decides which
+    candidates may become working YB geometry or YOLO+OCR crops.
+    """
+    self = host
+    records = list(yolo_records or [])
+    details = {
+        "row_guard_enabled": False,
+        "row_guard_layout": "",
+        "row_guard_input_count": int(len(records)),
+        "row_guard_accepted_count": int(len(records)),
+        "row_guard_rejected_count": 0,
+        "row_guard_separator_cross_count": 0,
+        "row_guard_invalid_bbox_count": 0,
+    }
+    if not isinstance(data, dict) or not records:
+        return records, details
+
+    try:
+        two_row = bool(self._should_preview_use_two_row_layers(data))
+    except Exception:
+        two_row = False
+    if not two_row:
+        return records, details
+
+    details["row_guard_enabled"] = True
+    details["row_guard_layout"] = "two_row"
+
+    image_h = None
+    image_w = None
+    try:
+        if image_shape is not None and len(image_shape) >= 2:
+            image_h = float(image_shape[0])
+            image_w = float(image_shape[1])
+    except Exception:
+        image_h = None
+        image_w = None
+
+    separator = None
+    try:
+        separator = self._normalize_preview_layout_separator(
+            data.get("layout_separator"),
+            image_w=image_w,
+            image_h=image_h,
+        )
+    except Exception:
+        separator = None
+
+    if not isinstance(separator, dict):
+        try:
+            separator = self._ensure_preview_layout_separator(
+                data,
+                data.get("characters", []),
+                image_w=image_w,
+                image_h=image_h,
+            )
+        except Exception:
+            separator = None
+
+    if not isinstance(separator, dict):
+        details["row_guard_reason"] = "missing_separator"
+        return records, details
+
+    details["row_guard_separator_source"] = str(
+        separator.get("source", "") or ""
+    )
+
+    try:
+        sx1 = float(separator.get("x1", 0.0) or 0.0)
+        sy1 = float(separator.get("y1", 0.0) or 0.0)
+        sx2 = float(separator.get("x2", sx1) or sx1)
+        sy2 = float(separator.get("y2", sy1) or sy1)
+    except Exception:
+        details["row_guard_reason"] = "invalid_separator"
+        return records, details
+
+    def _separator_y_at_x(x_value: float) -> float:
+        if abs(sx2 - sx1) <= 1e-9:
+            return (sy1 + sy2) / 2.0
+        t = (float(x_value) - sx1) / (sx2 - sx1)
+        t = max(0.0, min(1.0, t))
+        return sy1 + ((sy2 - sy1) * t)
+
+    accepted = []
+    rejected_cross = 0
+    invalid_bbox = 0
+    margin = 0.5
+
+    for rec in records:
+        bbox = _record_bbox(self, rec)
+        if not bbox:
+            invalid_bbox += 1
+            continue
+        try:
+            x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+        except Exception:
+            invalid_bbox += 1
+            continue
+        if x2 < x1:
+            x1, x2 = x2, x1
+        if y2 < y1:
+            y1, y2 = y2, y1
+        if x2 <= x1 or y2 <= y1:
+            invalid_bbox += 1
+            continue
+
+        probes = (x1, (x1 + x2) / 2.0, x2)
+        separator_ys = [_separator_y_at_x(probe_x) for probe_x in probes]
+
+        fully_above = all(y2 <= (sep_y - margin) for sep_y in separator_ys)
+        fully_below = all(y1 >= (sep_y + margin) for sep_y in separator_ys)
+        if not (fully_above or fully_below):
+            rejected_cross += 1
+            continue
+
+        accepted.append(rec)
+
+    details["row_guard_accepted_count"] = int(len(accepted))
+    details["row_guard_rejected_count"] = int(len(records) - len(accepted))
+    details["row_guard_separator_cross_count"] = int(rejected_cross)
+    details["row_guard_invalid_bbox_count"] = int(invalid_bbox)
+    details["row_guard_reason"] = (
+        "separator_guard_applied"
+        if details["row_guard_rejected_count"] > 0
+        else "separator_guard_clear"
+    )
+    return accepted, details
+
+
 def apply_yolo_symbols_to_existing_boxes(
     host,
     existing_chars,
@@ -1026,7 +1163,40 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     yolo_chars = yolo_nms_chars
                 else:
                     yolo_chars = self._sort_character_records_by_x(list(getattr(detector, "last_yolo_detections", [])))
+
+                # YB/OCR 2R guard: RAW/NMS remain untouched diagnostics.
+                # A box crossing the known row separator cannot become working
+                # character geometry or an OCR crop.
                 yolo_box_backend_chars = yolo_nms_chars or yolo_chars or yolo_raw_chars
+                yolo_box_backend_chars, row_guard_details = guard_yolo_box_candidates_for_plate_layout(
+                    self,
+                    local_meta[pid],
+                    yolo_box_backend_chars,
+                    image_shape=getattr(img, "shape", None),
+                )
+                if int(row_guard_details.get("row_guard_rejected_count", 0) or 0) > 0:
+                    self._log(
+                        self.test_log_text,
+                        (
+                            f"[2R GUARD] {pid}: odrzucono "
+                            f"{int(row_guard_details.get('row_guard_rejected_count', 0) or 0)}/"
+                            f"{int(row_guard_details.get('row_guard_input_count', 0) or 0)} "
+                            "kandydatów YB przecinających separator rzędów."
+                        ),
+                        "WARNING",
+                    )
+
+                if method == DetectionMethod.YOLO_OCR:
+                    # CharacterDetector wykonał surową próbę na NMS. Wynik
+                    # roboczy tworzymy ponownie wyłącznie z kandydatów
+                    # dopuszczonych przez 2R guard.
+                    yolo_chars = list(yolo_box_backend_chars)
+                    chars = detector._detect_with_yolo_boxes_and_ocr(
+                        img,
+                        list(yolo_box_backend_chars),
+                    )
+                    detector.last_yolo_ocr_detections = list(chars or [])
+
                 if method == DetectionMethod.YOLO_BOX:
                     chars = build_yolo_box_only_records(self, yolo_box_backend_chars)
                     fusion_strategy = "yolo_box_only" if chars else "no_detection"
@@ -1075,6 +1245,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                         yolo_box_backend_detections=yolo_box_backend_chars,
                         plate_image=img,
                     )
+                fusion_details = dict(fusion_details or {})
+                if bool(row_guard_details.get("row_guard_enabled", False)):
+                    fusion_details.update(row_guard_details)
+
                 c_clean = self._serialize_character_records(
                     chars,
                     fusion_strategy=fusion_strategy,

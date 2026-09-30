@@ -9,7 +9,7 @@ def _read(rel):
 
 def test_pz2_exposes_one_append_entry_above_plate_list():
     source = _read("auto_annotation_tool/gui/z3_detection_tab_ui.py")
-    assert 'text="Dodaj materiał do zbioru…"' in source
+    assert 'text="Dodaj tablice lub zdjęcia…"' in source
     assert "open_pz2_add_material" in source
     assert "preview_add_material_btn" in source
     assert "preview_import_focus_frame" in source

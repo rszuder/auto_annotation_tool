@@ -124,7 +124,23 @@ def get_preview_sort_priority(host: "CharacterAnnotationTab", pid: str, data: di
     total_boxes = len(list((data or {}).get("characters", []) or [])) if isinstance(data, dict) else 0
 
     if mode_key == "DEFAULT":
-        return (0, int(original_index))
+        gold_state = data.get("gold_state") if isinstance(data, dict) else {}
+        excluded = bool(
+            gold_state.get("excluded", False)
+        ) if isinstance(gold_state, dict) else False
+
+        # Domyślna lista ma trzy stabilne grupy:
+        #   0. pozostałe (OK, ZATWIERDŹ/niebieskie, inne neutralne),
+        #   1. czerwone rekordy wymagające korekty,
+        #   2. N / wykluczone.
+        # Zachowujemy kolejność źródłową wewnątrz każdej grupy.
+        if excluded:
+            group = 2
+        elif status == "needs_fix" and not _review_ready(host, data):
+            group = 1
+        else:
+            group = 0
+        return (group, int(original_index))
 
     if mode_key == "OK":
         if status == "perfect":
@@ -171,8 +187,6 @@ def get_preview_sort_priority(host: "CharacterAnnotationTab", pid: str, data: di
 def get_sorted_preview_plate_ids(host: "CharacterAnnotationTab", ordered_pids):
     base_order = list(ordered_pids or [])
     mode_key = host._get_preview_sort_mode_key()
-    if mode_key == "DEFAULT":
-        return base_order
 
     indexed = list(enumerate(base_order))
     indexed.sort(

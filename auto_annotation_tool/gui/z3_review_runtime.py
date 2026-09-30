@@ -602,6 +602,10 @@ def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=Fa
     review_chars = copy.deepcopy(raw_chars)
     try:
         host._update_preview_plate_layout_metadata(data, review_chars)
+        review_chars = host._apply_preview_layout_separator_constraints_to_chars(
+            data,
+            review_chars,
+        )
     except Exception:
         pass
     try:

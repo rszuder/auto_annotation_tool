@@ -9,8 +9,10 @@ def _read(rel):
 
 def test_pz2_has_mirrored_add_and_export_buttons():
     source = _read("auto_annotation_tool/gui/z3_detection_tab_ui.py")
-    assert 'text="Dodaj materiał do zbioru…"' in source
-    assert 'text="Eksportuj cropy + AZ…"' in source
+    assert 'text="Dodaj tablice lub zdjęcia…"' in source
+    assert 'text="Eksportuj wycięcia tablic…"' in source
+    assert 'text="Eksportuj cropy + AZ…"' not in source
+    assert 'text="Eksportuj cropy + AZ…"' not in source
     assert "open_pz2_add_material" in source
     assert "open_pz2_export_material" in source
 
