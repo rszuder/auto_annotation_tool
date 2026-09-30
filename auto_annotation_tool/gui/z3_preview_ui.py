@@ -5229,10 +5229,16 @@ def update_preview_character_drag_visual(host, char_idx: int, rec: dict, bbox) -
         if selection_item is not None:
             canvas.coords(selection_item, cx1 - 2, cy1 - 2, cx2 + 2, cy2 + 2)
         handle_ids = list(visual_ids.get("handles", []) or [])
-        handle_points = ((cx1, cy1), (cx2, cy1), (cx1, cy2), (cx2, cy2))
-        for item_id, (handle_x, handle_y) in zip(handle_ids, handle_points):
+        # Zachowaj podczas live-drag dokładnie tę samą geometrię zewnętrznych
+        # uchwytów co w zwykłym renderze. Środek narożnego koła ma leżeć
+        # poza wnętrzem boxa, a jego obwód tylko stykać się z narożnikiem.
+        handle_centers = get_corner_handle_centers(
+            cx1, cy1, cx2, cy2, handle_radius
+        )
+        for handle_name, item_id in zip(CORNER_HANDLE_ORDER, handle_ids):
             if item_id is None:
                 continue
+            handle_x, handle_y = handle_centers[handle_name]
             canvas.coords(
                 item_id,
                 handle_x - handle_radius,
