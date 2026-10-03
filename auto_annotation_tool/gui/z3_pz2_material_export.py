@@ -10,11 +10,13 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 from pathlib import Path
 
+from ..campaign_manager import CAMPAIGN
+from ..config import CONFIG
+from ..registry.az_registry import AZRegistry, project_id_from_folder_name
 from ..registry.az_package_export import export_pz2_az_package
 from .z3_pz2_material_append import (
     _flush_preview_metadata,
     _parent,
-    _resolve_active_project_context,
     _show_error,
     _show_info,
 )
@@ -22,12 +24,13 @@ from .z3_pz2_material_append import (
 
 def open_pz2_export_material(host) -> bool:
     """Eksportuj materiał z TEGO SAMEGO aktywnego PZ2 do alpr.az_package.v1."""
-    context = _resolve_active_project_context(host)
+    context = _resolve_export_context(host)
     if context is None:
         return False
 
     try:
-        _flush_preview_metadata(host)
+        if context["project_id"] is not None:
+            _flush_preview_metadata(host)
     except Exception as exc:
         _show_error(
             host,
@@ -52,7 +55,7 @@ def open_pz2_export_material(host) -> bool:
 
     parent_dir = filedialog.askdirectory(
         parent=_parent(host),
-        initialdir=str(context["project_root"]),
+        initialdir=str(context["output_initial_dir"]),
         title="Wybierz katalog, w którym utworzyć pakiet cropów + AZ",
     )
     if not parent_dir:
@@ -73,6 +76,8 @@ def open_pz2_export_material(host) -> bool:
             iteration_num=context["iteration_num"],
             output_dir=output_dir,
             plate_ids=plate_ids,
+            metadata=(getattr(host, "preview_metadata", None)
+                      if context["project_id"] is None else None),
         )
     except Exception as exc:
         _show_error(
@@ -91,7 +96,7 @@ def open_pz2_export_material(host) -> bool:
         "Wyeksportowano cropy + AZ",
         (
             "Utworzono przenośny pakiet zgodny z funkcją "
-            "„Dodaj materiał do zbioru…”.\n\n"
+            "„Dodaj tablice lub zdjęcia…” → „Gotowe tablice + AZ”.\n\n"
             f"Zakres: {scope_info[scope]['label']}\n"
             f"Wyeksportowano: {result.exported}\n"
             f"Z istniejącą rewizją AZ: {result.with_bound_revision}\n"
@@ -110,6 +115,50 @@ def open_pz2_export_material(host) -> bool:
     except Exception:
         pass
     return True
+
+
+def _resolve_export_context(host) -> dict | None:
+    """Resolve an existing preview and registry without creating project state."""
+    try:
+        preview_raw = str(host.preview_dir_var.get() or "").strip()
+        if not preview_raw:
+            raise ValueError("Najpierw przygotuj tablice w PZ1 i otwórz je w PZ2.")
+        preview = Path(preview_raw)
+        metadata_path = preview / "metadata.json"
+        if not metadata_path.is_file() or not (preview / "images").is_dir():
+            raise ValueError("Aktywny PZ2 nie ma kompletnego metadata.json + images/.")
+        loaded = getattr(host, "_loaded_meta_path", None)
+        if loaded is not None and Path(loaded).resolve() != metadata_path.resolve():
+            raise ValueError("Odśwież PZ2: widok nie odpowiada aktywnemu metadata.json.")
+
+        registry = AZRegistry.for_workspace(Path(CONFIG.WORKSPACE_DIR))
+        if not registry.database.db_path.is_file():
+            raise ValueError("Brak istniejącego AZ registry dla aktywnego Workspace.")
+        project_name = str(CAMPAIGN.get_active_project_name() or "").strip()
+        free_mode = bool(getattr(getattr(host, "app", None), "campaign_free_mode", False))
+        project_id = None
+        iteration_num = None
+        initial_dir = preview.parent
+        display_name = preview.name
+        if project_name and not free_mode:
+            project_root = CAMPAIGN.get_active_project_root_dir()
+            iteration_num = int(CAMPAIGN.get_current_iteration_num() or 0)
+            if project_root is None or iteration_num <= 0 or not getattr(host, "_step3_linear_mode", False):
+                raise ValueError("Eksport projektu wymaga aktywnego projektowego PZ2 i iteracji.")
+            initial_dir = Path(project_root)
+            project_id = project_id_from_folder_name(initial_dir.name)
+            display_name = project_name
+        return {
+            "registry": registry,
+            "preview_dir": preview,
+            "project_id": project_id,
+            "iteration_num": iteration_num,
+            "project_name": display_name,
+            "output_initial_dir": initial_dir,
+        }
+    except Exception as exc:
+        _show_error(host, "Eksport cropów + AZ", str(exc))
+        return None
 
 
 def _collect_export_scopes(host) -> dict[str, dict]:
@@ -228,7 +277,7 @@ def _prompt_export_scope(host, scopes: dict[str, dict]) -> str | None:
         shell,
         text=(
             "Eksport nie zmienia aktywnego PZ2. Pakiet można później "
-            "dodać do innego projektu przez „Dodaj materiał do zbioru…”."
+            "dodać do projektu przez „Dodaj tablice lub zdjęcia…” → „Gotowe tablice + AZ”."
         ),
         wraplength=460,
         justify="left",
@@ -299,7 +348,7 @@ def _build_unique_output_dir(
     parent: Path,
     *,
     project_name: str,
-    iteration_num: int,
+    iteration_num: int | None,
     scope: str,
 ) -> Path:
     safe_project = re.sub(
@@ -308,10 +357,9 @@ def _build_unique_output_dir(
         str(project_name or "projekt").strip(),
     ).strip("._") or "projekt"
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = (
-        parent
-        / f"AZ_{safe_project}_IT{int(iteration_num):03d}_{scope}_{stamp}"
-    )
+    name = (f"AZ_FREE_{safe_project}_{scope}_{stamp}" if iteration_num is None
+            else f"AZ_{safe_project}_IT{int(iteration_num):03d}_{scope}_{stamp}")
+    base = parent / name
     candidate = base
     suffix = 2
     while candidate.exists():

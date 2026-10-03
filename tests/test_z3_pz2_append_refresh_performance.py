@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+
+import pytest
 
 from auto_annotation_tool.gui.z3_pz2_material_append import _refresh_after_append
 
@@ -118,3 +120,26 @@ def test_append_refresh_source_has_no_second_list_rebuild_path():
     assert "_preview_import_focus_batch_id" in body
     assert "_preview_import_focus_active" in body
     assert "_set_preview_import_focus(" not in body
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_append_refresh_reuses_verified_metadata_only_for_unchanged_file(tmp_path, stale):
+    metadata_path = tmp_path / "metadata.json"
+    metadata_path.write_text('{"old": {"crop_id": "old"}}', encoding="utf-8")
+    stat = metadata_path.stat()
+    verified = {"old": {"crop_id": "old"}}
+    result = SimpleNamespace(items=(), verified_metadata=verified,
+                             metadata_path=str(metadata_path),
+                             metadata_signature=(stat.st_mtime_ns, stat.st_size))
+    if stale:
+        metadata_path.write_text('{"changed": {"crop_id": "changed"}}', encoding="utf-8")
+    host = SimpleNamespace(_apply_preview_metadata_update=Mock(), preview_metadata={})
+    with patch.object(Path, "read_text", wraps=metadata_path.read_text) as read:
+        _refresh_after_append(host, metadata_path, result, "PKG")
+    payload = host._apply_preview_metadata_update.call_args.args[0]
+    if stale:
+        assert "changed" in payload
+        read.assert_called_once()
+    else:
+        assert payload is verified
+        read.assert_not_called()

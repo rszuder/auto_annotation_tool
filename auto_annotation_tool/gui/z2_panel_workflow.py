@@ -156,6 +156,20 @@ def _refresh_free_mode_workflow_ui(self):
         return
 
     self._workflow_ui_refresh_in_progress = True
+    try:
+        _render_free_mode_workflow_ui(self)
+    finally:
+        self._workflow_ui_refresh_in_progress = False
+
+    if bool(getattr(self, "_workflow_ui_refresh_pending", False)):
+        self._workflow_ui_refresh_pending = False
+        try:
+            self.frame.after_idle(self._refresh_free_mode_workflow_ui)
+        except Exception:
+            self._refresh_free_mode_workflow_ui()
+
+
+def _render_free_mode_workflow_ui(self):
     self._refresh_workflow_route_cards()
     preferred_run_dir = self._get_preferred_annotation_run_dir(require_xml=True)
     if (
@@ -451,14 +465,6 @@ def _refresh_free_mode_workflow_ui(self):
 
     self._refresh_workflow_button_styles()
     self._refresh_workflow_step_cards()
-
-    self._workflow_ui_refresh_in_progress = False
-    if bool(getattr(self, "_workflow_ui_refresh_pending", False)):
-        self._workflow_ui_refresh_pending = False
-        try:
-            self.frame.after_idle(self._refresh_free_mode_workflow_ui)
-        except Exception:
-            self._refresh_free_mode_workflow_ui()
 
 def get_campaign_step2_view_model(self) -> Step2ViewModel:
     result = Step2ViewModel(

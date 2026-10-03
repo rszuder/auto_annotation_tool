@@ -23,6 +23,7 @@ from pathlib import Path
 import shutil
 import uuid
 from typing import Any, Mapping, Sequence
+from PIL import Image
 
 from .az_package_transport import AZ_PACKAGE_SCHEMA
 from .az_registry import AZRegistry, crop_contract_sha256
@@ -60,30 +61,36 @@ class AZPackageExportResult:
     output_dir: str
     manifest_path: str
     package_id: str
-    project_id: str
-    iteration_num: int
+    project_id: str | None
+    iteration_num: int | None
     exported: int
     requested: int
     with_bound_revision: int
     items: tuple[AZPackageExportItem, ...]
+    source_mode: str = "campaign"
 
 
 def export_pz2_az_package(
     registry: AZRegistry,
     *,
     preview_dir: str | Path,
-    project_id: str,
-    iteration_num: int,
+    project_id: str | None = None,
+    iteration_num: int | None = None,
     output_dir: str | Path,
     plate_ids: Sequence[str] | None = None,
+    metadata: Mapping[str, Any] | None = None,
 ) -> AZPackageExportResult:
     """Eksportuj wybrane albo wszystkie rekordy aktywnego PZ2.
 
     `plate_ids=None` oznacza wszystkie rekordy metadata posiadające crop_id.
     Jeśli `plate_ids` podano, każdy wskazany rekord musi istnieć i być
     eksportowalny; nie ma cichego pomijania.
+    Brak project_id i iteration_num oznacza tryb swobodny. Opcjonalne metadata
+    pozwala wyeksportować bieżący stan edytora bez zapisywania pliku źródłowego.
     """
-    registry.initialize()
+    # Export must not create or migrate the source registry.
+    if not registry.database.db_path.is_file():
+        raise AZPackageExportError("Brak istniejącego AZ registry.")
     preview = Path(preview_dir)
     metadata_path = preview / "metadata.json"
     images_dir = preview / "images"
@@ -93,15 +100,21 @@ def export_pz2_az_package(
     if not images_dir.is_dir():
         raise AZPackageExportError(f"Brak images/: {images_dir}")
 
-    project_id = _required_text("project_id", project_id)
-    iteration_num = _positive_int("iteration_num", iteration_num)
+    if project_id is None:
+        if iteration_num is not None:
+            raise AZPackageExportError("Tryb swobodny nie ma iteracji projektu.")
+    else:
+        project_id = _required_text("project_id", project_id)
+        iteration_num = _positive_int("iteration_num", iteration_num)
 
-    metadata = _load_metadata(metadata_path)
+    metadata = _load_metadata(metadata_path) if metadata is None else metadata
+    if not isinstance(metadata, Mapping):
+        raise AZPackageExportError("Metadata PZ2 musi być obiektem JSON.")
     selected_ids = _resolve_plate_ids(metadata, plate_ids)
     if not selected_ids:
         raise AZPackageExportError("Brak rekordów PZ2 do eksportu.")
 
-    project_info = _load_project_info(registry, project_id)
+    project_info = _load_project_info(registry, project_id) if project_id else None
     prepared = [
         _prepare_export_item(
             registry,
@@ -205,7 +218,7 @@ def export_pz2_az_package(
             "schema": AZ_PACKAGE_SCHEMA,
             "package_id": package_id,
             "created_at": created_at,
-            "source": {
+            "source": ({
                 "project_id": project_id,
                 "project_name": project_info["display_name"],
                 "folder_name": project_info["folder_name"],
@@ -217,7 +230,11 @@ def export_pz2_az_package(
                     if plate_ids is not None
                     else "active_pz2_all"
                 ),
-            },
+            } if project_info is not None else {
+                "mode": "free_mode",
+                "preview_run": preview.name,
+                "scope": "selected" if plate_ids is not None else "active_pz2_all",
+            }),
             "crops": manifest_crops,
         }
         manifest_path = temp_dir / "manifest.json"
@@ -269,6 +286,7 @@ def export_pz2_az_package(
         requested=len(selected_ids),
         with_bound_revision=bound_count,
         items=tuple(result_items),
+        source_mode="campaign" if project_id else "free_mode",
     )
 
 
@@ -277,8 +295,8 @@ def _prepare_export_item(
     *,
     preview: Path,
     images_dir: Path,
-    project_id: str,
-    iteration_num: int,
+    project_id: str | None,
+    iteration_num: int | None,
     plate_id: str,
     row: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -355,6 +373,18 @@ def _prepare_export_item(
             f"Rozmiar fizycznego cropa nie odpowiada registry dla {plate_id}."
         )
 
+    try:
+        with Image.open(source_artifact) as image:
+            actual_dimensions = image.size
+            image.verify()
+    except Exception as exc:
+        raise AZPackageExportError(f"Nieprawidłowy obraz cropa {plate_id}: {exc}") from exc
+    if actual_dimensions != (width, height):
+        raise AZPackageExportError(f"Wymiary cropa nie odpowiadają registry dla {plate_id}.")
+    for key, expected in (("plate_image_width", width), ("plate_image_height", height)):
+        if row.get(key) is not None and _positive_int(key, row[key]) != expected:
+            raise AZPackageExportError(f"Wymiary metadata/registry nie zgadzają się dla {plate_id}.")
+
     crop_identity = _reconstruct_verified_identity(
         row=row,
         registry_row=registry_row,
@@ -366,6 +396,17 @@ def _prepare_export_item(
     contract_sha = crop_contract_sha256(
         crop_identity["crop_contract"]
     )
+    contract = crop_identity["crop_contract"]
+    if (contract.get("output_width"), contract.get("output_height")) != (width, height):
+        raise AZPackageExportError(f"Wymiary crop contract/registry nie zgadzają się dla {plate_id}.")
+    for key in ("source_annotation_id", "source_geometry_hash"):
+        stored = registry_row[key]
+        if stored and str(crop_identity.get(key) or "") != str(stored):
+            raise AZPackageExportError(f"Lineage identity/registry nie zgadza się dla {plate_id}: {key}.")
+        if row.get(key) and str(row[key]) != str(crop_identity.get(key) or ""):
+            raise AZPackageExportError(f"Lineage metadata/identity nie zgadza się dla {plate_id}: {key}.")
+    if row.get("source_image_id") and row["source_image_id"] != crop_identity.get("source_image_id"):
+        raise AZPackageExportError(f"source_image_id metadata/identity nie zgadza się dla {plate_id}.")
     stored_contract_sha = str(
         registry_row["crop_contract_sha256"] or ""
     ).strip().lower()
@@ -393,7 +434,7 @@ def _prepare_export_item(
         project_id=project_id,
         crop_id=crop_id,
         payload_sha256=payload_sha,
-    )
+    ) if project_id is not None else None
     if bound is not None:
         source_kind = str(bound["source_kind"] or context.source_kind)
         source_status = (
@@ -572,7 +613,7 @@ def _reconstruct_verified_identity(
 def _load_registry_export_row(
     registry: AZRegistry,
     *,
-    project_id: str,
+    project_id: str | None,
     crop_id: str,
     artifact_id: str,
 ):
@@ -599,21 +640,23 @@ def _load_registry_export_row(
             FROM plate_crops pc
             JOIN source_images si
               ON si.source_image_id = pc.source_image_id
-            JOIN project_crop_members pcm
-              ON pcm.crop_id = pc.crop_id
-             AND pcm.project_id = ?
             JOIN crop_artifacts ca
               ON ca.crop_id = pc.crop_id
             JOIN image_artifacts ia
               ON ia.artifact_id = ca.artifact_id
             WHERE pc.crop_id = ?
               AND ia.artifact_id = ?
+              AND (? IS NULL OR EXISTS (
+                  SELECT 1 FROM project_crop_members pcm
+                  WHERE pcm.crop_id = pc.crop_id AND pcm.project_id = ?
+              ))
             """,
-            (project_id, crop_id, artifact_id),
+            (crop_id, artifact_id, project_id, project_id),
         ).fetchone()
     if row is None:
         raise AZPackageExportError(
-            f"Crop {crop_id} / artifact {artifact_id} nie należy do projektu."
+            f"Crop {crop_id} / artifact {artifact_id} nie istnieje w registry"
+            + (" lub nie należy do projektu." if project_id else ".")
         )
     return row
 

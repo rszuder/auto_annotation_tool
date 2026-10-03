@@ -11,6 +11,7 @@ from pathlib import Path
 from ..config import logger
 from .z3_gt_box_policy import can_add_character_box
 from .z3_review_runtime import prepare_layout_review
+from .z3_preview_grip_geometry import EDGE_HANDLE_ORDER, get_box_handle_point, resize_box_edge
 from .z3_preview_ui import (
     _get_cached_preview_photo,
     _get_cached_preview_source_image,
@@ -477,7 +478,11 @@ def on_preview_canvas_motion(host, event=None):
         return
 
     if isinstance(grip_hit, dict):
-        self._apply_preview_canvas_cursor("crosshair" if str(grip_hit.get("kind", "")) == "corner" else "fleur")
+        kind = str(grip_hit.get("kind", ""))
+        handle = str(grip_hit.get("handle", ""))
+        cursor = ("sb_h_double_arrow" if handle in ("e", "w") else "sb_v_double_arrow") if kind == "edge" else (
+            "crosshair" if kind == "corner" else "fleur")
+        self._apply_preview_canvas_cursor(cursor)
     else:
         self._apply_preview_canvas_cursor()
     post_release_probe = getattr(self, "_preview_post_release_latency_probe", None)
@@ -675,8 +680,37 @@ def on_preview_canvas_keypress(host, event=None):
         return None
     if keysym == "f":
         if active_label_idx is None:
-            result = self._toggle_review_excluded()
+            result = self._toggle_review_excluded(
+                persist=True,
+                refresh=False,
+            )
             if isinstance(result, dict) and result.get("ok"):
+                pid = str(
+                    result.get("plate_id", "")
+                    or getattr(self, "_preview_active_pid", "")
+                    or ""
+                ).strip()
+                data = self._get_preview_active_data(create=False)
+
+                try:
+                    self._refresh_preview_listbox_row(pid)
+                except Exception:
+                    pass
+                try:
+                    refresh_preview_canvas_info_overlay_only(self, data=data)
+                except Exception:
+                    pass
+                try:
+                    self._schedule_preview_info_refresh(delay_ms=250)
+                except Exception:
+                    pass
+                try:
+                    frame = getattr(self, "frame", None)
+                    if frame is not None:
+                        frame.after_idle(self._refresh_detection_review_controls)
+                except Exception:
+                    pass
+
                 if bool(result.get("excluded")):
                     self._update_preview_edit_status(
                         "F: tablica wykluczona z PZ3/Z4.",
@@ -994,7 +1028,7 @@ def on_preview_canvas_press(host, event):
 
     if edit_mode and not label_mode:
         grip_hit = self._find_preview_character_grip_hit(event.x, event.y)
-        if isinstance(grip_hit, dict) and str(grip_hit.get("kind", "")) == "corner":
+        if isinstance(grip_hit, dict) and str(grip_hit.get("kind", "")) in {"corner", "edge"}:
             char_idx = int(grip_hit.get("index", -1))
             handle_name = str(grip_hit.get("handle", "se") or "se")
             probe = self._start_preview_latency_probe(
@@ -1007,7 +1041,8 @@ def on_preview_canvas_press(host, event):
                 "resize",
                 event,
                 handle_name=handle_name,
-                cursor="crosshair",
+                cursor=("sb_h_double_arrow" if handle_name in ("e", "w") else "sb_v_double_arrow")
+                if str(grip_hit.get("kind")) == "edge" else "crosshair",
             ):
                 drag_state = getattr(self, "_preview_char_drag_state", None)
                 if isinstance(drag_state, dict):
@@ -1226,8 +1261,12 @@ def on_preview_canvas_drag(host, event):
         if 0 <= char_idx < len(chars):
             rec = chars[char_idx]
             bbox = list(char_drag_state.get("start_bbox", rec.get("bbox", [0, 0, 0, 0])))
-            img_x, img_y = self._preview_canvas_to_image_point(event.x, event.y)
             mode = str(char_drag_state.get("mode", "move") or "move").lower()
+            img_x, img_y = self._preview_canvas_to_image_point(
+                event.x,
+                event.y,
+                clamp=(mode == "move"),
+            )
 
             if mode == "move":
                 start_x = float(char_drag_state.get("start_img_x", img_x))
@@ -1255,13 +1294,15 @@ def on_preview_canvas_drag(host, event):
                 corner_img_y = float(img_y) - pointer_offset_y
                 if "w" in handle_name:
                     x1 = corner_img_x
-                else:
+                elif "e" in handle_name:
                     x2 = corner_img_x
                 if "n" in handle_name:
                     y1 = corner_img_y
-                else:
+                elif "s" in handle_name:
                     y2 = corner_img_y
                 new_bbox = [x1, y1, x2, y2]
+                if handle_name in EDGE_HANDLE_ORDER:
+                    new_bbox = resize_box_edge(bbox, handle_name, corner_img_x, corner_img_y)
 
             normalized_bbox = self._normalize_preview_char_bbox(new_bbox)
             if normalized_bbox is not None:
@@ -1273,6 +1314,13 @@ def on_preview_canvas_drag(host, event):
                     min_size=4.0,
                 )
             if normalized_bbox is not None:
+                if mode == "resize" and handle_name in EDGE_HANDLE_ORDER:
+                    # Normalization/separator constraints must not move the
+                    # other three sides of an orthogonal resize.
+                    axis = {"w": 0, "n": 1, "e": 2, "s": 3}[handle_name]
+                    edge_bbox = list(bbox)
+                    edge_bbox[axis] = normalized_bbox[axis]
+                    normalized_bbox = edge_bbox
                 current_bbox = self._char_record_bbox(rec)
                 try:
                     if current_bbox and all(
@@ -2193,7 +2241,12 @@ def start_preview_character_box_drag(host, char_idx, mode, event, *, handle_name
         original_record = dict(rec) if isinstance(rec, dict) else {}
     copy_ms = (time.perf_counter() - phase_start) * 1000.0
 
-    img_x, img_y = self._preview_canvas_to_image_point(event.x, event.y)
+    resize_mode = str(mode or "").strip().lower() == "resize"
+    img_x, img_y = self._preview_canvas_to_image_point(
+        event.x,
+        event.y,
+        clamp=not resize_mode,
+    )
     self._preview_char_label_active_index = None
     self._preview_char_selected_index = int(char_idx)
     try:
@@ -2216,8 +2269,7 @@ def start_preview_character_box_drag(host, char_idx, mode, event, *, handle_name
     }
     if str(mode).lower() == "resize" and handle_name:
         handle_key = str(handle_name or "se").lower()
-        corner_x = float(bbox[0] if "w" in handle_key else bbox[2])
-        corner_y = float(bbox[1] if "n" in handle_key else bbox[3])
+        corner_x, corner_y = get_box_handle_point(handle_key, *bbox)
         drag_state["pointer_corner_offset_img_x"] = float(img_x) - corner_x
         drag_state["pointer_corner_offset_img_y"] = float(img_y) - corner_y
     if isinstance(geometry_inherit_state, dict):

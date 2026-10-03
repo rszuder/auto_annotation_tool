@@ -57,6 +57,7 @@ def test_rerun_preserves_manual_characters_and_approval(tmp_path, approved):
 
 def test_approval_never_trims_or_relabels_existing_characters(tmp_path):
     host, data = make_host(tmp_path)
+    data["ground_truth_source"] = "manual_z2"
     review.prepare_working_annotation_from_raw(host, data)
     data["characters"].append(records("X")[-1])
     before = deepcopy(data["characters"])
@@ -119,6 +120,7 @@ def test_failed_gt_write_leaves_review_unapproved(tmp_path, monkeypatch):
 
 def test_changed_gt_does_not_override_labels_on_approval(tmp_path):
     host, data = make_host(tmp_path)
+    data["ground_truth_source"] = "manual_z2"
     review.prepare_working_annotation_from_raw(host, data)
     data["characters"][0]["character"] = "Z"
     before = deepcopy(data["characters"])

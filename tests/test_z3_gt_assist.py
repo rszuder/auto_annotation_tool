@@ -111,6 +111,16 @@ class Host:
         )
 
 
+def test_gt_assist_does_not_restore_nms_candidates_rejected_by_geometry_guards():
+    data = metadata("XX", "AB", yolo_text="AB")
+    data["yolo_box_detections"] = []
+    before = copy.deepcopy(data)
+    result = runtime.build_gt_assist_suggestion(Host(), data)
+    assert result["status"] == "no_suggestion"
+    assert not result["operations"]
+    assert data == before
+
+
 def metadata(raw_text, gt, *, yolo_text=None):
     return {
         "source_annotation_id": "plate-ann-one",

@@ -11,7 +11,7 @@ from tkinter import messagebox
 
 from ..config import logger
 from .z3_gt_box_policy import can_add_character_box
-from .z3_preview_grip_geometry import CORNER_HANDLE_ORDER, get_corner_handle_centers
+from .z3_preview_grip_geometry import CORNER_HANDLE_ORDER, EDGE_HANDLE_ORDER, get_corner_handle_centers, get_edge_handle_rects
 
 
 def _get_preview_selected_char_record(self):
@@ -294,6 +294,9 @@ def _find_preview_character_handle_hit(self, canvas_x: float, canvas_y: float):
     cx1, cy1 = self._preview_image_to_canvas_point(bbox[0], bbox[1])
     cx2, cy2 = self._preview_image_to_canvas_point(bbox[2], bbox[3])
     radius = float(self._get_preview_char_handle_radius())
+    for handle_name, rect in get_edge_handle_rects(cx1, cy1, cx2, cy2, radius).items():
+        if rect[0] <= float(canvas_x) <= rect[2] and rect[1] <= float(canvas_y) <= rect[3]:
+            return idx, handle_name
     handles = get_corner_handle_centers(cx1, cy1, cx2, cy2, radius)
 
     best_hit = None
@@ -336,9 +339,9 @@ def _find_preview_character_grip_hit(self, canvas_x: float, canvas_y: float):
         char_idx, handle_name = corner_hit
         return {
             "index": int(char_idx),
-            "kind": "corner",
+            "kind": "edge" if handle_name in EDGE_HANDLE_ORDER else "corner",
             "handle": str(handle_name),
-            "key": f"corner:{handle_name}",
+            "key": f"edge:{handle_name}" if handle_name in EDGE_HANDLE_ORDER else f"corner:{handle_name}",
         }
 
     move_hit = self._find_preview_character_move_handle_hit(canvas_x, canvas_y)

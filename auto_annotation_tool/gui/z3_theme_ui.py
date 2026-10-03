@@ -1040,3 +1040,8 @@ def apply_character_annotation_theme(host, progress_bar_cls) -> None:
             refresh()
     except Exception:
         pass
+
+    # Restore the loading card after the generic panel pass flattens its
+    # nested backgrounds. Keep the current text, value and animation.
+    from .z3_extraction_tab_ui import _apply_campaign_detect_splash_theme
+    _apply_campaign_detect_splash_theme(self)

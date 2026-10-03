@@ -23,6 +23,7 @@ from .section_header_label import SectionHeaderLabel
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .z3_extraction_sources import read_xml_plate_attributes
 from .z3_extraction_progress import ExtractionProgress
+from .z3_loading_progress import LoadingProgressBar
 from . import z3_preview_run_browser
 
 
@@ -35,7 +36,49 @@ def _is_live_widget(widget) -> bool:
         return False
 
 
-def _ensure_campaign_detect_splash_widgets(host):
+def _apply_campaign_detect_splash_theme(host):
+    overlay = getattr(host, "campaign_detect_splash_overlay", None)
+    if not _is_live_widget(overlay):
+        return
+    palette = getattr(host.app, "palette", {})
+    panel_bg = palette.get("panel", "#252526")
+    tone = str(getattr(host, "_campaign_detect_splash_tone", "info"))
+    accent = palette.get(tone if tone in {"error", "warning"} else "accent", "#4f8de3")
+    overlay_bg = blend_hex_colors(panel_bg, palette.get("bg", panel_bg), .45)
+    card_bg = palette.get("field", panel_bg)
+    border = blend_hex_colors(palette.get("panel_border", "#3c3c3c"), accent, .30)
+    overlay.configure(bg=overlay_bg)
+    host.campaign_detect_splash_card.configure(bg=card_bg, highlightthickness=1,
+                                               highlightbackground=border, highlightcolor=border)
+    host.campaign_detect_splash_content.configure(bg=card_bg)
+    host.campaign_detect_splash_accent_bar.configure(bg=accent)
+    host.campaign_detect_splash_progress_header.configure(bg=card_bg)
+    for widget, color in ((host.campaign_detect_splash_eyebrow_lbl, accent),
+                          (host.campaign_detect_splash_title_lbl, palette.get("fg", "#f3f3f3")),
+                          (host.campaign_detect_splash_body_lbl, palette.get("muted", "#c7c7c7")),
+                          (host.campaign_detect_splash_progress_caption_lbl, palette.get("muted", "#c7c7c7")),
+                          (host.campaign_detect_splash_progress_pct_lbl, accent)):
+        widget.configure(bg=card_bg, fg=color)
+    host.campaign_detect_splash_progress.configure(
+        bg=card_bg, fill_color=accent,
+        trough_color=blend_hex_colors(palette.get("progress_trough", palette.get("panel_alt", panel_bg)), border, .18),
+        border_color=border,
+    )
+
+
+def _layout_campaign_detect_splash(host, event=None):
+    overlay = host.campaign_detect_splash_overlay
+    width = int(event.width) if event is not None else overlay.winfo_width()
+    if width <= 1:
+        return
+    card_width = max(120, min(640, width - 48))
+    wrap = max(70, card_width - 58)
+    host.campaign_detect_splash_card.place(relx=.5, rely=.5, anchor=tk.CENTER, width=card_width)
+    host.campaign_detect_splash_title_lbl.configure(wraplength=wrap)
+    host.campaign_detect_splash_body_lbl.configure(wraplength=wrap)
+
+
+def _ensure_campaign_detect_splash_widgets(host, *, return_text=None, return_command=None):
     force_root_surface = bool(getattr(host, "_campaign_detect_splash_force_root_surface", False))
     surface = getattr(host, "frame", None) if force_root_surface else getattr(host, "detect_content_frame", None)
     if not _is_live_widget(surface):
@@ -51,6 +94,7 @@ def _ensure_campaign_detect_splash_widgets(host):
         and _is_live_widget(getattr(host, "campaign_detect_splash_title_lbl", None))
         and _is_live_widget(getattr(host, "campaign_detect_splash_body_lbl", None))
         and _is_live_widget(getattr(host, "campaign_detect_splash_progress", None))
+        and _is_live_widget(getattr(host, "campaign_detect_splash_progress_header", None))
     )
     if (
         has_widgets
@@ -59,6 +103,8 @@ def _ensure_campaign_detect_splash_widgets(host):
     ):
         return existing_surface
     if has_widgets and existing_surface is surface:
+        if return_text is not None:
+            host.campaign_detect_splash_return_btn.configure(text=return_text, command=return_command)
         return surface
 
     if _is_live_widget(overlay):
@@ -67,67 +113,74 @@ def _ensure_campaign_detect_splash_widgets(host):
         except Exception:
             pass
 
-    palette = getattr(host.app, "palette", {})
-    panel_bg = palette.get("panel", "#252526")
-    accent = palette.get("accent", "#4f8de3")
-    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.24)
-    card_bg = blend_hex_colors(panel_bg, accent, 0.10)
-    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.48)
-
-    overlay = tk.Frame(surface, bd=0, highlightthickness=0, bg=overlay_bg)
+    overlay = tk.Frame(surface, bd=0, highlightthickness=0)
     card = tk.Frame(
         overlay,
         bd=0,
         highlightthickness=1,
-        highlightbackground=border_color,
-        highlightcolor=border_color,
-        padx=22,
-        pady=20,
-        bg=card_bg,
     )
-    card.place(relx=0.5, rely=0.34, anchor="n")
-    card.grid_columnconfigure(0, weight=1, minsize=560)
+    card.place(relx=.5, rely=.5, anchor=tk.CENTER, width=640)
+    card.grid_columnconfigure(0, weight=1)
+    accent_bar = tk.Frame(card, height=4, bd=0, highlightthickness=0)
+    accent_bar.grid(row=0, column=0, sticky="ew")
+    content = tk.Frame(card, padx=26, pady=22, bd=0, highlightthickness=0)
+    content.grid(row=1, column=0, sticky="ew")
+    content.grid_columnconfigure(0, weight=1)
+    eyebrow_lbl = tk.Label(content, text="PRZYGOTOWANIE Z3", anchor="w",
+                           font=("Segoe UI", 9, "bold"), bd=0, highlightthickness=0)
+    eyebrow_lbl.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
     title_lbl = tk.Label(
-        card,
+        content,
         text="Przygotowuję wyodrębnione tablice dla Z3",
         anchor="w",
         justify=tk.LEFT,
-        font=("Segoe UI Semibold", 13),
+        font=("Segoe UI", 15, "bold"),
         bd=0,
         highlightthickness=0,
-        bg=card_bg,
-        fg=accent,
     )
-    title_lbl.grid(row=0, column=0, sticky="ew")
+    title_lbl.grid(row=1, column=0, sticky="ew")
 
     body_lbl = tk.Label(
-        card,
+        content,
         text="To automatyczny krok pośredni przed pracą nad znakami.",
         anchor="w",
         justify=tk.LEFT,
-        wraplength=560,
+        wraplength=580,
+        font=("Segoe UI", 10),
         bd=0,
         highlightthickness=0,
-        bg=card_bg,
-        fg=palette.get("fg", "#f3f3f3"),
     )
-    body_lbl.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+    body_lbl.grid(row=2, column=0, sticky="ew", pady=(10, 20))
 
-    progressbar = ttk.Progressbar(card, mode="determinate", maximum=100.0)
-    progressbar.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+    progress_header = tk.Frame(content, bd=0, highlightthickness=0)
+    progress_header.grid(row=3, column=0, sticky="ew")
+    progress_caption_lbl = tk.Label(progress_header, text="Postęp", anchor="w",
+                                    font=("Segoe UI", 9), bd=0, highlightthickness=0)
+    progress_caption_lbl.pack(side=tk.LEFT)
+    progress_pct_lbl = tk.Label(progress_header, text="0%", anchor="e",
+                                font=("Segoe UI", 10, "bold"), bd=0, highlightthickness=0)
+    progress_pct_lbl.pack(side=tk.RIGHT)
+    progressbar = LoadingProgressBar(content)
+    progressbar.grid(row=4, column=0, sticky="ew", pady=(6, 0))
 
     return_btn = ttk.Button(
-        card,
-        text="Zatwierdź PZ1 i wróć do pracy T05",
-        command=getattr(host, "_return_to_t05_work_after_step3_pz1", lambda: None),
+        content,
+        text=return_text or "Zatwierdź PZ1 i wróć do pracy T05",
+        command=return_command or getattr(host, "_return_to_t05_work_after_step3_pz1", lambda: None),
     )
-    return_btn.grid(row=3, column=0, sticky="w", pady=(14, 0))
+    return_btn.grid(row=5, column=0, sticky="w", pady=(14, 0))
     return_btn.grid_remove()
     overlay.place_forget()
 
     host.campaign_detect_splash_overlay = overlay
     host.campaign_detect_splash_card = card
+    host.campaign_detect_splash_content = content
+    host.campaign_detect_splash_accent_bar = accent_bar
+    host.campaign_detect_splash_eyebrow_lbl = eyebrow_lbl
+    host.campaign_detect_splash_progress_header = progress_header
+    host.campaign_detect_splash_progress_caption_lbl = progress_caption_lbl
+    host.campaign_detect_splash_progress_pct_lbl = progress_pct_lbl
     host.campaign_detect_splash_title_lbl = title_lbl
     host.campaign_detect_splash_body_lbl = body_lbl
     host.campaign_detect_splash_progress = progressbar
@@ -136,6 +189,11 @@ def _ensure_campaign_detect_splash_widgets(host):
     host._campaign_detect_splash_visible = False
     host._campaign_detect_splash_key = None
     host._campaign_detect_splash_progress_indeterminate = False
+    overlay.bind("<Configure>", lambda event: _layout_campaign_detect_splash(host, event), add="+")
+    overlay.apply_theme = lambda: _apply_campaign_detect_splash_theme(host)
+    for surface_widget in (overlay, card, content, progress_header):
+        surface_widget._panel_surface_theme_handler = overlay.apply_theme
+    _apply_campaign_detect_splash_theme(host)
     return surface
 
 
@@ -162,9 +220,6 @@ def show_campaign_detect_splash(
     if overlay is None or title_lbl is None or body_lbl is None or progressbar is None or card is None or surface is None:
         return
 
-    palette = getattr(host.app, "palette", {})
-    panel_bg = palette.get("panel", "#252526")
-    fg = palette.get("fg", "#f3f3f3")
     tone_key = str(tone or "info").strip().lower()
     splash_key = (
         title_text,
@@ -183,34 +238,11 @@ def show_campaign_detect_splash(
         and _is_live_widget(surface)
         and str(overlay.winfo_manager())
     )
-    if tone_key == "error":
-        accent = palette.get("error", "#e74c3c")
-    elif tone_key == "success":
-        accent = palette.get("success", "#2ecc71")
-    else:
-        accent = palette.get("accent", "#4f8de3")
-
-    overlay_bg = blend_hex_colors(panel_bg, "#000000", 0.24)
-    card_bg = blend_hex_colors(panel_bg, accent, 0.10)
-    border_color = blend_hex_colors(accent, palette.get("panel_border", palette.get("border", "#3c3c3c")), 0.48)
-
+    host._campaign_detect_splash_tone = tone_key
+    _apply_campaign_detect_splash_theme(host)
     if not same_splash:
-        try:
-            overlay.configure(bg=overlay_bg, highlightbackground=overlay_bg, highlightcolor=overlay_bg)
-        except Exception:
-            pass
-        try:
-            card.configure(bg=card_bg, highlightbackground=border_color, highlightcolor=border_color)
-        except Exception:
-            pass
-        try:
-            title_lbl.configure(text=title_text, bg=card_bg, fg=accent)
-        except Exception:
-            pass
-        try:
-            body_lbl.configure(text=body_text, bg=card_bg, fg=fg)
-        except Exception:
-            pass
+        title_lbl.configure(text=title_text)
+        body_lbl.configure(text=body_text)
 
     try:
         if show_progress:
@@ -224,16 +256,20 @@ def show_campaign_detect_splash(
                 value = max(0.0, min(100.0, float(progress)))
                 progressbar.configure(mode="determinate", maximum=100.0, value=value)
                 host._campaign_detect_splash_progress_value = value
+                host.campaign_detect_splash_progress_pct_lbl.configure(text=f"{value:.1f}".rstrip("0").rstrip(".") + "%")
             else:
                 progressbar.configure(mode="indeterminate", maximum=100.0)
                 if not bool(getattr(host, "_campaign_detect_splash_progress_indeterminate", False)):
                     try:
-                        progressbar.start(12)
+                        progressbar.start(40)
                     except Exception:
                         pass
                 host._campaign_detect_splash_progress_indeterminate = True
+                host.campaign_detect_splash_progress_pct_lbl.configure(text="Przygotowanie…")
+                host._campaign_detect_splash_progress_value = None
             if not str(progressbar.winfo_manager()):
-                progressbar.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+                progressbar.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+            host.campaign_detect_splash_progress_header.grid()
         else:
             try:
                 if bool(getattr(host, "_campaign_detect_splash_progress_indeterminate", False)):
@@ -243,6 +279,7 @@ def show_campaign_detect_splash(
             host._campaign_detect_splash_progress_indeterminate = False
             if str(progressbar.winfo_manager()):
                 progressbar.grid_remove()
+            host.campaign_detect_splash_progress_header.grid_remove()
     except Exception:
         pass
 
@@ -251,7 +288,7 @@ def show_campaign_detect_splash(
             if return_btn is not None:
                 if show_return:
                     if not str(return_btn.winfo_manager()):
-                        return_btn.grid(row=3, column=0, sticky="w", pady=(14, 0))
+                        return_btn.grid(row=5, column=0, sticky="w", pady=(14, 0))
                 elif str(return_btn.winfo_manager()):
                     return_btn.grid_remove()
         except Exception:

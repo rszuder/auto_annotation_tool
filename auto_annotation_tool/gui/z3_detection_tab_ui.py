@@ -9,6 +9,7 @@ from tkinter import ttk
 from ..config import logger
 from .canvas_progress_overlay import CanvasProgressOverlay
 from .z3_badge_legend import CharacterBadgeLegend
+from .z3_threshold_percent import create_percent_spinbox, format_percent, percent_label
 from .z3_detection_guard_dialog import prompt_pz2_detection_guard_options
 from .z3_pz2_material_append import open_pz2_add_material
 from .z3_pz2_material_export import open_pz2_export_material
@@ -233,95 +234,10 @@ def build_detection_tab(
     )
     self.detect_left_header.grid_remove()
 
-    old_splash_overlay = getattr(self, "campaign_detect_splash_overlay", None)
-    old_splash_card = getattr(self, "campaign_detect_splash_card", None)
-    old_splash_title_lbl = getattr(self, "campaign_detect_splash_title_lbl", None)
-    old_splash_body_lbl = getattr(self, "campaign_detect_splash_body_lbl", None)
-    old_splash_progress = getattr(self, "campaign_detect_splash_progress", None)
-    old_splash_return_btn = getattr(self, "campaign_detect_splash_return_btn", None)
-    old_splash_surface = getattr(self, "_campaign_detect_splash_surface", None)
-    keep_existing_splash = False
-    try:
-        keep_existing_splash = bool(
-            getattr(self, "_campaign_detect_splash_visible", False)
-            and old_splash_overlay is not None
-            and old_splash_overlay.winfo_exists()
-        )
-    except Exception:
-        keep_existing_splash = False
-    try:
-        if old_splash_overlay is not None and old_splash_overlay.winfo_exists() and not keep_existing_splash:
-            old_splash_overlay.destroy()
-    except Exception:
-        pass
-
-    self.campaign_detect_splash_overlay = tk.Frame(
-        content_frame,
-        bd=0,
-        highlightthickness=0,
+    from .z3_extraction_tab_ui import _ensure_campaign_detect_splash_widgets
+    _ensure_campaign_detect_splash_widgets(
+        self, return_text="Wróć do E3", return_command=self._return_to_wizard_for_step3_rework,
     )
-    self._campaign_detect_splash_surface = content_frame
-    self.campaign_detect_splash_card = tk.Frame(
-        self.campaign_detect_splash_overlay,
-        bd=0,
-        highlightthickness=1,
-        padx=22,
-        pady=20,
-    )
-    self.campaign_detect_splash_card.place(relx=0.5, rely=0.34, anchor="n")
-    self.campaign_detect_splash_card.grid_columnconfigure(0, weight=1, minsize=560)
-
-    self.campaign_detect_splash_title_lbl = tk.Label(
-        self.campaign_detect_splash_card,
-        text="Przygotowuję wyodrębnione tablice dla Z3",
-        anchor="w",
-        justify=tk.LEFT,
-        font=("Segoe UI Semibold", 13),
-        bd=0,
-        highlightthickness=0,
-    )
-    self.campaign_detect_splash_title_lbl.grid(row=0, column=0, sticky="ew")
-
-    self.campaign_detect_splash_body_lbl = tk.Label(
-        self.campaign_detect_splash_card,
-        text="To automatyczny krok pośredni przed pracą nad znakami.",
-        anchor="w",
-        justify=tk.LEFT,
-        wraplength=560,
-        bd=0,
-        highlightthickness=0,
-    )
-    self.campaign_detect_splash_body_lbl.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-
-    self.campaign_detect_splash_progress = ttk.Progressbar(
-        self.campaign_detect_splash_card,
-        mode="determinate",
-        maximum=100.0,
-    )
-    self.campaign_detect_splash_progress.grid(row=2, column=0, sticky="ew", pady=(14, 0))
-
-    self.campaign_detect_splash_return_btn = ttk.Button(
-        self.campaign_detect_splash_card,
-        text="Wróć do E3",
-        command=self._return_to_wizard_for_step3_rework,
-    )
-    self.campaign_detect_splash_return_btn.grid(row=3, column=0, sticky="w", pady=(14, 0))
-    self.campaign_detect_splash_return_btn.grid_remove()
-    self.campaign_detect_splash_overlay.place_forget()
-    if keep_existing_splash:
-        new_splash_overlay = self.campaign_detect_splash_overlay
-        try:
-            if new_splash_overlay is not None and new_splash_overlay.winfo_exists():
-                new_splash_overlay.destroy()
-        except Exception:
-            pass
-        self.campaign_detect_splash_overlay = old_splash_overlay
-        self.campaign_detect_splash_card = old_splash_card
-        self.campaign_detect_splash_title_lbl = old_splash_title_lbl
-        self.campaign_detect_splash_body_lbl = old_splash_body_lbl
-        self.campaign_detect_splash_progress = old_splash_progress
-        self.campaign_detect_splash_return_btn = old_splash_return_btn
-        self._campaign_detect_splash_surface = old_splash_surface
     _mark_build_phase("shell")
 
     preview_panel_bg = palette.get("panel", "#252526")
@@ -1329,49 +1245,25 @@ def build_detection_tab(
     self.preview_sort_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
     self.preview_sort_bar.grid_columnconfigure(0, weight=1)
 
-    self.preview_sort_title_lbl = tk.Label(
-        self.preview_sort_bar,
-        text="Sortowanie:",
-        anchor="w",
-        bd=0,
-        highlightthickness=0,
-        padx=0,
-        font=("Segoe UI", 8),
-    )
-    self.preview_sort_title_lbl.grid(row=0, column=0, sticky="w", padx=(0, 2), pady=(0, 2))
-
-    self.preview_sort_buttons_frame = tk.Frame(self.preview_sort_bar, bd=0, highlightthickness=0)
-    self.preview_sort_buttons_frame.grid(row=1, column=0, sticky="ew")
-    buttons_per_row = 4
-    for button_column in range(buttons_per_row):
-        self.preview_sort_buttons_frame.grid_columnconfigure(button_column, weight=1)
-
+    self.preview_sort_title_lbl = None
+    self.preview_sort_buttons_frame = None
     self.preview_sort_buttons = {}
-    for idx, (mode_key, mode_label) in enumerate(PREVIEW_SORT_OPTIONS):
-        btn_row = idx // buttons_per_row
-        btn_column = idx % buttons_per_row
-        btn = tk.Button(
-            self.preview_sort_buttons_frame,
-            text=mode_label,
-            font=("Segoe UI", 8),
-            padx=6,
-            pady=1,
-            bd=0,
-            relief=tk.FLAT,
-            cursor="hand2",
-            takefocus=0,
-            command=lambda target_key=mode_key: self._on_preview_sort_mode_change(target_key),
-        )
-        btn.grid(
-            row=btn_row,
-            column=btn_column,
-            sticky="ew",
-            padx=(0, 4) if btn_column < (buttons_per_row - 1) else 0,
-            pady=(0, 4) if btn_row == 0 else 0,
-        )
-        btn.bind("<Enter>", lambda _event, target_key=mode_key: self._set_preview_sort_hover(target_key, True))
-        btn.bind("<Leave>", lambda _event, target_key=mode_key: self._set_preview_sort_hover(target_key, False))
-        self.preview_sort_buttons[mode_key] = btn
+
+    self.preview_sort_cta = tk.Button(
+        self.preview_sort_bar,
+        text="Sortowanie: Domyślne  ▾",
+        anchor="w",
+        justify=tk.LEFT,
+        font=("Segoe UI", 8),
+        padx=8,
+        pady=3,
+        bd=0,
+        relief=tk.FLAT,
+        cursor="hand2",
+        takefocus=0,
+        command=self._open_preview_sort_modal,
+    )
+    self.preview_sort_cta.grid(row=0, column=0, sticky="ew")
 
     self.preview_layout_filter_title_lbl = None
     self.preview_layout_filter_buttons_frame = None
@@ -1399,7 +1291,7 @@ def build_detection_tab(
     self.plates_listbox.bind("<B1-Motion>", lambda _event: "break", add=False)
     self.plates_listbox.bind(
         "<<ListboxSelect>>",
-        lambda _event: (self._schedule_preview_select_render(delay_ms=1), "break")[1],
+        lambda _event: (self._schedule_preview_select_render(delay_ms=1), "break")[-1],
     )
     self.plates_listbox.bind("<Up>", lambda _event: self._handle_preview_list_arrow_nav(-1), add=False)
     self.plates_listbox.bind("<Down>", lambda _event: self._handle_preview_list_arrow_nav(1), add=False)
@@ -1817,7 +1709,7 @@ def build_detection_tab(
 
     self.hybrid_rescue_info_lbl = ttk.Label(
         self.hybrid_rescue_frame,
-        text="Gdy normalny próg confidence zostawi mniej znaków niż wynika z napisu tablicy, system może zrobić kontrolny przebieg do 0.10. Wynik przechodzi tylko wtedy, gdy poprawia dopasowanie.",
+        text="Gdy normalny próg confidence zostawi mniej znaków niż wynika z napisu tablicy, system może zrobić kontrolny przebieg do 10%. Wynik przechodzi tylko wtedy, gdy poprawia dopasowanie.",
         style="PanelMuted.TLabel",
         wraplength=320,
         justify=tk.LEFT,
@@ -1997,7 +1889,7 @@ def build_detection_tab(
 
         label = tk.Label(
             row,
-            text=label_text,
+            text=percent_label(label_text),
             anchor="w",
             justify=tk.LEFT,
             bd=0,
@@ -2011,18 +1903,16 @@ def build_detection_tab(
 
         value_lbl = tk.Label(
             row,
-            width=6,
+            width=9,
             anchor="e",
             bd=0,
             highlightthickness=0,
         )
         value_lbl.pack(side=tk.RIGHT)
 
-        fmt = "{:." + str(int(digits)) + "f}"
-
         def refresh_value(*_args):
             try:
-                value_lbl.config(text=fmt.format(float(variable.get())))
+                value_lbl.config(text=format_percent(variable.get(), suffix=True))
             except Exception:
                 value_lbl.config(text=str(variable.get()))
 
@@ -2113,21 +2003,21 @@ def build_detection_tab(
     self.yolo_conf_row = make_detection_param_row(self.yolo_tuning_lf)
     self.yolo_conf_lbl = tk.Label(
         self.yolo_conf_row,
-        text="Confidence YB:",
+        text="Confidence YB [%]:",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
     )
     self.yolo_conf_lbl.pack(side=tk.LEFT)
-    self.yolo_conf_spin = ttk.Spinbox(
+    self.yolo_conf_spin = create_percent_spinbox(
         self.yolo_conf_row,
+        variable=self.yolo_box_conf_var,
         from_=0.00001,
         to=1.0,
         increment=0.05,
-        textvariable=self.yolo_box_conf_var,
         width=9,
-        format="%.5f",
+        command=self._on_yolo_option_var_write,
     )
     self.yolo_conf_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_conf_row, labels=[self.yolo_conf_lbl])
@@ -2135,21 +2025,21 @@ def build_detection_tab(
     self.yolo_symbol_conf_row = make_detection_param_row(self.yolo_tuning_lf)
     self.yolo_symbol_conf_lbl = tk.Label(
         self.yolo_symbol_conf_row,
-        text="Confidence YS:",
+        text="Confidence YS [%]:",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
     )
     self.yolo_symbol_conf_lbl.pack(side=tk.LEFT)
-    self.yolo_symbol_conf_spin = ttk.Spinbox(
+    self.yolo_symbol_conf_spin = create_percent_spinbox(
         self.yolo_symbol_conf_row,
+        variable=self.yolo_symbol_conf_var,
         from_=0.00001,
         to=1.0,
         increment=0.05,
-        textvariable=self.yolo_symbol_conf_var,
         width=9,
-        format="%.5f",
+        command=self._on_yolo_option_var_write,
     )
     self.yolo_symbol_conf_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_symbol_conf_row, labels=[self.yolo_symbol_conf_lbl])
@@ -2165,21 +2055,21 @@ def build_detection_tab(
     self.yolo_iou_row = make_detection_param_row(self.yolo_tuning_lf)
     self.yolo_iou_lbl = tk.Label(
         self.yolo_iou_row,
-        text="NMS IoU:",
+        text="NMS IoU [%]:",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
     )
     self.yolo_iou_lbl.pack(side=tk.LEFT)
-    self.yolo_iou_spin = ttk.Spinbox(
+    self.yolo_iou_spin = create_percent_spinbox(
         self.yolo_iou_row,
+        variable=self.yolo_iou_var,
         from_=0.01,
         to=0.99,
         increment=0.05,
-        textvariable=self.yolo_iou_var,
         width=9,
-        format="%.5f",
+        command=self._on_yolo_option_var_write,
     )
     self.yolo_iou_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_iou_row, labels=[self.yolo_iou_lbl])
@@ -2195,21 +2085,21 @@ def build_detection_tab(
     self.yolo_overlap_row = make_detection_param_row(self.yolo_tuning_lf)
     self.yolo_overlap_lbl = tk.Label(
         self.yolo_overlap_row,
-        text="Nakładanie boxów:",
+        text="Nakładanie boxów [%]:",
         anchor="w",
         justify=tk.LEFT,
         bd=0,
         highlightthickness=0,
     )
     self.yolo_overlap_lbl.pack(side=tk.LEFT)
-    self.yolo_overlap_spin = ttk.Spinbox(
+    self.yolo_overlap_spin = create_percent_spinbox(
         self.yolo_overlap_row,
+        variable=self.yolo_overlap_var,
         from_=0.0,
         to=1.0,
         increment=0.05,
-        textvariable=self.yolo_overlap_var,
         width=9,
-        format="%.5f",
+        command=self._on_yolo_option_var_write,
     )
     self.yolo_overlap_spin.pack(side=tk.RIGHT, padx=(6, 0))
     self._register_detection_param_row(self.yolo_overlap_row, labels=[self.yolo_overlap_lbl])

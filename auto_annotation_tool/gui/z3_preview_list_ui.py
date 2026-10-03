@@ -98,6 +98,25 @@ def get_preview_layout_group_priority(
     return (0 if matches else 1, int(original_index))
 
 
+def preview_has_inherited_z2_gt(data: dict | None) -> bool:
+    """True only for a real, non-empty operator GT inherited from Z2."""
+    if not isinstance(data, dict):
+        return False
+
+    attrs = data.get("plate_attributes")
+    attrs = attrs if isinstance(attrs, dict) else {}
+    source = str(
+        data.get("ground_truth_source")
+        or attrs.get("ground_truth_source")
+        or ""
+    ).strip().lower()
+
+    if source != "manual_z2":
+        return False
+
+    return bool(plate_gt(data))
+
+
 def get_preview_sort_source_count(host: "CharacterAnnotationTab", mode_key: str, data: dict | None = None) -> int:
     normalized_key = str(mode_key or "").strip().upper()
     source_data = data if isinstance(data, dict) else {}
@@ -148,6 +167,12 @@ def get_preview_sort_priority(host: "CharacterAnnotationTab", pid: str, data: di
         if status == "needs_fix":
             return (1, -int(total_boxes), int(original_index))
         return (2, -int(total_boxes), int(original_index))
+
+    if mode_key == "GT_Z2":
+        return (
+            0 if preview_has_inherited_z2_gt(data) else 1,
+            int(original_index),
+        )
 
     if mode_key in {"1R", "2R"}:
         matches_layout = preview_layout_group_matches(host, data, mode_key)
@@ -577,6 +602,12 @@ def refresh_preview_import_focus_ui(host: "CharacterAnnotationTab") -> None:
         material_button is not None
         and getattr(host, "_step3_linear_mode", False)
     )
+    export_available = bool(export_button is not None and (
+        project_append_available or any(
+            isinstance(row, dict) and row.get("crop_id")
+            for row in getattr(host, "preview_metadata", {}).values()
+        )
+    ))
 
     if material_button is not None:
         try:
@@ -589,7 +620,7 @@ def refresh_preview_import_focus_ui(host: "CharacterAnnotationTab") -> None:
 
     if export_button is not None:
         try:
-            if project_append_available:
+            if export_available:
                 export_button.grid()
             else:
                 export_button.grid_remove()
@@ -598,7 +629,7 @@ def refresh_preview_import_focus_ui(host: "CharacterAnnotationTab") -> None:
 
     if frame is not None:
         try:
-            if known_count or project_append_available:
+            if known_count or project_append_available or export_available:
                 if not str(frame.winfo_manager()):
                     frame.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 6))
             elif str(frame.winfo_manager()):
@@ -741,6 +772,38 @@ def apply_preview_sort_bar_style(
                     pass
 
     active_key = host._get_preview_sort_mode_key()
+
+    sort_cta = getattr(host, "preview_sort_cta", None)
+    if sort_cta is not None:
+        active_label = str(sort_labels.get(active_key, active_key) or active_key)
+        tone_key = sort_color_keys.get(active_key, "muted")
+        accent = palette.get(tone_key, palette.get("accent", "#4aa3ff"))
+        cta_bg = blend_hex_colors(accent, shell_bg, 0.82)
+        cta_active_bg = blend_hex_colors(accent, shell_bg, 0.66)
+        cta_fg = host._get_readable_text_color(
+            cta_bg,
+            preferred=palette.get("fg", "#f3f3f3"),
+        )
+        try:
+            sort_cta.configure(
+                text=f"Sortowanie: {active_label}  ▾",
+                bg=cta_bg,
+                fg=cta_fg,
+                activebackground=cta_active_bg,
+                activeforeground=host._get_readable_text_color(
+                    cta_active_bg,
+                    preferred=cta_fg,
+                ),
+                highlightbackground=border,
+                highlightcolor=accent,
+                highlightthickness=1,
+                bd=0,
+                relief=tk.FLAT,
+                font=("Segoe UI", 8, "bold"),
+            )
+        except Exception:
+            pass
+
     hover_key = str(getattr(host, "_preview_sort_hover_key", "") or "").strip().upper()
     for mode_key, button in getattr(host, "preview_sort_buttons", {}).items():
         if button is None:

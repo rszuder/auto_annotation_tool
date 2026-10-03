@@ -995,7 +995,8 @@ def show_last_detection_details(host) -> None:
             try:
                 yb_conf = float(summary.get("yolo_box_conf", 0.0) or 0.0)
                 ys_conf = float(summary.get("yolo_symbol_conf", 0.0) or 0.0)
-                technical_rows.append(("Progi YOLO", f"YB {yb_conf:.5g} | YS {ys_conf:.5g}"))
+                from .z3_threshold_percent import format_percent
+                technical_rows.append(("Progi YOLO", f"YB {format_percent(yb_conf, suffix=True)} | YS {format_percent(ys_conf, suffix=True)}"))
             except Exception:
                 pass
     else:

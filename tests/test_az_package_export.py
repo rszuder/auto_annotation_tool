@@ -3,6 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from PIL import Image
+from unittest.mock import patch
 
 from auto_annotation_tool.registry import RegistryDatabase
 from auto_annotation_tool.registry.az_package_export import (
@@ -11,6 +13,7 @@ from auto_annotation_tool.registry.az_package_export import (
 )
 from auto_annotation_tool.registry.az_package_transport import (
     analyze_az_package,
+    append_az_package,
     load_az_package,
 )
 from auto_annotation_tool.registry.az_registry import (
@@ -27,6 +30,7 @@ from auto_annotation_tool.registry.crop_identity import (
 from auto_annotation_tool.registry.pz2_az_adapter import (
     pz2_metadata_to_az_payload,
 )
+from auto_annotation_tool.registry.pz2_append_materializer import materialize_az_append_to_preview
 
 
 class AZPackageExportTests(unittest.TestCase):
@@ -110,8 +114,8 @@ class AZPackageExportTests(unittest.TestCase):
         )
 
         image_path = self.images / f"{plate_id}.jpg"
-        image_bytes = f"crop-{plate_id}".encode("ascii")
-        image_path.write_bytes(image_bytes)
+        Image.new("RGB", (256, 64), color=(10 if plate_id == "plate_A" else 20, 30, 40)).save(image_path)
+        image_bytes = image_path.read_bytes()
 
         reg = self.registry.register_crop_artifact(
             crop_identity_sha256=identity_sha,
@@ -190,6 +194,152 @@ class AZPackageExportTests(unittest.TestCase):
             effective_status="approved",
             created_at="2026-09-29T12:00:00+00:00",
         )
+
+    def _make_free(self):
+        with self.db.transaction() as con:
+            con.execute("DELETE FROM project_crop_az")
+            con.execute("DELETE FROM az_revisions")
+            con.execute("DELETE FROM iteration_crop_members")
+            con.execute("DELETE FROM project_crop_members")
+            con.execute("DELETE FROM projects")
+
+    def _registry_snapshot(self):
+        with self.db.read_connection() as con:
+            return tuple(con.iterdump())
+
+    def test_free_export_is_read_only_without_projects_or_memberships(self):
+        self._make_free()
+        before_db = self._registry_snapshot()
+        before_meta = (self.preview / "metadata.json").read_bytes()
+        out = self.root / "free_export"
+        with patch.object(self.registry, "initialize", side_effect=AssertionError("export initialized registry")):
+            result = export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=out)
+        self.assertEqual(before_db, self._registry_snapshot())
+        self.assertEqual(before_meta, (self.preview / "metadata.json").read_bytes())
+        self.assertEqual(result.source_mode, "free_mode")
+        self.assertIsNone(result.project_id)
+        self.assertIsNone(result.iteration_num)
+        package = load_az_package(out)
+        self.assertFalse(package.invalid_items)
+        self.assertEqual(len(package.crops), 2)
+        self.assertEqual(package.source["mode"], "free_mode")
+        self.assertNotIn("project_id", package.source)
+        self.assertNotIn("iteration", package.source)
+        for item in package.crops:
+            row = self.rows[item.entry_id]
+            self.assertEqual(item.crop_identity_sha256, row["crop_identity_sha256"])
+            self.assertEqual(item.artifact_sha256, hashlib.sha256((self.images / f"{item.entry_id}.jpg").read_bytes()).hexdigest())
+            self.assertEqual(item.az.payload, pz2_metadata_to_az_payload(row, image_width=256, image_height=64))
+            self.assertIsNone(item.az.origin_project_id)
+            self.assertIsNone(item.az.origin_iteration)
+            self.assertIsNone(item.az.source_az_revision_id)
+            self.assertEqual(item.az.source_status, "perfect")
+
+    def test_free_export_uses_live_metadata_without_saving_it(self):
+        self._make_free()
+        before = (self.preview / "metadata.json").read_bytes()
+        self.rows["plate_A"]["ground_truth_text"] = "EDIT123"
+        out = self.root / "live_export"
+        export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=out,
+                              plate_ids=["plate_A"], metadata=self.rows)
+        self.assertEqual(load_az_package(out).crops[0].az.payload["expected_text"], "EDIT123")
+        self.assertEqual(before, (self.preview / "metadata.json").read_bytes())
+
+    def test_free_round_trip_to_separate_project_is_pending_and_idempotent(self):
+        self._make_free()
+        out = self.root / "free_export"
+        export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=out,
+                              plate_ids=["plate_A"])
+        package = load_az_package(out)
+        target_workspace = self.root / "TargetWorkspace"
+        target = AZRegistry.for_workspace(target_workspace)
+        target.initialize()
+        with target.database.transaction() as con:
+            con.execute("INSERT INTO projects(project_id, display_name) VALUES (?, ?)", ("PRJ-TARGET", "Target"))
+        preview = target_workspace / "preview"
+        images = preview / "images"
+        images.mkdir(parents=True)
+        old = {"old": {"ground_truth_text": "KEEP", "status": "perfect", "gold_state": {"approved": True}, "characters": []}}
+        meta_path = preview / "metadata.json"
+        meta_path.write_text(json.dumps(old), encoding="utf-8")
+        (images / "old.jpg").write_bytes(b"old target untouched")
+        plan = analyze_az_package(target, package, target_project_id="PRJ-TARGET")
+        self.assertEqual(plan.new_count, 1)
+        self.assertEqual(plan.conflict_count, 0)
+        appended = append_az_package(target, package, target_project_id="PRJ-TARGET", iteration_num=1, target_artifact_dir=images)
+        result = materialize_az_append_to_preview(target, package, append_result=appended, preview_dir=preview,
+                                                target_project_id="PRJ-TARGET", iteration_num=1)
+        self.assertEqual(result.added, 1)
+        metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+        self.assertEqual(metadata["old"], old["old"])
+        imported = metadata[result.items[0].plate_id]
+        self.assertFalse(imported["gold_state"]["approved"])
+        self.assertTrue(imported["az_reuse"]["requires_review"])
+        self.assertEqual(imported["status"], "needs_fix")
+        with target.database.read_connection() as con:
+            binding = con.execute("SELECT effective_status FROM project_crop_az WHERE project_id = ?", ("PRJ-TARGET",)).fetchone()
+        self.assertEqual(binding[0], "imported_pending_review")
+        self.assertEqual(analyze_az_package(target, package, target_project_id="PRJ-TARGET").already_present_count, 1)
+        before_second = meta_path.read_bytes()
+        second = append_az_package(target, package, target_project_id="PRJ-TARGET", iteration_num=1, target_artifact_dir=images)
+        again = materialize_az_append_to_preview(target, package, append_result=second, preview_dir=preview,
+                                               target_project_id="PRJ-TARGET", iteration_num=1)
+        self.assertEqual(again.added, 0)
+        self.assertEqual(meta_path.read_bytes(), before_second)
+        # A damaged exported package must not overwrite the reviewed target.
+        target_before = None
+        with target.database.read_connection() as con:
+            target_before = tuple(con.iterdump())
+        manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        (out / manifest["crops"][0]["artifact"]["path"]).write_bytes(b"damaged")
+        invalid_package = load_az_package(out)
+        invalid_plan = analyze_az_package(target, invalid_package, target_project_id="PRJ-TARGET")
+        self.assertEqual(invalid_plan.invalid_count, 1)
+        self.assertEqual(meta_path.read_bytes(), before_second)
+        with target.database.read_connection() as con:
+            self.assertEqual(tuple(con.iterdump()), target_before)
+
+    def test_campaign_export_requires_membership(self):
+        self._make_free()
+        with self.db.transaction() as con:
+            con.execute("INSERT INTO projects(project_id, display_name) VALUES (?, ?)", ("PRJ-SOURCE", "Source"))
+        with self.assertRaisesRegex(AZPackageExportError, "nie należy do projektu"):
+            export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=self.root / "bad",
+                                  project_id="PRJ-SOURCE", iteration_num=1)
+
+    def test_free_export_rejects_corrupt_artifact_without_mutation(self):
+        self._make_free()
+        (self.images / "plate_A.jpg").write_bytes(b"corrupt")
+        before = self._registry_snapshot()
+        with self.assertRaisesRegex(AZPackageExportError, "SHA fizycznego cropa"):
+            export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=self.root / "bad")
+        self.assertEqual(before, self._registry_snapshot())
+        self.assertFalse((self.root / "bad").exists())
+
+    def test_free_export_rejects_wrong_dimensions(self):
+        self._make_free()
+        with self.db.transaction() as con:
+            con.execute("UPDATE plate_crops SET width = 128")
+        with self.assertRaisesRegex(AZPackageExportError, "Wymiary cropa"):
+            export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=self.root / "bad")
+
+    def test_free_export_rejects_mismatched_identity_and_source_hash(self):
+        self._make_free()
+        for key, value in (("crop_identity_sha256", "e" * 64),
+                           ("source_file_sha256", "e" * 64),
+                           ("artifact_id", "UNKNOWN")):
+            with self.subTest(key=key):
+                metadata = json.loads((self.preview / "metadata.json").read_text(encoding="utf-8"))
+                metadata["plate_A"][key] = value
+                with self.assertRaises(AZPackageExportError):
+                    export_pz2_az_package(self.registry, preview_dir=self.preview, output_dir=self.root / "bad", metadata=metadata)
+                self.assertFalse((self.root / "bad").exists())
+
+    def test_missing_registry_is_not_created_by_export(self):
+        missing = AZRegistry.for_workspace(self.root / "missing_workspace")
+        with self.assertRaisesRegex(AZPackageExportError, "Brak istniejącego"):
+            export_pz2_az_package(missing, preview_dir=self.preview, output_dir=self.root / "bad")
+        self.assertFalse(missing.database.db_path.parent.exists())
 
     def test_export_round_trip_is_loadable_and_importable_elsewhere(self):
         out = self.root / "export_all"

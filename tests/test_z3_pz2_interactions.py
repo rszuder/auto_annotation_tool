@@ -184,6 +184,7 @@ def _status_shortcut_host():
 def test_f_shortcut_toggles_plate_exclusion():
     host = _status_shortcut_host()
     host._toggle_review_excluded = Mock(return_value={"ok": True, "excluded": True})
+    host._get_preview_active_data = Mock(return_value={})
 
     result = preview_events.on_preview_canvas_keypress(
         host,
@@ -191,7 +192,7 @@ def test_f_shortcut_toggles_plate_exclusion():
     )
 
     assert result == "break"
-    host._toggle_review_excluded.assert_called_once_with()
+    host._toggle_review_excluded.assert_called_once_with(persist=True, refresh=False)
     assert "PZ3/Z4" in host._update_preview_edit_status.call_args.args[0]
 
 def test_n_remains_character_when_symbol_field_is_active():
@@ -438,4 +439,3 @@ def test_inline_hud_status_is_n_ok_or_approve_without_mutating_shared_layout():
 
     assert hud_items[0]["text"] == "Decyzja: OK"
     assert shared[0]["text"] == "Status tablicy: kompletne"
-

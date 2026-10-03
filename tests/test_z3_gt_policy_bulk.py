@@ -93,15 +93,15 @@ def test_auto_view_and_review_use_the_same_gt_limited_geometry():
     assert len(host._get_preview_box_records(record)[0]) == 7
 
 
-def test_add_box_guard_uses_current_gt_and_allows_replacement_after_delete():
+def test_manual_addition_is_available_at_gt_count_and_after_delete():
     record = data("AB", "AB", editing=True)
     host = SimpleNamespace(_update_preview_edit_status=Mock())
-    assert not can_add_character_box(host, record)
+    assert can_add_character_box(host, record)
     record["characters"].pop()
     assert can_add_character_box(host, record)
 
 
-def test_d_and_completed_drawing_cannot_exceed_gt(canvas_host, monkeypatch):
+def test_d_and_completed_manual_drawing_can_exceed_gt_without_changing_raw(canvas_host, monkeypatch):
     host = canvas_host
     record = data("ABC", "ABC")
     host.preview_metadata = {"plate": record}
@@ -115,12 +115,14 @@ def test_d_and_completed_drawing_cannot_exceed_gt(canvas_host, monkeypatch):
     monkeypatch.setattr(host, "_refresh_preview_listbox_row", Mock())
     preview.on_preview_select(host)
     assert events.on_preview_canvas_keypress(host, SimpleNamespace(keysym="d", char="d", state=0)) == "break"
-    assert not host._preview_char_add_click_armed
+    assert host._preview_char_add_click_armed
     assert len(record["characters"]) == 3
-    before = deepcopy(record["characters"])
+    raw_before = deepcopy(record["raw_detection"])
     host._preview_char_add_state = {"bbox": [70, 2, 88, 25], "click_draw": True}
     assert events.finalize_preview_char_add_state(host) == "break"
-    assert record["characters"] == before
+    assert len(record["characters"]) == 4
+    assert record["characters"][-1]["box_source"] == "manual_box"
+    assert record["raw_detection"] == raw_before
 
 
 @pytest.fixture(scope="module")

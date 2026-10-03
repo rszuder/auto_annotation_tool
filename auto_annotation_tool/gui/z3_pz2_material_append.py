@@ -662,7 +662,15 @@ def _current_metadata_count(host, metadata_path: Path) -> int:
 
 
 def _refresh_after_append(host, metadata_path: Path, result, package_id: str) -> None:
-    payload = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
+    payload = getattr(result, "verified_metadata", None)
+    stat = metadata_path.stat()
+    signature = (stat.st_mtime_ns, stat.st_size)
+    result_path = getattr(result, "metadata_path", None)
+    if (not isinstance(payload, dict)
+            or getattr(result, "metadata_signature", None) != signature
+            or result_path is None
+            or Path(result_path).resolve() != metadata_path.resolve()):
+        payload = json.loads(metadata_path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise RuntimeError("Po appendzie metadata.json nie jest obiektem JSON.")
 

@@ -18,8 +18,7 @@ Kontrakt:
 
 from __future__ import annotations
 
-import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import os
@@ -67,6 +66,8 @@ class PZ2AppendMaterializationResult:
     without_az: int
     after_count: int
     items: tuple[PZ2AppendMaterializationItem, ...]
+    verified_metadata: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    metadata_signature: tuple[int, int] | None = None
 
 
 def materialize_az_append_to_preview(
@@ -175,7 +176,9 @@ def materialize_az_append_to_preview(
         if identity:
             existing_by_identity[identity] = (str(plate_id), row)
 
-    updated = copy.deepcopy(metadata)
+    # Append only inserts new rows; it never edits the nested old rows.
+    # Keep those as the post-check reference without cloning detector payloads.
+    updated = dict(metadata)
     added_items: list[PZ2AppendMaterializationItem] = []
     already_materialized = 0
     with_az = 0
@@ -304,6 +307,8 @@ def materialize_az_append_to_preview(
             without_az=0,
             after_count=before_count,
             items=(),
+            verified_metadata=metadata,
+            metadata_signature=_metadata_signature(metadata_path),
         )
 
     backup_path = _backup_metadata(metadata_path)
@@ -341,6 +346,8 @@ def materialize_az_append_to_preview(
         without_az=without_az,
         after_count=len(written),
         items=tuple(added_items),
+        verified_metadata=written,
+        metadata_signature=_metadata_signature(metadata_path),
     )
 
 
@@ -617,7 +624,7 @@ def _atomic_write_json(
             json.dumps(
                 payload,
                 ensure_ascii=False,
-                indent=2,
+                separators=(",", ":"),
                 allow_nan=False,
             ),
             encoding="utf-8",
@@ -629,6 +636,11 @@ def _atomic_write_json(
                 temp.unlink()
         except Exception:
             pass
+
+
+def _metadata_signature(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_size
 
 
 def _required_text(name: str, value: Any) -> str:

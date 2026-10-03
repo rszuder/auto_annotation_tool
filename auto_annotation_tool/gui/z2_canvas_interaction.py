@@ -321,13 +321,15 @@ def _focus_preview_plate(
         mark_phase("set_view")
         try:
             canvas._navigation_rendering = True
-            canvas._update_display(interaction_fast=True)
-            canvas._schedule_final_quality_display(delay_ms=900)
+            # This is the final fitted view, not an intermediate zoom frame.
+            # Render it at full quality instead of relying on a cancellable
+            # idle pass, which may leave NEAREST pixels visible during review.
+            canvas._update_display(interaction_fast=False)
         except Exception:
             canvas.refresh_overlay_only(skip_info=True)
         finally:
             canvas._navigation_rendering = False
-        mark_phase("fast_render")
+        mark_phase("render")
     else:
         try:
             canvas._cancel_zoom_animation()
@@ -339,11 +341,10 @@ def _focus_preview_plate(
             return False
         mark_phase("set_view")
         try:
-            canvas._update_display(interaction_fast=True)
-            canvas._schedule_final_quality_display(delay_ms=500)
+            canvas._update_display(interaction_fast=False)
         except Exception:
             canvas.refresh_overlay_only(skip_info=True)
-        mark_phase("fast_render")
+        mark_phase("render")
 
     self._set_preview_focus_target("plate", int(safe_idx))
     self._refresh_preview_plate_context_overlays()
@@ -389,7 +390,6 @@ def _focus_preview_plate(
         view=f"{phase_ms.get('view_state', 0.0):.1f}",
         cancel=f"{phase_ms.get('cancel', 0.0):.1f}",
         set_view=f"{phase_ms.get('set_view', 0.0):.1f}",
-        fast_render=f"{phase_ms.get('fast_render', 0.0):.1f}",
         render=f"{phase_ms.get('render', 0.0):.1f}",
         context=f"{phase_ms.get('context', 0.0):.1f}",
         status=f"{phase_ms.get('status', 0.0):.1f}",

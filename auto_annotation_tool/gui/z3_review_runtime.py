@@ -18,6 +18,7 @@ from .z3_metadata_cache import mark_preview_metadata_changed
 REVIEW_SCHEMA = "alpr.pz2.review.v1"
 REVIEW_IN_PROGRESS = "in_progress"
 REVIEW_APPROVED = "approved"
+PIPELINE_PREPARATION_VERSION = "pipeline_blocks_only.v1"
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -452,6 +453,7 @@ def toggle_review_excluded(
     *,
     reason: str = "unreadable",
     persist: bool = True,
+    refresh: bool = True,
 ):
     # Toggle manual PZ2 exclusion without deleting annotations or REVIEW/GOLD history.
     # Excluded records stay visible in PZ2 but must never be exportable to PZ3/Z4.
@@ -494,7 +496,18 @@ def toggle_review_excluded(
             )
         gold_state["candidate"] = candidate
 
-    _refresh_after_change(host, pid, persist=persist, message="")
+    if refresh:
+        _refresh_after_change(host, pid, persist=persist, message="")
+    else:
+        # Hot-key F must stay lightweight: mutate one row now and let the
+        # incremental metadata autosave persist it outside the key event.
+        mark_preview_metadata_changed(host)
+        if persist:
+            try:
+                host._schedule_preview_metadata_save(delay_ms=90)
+            except Exception:
+                pass
+
     if persist:
         _persist_review_az_revision_best_effort(
             host,
@@ -535,7 +548,13 @@ def can_refresh_automatic_working_annotation(data):
     if (data.get("last_detection") or {}).get("execution_mode") == "raw_evidence":
         return False
     old_hash = working.get("source_raw_result_hash")
-    if (not old_hash or not raw.get("result_hash") or raw["result_hash"] == old_hash
+    needs_pipeline_preparation = bool(
+        working.get("automatic_content_hash")
+        and (working.get("pipeline_preparation_version") != PIPELINE_PREPARATION_VERSION
+             or working.get("pipeline_blocks") != raw.get("pipeline_blocks"))
+    )
+    if (not old_hash or not raw.get("result_hash")
+            or (raw["result_hash"] == old_hash and not needs_pipeline_preparation)
             or state.get("raw_result_hash") != old_hash
             or state.get("status") != REVIEW_IN_PROGRESS
             or state.get("source") != "raw_detection"
@@ -585,11 +604,25 @@ def refresh_stale_automatic_working_annotations(host, metadata):
     return changed
 
 
-def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=False):
+def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=False, plate_image=None,
+                                      geometry_settings=None, from_detection=False):
     """Refresh untouched automatic results; preserve human work and approvals."""
     if not isinstance(data, dict) or not isinstance(data.get("raw_detection"), dict):
         return False
-    if not overwrite and (get_review_state_status(data) or data.get("characters")
+    # Clearing automatic boxes is a human edit, but explicitly running the
+    # pipeline again authorizes filling the cleared slots. Loading/rendering
+    # the old RAW does not. Other human corrections remain protected.
+    cleared = data.get("automatic_boxes_cleared")
+    current_chars = data.get("characters") or []
+    refill_cleared = bool(
+        from_detection and isinstance(cleared, dict) and cleared.get("removed_count", 0) > 0
+        and get_review_state_status(data) == REVIEW_IN_PROGRESS
+        and not (data.get("gold_state") or {}).get("approved") and data.get("status") != "perfect"
+        and all(host._get_character_box_source_tag(rec, data=data, fallback_index=index) == "manual_box"
+                for index, rec in enumerate(current_chars))
+    )
+    preserved_manuals = copy.deepcopy(current_chars) if refill_cleared else []
+    if not overwrite and not refill_cleared and (get_review_state_status(data) or data.get("characters")
                           or data.get("working_annotation")
                           or data.get("fusion_strategy") in {"manual_correction", "manual", "cvat_import"}
                           or (data.get("gold_state") or {}).get("approved")
@@ -600,6 +633,14 @@ def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=Fa
     raw_detection = data["raw_detection"]
     raw_chars = raw_detection.get("characters") or []
     review_chars = copy.deepcopy(raw_chars)
+    # Geometry comes only from the declared pipeline's RAW result. GT may
+    # select/label existing boxes, but must not add an implicit segmentation.
+    data.pop("gt_geometry_recovery", None)
+    if preserved_manuals:
+        from .z3_preview_records import merge_detected_characters_preserving_manual
+        review_chars, _merge_info = merge_detected_characters_preserving_manual(
+            host, preserved_manuals, review_chars, data=data,
+        )
     try:
         host._update_preview_plate_layout_metadata(data, review_chars)
         review_chars = host._apply_preview_layout_separator_constraints_to_chars(
@@ -663,11 +704,31 @@ def prepare_working_annotation_from_raw(host, data, *, plate_id="", overwrite=Fa
     assist = getattr(host, "_apply_live_gt_assist", None)
     if callable(assist):
         assist(data, prepare=True)
+    if preserved_manuals:
+        # GT count selection must not delete any manual geometry, even if
+        # the operator intentionally placed more boxes than the reference.
+        automatic = [rec for index, rec in enumerate(data["characters"])
+                     if host._get_character_box_source_tag(rec, data=data, fallback_index=index) != "manual_box"]
+        data["characters"] = host._annotate_preview_character_reading_positions(
+            host._sort_character_records_by_x(automatic + preserved_manuals, data=data), data=data,
+        )
+        if callable(assist):
+            assist(data, prepare=False)
+    if refill_cleared:
+        automatic_count = sum(host._get_character_box_source_tag(rec, data=data, fallback_index=index) != "manual_box"
+                              for index, rec in enumerate(data["characters"]))
+        if automatic_count:
+            data.pop("automatic_boxes_cleared", None)
+        if preserved_manuals or not automatic_count:
+            data["review_state"]["human_edited"] = True
+            data["fusion_strategy"] = "manual_correction"
     data["working_annotation"] = {
         "schema": "alpr.pz2.working.v1", "prepared_at": now,
         "source_raw_result_hash": raw_hash,
         "preparation": "gt_assisted" if plate_gt(data) else "pipeline",
         "automatic_content_hash": _working_annotation_fingerprint(data),
+        "pipeline_preparation_version": PIPELINE_PREPARATION_VERSION,
+        "pipeline_blocks": copy.deepcopy(raw_detection.get("pipeline_blocks")),
     }
     return True
 
@@ -965,10 +1026,12 @@ def confirm_review_gold(
         or ""
     ).strip().lower()
     inherited_from_z2 = bool(saved_text and number_source == "manual_z2")
-    local_z3_number = bool(saved_text and number_source == "manual_z3")
 
     if saved_text and candidate_text and candidate_text != saved_text:
-        if local_z3_number:
+        # Tylko GT odziedziczone z Z2 jest twardą referencją. Każdy inny
+        # zapisany numer jest lokalnym/fallbackowym stanem roboczym PZ2 i
+        # świadome R operatora może go skorygować do aktualnego odczytu.
+        if not inherited_from_z2:
             try:
                 from .z3_plate_gt_runtime import save_plate_ground_truth
                 save_plate_ground_truth(host, data, candidate_text, prepare=False)

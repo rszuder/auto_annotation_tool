@@ -17,7 +17,7 @@ from .web_slim_scrollbar import blend_hex_colors
 from .z3_workspace_drawers import workspace_drawers
 from .z3_inline_hud import plan_inline_hud, draw_inline_hud, resolve_inline_hud_plate_status
 from .z3_list_review import capture_selection, restore_selection
-from .z3_preview_grip_geometry import CORNER_HANDLE_ORDER, get_corner_handle_centers
+from .z3_preview_grip_geometry import CORNER_HANDLE_ORDER, EDGE_HANDLE_ORDER, get_corner_handle_centers, get_edge_handle_rects
 from .z3_preview_status_ui import (
     apply_preview_source_actions_style,
     apply_preview_info_stats_style,
@@ -629,7 +629,7 @@ def select_preview_character_box(
         )
     else:
         # Hot path: selecting boxes must only update selection visuals, not reflow the instruction overlay.
-        quick_message = "Box znaku jest aktywny. Chwyć środek albo narożnik."
+        quick_message = "Box znaku jest aktywny. Chwyć środek, narożnik lub uchwyt boku."
         try:
             if hasattr(host, "preview_edit_status_var") and str(host.preview_edit_status_var.get() or "") != quick_message:
                 host.preview_edit_status_var.set(quick_message)
@@ -740,7 +740,8 @@ def serialize_character_records(host, chars, fusion_strategy="", fusion_details=
                     record[field_name] = int(raw_value)
             except Exception:
                 pass
-        for field_name in ("correction_source", "gt_assist_original_character", "gt_assist_original_sign_source"):
+        for field_name in ("correction_source", "gt_assist_original_character", "gt_assist_original_sign_source",
+                           "box_refine_source", "box_refined_by_image"):
             if isinstance(char, dict) and field_name in char:
                 record[field_name] = char[field_name]
         if (
@@ -1480,6 +1481,9 @@ def resolve_preview_canvas_cursor(host: "CharacterAnnotationTab") -> str:
     char_drag_state = getattr(host, "_preview_char_drag_state", None)
     if isinstance(char_drag_state, dict):
         mode = str(char_drag_state.get("mode", "move") or "move").lower()
+        handle = str(char_drag_state.get("handle", ""))
+        if mode == "resize" and handle in EDGE_HANDLE_ORDER:
+            return "sb_h_double_arrow" if handle in ("e", "w") else "sb_v_double_arrow"
         return "crosshair" if mode == "resize" else "fleur"
     if getattr(host, "_preview_pan_drag_state", None) is not None:
         return "fleur"
@@ -1902,6 +1906,14 @@ def _draw_preview_character_edit_grips(
             )
         )
 
+    for handle_name, rect in get_edge_handle_rects(cx1, cy1, cx2, cy2, handle_radius).items():
+        active = hover_key == f"edge:{handle_name}"
+        handle_ids.append(canvas.create_rectangle(
+            *rect, fill=active_fill if active else idle_fill,
+            outline=active_outline if active else idle_outline,
+            width=int(grip_style["active_width"] if active else grip_style["idle_width"]), tags=tags,
+        ))
+
     center_x = (float(cx1) + float(cx2)) / 2.0
     center_y = (float(cy1) + float(cy2)) / 2.0
     move_active = hover_key == "move:center"
@@ -1941,8 +1953,9 @@ def _style_preview_character_edit_grips_fast(
     hover_key = str(getattr(host, "_preview_char_hover_grip", "") or "")
 
     try:
-        for handle_name, item_id in zip(("nw", "ne", "sw", "se"), handle_ids):
-            active = hover_key == f"corner:{handle_name}"
+        for handle_name, item_id in zip(CORNER_HANDLE_ORDER + EDGE_HANDLE_ORDER, handle_ids):
+            kind = "edge" if handle_name in EDGE_HANDLE_ORDER else "corner"
+            active = hover_key == f"{kind}:{handle_name}"
             canvas.itemconfigure(
                 item_id,
                 fill=active_fill if active else idle_fill,
@@ -5246,6 +5259,10 @@ def update_preview_character_drag_visual(host, char_idx: int, rec: dict, bbox) -
                 handle_x + handle_radius,
                 handle_y + handle_radius,
             )
+        edge_rects = get_edge_handle_rects(cx1, cy1, cx2, cy2, handle_radius)
+        for handle_name, item_id in zip(EDGE_HANDLE_ORDER, handle_ids[4:]):
+            if item_id is not None:
+                canvas.coords(item_id, *edge_rects[handle_name])
         move_handle_item = visual_ids.get("move_handle")
         if move_handle_item is not None:
             move_radius = float(self._get_preview_char_move_handle_radius())

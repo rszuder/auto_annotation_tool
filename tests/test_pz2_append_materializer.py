@@ -4,6 +4,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+from auto_annotation_tool.registry import pz2_append_materializer as materializer
 
 from auto_annotation_tool.registry import RegistryDatabase
 from auto_annotation_tool.registry.az_package_transport import (
@@ -395,6 +397,40 @@ class PZ2AppendMaterializerTests(unittest.TestCase):
         self.assertFalse(
             (self.preview / "_az_append_backups").exists()
         )
+
+    def test_large_nested_old_payload_is_preserved_and_result_matches_verified_file(self):
+        metadata = self.load_metadata()
+        metadata["existing_plate"]["yolo_raw_detections"] = [
+            {"bbox": [1.25, 2.5, 3.75, 4.0], "scores": [0.12, 0.34], "symbol": "Ł"}
+            for _ in range(1000)
+        ]
+        path = self.preview / "metadata.json"
+        path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+        before_bytes = path.read_bytes()
+        package = self.write_package(with_az=True)
+        result = self.materialize(package, self.append(package))
+        self.assertEqual(self.load_metadata()["existing_plate"], metadata["existing_plate"])
+        self.assertEqual(Path(result.backup_path).read_bytes(), before_bytes)
+        self.assertEqual(result.verified_metadata, self.load_metadata())
+        self.assertEqual(result.metadata_signature, (path.stat().st_mtime_ns, path.stat().st_size))
+        self.assertFalse(b'\n  ' in path.read_bytes())
+
+    def test_postcheck_restores_backup_when_written_old_record_is_changed(self):
+        package = self.write_package(with_az=True)
+        appended = self.append(package)
+        before = (self.preview / "metadata.json").read_bytes()
+        original_writer = materializer._atomic_write_json
+
+        def corrupt_writer(path, payload):
+            original_writer(path, payload)
+            written = json.loads(path.read_text(encoding="utf-8"))
+            written["existing_plate"]["ground_truth_text"] = "CORRUPT"
+            path.write_text(json.dumps(written), encoding="utf-8")
+
+        with patch.object(materializer, "_atomic_write_json", side_effect=corrupt_writer):
+            with self.assertRaisesRegex(PZ2AppendMaterializationError, "Post-check"):
+                self.materialize(package, appended)
+        self.assertEqual((self.preview / "metadata.json").read_bytes(), before)
 
     def test_existing_row_with_same_identity_is_not_duplicated(self):
         package = self.write_package(with_az=True)

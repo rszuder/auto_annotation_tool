@@ -1114,7 +1114,7 @@ def _step_goto_characters(self, preferred_source_context: dict | None = None):
                 title="Wyodrębniam tablice dla Z3",
                 body="Startuję wyodrębnianie tablic z aktualnego źródła T06.",
                 tone="info",
-                progress=0.0,
+                progress=None,
                 show_progress=True,
                 show_return=False,
             )

@@ -19,6 +19,7 @@ from ..character_recognition import CharacterDetector, DetectionMethod
 from ..ocr import PlateOCR
 from ..utils import cleanup_gpu_memory
 from .z3_gt_contract import canonical_raw_detection_hash
+from .z3_threshold_percent import format_percent
 
 YOLO_DETECTION_METHODS = {
     DetectionMethod.YOLO,
@@ -39,6 +40,28 @@ OCR_DETECTION_METHODS = {
     DetectionMethod.YOLO_OCR,
 }
 RAW_DETECTION_SCHEMA = "alpr.pz2.raw_detection.v1"
+
+
+def resolve_runtime_pipeline(host, blocks=None) -> dict:
+    """Use committed builder blocks, never silently substitute an OCR pipeline."""
+    from .z3_detection_pipeline_ui import compile_detection_pipeline_blocks
+    if blocks is None:
+        session = getattr(host, "local_session", None) or {}
+        blocks = session.get("char_detection_pipeline_blocks")
+        if not blocks:
+            getter = getattr(host, "_get_detection_pipeline_blocks", None)
+            if callable(getter):
+                blocks = getter()
+            else:
+                # Older hosts without a builder expose only the method key.
+                blocks = {"OCR": ["ocr_symbol"], "YOLO_BOX": ["yolo_box"],
+                          "YOLO_SYMBOL": ["yolo_symbol"], "YOLO": ["yolo_box", "yolo_symbol"],
+                          "YOLO_OCR": ["yolo_box", "ocr_symbol"], "BOTH": ["ocr_symbol", "yolo_box"]}.get(
+                              host._get_detection_method_key())
+    compiled = compile_detection_pipeline_blocks(blocks)
+    if not compiled["valid"]:
+        raise ValueError(compiled["status_text"])
+    return compiled
 
 
 def _method_uses_yolo(method: DetectionMethod) -> bool:
@@ -523,7 +546,11 @@ def apply_yolo_symbols_to_existing_boxes(
 
 def run_detection_stage(host):
     self = host
-    method = self._get_detection_method_key()
+    try:
+        pipeline = resolve_runtime_pipeline(self)
+    except ValueError as exc:
+        return messagebox.showerror("Nieprawidłowy pipeline", str(exc), parent=self.frame)
+    method = pipeline["method_key"]
     try:
         self.detection_method_var.set(method)
     except Exception:
@@ -551,6 +578,7 @@ def run_detection_stage(host):
         "prepare_working": True,
         "process_scope": "all",
         "workflow_context": workflow_context,
+        "pipeline_blocks": list(pipeline["blocks"]),
     }
 
     try:
@@ -604,18 +632,18 @@ def run_detection_stage(host):
             self._log(
                 self.test_log_text,
                 "[INFO] Parametry YOLO: "
-                f"infer_conf={yolo_runtime['conf']:.2f}, "
-                f"yb_conf={yolo_runtime.get('box_conf', yolo_runtime['conf']):.2f}, "
-                f"ys_conf={yolo_runtime.get('symbol_conf', yolo_runtime['conf']):.2f}, "
-                f"nms_iou={yolo_runtime['iou']:.2f}, "
-                f"overlap={yolo_runtime['overlap']:.2f}, "
+                f"infer_conf={format_percent(yolo_runtime['conf'], suffix=True)}, "
+                f"yb_conf={format_percent(yolo_runtime.get('box_conf', yolo_runtime['conf']), suffix=True)}, "
+                f"ys_conf={format_percent(yolo_runtime.get('symbol_conf', yolo_runtime['conf']), suffix=True)}, "
+                f"nms_iou={format_percent(yolo_runtime['iou'], suffix=True)}, "
+                f"overlap={format_percent(yolo_runtime['overlap'], suffix=True)}, "
                 f"agnostic_nms={yolo_runtime['agnostic_nms']}, "
-                f"seq_y={yolo_runtime['seq_center_y']:.2f}, "
-                f"seq_h_min={yolo_runtime['seq_min_h']:.2f}, "
-                f"seq_h_max={yolo_runtime['seq_max_h']:.2f}, "
-                f"seq_w_max={yolo_runtime['seq_max_w']:.2f}, "
-                f"seq_soft={yolo_runtime['seq_soft_overlap']:.2f}, "
-                f"seq_hard={yolo_runtime['seq_hard_overlap']:.2f}",
+                f"seq_y={format_percent(yolo_runtime['seq_center_y'], suffix=True)}, "
+                f"seq_h_min={format_percent(yolo_runtime['seq_min_h'], suffix=True)}, "
+                f"seq_h_max={format_percent(yolo_runtime['seq_max_h'], suffix=True)}, "
+                f"seq_w_max={format_percent(yolo_runtime['seq_max_w'], suffix=True)}, "
+                f"seq_soft={format_percent(yolo_runtime['seq_soft_overlap'], suffix=True)}, "
+                f"seq_hard={format_percent(yolo_runtime['seq_hard_overlap'], suffix=True)}",
                 "INFO"
             )
         except Exception as e:
@@ -719,6 +747,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
         return
 
     guard_options = dict(guard_options or {})
+    try:
+        pipeline = resolve_runtime_pipeline(self, guard_options.get("pipeline_blocks"))
+    except ValueError as exc:
+        return messagebox.showerror("Nieprawidłowy pipeline", str(exc), parent=self.frame)
     raw_only = bool(guard_options.get("raw_only", False))
     workflow_context = str(
         guard_options.get("workflow_context") or "free"
@@ -817,13 +849,8 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
     self._log(self.test_log_text, "=======================================================", "HEADER")
     self._log(self.test_log_text, "START - Szybki Test Celności\n", "HEADER")
 
-    method_key = self._get_detection_method_key()
-    method_str = method_key.strip().lower()
-    try:
-        method = DetectionMethod(method_str)
-    except Exception:
-        method = DetectionMethod.OCR
-        method_key = "OCR"
+    method_key = pipeline["method_key"]
+    method = DetectionMethod(method_key.lower())
     detection_started_iso = datetime.now().astimezone().isoformat(timespec="seconds")
     try:
         detection_pipeline_label = self._get_detection_pipeline_short_label(method_key)
@@ -1023,6 +1050,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 "method": str(method_key or "OCR"),
                 "method_label": detection_method_label,
                 "pipeline": detection_pipeline_label,
+                "pipeline_blocks": list(pipeline["blocks"]),
                 "device": str(effective_device_choice or ""),
                 "yolo_device": str(effective_yolo_device or ""),
                 "ocr_device": str(effective_ocr_device or ""),
@@ -1167,7 +1195,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                 # YB/OCR 2R guard: RAW/NMS remain untouched diagnostics.
                 # A box crossing the known row separator cannot become working
                 # character geometry or an OCR crop.
-                yolo_box_backend_chars = yolo_nms_chars or yolo_chars or yolo_raw_chars
+                # NMS/RAW are evidence, not a fallback around sequence guards.
+                yolo_box_backend_chars = self._sort_character_records_by_x(
+                    list(detector.last_yolo_box_detections)
+                )
                 yolo_box_backend_chars, row_guard_details = guard_yolo_box_candidates_for_plate_layout(
                     self,
                     local_meta[pid],
@@ -1285,6 +1316,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     "detection_method": str(
                         getattr(method, "value", method) or ""
                     ),
+                    "pipeline_blocks": list(pipeline["blocks"]),
                     "prediction_text": raw_prediction_text,
                     "characters": copy.deepcopy(c_clean),
                     "fusion_strategy": str(fusion_strategy or ""),
@@ -1303,6 +1335,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
 
                 yolo_clean = self._serialize_character_records(
                     getattr(detector, "last_yolo_detections", []),
+                    data=local_meta[pid],
+                )
+                yolo_box_clean = self._serialize_character_records(
+                    yolo_box_backend_chars,
                     data=local_meta[pid],
                 )
                 yolo_nms_clean = self._serialize_character_records(
@@ -1329,6 +1365,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     # Diagnostics belong to the RAW run and are safe to update.
                     local_meta[pid]["yolo_detections"] = yolo_clean
                     local_meta[pid]["yolo_nms_detections"] = yolo_nms_clean
+                    local_meta[pid]["yolo_box_detections"] = yolo_box_clean
                     local_meta[pid]["yolo_raw_detections"] = yolo_raw_clean
 
                     # Evaluation and Assist may use GT only after RAW is frozen.
@@ -1426,7 +1463,10 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     )
                     if guard_options.get("prepare_working"):
                         from .z3_review_runtime import prepare_working_annotation_from_raw
-                        prepare_working_annotation_from_raw(self, local_meta[pid], plate_id=pid)
+                        prepare_working_annotation_from_raw(
+                            self, local_meta[pid], plate_id=pid, plate_image=img,
+                            geometry_settings=yolo_runtime, from_detection=True,
+                        )
                     continue
 
                 preserve_perfect_existing = bool(existing_is_perfect and protect_perfect_plates)
@@ -1521,6 +1561,7 @@ def run_fast_ocr_test(host, guard_options: dict | None = None):
                     final_chars = list(local_meta[pid].get("characters", []) or [])
                 local_meta[pid]["yolo_detections"] = yolo_clean
                 local_meta[pid]["yolo_nms_detections"] = yolo_nms_clean
+                local_meta[pid]["yolo_box_detections"] = yolo_box_clean
                 local_meta[pid]["yolo_raw_detections"] = yolo_raw_clean
 
                 try:

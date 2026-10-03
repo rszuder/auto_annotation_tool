@@ -807,12 +807,14 @@ def _clear_project_contexts(
                 except Exception:
                     pass
                 if lightweight_tab_clear and tab_key != "training":
-                    try:
-                        setattr(tab, "_campaign_lightweight_context_detached", True)
-                    except Exception:
-                        pass
-                    logger.debug(f"Lekko odpinam kontekst {label} bez czyszczenia niewidocznego UI.")
-                    continue
+                    # "Lightweight" oznacza tylko: nie odtwarzaj ciężkiego
+                    # podglądu free mode. Nie wolno pomijać samego czyszczenia
+                    # kontekstu kampanii, bo po wejściu do Z2/Z3 zostaje wtedy
+                    # stary shell projektu. Marker detached nie był nigdzie konsumowany.
+                    logger.debug(
+                        f"Odpinam kontekst {label} bez odtwarzania ciężkiego "
+                        "podglądu trybu swobodnego."
+                    )
                 clear_context = getattr(tab, "clear_campaign_context", None)
                 if clear_context is None:
                     continue

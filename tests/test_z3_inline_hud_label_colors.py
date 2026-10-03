@@ -16,12 +16,12 @@ def test_top_hud_uses_one_label_color_and_independent_value_colors(monkeypatch):
         frame=object(),
         app=SimpleNamespace(
             palette={
-                "muted": "#LABEL",
-                "fg": "#FG",
-                "accent_alt": "#GT",
-                "warning": "#WARN",
-                "success": "#OK",
-                "error": "#ERR",
+                "muted": "#b7c0c8",
+                "fg": "#f3f6f8",
+                "accent_alt": "#7ee7ff",
+                "warning": "#ffe064",
+                "success": "#6add7f",
+                "error": "#ff8989",
             }
         ),
         _preview_inline_hud_fonts=(_Font(), _Font()),
@@ -33,17 +33,17 @@ def test_top_hud_uses_one_label_color_and_independent_value_colors(monkeypatch):
     monkeypatch.setattr(
         z3_inline_hud,
         "resolve_inline_hud_plate_status",
-        lambda _host, _data: ("DO KONTROLI", "#WARN"),
+        lambda _host, _data: ("DO KONTROLI", "#ffe064"),
     )
 
     status_layout = {
         "neutral_badges": [
-            {"text": "Odczyt: [ABC123]", "outline": "#READ"},
-            {"text": "Ramki: 6", "outline": "#BOX"},
-            {"text": "Układ: 1R", "outline": "#LAYOUT"},
+            {"text": "Odczyt: [ABC123]", "outline": "#6aabe1"},
+            {"text": "Ramki: 6", "outline": "#ffc97a"},
+            {"text": "Układ: 1R", "outline": "#cb9bf4"},
         ],
         "badges": [
-            {"text": "Decyzja: DO KONTROLI", "outline": "#WARN"},
+            {"text": "Decyzja: DO KONTROLI", "outline": "#ffe064"},
         ],
     }
 
@@ -76,12 +76,9 @@ def test_top_hud_uses_one_label_color_and_independent_value_colors(monkeypatch):
         "Układ:",
         "Decyzja:",
     ]
-    assert {row[4] for row in label_lines} == {"#LABEL"}
+    assert {row[4] for row in label_lines} == {z3_inline_hud._HUD_LABEL_COLOR}
 
     values = {row[0]: row[4] for row in value_lines}
-    assert values["1/1"] == "#FG"
-    assert values["brak"] == "#GT"
-    assert values["[ABC123]"] == "#READ"
-    assert values["6"] == "#BOX"
-    assert values["1R"] == "#LAYOUT"
-    assert values["DO KONTROLI"] == "#WARN"
+    for text, color in (("1/1", "#f3f6f8"), ("brak", "#f3f6f8"), ("[ABC123]", "#6aabe1"),
+                        ("6", "#ffc97a"), ("1R", "#cb9bf4"), ("DO KONTROLI", "#ffe064")):
+        assert values[text] == z3_inline_hud.ensure_inline_hud_canvas_contrast(color, min_ratio=5.3)

@@ -57,6 +57,7 @@ from . import z3_plate_layout_runtime
 from . import z3_character_geometry
 from . import z3_preview_editor_runtime
 from . import z3_preview_overlay_runtime
+from .z3_preview_sort_modal import open_preview_sort_modal
 from .free_mode_assistant import get_step3_free_mode_assistant_context
 from .z3_campaign_flow import (
     auto_progress_campaign_step3_entry,
@@ -641,6 +642,7 @@ PREVIEW_BOX_MODE_BY_LABEL.update({
 PREVIEW_SORT_OPTIONS = [
     ("DEFAULT", "Domyślne"),
     ("OK", "Po OK"),
+    ("GT_Z2", "Po GT z Z2"),
     ("1R", "Po 1R"),
     ("2R", "Po 2R"),
     ("M", "Po M"),
@@ -652,6 +654,7 @@ PREVIEW_SORT_LABELS = {key: label for key, label in PREVIEW_SORT_OPTIONS}
 PREVIEW_SORT_COLOR_KEYS = {
     "DEFAULT": "muted",
     "OK": "success",
+    "GT_Z2": "info",
     "1R": "success",
     "2R": "warning",
     "M": "warning",
@@ -1159,7 +1162,13 @@ class CharacterAnnotationTab:
         except Exception:
             self._preview_char_drag_window_bindings = []
 
-    def _preview_canvas_to_image_point(self, canvas_x: float, canvas_y: float):
+    def _preview_canvas_to_image_point(
+        self,
+        canvas_x: float,
+        canvas_y: float,
+        *,
+        clamp: bool = True,
+    ):
         state = getattr(self, "_preview_render_state", None) or {}
         scale = max(0.001, float(state.get("scale", 0.0) or 0.0))
         image_left = float(state.get("image_left", 0.0))
@@ -1169,8 +1178,9 @@ class CharacterAnnotationTab:
 
         img_x = (float(canvas_x) - image_left) / scale
         img_y = (float(canvas_y) - image_top) / scale
-        img_x = max(0.0, min(orig_w, img_x))
-        img_y = max(0.0, min(orig_h, img_y))
+        if clamp:
+            img_x = max(0.0, min(orig_w, img_x))
+            img_y = max(0.0, min(orig_h, img_y))
         return float(img_x), float(img_y)
 
     def _preview_image_to_canvas_point(self, img_x: float, img_y: float):
@@ -2547,6 +2557,13 @@ class CharacterAnnotationTab:
         apply_preview_sort_bar_style(
             self,
             sort_labels=PREVIEW_SORT_LABELS,
+            sort_color_keys=PREVIEW_SORT_COLOR_KEYS,
+        )
+
+    def _open_preview_sort_modal(self):
+        return open_preview_sort_modal(
+            self,
+            sort_options=PREVIEW_SORT_OPTIONS,
             sort_color_keys=PREVIEW_SORT_COLOR_KEYS,
         )
 

@@ -52,6 +52,24 @@ def make_owner(count, selected, *, super_mode=True):
     return host
 
 
+@pytest.mark.parametrize("super_mode", [False, True])
+def test_a_fits_plate_at_full_quality_without_waiting_for_idle(super_mode):
+    host = make_owner(2, 0, super_mode=super_mode)
+    host._preview_shortcuts_enabled = lambda *args, **kwargs: True
+    host._preview_shortcut_is_duplicate = lambda *args: False
+    host._mark_preview_user_interaction = Mock()
+    host._preview_draw_mode = False
+    host._capture_preview_view_state = Mock(return_value={})
+
+    assert interaction._on_preview_cycle_plate_shortcut(host) == "break"
+
+    assert host._get_selected_plate_index_for_ann(host._get_preview_annotation()) == 1
+    host.preview_canvas._update_display.assert_called_once_with(interaction_fast=False)
+    host.preview_canvas._schedule_final_quality_display.assert_not_called()
+    if super_mode:
+        assert not host.preview_canvas._navigation_rendering
+
+
 @pytest.mark.parametrize("count,selected", [(2, 0), (2, 1), (3, 0), (3, 1), (3, 2)])
 def test_delete_in_superzoom_shows_remaining_plate_on_same_image(count, selected):
     host = make_owner(count, selected)

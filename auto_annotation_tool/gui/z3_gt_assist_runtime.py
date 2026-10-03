@@ -61,6 +61,21 @@ def apply_live_gt_assist(host, data: dict | None, *, prepare: bool = False) -> d
     if reason == "ready":
         ordered = host._sort_character_records_by_x(chars, data=data)
         for rec, symbol in zip(ordered, gt):
+            sign_source = str(rec.get("sign_source") or "").strip().lower().replace("-", "_")
+            symbol_source = str(rec.get("symbol_source") or "").strip().lower().replace("-", "_")
+            symbol_method = str(rec.get("symbol_method") or "").strip().lower().replace("-", "_")
+            manual_sign = (
+                sign_source in {"manual_sign", "manual", "local_manual", "cvat_manual", "preview_editor"}
+                or (
+                    not sign_source
+                    and (
+                        symbol_source in {"manual", "manual_sign", "local_manual", "cvat_manual", "preview_editor"}
+                        or symbol_method in {"manual", "manual_sign", "local_manual", "cvat_manual", "preview_editor"}
+                    )
+                )
+            )
+            if manual_sign:
+                continue
             if str(rec.get("character") or "") != symbol:
                 rec.setdefault("gt_assist_original_character", rec.get("character", ""))
                 rec.setdefault("gt_assist_original_sign_source", rec.get("sign_source", ""))
@@ -96,7 +111,11 @@ def get_live_gt_assist_presentation(host, data: dict | None = None) -> dict:
     elif (data.get("live_gt_assist") or {}).get("reason") in {"invalid_geometry", "layout_conflict", "layout_uncertain"}:
         text, tone = f"GT: {gt} · sprawdź geometrię i układ ramek", "warning"
     else:
-        text = f"GT: {gt} · asysta znaków aktywna"
+        recovery = data.get("gt_geometry_recovery") or {}
+        if recovery.get("generated_box_count"):
+            text = f"GT: {gt} · ramki odzyskane z obrazu — sprawdź ich geometrię"
+        else:
+            text = f"GT: {gt} · asysta znaków aktywna"
     return {"text": text, "tone": tone, "status": "automatic", "can_accept": False, "can_reject": False}
 
 
@@ -265,7 +284,7 @@ def build_gt_assist_suggestion(host, data: dict | None) -> dict:
                 }
             )
 
-    yolo_candidates = (
+    yolo_candidates = source_data.get("yolo_box_detections") if "yolo_box_detections" in source_data else (
         source_data.get("yolo_nms_detections")
         or source_data.get("yolo_detections")
         or source_data.get("yolo_raw_detections")

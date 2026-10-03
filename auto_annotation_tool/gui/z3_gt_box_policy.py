@@ -91,12 +91,10 @@ def _select_limited_boxes(host, data, records):
 
 
 def can_add_character_box(host, data, *, notify=True):
-    gt = plate_gt(data)
-    count = len((data or {}).get("characters") or [])
-    allowed = not gt or count < len(gt)
-    if not allowed and notify:
-        host._update_preview_edit_status(
-            f"Limit GT: {len(gt)} znaków, ramki {count}/{len(gt)}. Usuń zbędną ramkę przed dodaniem nowej.",
-            tone="warning",
-        )
-    return allowed
+    """Manual PZ2 editing is never count-blocked by GT.
+
+    GT count guards belong to automatic detection/post-processing. The operator
+    must always be able to add the missing box, even when inherited Z2 GT later
+    turns out to be wrong. Any mismatch is resolved at explicit R/OK review.
+    """
+    return True

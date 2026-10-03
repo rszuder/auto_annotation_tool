@@ -4,6 +4,7 @@ import tkinter as tk
 
 from . import z3_review_runtime as review
 from .z3_metadata_cache import mark_preview_metadata_changed
+from .z3_gt_box_policy import working_characters
 
 
 def selected_plate_ids(host):
@@ -51,6 +52,32 @@ def select_all(host, event=None):
     return "break"
 
 
+def clear_automatic_boxes(host, plate_id):
+    """Clear working automatic geometry, preserving manual boxes and RAW."""
+    data = host.preview_metadata.get(plate_id)
+    if not isinstance(data, dict):
+        return {"ok": False, "reason": "missing_plate"}
+    records = list(working_characters(host, data))
+    retained = [rec for index, rec in enumerate(records)
+                if host._get_character_box_source_tag(rec, data=data, fallback_index=index) == "manual_box"]
+    removed = len(records) - len(retained)
+    if not removed:
+        return {"ok": True, "unchanged": True, "removed_boxes": 0, "manual_boxes": len(retained)}
+    host._push_preview_history_snapshot(plate_id)
+    review.mark_review_edit_started(host, data)
+    data["characters"] = retained
+    data["status"] = "needs_fix"
+    data["fusion_strategy"] = "manual_correction"
+    for key in ("gt_box_limit", "gt_geometry_recovery", "live_gt_assist", "gt_assist", "_layout_override_chars_backup"):
+        data.pop(key, None)
+    data["automatic_boxes_cleared"] = {"removed_count": removed, "retained_manual_count": len(retained)}
+    return {"ok": True, "removed_boxes": removed, "manual_boxes": len(retained)}
+
+
+def run_selected_clear_automatic_boxes(host):
+    return run_selected_review_action(host, approved=False, action="clear_automatic_boxes")
+
+
 def change_plate_approval(host, plate_id, approved):
     data = host.preview_metadata.get(plate_id)
     if not isinstance(data, dict):
@@ -72,7 +99,7 @@ def change_plate_approval(host, plate_id, approved):
     return review.confirm_review_gold(host, plate_id, persist=False, quiet=True, refresh=False)
 
 
-def run_selected_review_action(host, approved=True):
+def run_selected_review_action(host, approved=True, *, action=None):
     if (getattr(host, "_preview_review_batch_running", False)
             or getattr(host, "is_processing", False) or getattr(host, "fast_test_running", False)):
         return None
@@ -82,7 +109,8 @@ def run_selected_review_action(host, approved=True):
     metadata = host.preview_metadata
     reset_token = getattr(host, "_project_reset_token", None)
     result = {"total": len(ids), "processed": 0, "changed": [], "unchanged": 0,
-              "failed": [], "dirty": [], "approved": bool(approved), "done": False}
+              "failed": [], "dirty": [], "approved": bool(approved), "done": False,
+              "action": action, "removed_boxes": 0, "manual_boxes": 0}
     host._preview_review_batch_running = True
     host._preview_review_batch_result = result
     host._refresh_detection_review_controls()
@@ -111,7 +139,8 @@ def run_selected_review_action(host, approved=True):
         while result["processed"] < len(ids):
             pid = ids[result["processed"]]
             try:
-                outcome = change_plate_approval(host, pid, approved)
+                outcome = (clear_automatic_boxes(host, pid) if action == "clear_automatic_boxes"
+                           else change_plate_approval(host, pid, approved))
             except Exception as exc:
                 outcome = {"ok": False, "reason": "validation_error", "error": str(exc)}
             if outcome.get("unchanged"):
@@ -120,6 +149,8 @@ def run_selected_review_action(host, approved=True):
                 result["changed"].append(pid)
             else:
                 result["failed"].append({"plate_id": pid, "reason": outcome.get("reason", "review_not_perfect")})
+            result["removed_boxes"] += outcome.get("removed_boxes", 0)
+            result["manual_boxes"] += outcome.get("manual_boxes", 0)
             if not outcome.get("unchanged") and outcome.get("reason") not in {"missing_plate", "missing_raw_detection"}:
                 result["dirty"].append(pid)
             host._refresh_preview_listbox_row(pid)
@@ -135,11 +166,15 @@ def run_selected_review_action(host, approved=True):
             # completed rows through the existing autosave lifecycle.
             if pending:
                 host._schedule_preview_metadata_save(delay_ms=180)
-            host._update_preview_edit_status(f"Aktualizacja zatwierdzeń: {result['processed']}/{len(ids)}", tone="info")
+            label = "Usuwanie automatycznych ramek" if action == "clear_automatic_boxes" else "Aktualizacja zatwierdzeń"
+            host._update_preview_edit_status(f"{label}: {result['processed']}/{len(ids)}", tone="info")
             result["after_id"] = host.frame.after(1, step)
             return
 
         host._preview_review_batch_running = False
+        if action == "clear_automatic_boxes" and result["changed"]:
+            from .z3_detection_runtime import clear_detection_review_snapshot_after_manual_edit
+            clear_detection_review_snapshot_after_manual_edit(host)
         # Failed approval can still create a valid, unfinished working review.
         mark_preview_metadata_changed(host)
         if pending:
@@ -151,6 +186,10 @@ def run_selected_review_action(host, approved=True):
         host._on_preview_select(None)
         verb = "Zatwierdzono" if approved else "Cofnięto zatwierdzenie"
         message = f"{verb}: {len(result['changed'])}/{len(ids)}."
+        if action == "clear_automatic_boxes":
+            message = (f"Usunięto automatyczne ramki: {result['removed_boxes']}, "
+                       f"tablic: {len(result['changed'])}/{len(ids)}. "
+                       f"Zachowano ręczne ramki: {result['manual_boxes']}.")
         if result["unchanged"]:
             message += f" Bez zmian: {result['unchanged']}."
         if result["failed"]:
@@ -192,6 +231,8 @@ def show_context_menu(host, event):
                      command=lambda: run_selected_review_action(host, True))
     menu.add_command(label=f"Cofnij zatwierdzenie ({total})", state=state,
                      command=lambda: run_selected_review_action(host, False))
+    menu.add_command(label=f"Usuń automatyczne ramki ({total})", state=state,
+                     command=lambda: run_selected_clear_automatic_boxes(host))
     menu.add_separator()
     menu.add_command(label="Zaznacz wszystkie", accelerator="Ctrl+A", command=lambda: select_all(host))
     try:

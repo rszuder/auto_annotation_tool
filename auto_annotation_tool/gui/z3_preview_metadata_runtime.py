@@ -281,11 +281,45 @@ def _resolve_preview_expected_text_for_crop(self, data: dict | None = None, char
                 "resolution": "missing_ground_truth",
             }
 
+        attrs = source_data.get("plate_attributes") if isinstance(source_data, dict) else {}
+        attrs = attrs if isinstance(attrs, dict) else {}
+        ground_truth_source = str(
+            (source_data or {}).get("ground_truth_source")
+            or attrs.get("ground_truth_source")
+            or ""
+        ).strip().lower()
+        protected_z2_gt = bool(ground_truth_source == "manual_z2")
+
         matched_text = (
             ground_truth_text
             if candidate_text and candidate_text == ground_truth_text
             else ""
         )
+
+        # Only inherited Z2 GT may resolve/count the expected number of boxes.
+        # Local manual_z3 or legacy/fallback text may remain visible as the
+        # saved number, but completeness of manual boxes is the operator's
+        # decision and must never be rendered as N/M.
+        if not protected_z2_gt:
+            return {
+                "candidate_text": candidate_text,
+                "expected_texts": [ground_truth_text],
+                "expected_lengths": [],
+                "matched_text": matched_text,
+                "target_text": "",
+                "target_length": 0,
+                "target_lengths": [],
+                "text_resolved": bool(matched_text),
+                "count_resolved": False,
+                "ambiguous": False,
+                "expected_source": "local_ground_truth",
+                "resolution": (
+                    "local_ground_truth_exact"
+                    if matched_text
+                    else "local_ground_truth_review"
+                ),
+            }
+
         return {
             "candidate_text": candidate_text,
             "expected_texts": [ground_truth_text],

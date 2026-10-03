@@ -178,120 +178,120 @@ def create_annotation_widgets(host, SlimProgressBar, nav_button_width):
     self.manual_route_card_title = None
     self.manual_route_card_desc = None
 
-    if not initial_campaign_context:
-        self.workflow_entry_title_lbl = SectionHeaderLabel(
-            self.workflow_entry_section,
-            self.app,
-            text="Co chcesz zrobic?",
-        )
-        self.workflow_entry_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
-
-        self.workflow_intro_lbl = tk.Label(
-            self.workflow_entry_section,
-            textvariable=self.workflow_intro_var,
-            anchor="w",
-            justify=tk.LEFT,
-            wraplength=360,
-            bd=0,
-            highlightthickness=0
-        )
-        self.workflow_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
-        self._set_inline_label_state(self.workflow_intro_lbl, tone="muted", emphasis=False)
-
-        self.workflow_cards_frame = ttk.Frame(self.workflow_entry_section, style="Panel.TFrame")
-        self.workflow_cards_frame.pack(fill=tk.X)
-
-        palette = getattr(self.app, "palette", {})
-        workflow_card_bg = palette.get("panel_alt", palette.get("panel", "#252526"))
-        workflow_card_border = blend_hex_colors(
-            palette.get("success", "#4ec9b0"),
-            palette.get("panel_border", palette.get("border", "#3c3c3c")),
-            0.18,
-        )
-        workflow_card_fg = palette.get("fg", "#f3f3f3")
-        workflow_card_muted = palette.get("muted", "#c7c7c7")
-
-        self.auto_route_card = tk.Frame(
-        self.workflow_cards_frame,
-        bd=0,
-        highlightthickness=1,
-        highlightbackground=workflow_card_border,
-        highlightcolor=workflow_card_border,
-        bg=workflow_card_bg,
-        padx=14,
-        pady=12,
-        cursor="hand2",
+    # Build route cards in both contexts; the renderer controls visibility.
+    self.workflow_entry_title_lbl = SectionHeaderLabel(
+        self.workflow_entry_section,
+        self.app,
+        text="Co chcesz zrobic?",
     )
-        self.auto_route_card.pack(fill=tk.X, pady=(0, 8))
-        self.auto_route_card_title = tk.Label(
-        self.auto_route_card,
-        text="Autoanotacja tablic",
+    self.workflow_entry_title_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+
+    self.workflow_intro_lbl = tk.Label(
+        self.workflow_entry_section,
+        textvariable=self.workflow_intro_var,
         anchor="w",
         justify=tk.LEFT,
-        font=("Segoe UI Semibold", 11),
-        cursor="hand2",
+        wraplength=360,
         bd=0,
-        highlightthickness=0,
-        bg=workflow_card_bg,
-        fg=workflow_card_fg,
+        highlightthickness=0
     )
-        self.auto_route_card_title.pack(anchor=tk.W, fill=tk.X)
-        self.auto_route_card_desc = tk.Label(
-        self.auto_route_card,
-        text="Uruchom YOLO, zapisz run anotacji Z2 w workspace i przejdź potem do korekty oraz splitu.",
-        anchor="w",
-        justify=tk.LEFT,
-        wraplength=336,
-        cursor="hand2",
-        bd=0,
-        highlightthickness=0,
-        bg=workflow_card_bg,
-        fg=workflow_card_muted,
-    )
-        self.auto_route_card_desc.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+    self.workflow_intro_lbl.pack(anchor=tk.W, fill=tk.X, pady=(0, 10))
+    self._set_inline_label_state(self.workflow_intro_lbl, tone="muted", emphasis=False)
 
-        self.manual_route_card = tk.Frame(
-        self.workflow_cards_frame,
-        bd=0,
-        highlightthickness=1,
-        highlightbackground=workflow_card_border,
-        highlightcolor=workflow_card_border,
-        bg=workflow_card_bg,
-        padx=14,
-        pady=12,
-        cursor="hand2",
-    )
-        self.manual_route_card.pack(fill=tk.X)
-        self.manual_route_card_title = tk.Label(
-        self.manual_route_card,
-        text="Praca ręczna na runie Z2",
-        anchor="w",
-        justify=tk.LEFT,
-        font=("Segoe UI Semibold", 11),
-        cursor="hand2",
-        bd=0,
-        highlightthickness=0,
-        bg=workflow_card_bg,
-        fg=workflow_card_fg,
-    )
-        self.manual_route_card_title.pack(anchor=tk.W, fill=tk.X)
-        self.manual_route_card_desc = tk.Label(
-        self.manual_route_card,
-        text="Utwórz nowy run ręczny, otwórz lokalny run z historii albo wskaż dowolny run Z2 do korekty.",
-        anchor="w",
-        justify=tk.LEFT,
-        wraplength=336,
-        cursor="hand2",
-        bd=0,
-        highlightthickness=0,
-        bg=workflow_card_bg,
-        fg=workflow_card_muted,
-    )
-        self.manual_route_card_desc.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+    self.workflow_cards_frame = ttk.Frame(self.workflow_entry_section, style="Panel.TFrame")
+    self.workflow_cards_frame.pack(fill=tk.X)
 
-        self._bind_workflow_card(self.auto_route_card, "auto")
-        self._bind_workflow_card(self.manual_route_card, "manual")
-        self._refresh_workflow_route_cards(refresh_content=True)
+    palette = getattr(self.app, "palette", {})
+    workflow_card_bg = palette.get("panel_alt", palette.get("panel", "#252526"))
+    workflow_card_border = blend_hex_colors(
+        palette.get("success", "#4ec9b0"),
+        palette.get("panel_border", palette.get("border", "#3c3c3c")),
+        0.18,
+    )
+    workflow_card_fg = palette.get("fg", "#f3f3f3")
+    workflow_card_muted = palette.get("muted", "#c7c7c7")
+
+    self.auto_route_card = tk.Frame(
+    self.workflow_cards_frame,
+    bd=0,
+    highlightthickness=1,
+    highlightbackground=workflow_card_border,
+    highlightcolor=workflow_card_border,
+    bg=workflow_card_bg,
+    padx=14,
+    pady=12,
+    cursor="hand2",
+)
+    self.auto_route_card.pack(fill=tk.X, pady=(0, 8))
+    self.auto_route_card_title = tk.Label(
+    self.auto_route_card,
+    text="Autoanotacja tablic",
+    anchor="w",
+    justify=tk.LEFT,
+    font=("Segoe UI Semibold", 11),
+    cursor="hand2",
+    bd=0,
+    highlightthickness=0,
+    bg=workflow_card_bg,
+    fg=workflow_card_fg,
+)
+    self.auto_route_card_title.pack(anchor=tk.W, fill=tk.X)
+    self.auto_route_card_desc = tk.Label(
+    self.auto_route_card,
+    text="Uruchom YOLO, zapisz run anotacji Z2 w workspace i przejdź potem do korekty oraz splitu.",
+    anchor="w",
+    justify=tk.LEFT,
+    wraplength=336,
+    cursor="hand2",
+    bd=0,
+    highlightthickness=0,
+    bg=workflow_card_bg,
+    fg=workflow_card_muted,
+)
+    self.auto_route_card_desc.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+
+    self.manual_route_card = tk.Frame(
+    self.workflow_cards_frame,
+    bd=0,
+    highlightthickness=1,
+    highlightbackground=workflow_card_border,
+    highlightcolor=workflow_card_border,
+    bg=workflow_card_bg,
+    padx=14,
+    pady=12,
+    cursor="hand2",
+)
+    self.manual_route_card.pack(fill=tk.X)
+    self.manual_route_card_title = tk.Label(
+    self.manual_route_card,
+    text="Praca ręczna na runie Z2",
+    anchor="w",
+    justify=tk.LEFT,
+    font=("Segoe UI Semibold", 11),
+    cursor="hand2",
+    bd=0,
+    highlightthickness=0,
+    bg=workflow_card_bg,
+    fg=workflow_card_fg,
+)
+    self.manual_route_card_title.pack(anchor=tk.W, fill=tk.X)
+    self.manual_route_card_desc = tk.Label(
+    self.manual_route_card,
+    text="Utwórz nowy run ręczny, otwórz lokalny run z historii albo wskaż dowolny run Z2 do korekty.",
+    anchor="w",
+    justify=tk.LEFT,
+    wraplength=336,
+    cursor="hand2",
+    bd=0,
+    highlightthickness=0,
+    bg=workflow_card_bg,
+    fg=workflow_card_muted,
+)
+    self.manual_route_card_desc.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+
+    self._bind_workflow_card(self.auto_route_card, "auto")
+    self._bind_workflow_card(self.manual_route_card, "manual")
+    self._refresh_workflow_route_cards(refresh_content=True)
     _log_build_phase("workflow_cards")
     self.workflow_entry_separator = self._build_left_section_separator(settings_col, pady=(16, 20))
     _log_build_phase("workflow_entry")

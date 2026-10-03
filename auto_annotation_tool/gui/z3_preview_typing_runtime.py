@@ -368,16 +368,28 @@ def _assign_character_to_active_preview_label(self, symbol: str):
         return False
 
     rec = chars[int(idx)]
+    persistent_label_mode = bool(getattr(self, "_preview_char_label_mode", False))
     if self._sanitize_preview_char_symbol(rec.get("character", "")) == symbol:
         self._preview_char_selected_index = int(idx)
-        self._preview_char_label_active_index = int(idx)
-        self._preview_char_hover_label_index = int(idx)
-        self._update_preview_edit_status(
-            "Znak już ma taką wartość. Użyj strzałek lewo/prawo albo kliknij inny box LPM.",
-            tone="muted",
-        )
-        if not self._refresh_preview_character_selection_visual({int(idx)}):
-            self._on_preview_select(None)
+        if persistent_label_mode:
+            self._preview_char_label_active_index = int(idx)
+            self._preview_char_hover_label_index = int(idx)
+            self._update_preview_edit_status(
+                "Znak już ma taką wartość. Użyj strzałek lewo/prawo albo kliknij inny box LPM.",
+                tone="muted",
+            )
+            if not self._refresh_preview_character_selection_visual({int(idx)}):
+                self._on_preview_select(None)
+        else:
+            self._cancel_preview_char_label_interaction(
+                reset_mode=False,
+                clear_hover=True,
+                redraw_canvas=True,
+            )
+            self._update_preview_edit_status(
+                "Znak już ma taką wartość. Korekta pojedynczego pola zakończona.",
+                tone="muted",
+            )
         return True
     self._push_preview_history_snapshot()
     rec["character"] = symbol
@@ -394,9 +406,19 @@ def _assign_character_to_active_preview_label(self, symbol: str):
         refresh_row=True,
         light_redraw_indices="selected",
     )
-    if bool(getattr(self, "_preview_char_label_mode", False)):
+    if persistent_label_mode:
         self._update_preview_edit_status(
             f"Zapisano znak {symbol}. Użyj strzałek lewo/prawo albo kliknij kolejny box LPM.",
+            tone="success",
+        )
+    else:
+        self._cancel_preview_char_label_interaction(
+            reset_mode=False,
+            clear_hover=True,
+            redraw_canvas=True,
+        )
+        self._update_preview_edit_status(
+            f"Zapisano znak {symbol}. Korekta pojedynczego pola zakończona.",
             tone="success",
         )
     return True
