@@ -35,6 +35,7 @@ _SIDE_CAR_NAMES = (
     "metadata.json",
 )
 _DATASET_MANIFEST_NAMES = (
+    "split_assignment_manifest.json",
     "training_variant_manifest.json",
     "mz_training_variant_manifest.json",
     "dataset_manifest.json",
@@ -228,6 +229,9 @@ def build_model_training_provenance(
         "base_model": str(_value(run, "base_model", "") or ""),
         "img_size": _int_or_none(_value(run, "img_size")),
         "batch_size": _int_or_none(_value(run, "batch_size")),
+        "experiment_id": str(_value(run, "experiment_id", "") or ""),
+        "strict_experiment": bool(_value(run, "strict_experiment", False)),
+        "training_protocol_snapshot": _mapping_copy(_value(run, "training_protocol_snapshot")),
         "started_at": str(_value(run, "started_at", "") or ""),
         "finished_at": str(_value(run, "finished_at", "") or ""),
         "created_at": str(_value(run, "created_at", "") or ""),
@@ -1583,6 +1587,10 @@ def _run_like_dict(run_like: Any) -> dict[str, Any]:
         "dataset_preparation",
         "input_checkpoint_snapshot",
         "output_checkpoint_snapshot",
+        "strict_experiment",
+        "experiment_id",
+        "training_protocol_requested",
+        "training_protocol_snapshot",
     ):
         try:
             value = getattr(run_like, key)

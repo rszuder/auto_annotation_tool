@@ -45,6 +45,9 @@ from .model_provenance import (
 from .training_history import TrainingHistory, TrainingRun, TrainingStatus
 from .training_report import TrainingReportGenerator
 from .resource_monitor import format_resource_sample_line, sample_system_memory
+from .experiment_protocol import (
+    CONTROLLED_TRAIN_FIELDS, protocol_differences, training_protocol_snapshot, validate_requested_protocol,
+)
 
 YOLO = None
 
@@ -666,7 +669,48 @@ class YOLOPoseTrainer:
             train_args["mosaic"] = float(mosaic)
         if close_mosaic is not None:
             train_args["close_mosaic"] = int(close_mosaic)
+        requested = dict(getattr(run, "training_protocol_requested", None) or {})
+        train_args["seed"] = int(requested.get("seed", 0))
+        train_args["optimizer"] = str(requested.get("optimizer", "auto"))
+        if bool(getattr(run, "strict_experiment", False)):
+            validate_requested_protocol(requested)
+            # A memory retry must never silently replace the requested core
+            # configuration. Optional/default args below implement the recipe.
+            core = {key:train_args[key] for key in ("batch","imgsz","epochs","lr0","device")}
+            changed = protocol_differences({key:requested[key] for key in core}, core)
+            if changed:
+                raise RuntimeError("Strict experiment parameter drift: " + str(changed))
+            train_args.update({key:value for key,value in requested.items() if key in CONTROLLED_TRAIN_FIELDS})
         return train_args
+
+    def _capture_training_protocol(self, run, arguments, *, source):
+        requested = dict(getattr(run, "training_protocol_requested", None) or {})
+        strict = bool(getattr(run, "strict_experiment", False))
+        snapshot = training_protocol_snapshot(requested, arguments, strict=strict, source=source)
+        self.history.update_run(run.id, training_protocol_snapshot=snapshot)
+        run.training_protocol_snapshot = snapshot
+        if strict and snapshot["differences"]:
+            raise RuntimeError("Strict experiment runtime parameter drift: " + str(snapshot["differences"]))
+
+    def _reject_experiment_memory_fallback(self, run, reason):
+        snapshot = dict(getattr(run, "training_protocol_snapshot", None) or {})
+        snapshot.update(schema="alpr.training_protocol_snapshot.v1", comparable=False,
+            strict_experiment=True, memory_fallback_required=True, failure_reason=str(reason))
+        self.history.update_run(run.id, training_protocol_snapshot=snapshot)
+        run.training_protocol_snapshot = snapshot
+        raise RuntimeError("Strict experiment cannot change protocol for RAM/OOM safety: " + str(reason))
+
+    @staticmethod
+    def _apply_experiment_data_policy(run, runtime_trainer):
+        if not bool(getattr(run, "strict_experiment", False)):
+            return
+        requested = dict(getattr(run, "training_protocol_requested", None) or {})
+        if requested.get("augmentation_policy") != "source_only":
+            raise RuntimeError("Strict experiment requires an explicit augmentation policy")
+        # Ultralytics 8.4.19 supports hyp.augmentations in its dataset builder,
+        # but not as a validated top-level model.train keyword. This callback
+        # runs before get_dataset()/loader creation; no global patch is used.
+        runtime_trainer.args.augmentations = []
 
     def _export_training_report_artifacts(self, run: TrainingRun) -> None:
         if run is None:
@@ -1290,6 +1334,18 @@ class YOLOPoseTrainer:
             model_file = f"{base_model}.pt"
 
         run_metadata = {}
+        requested_protocol = dict(kwargs.pop("training_protocol", None) or {})
+        strict_experiment = bool(kwargs.get("strict_experiment", False))
+        if strict_experiment:
+            try:
+                validate_requested_protocol(requested_protocol)
+                if resume_from:
+                    raise ValueError("Controlled MZ comparisons start from official base weights, not resume")
+            except ValueError as exc:
+                logger.error(str(exc))
+                return None
+        run_metadata.update(strict_experiment=strict_experiment,
+            experiment_id=str(kwargs.get("experiment_id") or ""), training_protocol_requested=requested_protocol)
         for key in (
             "lineage_mode",
             "parent_run_id",
@@ -1549,6 +1605,9 @@ class YOLOPoseTrainer:
                 not is_resuming
                 and self._is_ram_pressure_high(ram_state, dataset_profile)
             )
+            strict_experiment = bool(getattr(run, "strict_experiment", False))
+            if strict_experiment and (start_with_ram_safe_profile or start_with_safe_pose_profile or disable_mosaic_from_start):
+                self._reject_experiment_memory_fallback(run, "RAM-safe preflight or automatic safety profile")
             if disable_mosaic_from_start:
                 logger.info(
                     "Duży dataset POSE tablic wykryty. Startuję trening bez mosaic, "
@@ -1590,8 +1649,30 @@ class YOLOPoseTrainer:
             self._training_batch_state = batch_state
             dataset_verified = False
 
+            def on_pretrain_routine_start(_trainer):
+                self._apply_experiment_data_policy(run, _trainer)
+
             def on_pretrain_routine_end(_trainer):
                 nonlocal dataset_verified
+                runtime_args = getattr(_trainer, "args", None)
+                runtime_args = runtime_args if isinstance(runtime_args, dict) else getattr(runtime_args, "__dict__", None)
+                if isinstance(runtime_args, dict):
+                    actual = dict(runtime_args)
+                    if strict_experiment:
+                        if actual.get("augmentations") != []:
+                            raise RuntimeError("Strict source_only policy was not applied before loader creation")
+                    if hasattr(_trainer, "amp"):
+                        actual["amp"] = bool(_trainer.amp)
+                    optimizer = getattr(_trainer, "optimizer", None)
+                    if optimizer is not None:
+                        actual["optimizer"] = type(optimizer).__name__
+                    self._capture_training_protocol(run, actual, source="ultralytics_pretrain_runtime")
+                    if strict_experiment:
+                        policy_snapshot = dict(run.training_protocol_snapshot)
+                        policy_snapshot["augmentation_policy"] = "source_only"
+                        policy_snapshot["albumentations_transforms"] = []
+                        self.history.update_run(run.id, training_protocol_snapshot=policy_snapshot)
+                        run.training_protocol_snapshot = policy_snapshot
                 if self.on_progress:
                     self.on_progress((completed_epoch / max(1, epochs)) * 100,
                                      "Potwierdzam dataset po przygotowaniu obrazów...")
@@ -1773,7 +1854,7 @@ class YOLOPoseTrainer:
                     }
                 ]
             used_memory_fallback = False
-            if not is_resuming and not start_with_ram_safe_profile:
+            if not is_resuming and not start_with_ram_safe_profile and not strict_experiment:
                 fallback_attempt = self._build_ram_safe_training_attempt(
                     batch_size=int(batch_size),
                     img_size=int(img_size),
@@ -1807,6 +1888,7 @@ class YOLOPoseTrainer:
                 except Exception:
                     pass
 
+                self.model.add_callback("on_pretrain_routine_start", on_pretrain_routine_start)
                 self.model.add_callback("on_pretrain_routine_end", on_pretrain_routine_end)
                 self.model.add_callback("on_train_epoch_start", on_train_epoch_start)
                 self.model.add_callback("on_train_batch_end", on_train_batch_end)
@@ -1859,13 +1941,18 @@ class YOLOPoseTrainer:
                             plots=bool(attempt.get("plots", True)),
                             cache=bool(attempt.get("cache", False)),
                         )
+                        self._capture_training_protocol(run, train_args, source="model_train_arguments")
                         self.model.train(**train_args)
                     last_training_error = None
                     break
                 except Exception as train_error:
                     last_training_error = train_error
+                    if strict_experiment and self._is_training_memory_error(train_error):
+                        self._reject_experiment_memory_fallback(run, str(train_error))
                     progressed_batches = int(batch_state.get("batch", 0) or 0) > 0
                     can_retry = (
+                        not strict_experiment
+                        and
                         attempt_index < (len(training_attempts) - 1)
                         and not is_resuming
                         and not self.should_stop

@@ -88,6 +88,10 @@ class TrainingRun:
     dataset_preparation: Dict = field(default_factory=dict)
     input_checkpoint_snapshot: Dict = field(default_factory=dict)
     output_checkpoint_snapshot: Dict = field(default_factory=dict)
+    strict_experiment: bool = False
+    experiment_id: str = ""
+    training_protocol_requested: Dict = field(default_factory=dict)
+    training_protocol_snapshot: Dict = field(default_factory=dict)
     
     def to_dict(self) -> Dict:
         return asdict(self)
