@@ -12,6 +12,7 @@ import pytest
 from auto_annotation_tool.gui import z4_mz_experiment as gui, z4_training_runtime as runtime
 from auto_annotation_tool.gui import z4_device_runtime, z4_dataset_sources, z4_shared_ui, z4_training_metrics
 from auto_annotation_tool.training.mz_experiment_runtime import MZExperimentSelection
+from auto_annotation_tool.training import mz_experiment_runtime as shared_preflight
 from test_mz_shared_preflight import frozen
 from test_z4_async_training_preflight import _Host, _Var, _Widget, _SlowTrainer
 
@@ -395,3 +396,123 @@ def test_cockpit_and_summary_immediately_show_only_the_frozen_model_data_and_har
     rows=dict(z4_training_metrics._build_training_execution_summary_rows(value))
     assert rows['Tor']=='Znaki (YOLO Detect)' and rows['Model']=='YOLO26n Detect'
     assert 'batch 4' in rows['Parametry'] and '320px' in rows['Parametry']
+
+
+@pytest.fixture
+def readiness_host(host,monkeypatch):
+    value,protocol,repo=host
+    # Exercise the production readiness and badge methods with synthetic inputs.
+    # The headless host's Tcl interpreter has no default Tk root for StringVar.
+    monkeypatch.setattr(z4_training_metrics.tk,'StringVar',_Var)
+    monkeypatch.setattr(z4_training_metrics,'YOLO_AVAILABLE',True)
+    value._step4_has_active_operation=lambda:bool(getattr(value,'_locked',False))
+    value._is_training_configuration_ready=lambda:z4_training_metrics._is_training_configuration_ready(value)
+    value._resolve_selected_training_base_model_path=lambda:z4_training_metrics._resolve_selected_training_base_model_path(value)
+    value._resolve_training_dataset_yaml_path=lambda:z4_training_metrics._resolve_training_dataset_yaml_path(value)
+    value._get_latest_campaign_resumable_run_id=lambda:''
+    value._build_training_start_gate_message=lambda **kwargs:z4_training_metrics._build_training_start_gate_message(value,**kwargs)
+    value._refresh_training_start_gate=lambda **kwargs:z4_training_metrics._refresh_training_start_gate(value,**kwargs)
+    value.train_start_gate_status_lbl=Widget()
+    value.train_start_gate_hint_lbl=Widget()
+    return value,protocol,repo
+
+
+def test_free_pose_to_strict_autoconfig_enables_start_and_ready_badge(readiness_host):
+    value,protocol,repo=readiness_host
+    normal=use_normal_plate_context(value,repo)
+    value._dataset_variant_choices=[{'path':str(normal)}]
+    activate(value,protocol,repo)
+    assert value._get_selected_training_target()=='char'
+    assert value._is_training_configuration_ready()
+    assert value.btn_start_train.config['state']=='normal'
+    assert value.train_start_gate_status_lbl.config['text']=='Gotowe'
+    assert value._dataset_variant_choices==[{'path':str(normal)}]
+    assert not value.trainer.calls and not value.errors.called
+
+
+@pytest.mark.parametrize('selection',['root','yaml','resolved_root'])
+def test_unlisted_frozen_root_passes_only_while_strict_is_active(readiness_host,selection):
+    value,protocol,repo=readiness_host
+    value._dataset_variant_choices=[]
+    assert not z4_training_metrics._validate_training_source_lightweight(value)['ok']
+    activate(value,protocol,repo)
+    root=Path(protocol['dataset']['path'])
+    selected={'root':root,'yaml':root/'data.yaml','resolved_root':root/'..'/root.name}[selection]
+    value.dataset_var.set(str(selected))
+    assert z4_training_metrics._validate_training_source_lightweight(value)['ok']
+    value.mz_mode_var.set(False)
+    assert not z4_training_metrics._validate_training_source_lightweight(value)['ok']
+
+
+@pytest.mark.parametrize('location',['sibling','parent','child'])
+def test_other_unlisted_root_does_not_get_strict_membership_exception(readiness_host,location):
+    value,protocol,repo=readiness_host
+    value._dataset_variant_choices=[]
+    activate(value,protocol,repo)
+    frozen_root=Path(protocol['dataset']['path'])
+    other={'sibling':repo/(frozen_root.name+'_other'),'parent':frozen_root.parent,'child':frozen_root/'other'}[location]
+    other.mkdir(exist_ok=True)
+    (other/'data.yaml').write_bytes((frozen_root/'data.yaml').read_bytes())
+    value.dataset_var.set(str(other))
+    result=z4_training_metrics._validate_training_source_lightweight(value)
+    assert not result['ok'] and 'PZ1' in result['message']
+    value._refresh_training_start_state()
+    assert value.btn_start_train.config['state']=='disabled'
+    assert not value.trainer.calls
+
+
+@pytest.mark.parametrize('registered',[False,True])
+def test_strict_off_restores_normal_PZ1_membership_validation(readiness_host,registered):
+    value,protocol,repo=readiness_host
+    normal=use_normal_plate_context(value,repo)
+    value._dataset_variant_choices=[{'path':str(normal)}] if registered else []
+    activate(value,protocol,repo)
+    assert value.btn_start_train.config['state']=='normal'
+    gui.disable_mode(value)
+    assert value.dataset_var.get()==str(normal)
+    assert not gui.is_active(value)
+    assert z4_training_metrics._validate_training_source_lightweight(value)['ok']==registered
+    assert value.btn_start_train.config['state']==('normal' if registered else 'disabled')
+    assert not value.trainer.calls
+
+
+@pytest.mark.parametrize('failure',['missing_yaml','missing_val','target','readiness'])
+def test_strict_membership_exception_keeps_downstream_validation(readiness_host,failure):
+    value,protocol,repo=readiness_host
+    value._dataset_variant_choices=[]
+    activate(value,protocol,repo)
+    root=Path(protocol['dataset']['path'])
+    if failure=='missing_yaml':
+        (root/'data.yaml').unlink()
+    elif failure=='missing_val':
+        (root/'data.yaml').write_text('train: images/train\nnames: [A]\n',encoding='utf-8')
+    elif failure=='target':
+        value._infer_dataset_target=lambda path:'plate'
+    else:
+        (root/'mz_training_variant_manifest.json').write_text(
+            json.dumps({'ready_for_training':False,'completion_status':'PARTIAL_AUGMENTATION'}),encoding='utf-8')
+    assert not z4_training_metrics._validate_training_source_lightweight(value)['ok']
+    value._refresh_training_start_state()
+    assert value.btn_start_train.config['state']=='disabled'
+    assert not value.trainer.calls
+
+
+def test_enabled_start_repeats_shared_preflight_and_blocks_changed_assignment(readiness_host,monkeypatch):
+    value,protocol,repo=readiness_host
+    value._dataset_variant_choices=[]
+    prepare=Mock(side_effect=lambda candidate,variant:shared_preflight.prepare_mz_experiment(candidate,variant,repo_root=repo))
+    monkeypatch.setattr(gui,'prepare_mz_experiment',prepare)
+    activate(value,protocol,repo)
+    assert value.btn_start_train.config['state']=='normal'
+    assert prepare.call_count==1
+    begin=Mock(return_value=True)
+    value._begin_step4_operation=begin
+    assignment=Path(protocol['dataset']['path'])/'split_assignment_manifest.json'
+    payload=json.loads(assignment.read_text(encoding='utf-8'))
+    payload['assignment_sha256']='0'*64
+    assignment.write_text(json.dumps(payload),encoding='utf-8')
+    runtime._start_training(value)
+    pump(value)
+    assert prepare.call_count==2
+    begin.assert_not_called()
+    assert value.trainer.calls==0 and value.errors.called

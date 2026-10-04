@@ -1638,7 +1638,14 @@ def _validate_training_source_lightweight(self) -> dict:
             if raw:
                 candidate = Path(raw)
                 known_roots.append((candidate.parent if candidate.name.lower() == "data.yaml" else candidate).resolve())
-        if selected_root not in known_roots:
+        from . import z4_mz_experiment
+        frozen_path = (
+            str(self._mz_protocol.get("dataset", {}).get("path") or "").strip()
+            if z4_mz_experiment.is_active(self) else ""
+        )
+        # A frozen experiment input is not an ordinary PZ1 split variant.
+        frozen_root_selected = bool(frozen_path) and selected_root == Path(frozen_path).resolve()
+        if selected_root not in known_roots and not frozen_root_selected:
             result["message"] = "Wybierz wariant splitu z listy PZ2 albo utwórz go w PZ1."
             return result
     try:
