@@ -95,6 +95,7 @@ from . import z4_training_metrics
 from . import z4_dataset_builder
 from . import z4_analysis_ranking
 from . import z4_training_runtime
+from . import z4_mz_experiment
 from . import z4_campaign_state
 from . import z4_dataset_validation
 from . import z4_layout_runtime
@@ -357,6 +358,8 @@ def _build_train_tab(self):
                 "hint": hint_lbl,
             }
         )
+
+    z4_mz_experiment.build_section(self, settings_col)
 
     section_border = blend_hex_colors(
         palette.get("success", "#2ecc71"),
@@ -798,6 +801,11 @@ def _build_train_tab(self):
     self.step4_pinned_result_shell.pack_forget()
 
     def auto_name(*args):
+        if bool(getattr(self, "_mz_applying_protocol", False)):
+            return
+        if z4_mz_experiment.is_active(self):
+            self.name_var.set(self._mz_protocol["experiment_id"] + "_" + self.mz_variant_var.get())
+            return
         ds_name = Path(self.dataset_var.get()).name if self.dataset_var.get() else "UnknownDS"
         model_name = self.base_model_var.get()
         if self._is_custom_base_model_key(model_name):

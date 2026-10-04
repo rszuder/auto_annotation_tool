@@ -109,6 +109,7 @@ from . import z4_dataset_sources
 from . import z4_training_metrics
 from . import z4_dataset_builder
 from . import z4_analysis_ranking
+from . import z4_mz_experiment
 from .z4_view_models import (
     Step4CampaignNavigationViewModel,
     Step4DatasetWorkflowViewModel,
@@ -183,6 +184,8 @@ def _set_training_preparing_ui_state(self, *, text: str = "Przygotowanie trening
     except Exception:
         pass
 
+    z4_mz_experiment.refresh_controls(self)
+
 def _update_training_preflight_progress(self, stage: str, progress: float, detail: str = ""):
     stage_text = str(stage or "Przygotowanie treningu").strip()
     detail_text = str(detail or "").strip()
@@ -226,8 +229,8 @@ def _finish_training_preflight_failure(self, *, title: str, message: str):
     except Exception:
         pass
 
-def _start_training(self):
-    if bool(getattr(self, "_training_start_in_progress", False)):
+def _start_training(self, _mz_selection=None):
+    if bool(getattr(self, "_training_start_in_progress", False) or getattr(self, "_mz_validation_in_progress", False)):
         return
     if not YOLO_AVAILABLE:
         return messagebox.showerror("Błąd", "Brak ultralytics.")
@@ -244,6 +247,19 @@ def _start_training(self):
                 "Aby uruchomić nowy trening albo zmienić konfigurację, najpierw użyj `Odepnij wynik`."
             ),
         )
+
+    strict_request = None
+    if z4_mz_experiment.is_active(self):
+        if _mz_selection is None:
+            return z4_mz_experiment.verify_before_start(self,
+                lambda selection: _start_training(self, _mz_selection=selection))
+        try:
+            z4_mz_experiment.validate_gui_context(self, _mz_selection.protocol)
+        except ValueError as exc:
+            return messagebox.showerror("Eksperyment kontrolowany", str(exc))
+        strict_request = _mz_selection.request
+    elif _mz_selection is not None:
+        return messagebox.showerror("Eksperyment kontrolowany", "Tryb kontrolowany został zmieniony podczas weryfikacji.")
 
     try:
         self._clear_step4_guidance()
@@ -265,7 +281,9 @@ def _start_training(self):
         pass
 
     light_started = time.perf_counter()
-    source_state = z4_training_metrics._validate_training_source_lightweight(self)
+    source_state = ({"ok":True, "yaml_path":str(Path(strict_request["dataset_path"])/"data.yaml"),
+                     "dataset_root":strict_request["dataset_path"]} if strict_request is not None
+                    else z4_training_metrics._validate_training_source_lightweight(self))
     logger.info("[PREFLIGHT] gui_light_validation %.3f s", time.perf_counter() - light_started)
     if not bool(source_state.get("ok")):
         validation_msg = str(source_state.get("message") or "Dataset niegotowy do treningu.")
@@ -286,7 +304,7 @@ def _start_training(self):
 
         self._current_training_dataset_is_pose = bool(is_pose_dataset)
         inferred_target = self._infer_dataset_target(str(dataset_root)) or ("plate" if is_pose_dataset else "char")
-        selected_target = self._get_selected_training_target()
+        selected_target = "char" if strict_request is not None else self._get_selected_training_target()
 
         if not CAMPAIGN.get_active_project_name():
             if inferred_target != selected_target:
@@ -310,13 +328,14 @@ def _start_training(self):
         return messagebox.showerror("Błąd", f"Nie udało się odczytać data.yaml:\n{e}")
 
     dataset_path = str(dataset_root)
-    base_key = self.base_model_var.get().strip()
-    base_model = self.base_custom_var.get().strip() if self._is_custom_base_model_key(base_key) else base_key
+    base_key = Path(strict_request["base_model"]).name if strict_request is not None else self.base_model_var.get().strip()
+    base_model = strict_request["base_model"] if strict_request is not None else (
+        self.base_custom_var.get().strip() if self._is_custom_base_model_key(base_key) else base_key)
     base_model_display = self._resolve_selected_training_base_model_display()
     _base_model_info_path, base_model_info = self._resolve_selected_training_base_model_info(lightweight=True)
-    device = self._device_to_ultralytics(self.device_var.get())
+    device = strict_request["device"] if strict_request is not None else self._device_to_ultralytics(self.device_var.get())
 
-    selection_ok, _selection_message = self._validate_training_base_model_target_compatibility(
+    selection_ok, _selection_message = (True, "") if strict_request is not None else self._validate_training_base_model_target_compatibility(
         target=selected_target,
         show_dialog=True,
         lightweight=True,
@@ -325,7 +344,7 @@ def _start_training(self):
         return
 
     # Rozpoznaj, czy wybrany model jest modelem pose.
-    model_task = z4_training_metrics._training_base_model_task_lightweight(self, base_key, base_model)
+    model_task = "detect" if strict_request is not None else z4_training_metrics._training_base_model_task_lightweight(self, base_key, base_model)
 
     # Zablokuj niezgodne pary dataset-model przed startem treningu.
     if model_task is not None and is_pose_dataset and model_task != "pose":
@@ -346,7 +365,7 @@ def _start_training(self):
     fine_tune_run_label = ""
     fine_tune_metadata = {}
     try:
-        fine_tune_parent_run = self._resolve_step4_fine_tune_parent_run()
+        fine_tune_parent_run = None if strict_request is not None else self._resolve_step4_fine_tune_parent_run()
     except Exception:
         fine_tune_parent_run = None
     if fine_tune_parent_run is not None:
@@ -368,7 +387,7 @@ def _start_training(self):
             }
 
     try:
-        requested_imgsz = self._safe_training_int_value("imgsz_var", default=640, minimum=0)
+        requested_imgsz = strict_request["img_size"] if strict_request is not None else self._safe_training_int_value("imgsz_var", default=640, minimum=0)
     except Exception:
         requested_imgsz = 0
     if is_pose_dataset and requested_imgsz < 256:
@@ -379,7 +398,7 @@ def _start_training(self):
         )
 
     # Zapisz czytelny nagłówek sesji w terminalu procesu.
-    selected_device_display = self._normalize_training_device_choice(self.device_var.get())
+    selected_device_display = ("cpu" if device == "cpu" else "cuda:" + str(device).removeprefix("cuda:")) if strict_request is not None else self._normalize_training_device_choice(self.device_var.get())
     effective_device_raw, effective_device_profile = self._get_effective_training_device_profile(selected_device_display)
     if effective_device_profile is not None:
         effective_device_desc = (
@@ -406,7 +425,14 @@ def _start_training(self):
         )
 
     self._append_train_log("=" * 70)
-    self._append_train_log(f"START TRENINGU | Nazwa: {self.name_var.get()}")
+    self._append_train_log(f"START TRENINGU | Nazwa: {strict_request['name'] if strict_request is not None else self.name_var.get()}")
+    if strict_request is not None:
+        protocol = _mz_selection.protocol
+        self._append_train_log("Tryb: eksperyment kontrolowany • STRICT")
+        for label, value in (("Experiment ID", protocol["experiment_id"]), ("Wariant", _mz_selection.variant),
+            ("Dataset ID", protocol["dataset"]["dataset_id"]), ("Protocol SHA", protocol["protocol_sha256"]),
+            ("Assignment SHA", protocol["dataset"]["assignment_sha256"]), ("Split SHA", protocol["dataset"]["split_sha256"])):
+            self._append_train_log(f"{label}: {value}")
     self._append_train_log(f"Dataset: {dataset_path}")
     self._append_train_log(f"Wybór w polu 'Model startowy treningu (.pt)': {base_model_display}")
     self._append_train_log(f"Model przekazany do treningu: {base_model}")
@@ -418,10 +444,10 @@ def _start_training(self):
         f"Urządzenie: {selected_device_display} -> {effective_device_desc} | backend Ultralytics: {device}"
     )
     self._append_train_log(
-        f"Epoki: {self._safe_training_int_value('epochs_var', default=100, minimum=1)} | "
-        f"Rozmiar partii: {self._safe_training_int_value('batch_var', default=16, minimum=1)} | "
-        f"Rozdzielczość wejściowa: {self._safe_training_int_value('imgsz_var', default=640, minimum=32)} | "
-        f"Współczynnik uczenia: {self._safe_training_float_value('lr0_var', default=0.01, minimum=0.0001)}"
+        f"Epoki: {strict_request['epochs'] if strict_request is not None else self._safe_training_int_value('epochs_var', default=100, minimum=1)} | "
+        f"Rozmiar partii: {strict_request['batch_size'] if strict_request is not None else self._safe_training_int_value('batch_var', default=16, minimum=1)} | "
+        f"Rozdzielczość wejściowa: {strict_request['img_size'] if strict_request is not None else self._safe_training_int_value('imgsz_var', default=640, minimum=32)} | "
+        f"Współczynnik uczenia: {strict_request['lr0'] if strict_request is not None else self._safe_training_float_value('lr0_var', default=0.01, minimum=0.0001)}"
     )
     self._append_train_log("Liczebność zbiorów train/val/test zostanie sprawdzona w tle.")
     self._append_train_log("=" * 70)
@@ -429,7 +455,7 @@ def _start_training(self):
     if not self._begin_step4_operation("z4.training.run", "Z4: przygotowanie treningu"):
         return
 
-    request = {
+    request = dict(strict_request, validate_custom_model=False) if strict_request is not None else {
         "name": str(self.name_var.get() or ""),
         "dataset_path": dataset_path,
         "base_model": base_model,
@@ -1689,6 +1715,8 @@ def _promote_selected_run_model_to_campaign(self):
     )
 
 def _resume_selected_run(self):
+    if z4_mz_experiment.is_active(self):
+        return messagebox.showerror("Eksperyment kontrolowany", "W trybie kontrolowanym wznowienie jest zablokowane. Nowy run musi startować od oficjalnych wag bazowych.")
     if bool(getattr(self, "_training_start_in_progress", False)):
         return
     run = self._selected_run()
@@ -2057,6 +2085,8 @@ def _is_history_run_fine_tune_candidate(self, run) -> bool:
 
 
 def _select_selected_run_as_fine_tune_base(self):
+    if z4_mz_experiment.is_active(self):
+        return messagebox.showerror("Eksperyment kontrolowany", "W trybie kontrolowanym dotrenowanie jest zablokowane. Wyłącz tryb, aby wybrać rodzica.")
     run = self._selected_run()
     if run is None:
         return messagebox.showwarning(
@@ -2111,6 +2141,8 @@ def _select_selected_run_as_fine_tune_base(self):
 
 
 def _select_selected_ranking_run_as_fine_tune_base(self):
+    if z4_mz_experiment.is_active(self):
+        return messagebox.showerror("Eksperyment kontrolowany", "W trybie kontrolowanym dotrenowanie jest zablokowane. Wyłącz tryb, aby wybrać rodzica.")
     run = _selected_ranking_run(self)
     if run is None:
         return messagebox.showwarning(

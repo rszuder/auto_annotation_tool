@@ -32,3 +32,10 @@ def test_modified_recipe_is_rejected_before_training_or_dataset_access():
     protocol["training"]["seed"]=43
     with pytest.raises(ValueError,match="fingerprint mismatch"):
         experiment.check_protocol(protocol)
+
+
+def test_cli_delegates_to_the_shared_application_checker():
+    protocol={'schema':'fixture'}
+    with patch.object(experiment,'check_mz_experiment_protocol',return_value={'ok':True}) as checker:
+        assert experiment.check_protocol(protocol,repo_root='fixture-root')=={'ok':True}
+    checker.assert_called_once_with(protocol,repo_root='fixture-root')

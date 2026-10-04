@@ -1419,6 +1419,9 @@ def _apply_training_device_recommendation(self):
     self._apply_training_recommended_start_params()
 
 def _on_training_base_model_value_write(self, *_args):
+    from . import z4_mz_experiment
+    if bool(getattr(self, "_mz_applying_protocol", False)) or z4_mz_experiment.is_active(self):
+        return
     try:
         self._sync_step4_fine_tune_parent_selection()
     except Exception:
@@ -2241,7 +2244,7 @@ def _refresh_training_start_state(self):
     try:
         pinned_state = _get_pinned_step4_result_state(self)
         _ensure_new_training_uses_final_base_model(self)
-        preparing = bool(getattr(self, "_training_start_in_progress", False))
+        preparing = bool(getattr(self, "_training_start_in_progress", False) or getattr(self, "_mz_validation_in_progress", False))
         ready = bool(not preparing and not pinned_state and self._is_training_configuration_ready())
         button.configure(state=(tk.NORMAL if ready else tk.DISABLED))
     except Exception:
@@ -2266,6 +2269,9 @@ def _refresh_training_start_state(self):
         self._refresh_training_base_model_identity_ui()
     except Exception:
         pass
+
+    from . import z4_mz_experiment
+    z4_mz_experiment.refresh_controls(self)
 
 def _build_training_start_gate_message(self, *, ready: bool) -> tuple[str, str, str]:
     if getattr(self, "_training_start_in_progress", False):

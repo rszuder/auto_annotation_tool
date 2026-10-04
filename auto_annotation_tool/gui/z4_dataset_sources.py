@@ -270,6 +270,10 @@ def _get_free_dataset_variant_choices(self) -> list[dict]:
     return variants
 
 def _refresh_dataset_variant_choices(self):
+    from . import z4_mz_experiment
+    if z4_mz_experiment.is_active(self):
+        z4_mz_experiment.refresh_controls(self)
+        return
     combo = getattr(self, "dataset_variant_combo", None)
     if combo is None:
         return
@@ -386,6 +390,9 @@ def _sync_dataset_variant_selection(self):
         pass
 
 def _on_dataset_variant_selected(self, event=None):
+    from . import z4_mz_experiment
+    if z4_mz_experiment.is_active(self):
+        return
     selected = str(getattr(self, "dataset_variant_var", tk.StringVar()).get() or "").strip()
     if not selected:
         return
@@ -1477,6 +1484,9 @@ def _apply_saved_step4_training_model_selection(self, target: str | None = None)
     return True
 
 def _remember_current_step4_training_model_selection(self) -> None:
+    from . import z4_mz_experiment
+    if bool(getattr(self, "_mz_applying_protocol", False)) or z4_mz_experiment.is_active(self):
+        return
     if not CAMPAIGN.get_active_project_name():
         return
     if bool(getattr(self, "_step4_suppress_base_model_state_save", False)):
