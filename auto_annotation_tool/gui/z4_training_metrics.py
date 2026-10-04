@@ -978,6 +978,10 @@ def _set_train_live_metrics(self, metrics: dict | None):
     _set_training_status_tree_rows(self, tree, styled_rows)
 
 def _build_training_cockpit_summary(self, *, ready: bool | None = None) -> dict:
+    from . import z4_mz_experiment
+    frozen = z4_mz_experiment.frozen_cockpit_summary(self)
+    if frozen is not None:
+        return frozen
     if getattr(self, "_training_start_in_progress", False):
         previous = dict(getattr(self, "_last_training_cockpit_summary", {}) or {})
         return {
@@ -3195,6 +3199,10 @@ def _ensure_training_execution_summary_row_capacity(self, required_rows: int) ->
         self._append_training_execution_summary_row_widget(len(row_widgets))
 
 def _build_training_execution_summary_rows(self) -> list[tuple[str, str]]:
+    from . import z4_mz_experiment
+    frozen = z4_mz_experiment.frozen_execution_summary_rows(self)
+    if frozen is not None:
+        return frozen
     target = self._get_selected_training_target()
     target_label = self._format_training_target_label(target)
     base_model_display = self._resolve_selected_training_base_model_display()

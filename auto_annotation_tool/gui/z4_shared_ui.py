@@ -1214,6 +1214,8 @@ def refresh_step4_route_choice_cards(host: "TrainingTab"):
 
 
 def _schedule_step4_mode_deferred_refresh(host: "TrainingTab"):
+    if bool(getattr(host, "_mz_applying_protocol", False)):
+        return
     frame = getattr(host, "frame", None)
     if frame is None:
         return
