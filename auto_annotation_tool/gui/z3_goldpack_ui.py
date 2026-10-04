@@ -142,8 +142,19 @@ def get_gold_export_split_percentages(host) -> tuple[float, float, float]:
 
 
 def build_gold_export_plate_unique_key(data: dict) -> str:
+    """Deduplicate logical crops across runs, retaining legacy source fallback."""
     if not isinstance(data, dict):
         return ""
+
+    # Registry IDs describe the logical crop; artifact IDs describe individual
+    # encodings. Missing legacy source fields must not merge distinct imports.
+    crop_id = str(data.get("crop_id") or "").strip()
+    if crop_id:
+        return "crop:" + crop_id
+
+    identity_sha = str(data.get("crop_identity_sha256") or "").strip().lower()
+    if len(identity_sha) == 64 and all(char in "0123456789abcdef" for char in identity_sha):
+        return "crop-identity:" + identity_sha
 
     acquisition = data.get("mobile_acquisition")
     if isinstance(acquisition, dict) and acquisition.get("archive_sha256") and acquisition.get("group_key"):

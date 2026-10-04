@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import re
 from typing import TYPE_CHECKING
 
 from ..config import logger
@@ -138,6 +139,13 @@ def get_preview_sort_source_count(host: "CharacterAnnotationTab", mode_key: str,
 
 def get_preview_sort_priority(host: "CharacterAnnotationTab", pid: str, data: dict, original_index: int):
     mode_key = host._get_preview_sort_mode_key()
+    if mode_key == "PLATE_ID":
+        natural_id = tuple(
+            int(part) if index % 2 else part
+            for index, part in enumerate(re.split(r"(\d+)", str(pid).casefold()))
+        )
+        return (natural_id, int(original_index))
+
     status = str((data or {}).get("status", "unknown")).strip().lower()
     strategy_bucket = host._get_perfect_strategy_bucket(data)
     total_boxes = len(list((data or {}).get("characters", []) or [])) if isinstance(data, dict) else 0

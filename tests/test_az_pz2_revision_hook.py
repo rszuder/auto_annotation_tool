@@ -13,6 +13,7 @@ from auto_annotation_tool.registry.crop_identity import (
 )
 from auto_annotation_tool.registry.pz2_revision_registry import save_pz2_revision
 from auto_annotation_tool.gui import z3_review_runtime
+from auto_annotation_tool.gui import z3_list_review
 
 
 SOURCE_SHA = "a" * 64
@@ -224,6 +225,68 @@ class PZ2RevisionRegistryTests(unittest.TestCase):
             loaded["payload"]["characters"][0]["bbox"],
             [0.078125, 0.125, 0.234375, 0.875],
         )
+
+    def test_group_approval_checkpoints_imported_az_and_reopening_updates_binding(self):
+        data = self.metadata()
+        data["ground_truth_text"] = "A"
+        data["status"] = "needs_fix"
+        data["gold_state"]["approved"] = False
+        data["gold_state"]["candidate"] = False
+        data["review_state"] = {
+            "status": "in_progress", "source": "az_project_import",
+        }
+        imported = save_pz2_revision(
+            self.registry, data, project_id="PRJ-A", iteration_num=1,
+        )
+        with self.db.transaction() as con:
+            con.execute(
+                "UPDATE project_crop_az SET effective_status = ? WHERE project_id = ?",
+                ("imported_pending_review", "PRJ-A"),
+            )
+
+        host = Mock()
+        host.preview_metadata = {"plate": data}
+        host._characters_to_text.return_value = "A"
+        host._get_plate_source_bucket.return_value = "local_manual"
+        host._get_review_quality_status.return_value = "perfect"
+        host._review_approval_is_current.return_value = True
+
+        def checkpoint(_host, _plate_id, row, *, event):
+            return save_pz2_revision(
+                self.registry, row, project_id="PRJ-A", iteration_num=1,
+            )
+
+        with patch.object(z3_review_runtime, "get_review_quality_status", return_value="perfect"), \
+                patch.object(z3_review_runtime, "_persist_review_az_revision_best_effort",
+                             side_effect=checkpoint) as save_az, \
+                patch.object(z3_review_runtime, "_refresh_after_change") as refresh:
+            self.assertTrue(z3_list_review.change_plate_approval(host, "plate", True)["ok"])
+            approved = AZRevisionStore(self.db).get_project_az(project_id="PRJ-A", crop_id=self.crop_id)
+            self.assertEqual(approved["effective_status"], "approved")
+            self.assertTrue(approved["payload"]["gold_state"]["approved"])
+            self.assertNotEqual(approved["az_revision_id"], imported.revision.az_revision_id)
+            save_az.assert_called_once_with(host, "plate", data, event="review_approved")
+            refresh.assert_not_called()
+
+            approved_at = data["review_state"]["approved_at"]
+            with self.db.transaction() as con:
+                con.execute(
+                    "UPDATE project_crop_az SET effective_status = ? WHERE project_id = ?",
+                    ("imported_pending_review", "PRJ-A"),
+                )
+            self.assertTrue(z3_list_review.change_plate_approval(host, "plate", True)["unchanged"])
+            repeated = AZRevisionStore(self.db).get_project_az(project_id="PRJ-A", crop_id=self.crop_id)
+            self.assertEqual(repeated["effective_status"], "approved")
+            self.assertEqual(repeated["az_revision_id"], approved["az_revision_id"])
+            self.assertEqual(data["review_state"]["approved_at"], approved_at)
+
+            self.assertTrue(z3_list_review.change_plate_approval(host, "plate", False)["ok"])
+            reopened = AZRevisionStore(self.db).get_project_az(project_id="PRJ-A", crop_id=self.crop_id)
+            self.assertEqual(reopened["effective_status"], "needs_fix")
+            self.assertFalse(reopened["payload"]["gold_state"]["approved"])
+            self.assertEqual(save_az.call_count, 3)
+            self.assertEqual(save_az.call_args.kwargs["event"], "approval_reverted")
+            refresh.assert_not_called()
 
 
 class PZ2ReviewHookTests(unittest.TestCase):

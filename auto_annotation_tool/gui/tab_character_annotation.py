@@ -641,6 +641,7 @@ PREVIEW_BOX_MODE_BY_LABEL.update({
 
 PREVIEW_SORT_OPTIONS = [
     ("DEFAULT", "Domyślne"),
+    ("PLATE_ID", "Po plate_id"),
     ("OK", "Po OK"),
     ("GT_Z2", "Po GT z Z2"),
     ("1R", "Po 1R"),
@@ -653,6 +654,7 @@ PREVIEW_SORT_OPTIONS = [
 PREVIEW_SORT_LABELS = {key: label for key, label in PREVIEW_SORT_OPTIONS}
 PREVIEW_SORT_COLOR_KEYS = {
     "DEFAULT": "muted",
+    "PLATE_ID": "info",
     "OK": "success",
     "GT_Z2": "info",
     "1R": "success",

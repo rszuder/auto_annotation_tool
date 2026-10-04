@@ -8,6 +8,7 @@ Adapter metadata PZ2 -> canonical AZ payload zostanie podpięty w AZ004B.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -140,8 +141,14 @@ class AZRevisionStore:
         bind_project_id: str | None = None,
         effective_status: str | None = None,
         created_at: str | None = None,
+        connection: sqlite3.Connection | None = None,
     ) -> AZRevisionWriteResult:
-        self.initialize()
+        # Repairs can recheck preconditions and write under one caller-owned
+        # transaction. Ordinary callers retain initialization and commit rules.
+        if connection is None:
+            self.initialize()
+        elif not connection.in_transaction:
+            raise ValueError("connection wymaga aktywnej transakcji wywołującego.")
 
         crop_id = _required_text("crop_id", crop_id)
         source_kind = _required_text("source_kind", source_kind)
@@ -171,7 +178,7 @@ class AZRevisionStore:
         ).hexdigest()
         timestamp = str(created_at or "").strip() or _utc_now_iso()
 
-        with self.database.transaction() as connection:
+        with (self.database.transaction() if connection is None else nullcontext(connection)) as connection:
             crop_row = connection.execute(
                 """
                 SELECT crop_id, identity_sha256

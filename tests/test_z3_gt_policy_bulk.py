@@ -134,7 +134,8 @@ def root():
 
 
 @pytest.fixture
-def scene(root):
+def scene(root, monkeypatch):
+    monkeypatch.setattr(review, "_persist_review_az_revision_best_effort", Mock())
     host = CharacterAnnotationTab.__new__(CharacterAnnotationTab)
     host.frame = tk.Frame(root)
     host.frame.pack(fill="both", expand=True)
@@ -245,6 +246,7 @@ def test_bulk_approval_skips_invalid_rows_and_refreshes_approved_frame_counter(s
     wait_batch(scene, result)
     assert result["changed"] == ["a", "c"]
     assert [item["plate_id"] for item in result["failed"]] == ["b"]
+    assert [call.args[1] for call in review._persist_review_az_revision_best_effort.call_args_list] == ["a", "c"]
     assert scene.preview_perfect_count_lbl.cget("text") == "2"
     assert scene.preview_approved_char_count_lbl.cget("text").endswith(": 5")
     assert scene.plates_legend_box_perfect_lbl.cget("text") == "5"

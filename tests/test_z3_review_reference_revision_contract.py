@@ -5,12 +5,13 @@ from types import SimpleNamespace
 
 from auto_annotation_tool.gui import z3_goldpack_ui as gold
 from auto_annotation_tool.gui import z3_review_runtime as review
+from auto_annotation_tool.gui.tab_character_annotation import CharacterAnnotationTab
 
 
-def _record():
+def _record(character="A", index=0):
     return {
-        "character": "A",
-        "bbox": [0.0, 0.0, 10.0, 20.0],
+        "character": character,
+        "bbox": [index * 12.0, 0.0, index * 12.0 + 10.0, 20.0],
         "confidence": 1.0,
     }
 
@@ -18,7 +19,7 @@ def _record():
 def _data():
     return {
         "status": "needs_fix",
-        "characters": [_record()],
+        "characters": [_record(symbol, index) for index, symbol in enumerate("ABC123")],
         "source_gt_hash": "gt-hash-1",
         "source_gt_revision_ids": ["gt-r1"],
         "source_geometry_revision_ids": ["geom-r1"],
@@ -46,6 +47,11 @@ def _data():
 
 
 class Host(SimpleNamespace):
+    def _characters_to_text(self, chars, data=None):
+        # Use the production reading-order helper without constructing Tk UI.
+        tab = CharacterAnnotationTab.__new__(CharacterAnnotationTab)
+        return tab._characters_to_text(chars, data=data)
+
     def _derive_preview_status_from_data(self, probe, chars):
         state = probe.get("review_state") or {}
         return "perfect" if state.get("status") == review.REVIEW_APPROVED else "needs_fix"

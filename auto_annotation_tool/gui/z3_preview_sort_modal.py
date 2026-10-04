@@ -156,9 +156,11 @@ def open_preview_sort_modal(host, *, sort_options, sort_color_keys):
 
     try:
         dialog.update_idletasks()
+        dialog_height = max(425, dialog.winfo_reqheight())
+        dialog.geometry(f"340x{dialog_height}")
         center = getattr(host.app, "_center_dialog_window", None)
         if callable(center):
-            center(dialog, parent=parent, width=340, height=425)
+            center(dialog, parent=parent, width=340, height=dialog_height)
     except Exception:
         pass
 

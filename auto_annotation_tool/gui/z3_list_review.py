@@ -52,6 +52,22 @@ def select_all(host, event=None):
     return "break"
 
 
+def copy_selected_labels(host):
+    box = host.plates_listbox
+    labels = [box.get(index) for index in box.curselection()]
+    if not labels:
+        return None
+    text = "\n".join(labels)
+    try:
+        box.clipboard_clear()
+        box.clipboard_append(text)
+    except tk.TclError:
+        host._update_preview_edit_status("Nie udało się skopiować etykiet do schowka.", tone="warning")
+        return None
+    host._update_preview_edit_status(f"Skopiowano etykiety tablic: {len(labels)}.", tone="success")
+    return text
+
+
 def clear_automatic_boxes(host, plate_id):
     """Clear working automatic geometry, preserving manual boxes and RAW."""
     data = host.preview_metadata.get(plate_id)
@@ -88,15 +104,25 @@ def change_plate_approval(host, plate_id, approved):
             return {"ok": True, "unchanged": True}
         review.mark_review_edit_started(host, data)
         data["status"] = "needs_fix"
+        review._persist_review_az_revision_best_effort(
+            host, plate_id, data, event="approval_reverted",
+        )
         return {"ok": True}
     if (status == review.REVIEW_APPROVED and host._review_approval_is_current(data)
             and host._get_review_quality_status(data) == "perfect"):
+        # Repeating the explicit approval also repairs older missing AZ
+        # checkpoints without reopening or modifying the local review.
+        review._persist_review_az_revision_best_effort(
+            host, plate_id, data, event="review_approved",
+        )
         return {"ok": True, "unchanged": True}
     if not status and not data.get("characters"):
         return {"ok": False, "reason": "working_annotation_missing"}
     elif status != review.REVIEW_IN_PROGRESS:
         review.mark_review_edit_started(host, data)
-    return review.confirm_review_gold(host, plate_id, persist=False, quiet=True, refresh=False)
+    # Batch metadata saves remain coalesced. Each explicit decision still needs
+    # its AZ checkpoint, including imported_pending_review -> approved.
+    return review.confirm_review_gold(host, plate_id, persist=True, quiet=True, refresh=False)
 
 
 def run_selected_review_action(host, approved=True, *, action=None):
@@ -234,6 +260,8 @@ def show_context_menu(host, event):
     menu.add_command(label=f"Usuń automatyczne ramki ({total})", state=state,
                      command=lambda: run_selected_clear_automatic_boxes(host))
     menu.add_separator()
+    menu.add_command(label=f"Kopiuj zaznaczone etykiety ({total})",
+                     command=lambda: copy_selected_labels(host))
     menu.add_command(label="Zaznacz wszystkie", accelerator="Ctrl+A", command=lambda: select_all(host))
     try:
         menu.tk_popup(event.x_root, event.y_root)

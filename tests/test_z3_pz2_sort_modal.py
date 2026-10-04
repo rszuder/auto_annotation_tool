@@ -48,7 +48,7 @@ def test_character_tab_exposes_sort_modal_wrapper():
     assert "sort_color_keys=PREVIEW_SORT_COLOR_KEYS" in source
 
 
-def test_sort_option_contract_is_unchanged():
+def test_sort_option_contract():
     source = _read("auto_annotation_tool/gui/tab_character_annotation.py")
     tree = ast.parse(source)
 
@@ -62,6 +62,7 @@ def test_sort_option_contract_is_unchanged():
 
     assert options == [
         ("DEFAULT", "Domyślne"),
+        ("PLATE_ID", "Po plate_id"),
         ("OK", "Po OK"),
         ("GT_Z2", "Po GT z Z2"),
         ("1R", "Po 1R"),
