@@ -10804,16 +10804,16 @@ def _open_mobile_model_export_center(self, initial_run=None):
             self.app.style_dialog_window(
                 executor_modal,
                 title=title,
-                geometry="1260x840",
+                geometry="1260x760",
                 parent=dialog,
             )
         except Exception:
             executor_modal.title(title)
-            executor_modal.geometry("1260x840")
+            executor_modal.geometry("1260x760")
         try:
             executor_modal.transient(dialog)
             executor_modal.resizable(True, True)
-            executor_modal.minsize(1040, 740)
+            executor_modal.minsize(1040, 660)
         except Exception:
             pass
         _bind_mobile_export_child_window_motion(executor_modal, name="executor_window_configure")
@@ -11324,7 +11324,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
         )
         checks_shell.grid(row=0, column=1, sticky="nsew")
         checks_shell.grid_columnconfigure(0, weight=1)
-        checks_shell.grid_rowconfigure(1, weight=1, minsize=520)
+        # The requirements tables are scrollable. Do not reserve 520 px
+        # here: on common Windows DPI scaling that pushes the status/CTA
+        # footer below the visible work area in the default window.
+        checks_shell.grid_rowconfigure(1, weight=1, minsize=340)
         tk.Label(
             checks_shell,
             text="Gotowość eksportu i zależności",
@@ -11343,7 +11346,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ],
             bg_color=checks_shell["bg"],
             header_bg=blend_hex_colors(checks_shell["bg"], accent, 0.10),
-            height=520,
+            height=340,
         )
         executor_requirements_table["shell"].grid(row=1, column=0, sticky="nsew")
         executor_install_table = _build_wrapped_info_table(
@@ -11357,7 +11360,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ],
             bg_color=checks_shell["bg"],
             header_bg=blend_hex_colors(checks_shell["bg"], accent, 0.10),
-            height=520,
+            height=340,
         )
         executor_install_table["shell"].grid(row=1, column=0, sticky="nsew")
         executor_install_table["shell"].grid_remove()
@@ -12196,6 +12199,24 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ]
         )
         _sync_executor_buttons()
+
+        # Re-fit after the complete executor UI (including the footer) exists.
+        # This keeps the primary CTA visible on Windows displays with DPI
+        # scaling without requiring the user to maximize the window.
+        try:
+            fitter = getattr(self.app, "_fit_dialog_to_content", None)
+            if callable(fitter):
+                executor_modal.after_idle(
+                    lambda current=fitter: current(
+                        executor_modal,
+                        parent=dialog,
+                        min_width=1040,
+                        min_height=660,
+                        margin=18,
+                    )
+                )
+        except Exception:
+            pass
 
     def export_package() -> None:
         if worker_state.get("running"):

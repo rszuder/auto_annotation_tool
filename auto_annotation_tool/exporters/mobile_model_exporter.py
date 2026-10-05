@@ -40,6 +40,10 @@ MAX_PACKAGE_ENTRIES = 256
 MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_ALPR_PACKAGE_ENTRIES = 640
 MAX_ALPR_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+# Android AlprPackageImporter.readRootManifest() rejects a root manifest
+# larger than 2 MiB. Keep the desktop exporter on the same contract so an
+# artifact that passes desktop validation is also importable on Android.
+MAX_ANDROID_ROOT_MANIFEST_BYTES = 2 * 1024 * 1024
 SAFE_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 CALIBRATION_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 ONNX_INT8_CALIBRATION_MAX_IMAGES = 300
@@ -531,6 +535,33 @@ def _child_request_reproducibility_payload(request: MobileExportRequest | None) 
     )
 
 
+def _compact_package_model_entry(role: str, item: Mapping[str, Any]) -> dict[str, Any]:
+    # Root alpr.package.v1 entry: deployment contract only.
+    # Full per-model provenance stays in models/<role>/manifest.json and in the
+    # nested child .alprmodel. Duplicating it in the root manifest can make a
+    # valid desktop export impossible to import on Android.
+    payload = dict(item or {})
+    package_file = str(payload.get("package_file") or "").strip()
+    manifest_file = str(payload.get("manifest_file") or "").strip()
+    hashes = dict(payload.get("sha256") or {})
+    return _json_safe_value(
+        {
+            "role": role,
+            "task": str(payload.get("task") or "").strip(),
+            "model_id": str(payload.get("model_id") or "").strip(),
+            "name": str(payload.get("name") or "").strip(),
+            "version": str(payload.get("version") or "").strip(),
+            "schema": str(payload.get("schema") or "").strip(),
+            "package_file": package_file,
+            "manifest_file": manifest_file,
+            "sha256": {
+                package_file: str(hashes.get(package_file) or "").strip(),
+                manifest_file: str(hashes.get(manifest_file) or "").strip(),
+            },
+        }
+    )
+
+
 def _package_model_source_payload(
     *,
     role: str,
@@ -538,40 +569,19 @@ def _package_model_source_payload(
     request: MobileExportRequest | None,
     source_package: Path | None,
 ) -> dict[str, Any]:
+    # Package-level reproducibility references the full child manifest instead
+    # of embedding it again. model_ref keeps the checkpoint/package/runtime
+    # fingerprints needed by mobile reports while the sidecar remains the
+    # authority for complete training provenance.
     model_item = dict(item or {})
     payload: dict[str, Any] = {
         "role": role,
         "source_kind": "fresh_export" if request is not None else "existing_package",
-        "model_id": str(model_item.get("model_id") or getattr(request, "model_id", "") or ""),
-        "name": str(model_item.get("name") or getattr(request, "name", "") or ""),
-        "version": str(model_item.get("version") or getattr(request, "version", "") or ""),
-        "task": str(model_item.get("task") or ""),
-        "package_file": str(model_item.get("package_file") or ""),
-        "manifest_file": str(model_item.get("manifest_file") or ""),
-        "variants": list(model_item.get("variants") or []),
-        "variant_count": int(model_item.get("variant_count") or 0),
-        "labels": {
-            "count": int(model_item.get("label_count") or len(list(model_item.get("labels") or []))),
-            "items": list(model_item.get("labels") or []),
-        },
-        "training": dict(model_item.get("training") or {}),
-        "metrics": dict(model_item.get("metrics") or {}),
-        "source": dict(model_item.get("source") or {}),
-        "model": dict(model_item.get("model") or {}),
+        "model_ref": _package_model_ref_payload(role, model_item),
     }
-    child_repro = model_item.get("export_reproducibility")
-    if isinstance(child_repro, dict) and child_repro:
-        payload["child_export_reproducibility"] = child_repro
-    request_payload = _child_request_reproducibility_payload(request)
-    if request_payload:
-        payload["requested_export"] = request_payload
     package_payload = _path_reproducibility_payload(source_package)
     if package_payload:
         payload["source_package"] = package_payload
-    if role == "vehicle":
-        vehicle_detection = dict(model_item.get("vehicle_detection") or {})
-        if vehicle_detection:
-            payload["vehicle_detection"] = vehicle_detection
     return _json_safe_value(payload)
 
 
@@ -619,7 +629,17 @@ def _alpr_package_reproducibility_payload(
             },
             "ranking_dataset": dict(request.ranking_dataset or {}),
             "calibration_dataset": dict(request.calibration_dataset or {}),
-            "package_metadata": dict(request.metadata or {}),
+            # request.metadata is already stored once in root["metadata"].
+            # Store only a deterministic fingerprint here to avoid duplicating
+            # potentially large research metadata.
+            "package_metadata_sha256": hashlib.sha256(
+                json.dumps(
+                    _json_safe_value(dict(request.metadata or {})),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
             "toolchain": _runtime_toolchain_payload(),
         }
     )
@@ -2536,8 +2556,16 @@ class MobileAlprPackageExporter:
                 character_item=character_item,
             )
             self._validate_manifest_basic(manifest)
+            manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2)
+            manifest_bytes = manifest_text.encode("utf-8")
+            if len(manifest_bytes) > MAX_ANDROID_ROOT_MANIFEST_BYTES:
+                raise MobileExportError(
+                    "Manifest główny pakietu ALPR przekracza limit importera Androida "
+                    f"2 MiB: {len(manifest_bytes)} B > {MAX_ANDROID_ROOT_MANIFEST_BYTES} B. "
+                    "Pełna proweniencja modeli musi pozostać w manifestach potomnych."
+                )
             manifest_path = package_root / "manifest.json"
-            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            manifest_path.write_bytes(manifest_bytes)
 
             notify(76.0, f"Pakuje kompletny zestaw ALPR {package_label}.")
             temp_package = temp_root / destination.name
@@ -2805,7 +2833,7 @@ class MobileAlprPackageExporter:
         plate_item: dict[str, Any],
         character_item: dict[str, Any],
     ) -> dict[str, Any]:
-        models = {
+        source_models = {
             "plate": plate_item,
             "character": character_item,
         }
@@ -2826,9 +2854,9 @@ class MobileAlprPackageExporter:
                     "include_class_indices": list(vehicle_detection.get("include_class_indices") or []),
                     "fallback_coco_class_indices": list(vehicle_detection.get("fallback_coco_class_indices") or []),
                 }
-            models = {
+            source_models = {
                 "vehicle": vehicle_item,
-                **models,
+                **source_models,
             }
             pipeline = [
                 vehicle_stage,
@@ -2846,7 +2874,12 @@ class MobileAlprPackageExporter:
         created_at = _utc_now_iso()
         model_refs = {
             role: _package_model_ref_payload(role, item)
-            for role, item in models.items()
+            for role, item in source_models.items()
+            if isinstance(item, Mapping)
+        }
+        models = {
+            role: _compact_package_model_entry(role, item)
+            for role, item in source_models.items()
             if isinstance(item, Mapping)
         }
         manifest = {
@@ -2872,7 +2905,7 @@ class MobileAlprPackageExporter:
                 request=request,
                 package_id=package_id,
                 created_at=created_at,
-                models=models,
+                models=source_models,
                 pipeline=pipeline,
             ),
         }
