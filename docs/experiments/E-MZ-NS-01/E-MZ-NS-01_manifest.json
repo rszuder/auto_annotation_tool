@@ -1,0 +1,205 @@
+{
+  "schema": "alpr.mz_experiment_checkpoint.v1",
+  "experiment_id": "E-MZ-NS-01",
+  "status": "completed",
+  "purpose": "Controlled comparison of YOLO26n and YOLO26s character-detection models on one frozen group-aware split.",
+  "decision": {
+    "quality_winner": "MZ-s",
+    "scope": "quality_only",
+    "final_mobile_winner": false,
+    "reason": "MZ-s outperformed MZ-n on all object-level test metrics and on whole-plate Exact Match/CER. Mobile latency, memory, export precision and full MT+MZ pipeline cost are evaluated separately."
+  },
+  "dataset": {
+    "source_name": "YOLO_MegaDataset_Chars_20261004_141352",
+    "frozen_variant": "YOLO_MegaDataset_Chars_20261004_141352_E-MZ-NS-01_seed42",
+    "display_id": "DS-ZN-261004-1413-F7FA",
+    "provenance_id": "DS-MZ-020C480CE8",
+    "seed": 42,
+    "classes": 36,
+    "alphabet": "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "counts": {
+      "groups_total": 1004,
+      "images_total": 1136,
+      "characters_total": 7916,
+      "train": {
+        "groups": 805,
+        "images": 909,
+        "characters": 6345
+      },
+      "val": {
+        "groups": 100,
+        "images": 114,
+        "characters": 787
+      },
+      "test": {
+        "groups": 99,
+        "images": 113,
+        "characters": 784
+      }
+    },
+    "leakage_groups": 0,
+    "duplicate_identities": 0,
+    "missing_items": 0,
+    "class_Q_support": {
+      "total": 1,
+      "train": 1,
+      "val": 0,
+      "test": 0,
+      "test_metric": "N/A"
+    },
+    "assignment_sha256": "87e1117c2bc6f8dcfadff7c9323e832f4a709c6759053bbf0befd182449b224c",
+    "split_sha256": "9165a9f326bb6ec59869e91944b0481bd94b3f5361f20eefef3b65e2c5d5b794",
+    "data_yaml_sha256": "90fd254e498e8a0ae35c800b19be9c698d4ebce857a2a04c0f4241c93125cf9e"
+  },
+  "training_protocol": {
+    "strict_experiment": true,
+    "optimizer": "SGD",
+    "lr0": 0.01,
+    "epochs": 100,
+    "patience": 50,
+    "imgsz": 320,
+    "batch": 4,
+    "amp": false,
+    "device": 0,
+    "cache": false,
+    "workers": 0,
+    "mosaic": 0,
+    "close_mosaic": 0,
+    "deterministic": true,
+    "augmentation_policy": "source_only",
+    "online_augmentation": "disabled",
+    "seed": 42,
+    "end2end": true,
+    "differences_required": {},
+    "memory_fallback_required": false,
+    "protocol_sha256": "205789af82ca1c822cc6ce65c5d0a230c2a147e6847bdd89dad27fa44dd8f566",
+    "training_code_freeze_git_head": "c333f10fb8feabd9a0579075a21c63dd01ab4c6f",
+    "training_runtime_snapshot_sha256": "e7cfeea2dd583af787bd4096f73d402612d87d42d997f18608d93844fb372364"
+  },
+  "models": {
+    "MZ-n": {
+      "base_checkpoint": "yolo26n.pt",
+      "base_checkpoint_sha256": "9b09cc8bf347f0fc8a5f7657480587f25db09b34bf33b0652110fb03a8ad4fef",
+      "run_id": "20261004_234633",
+      "status": "completed",
+      "epochs_completed": 80,
+      "best_epoch": 80,
+      "best_checkpoint_sha256": "6639afd4f8a49e1c3f7919bf1b9324e6a283af7a80e204a9e535e4643a7ab2c7",
+      "best_checkpoint_size_bytes": 5370942,
+      "validation": {
+        "last": {
+          "map50_95": 0.806,
+          "map50": 0.921,
+          "precision": 0.844,
+          "recall": 0.836,
+          "loss": 0.416
+        },
+        "best": {
+          "map50_95": 0.806,
+          "map50": 0.923,
+          "precision": 0.892,
+          "recall": 0.852,
+          "loss": 0.416
+        }
+      },
+      "frozen_test_object_level": {
+        "precision": 0.8707,
+        "recall": 0.7883,
+        "map50": 0.9102,
+        "map50_95": 0.7961,
+        "fitness": 0.7961
+      },
+      "whole_plate_test": {
+        "plates": 113,
+        "exact_matches": 18,
+        "exact_match_rate": 0.159292,
+        "cer": 0.27551,
+        "no_read": 3,
+        "edit_distance": 216,
+        "correct_characters": 616,
+        "incorrect_characters": 23,
+        "missing_characters": 145,
+        "extra_characters": 48
+      }
+    },
+    "MZ-s": {
+      "base_checkpoint": "yolo26s.pt",
+      "base_checkpoint_sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b",
+      "run_id": "20261005_095712",
+      "status": "completed",
+      "epochs_completed": 100,
+      "best_epoch": 75,
+      "best_checkpoint_sha256": "3c55e519dc94bf62e4b6e0ddcef898487d21a00df26d45dca2c02e552bd54da4",
+      "best_checkpoint_size_bytes": 20324862,
+      "validation": {
+        "last": {
+          "map50_95": 0.867,
+          "map50": 0.96,
+          "precision": 0.939,
+          "recall": 0.916,
+          "loss": 0.184
+        },
+        "best": {
+          "map50_95": 0.868,
+          "map50": 0.962,
+          "precision": 0.955,
+          "recall": 0.935,
+          "loss": 0.169
+        }
+      },
+      "frozen_test_object_level": {
+        "precision": 0.9311,
+        "recall": 0.9453,
+        "map50": 0.9764,
+        "map50_95": 0.885,
+        "fitness": 0.885
+      },
+      "whole_plate_test": {
+        "plates": 113,
+        "exact_matches": 56,
+        "exact_match_rate": 0.495575,
+        "cer": 0.100765,
+        "no_read": 0,
+        "edit_distance": 79,
+        "correct_characters": 725,
+        "incorrect_characters": 5,
+        "missing_characters": 54,
+        "extra_characters": 20
+      }
+    }
+  },
+  "whole_plate_evaluation": {
+    "inference_contract": {
+      "imgsz": 320,
+      "confidence": 0.25,
+      "iou": 0.45,
+      "max_det": 300,
+      "device": 0,
+      "end2end": true,
+      "augment": false,
+      "half": false
+    },
+    "inference_contract_sha256": "f4e5ecec141d728301587f49172f3b3c51839d3c71b3c557cb11617769ccb7d7",
+    "evaluation_code_git_head": "655f6ac54e666c67912ceeedf3e45ecca0823039",
+    "evaluator_sha256": "c579e95dbab3464120644e1f31ecb029a458f3a3fe7e54faddab476541b84831",
+    "runner_sha256": "bb98435a1bb42c5a7ea664131aaf219a7b3bdd09f28e695bae107ad82b37c30e",
+    "artifacts": {
+      "comparison.json": "d4de76877f7188c8e6470b1a564bb9292449c5debaf076ec389f78960b0b0e04",
+      "MZ-n_rows.jsonl": "4a9fbaf7c3ed825d1f42d73aae2f70a72217bc23f713136129523f62defdfd91",
+      "MZ-n_summary.json": "4af45fa4c9eb772c319de69f19f010c6be5041b96dbcc71e75cc8c6ef18eeed8",
+      "MZ-s_rows.jsonl": "9a21ce04314a5cdab4156e6cdedfb75e64a8de5ed2fb0773ba0a61121c90d06e",
+      "MZ-s_summary.json": "e377cf11fe4c25fa69049bdccc14112912b7d628b53fa320edc369be6c72841c"
+    }
+  },
+  "interpretation": {
+    "map50_95_absolute_gain_MZ_s": 0.0889,
+    "recall_absolute_gain_MZ_s": 0.157,
+    "exact_match_absolute_gain_MZ_s": 0.336283,
+    "cer_relative_reduction_MZ_s": 0.6343,
+    "notes": [
+      "The frozen E-MZ-NS-01 test split was used to select between MZ-n and MZ-s and must not be presented later as an untouched final_test of the complete ALPR system.",
+      "Whole-plate evaluation uses one rectified crop per test item and does not include MT errors, mobile temporal consensus, tracking, or CameraX acquisition.",
+      "MZ-s is the quality winner, not yet the final mobile deployment winner."
+    ]
+  }
+}
