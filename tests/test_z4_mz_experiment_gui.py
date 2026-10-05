@@ -516,3 +516,22 @@ def test_enabled_start_repeats_shared_preflight_and_blocks_changed_assignment(re
     assert prepare.call_count==2
     begin.assert_not_called()
     assert value.trainer.calls==0 and value.errors.called
+
+
+@pytest.mark.parametrize('variant',['MZ-n','MZ-s'])
+def test_strict_base_model_panel_consistently_identifies_official_checkpoint(host,monkeypatch,variant):
+    value,protocol,repo=host
+    activate(value,protocol,repo,variant)
+    monkeypatch.setattr(z4_training_metrics.tk,'StringVar',_Var)
+    value.train_base_summary_values={key:Widget() for key in ['selected','origin','state']}
+    value.train_base_identity_lbl=Widget()
+    value._build_selected_training_base_model_identity_lines=lambda:z4_training_metrics._build_selected_training_base_model_identity_lines(value)
+    before=(value.base_model_var.get(),value.base_custom_var.get(),deepcopy(value._mz_protocol))
+    z4_training_metrics._refresh_training_base_model_identity_ui(value)
+    assert value.train_base_summary_values['selected'].cget('text')==('YOLO26n Detect' if variant=='MZ-n' else 'YOLO26s Detect')
+    assert value.train_base_summary_values['origin'].cget('text')=='Oficjalny checkpoint protokołu'
+    assert 'Zewnętrzn' not in str(value.train_base_summary_values['origin'].config)
+    assert 'Oficjalny checkpoint protokołu' in value.train_base_identity_lbl.cget('text')
+    assert z4_training_metrics._resolve_selected_training_base_model_display(value)==value.train_base_summary_values['selected'].cget('text')
+    assert before==(value.base_model_var.get(),value.base_custom_var.get(),value._mz_protocol)
+    assert not value.trainer.calls

@@ -146,10 +146,11 @@ class TrainingHistory:
         "vehicles": "vehicle",
     }
     
-    def __init__(self, history_dir: Path = None):
+    def __init__(self, history_dir: Path = None, *, reconcile_on_load: bool = True):
         self.history_dir = Path(history_dir) if history_dir else Path(CONFIG.DEFAULT_TRAINING_DIR)
         self.history_file = self.history_dir / self.HISTORY_FILE
         self.runs: Dict[str, TrainingRun] = {}
+        self._reconcile_on_load = reconcile_on_load
 
         self._load()
 
@@ -509,6 +510,9 @@ class TrainingHistory:
         """Laduje historie."""
         try:
             self.runs = self._load_runs_from_file(self.history_file)
+            if not self._reconcile_on_load:
+                # A UI catalog read must not migrate or rewrite other storages.
+                return
 
             imported_legacy = 0
             if not self.runs:

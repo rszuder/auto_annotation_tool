@@ -3425,6 +3425,9 @@ class TrainingTab:
     def _selected_run(self, *args, **kwargs):
         return z4_history_runtime._selected_run(self, *args, **kwargs)
 
+    def _get_visible_training_history_sources(self):
+        return z4_history_runtime._get_visible_training_history_sources(self)
+
     def _build_ui(self, *args, **kwargs):
         return z4_tab_shell._build_ui(self, *args, **kwargs)
 

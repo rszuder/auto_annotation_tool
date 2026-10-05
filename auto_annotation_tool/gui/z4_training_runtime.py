@@ -110,6 +110,7 @@ from . import z4_training_metrics
 from . import z4_dataset_builder
 from . import z4_analysis_ranking
 from . import z4_mz_experiment
+from . import z4_history_runtime
 from .z4_view_models import (
     Step4CampaignNavigationViewModel,
     Step4DatasetWorkflowViewModel,
@@ -732,7 +733,7 @@ def _bind_trainer_callbacks(self):
 
         # Aktualizacja UI w głównym wątku
         def update_ui():
-            _update_training_history_progress(self, run_id=run.id, epoch=epoch, total_epochs=run.epochs)
+            _update_training_history_progress(self, run_id=run.id, epoch=epoch, total_epochs=run.epochs, metrics=epoch_metrics)
             self._set_train_progress_values(overall=pct, epoch=100.0)
             self._update_training_progress_meta(
                 epoch=int(epoch),
@@ -857,13 +858,19 @@ def _bind_trainer_callbacks(self):
     self.trainer.on_resource_report = on_resource_report
 
 def _reload_history_snapshot_from_disk(self) -> bool:
+    trainer = getattr(self, "trainer", None)
+    if bool(getattr(trainer, "is_training", False)):
+        live_history = getattr(trainer, "history", None)
+        if isinstance(live_history, TrainingHistory) and Path(live_history.history_dir).resolve() == Path(self.history.history_dir).resolve():
+            self.history = live_history
+        return False
     history_obj = getattr(self, "history", None)
     history_dir = getattr(history_obj, "history_dir", None)
     if not history_dir:
         return False
 
     try:
-        refreshed = TrainingHistory(history_dir=Path(history_dir))
+        refreshed = TrainingHistory(history_dir=Path(history_dir), reconcile_on_load=False)
     except Exception as e:
         logger.debug(f"Nie udało się przeładować historii treningu z dysku: {e}")
         return False
@@ -1002,24 +1009,27 @@ def _set_training_running_ui_state(self, run_id: str | None = None, *, status_te
     if tree is None:
         return
     try:
-        if tree.exists(resolved_run_id):
-            tree.selection_set(resolved_run_id)
-            tree.focus(resolved_run_id)
-            tree.see(resolved_run_id)
+        run = self.history.get_run(resolved_run_id)
+        row_id = z4_history_runtime._history_row_id_for_run(self, run, history=self.history) if run else resolved_run_id
+        if tree.exists(row_id):
+            tree.selection_set(row_id)
+            tree.focus(row_id)
+            tree.see(row_id)
             self._on_run_selected()
     except Exception:
         pass
 
-def _update_training_history_progress(self, *, run_id, epoch=None, total_epochs=None) -> bool:
+def _update_training_history_progress(self, *, run_id, epoch=None, total_epochs=None, metrics=None) -> bool:
     """Update only live cells, without disk reads, rebuilding rows or changing selection."""
     tree = getattr(self, "tree", None)
     trainer = getattr(self, "trainer", None)
     current_run = getattr(trainer, "current_run", None)
-    row_id = str(run_id or "")
-    if (tree is None or not row_id or not bool(getattr(trainer, "is_training", False))
-            or str(getattr(current_run, "id", "")) != row_id
-            or str(getattr(self, "current_run_id", "") or row_id) != row_id):
+    real_run_id = str(run_id or "")
+    if (tree is None or not real_run_id or not bool(getattr(trainer, "is_training", False))
+            or str(getattr(current_run, "id", "")) != real_run_id
+            or str(getattr(self, "current_run_id", "") or real_run_id) != real_run_id):
         return False
+    row_id = z4_history_runtime._history_row_id_for_run(self, current_run, history=getattr(self, "history", None))
     try:
         if not tree.exists(row_id):
             return False
@@ -1032,6 +1042,21 @@ def _update_training_history_progress(self, *, run_id, epoch=None, total_epochs=
         if "pinned_result" in tree.item(row_id, "tags"):
             status = f"★ PODPIĘTY | {status}"
         values = {"Status": status}
+        if metrics is not None:
+            # Native workers write their own history. Mirror their completed-epoch
+            # event in memory, without saving JSON or reading it back each epoch.
+            rows = list(getattr(current_run, "metrics_history", []) or [])
+            if not any(str(row.get("epoch")) == str(epoch) for row in rows):
+                rows.append(dict(metrics, epoch=epoch))
+            current_run.metrics_history = rows
+            for key in ("map50", "map50_95"):
+                attr = "best_" + key
+                setattr(current_run, attr, max(float(getattr(current_run, attr, 0) or 0), float(metrics.get(key, 0) or 0)))
+            current_run.current_epoch = int(epoch)
+            values["mAP50-95"] = f"{current_run.best_map50_95:.3f}"
+            refs = getattr(self, "_history_row_refs", None)
+            if isinstance(refs, dict) and row_id in refs:
+                refs[row_id]["run"] = current_run
         if epoch is not None and total_epochs is not None:
             total = max(1, int(total_epochs))
             values["Epoki"] = f"{max(0, min(int(epoch), total))}/{total}"
@@ -1040,6 +1065,12 @@ def _update_training_history_progress(self, *, run_id, epoch=None, total_epochs=
             if tree.set(row_id, column) != value:
                 tree.set(row_id, column, value)
                 changed = True
+        selection = tree.selection() if metrics is not None else ()
+        if metrics is not None and selection and selection[0] == row_id:
+            refs = getattr(self, "_history_row_refs", None)
+            ref = refs.get(row_id, {}) if isinstance(refs, dict) else {}
+            target = ref.get("target") or str(getattr(current_run, "training_target", "") or "") or self.get_campaign_training_target()
+            z4_training_metrics._refresh_history_epoch_tables(self, current_run, target=target)
         return changed
     except tk.TclError:
         # The view may have been closed while a progress callback was queued.
@@ -1078,14 +1109,22 @@ def _load_history(self):
         pinned_run_ids, pinned_model_keys = set(), set()
 
     self.tree.delete(*self.tree.get_children())
-    for run in self.history.get_all_runs():
+    self._history_row_refs = {}
+    entries = []
+    for source_target, source_history in z4_history_runtime._get_visible_training_history_sources(self):
+        for run in source_history.get_all_runs():
+            iid = str(run.id) if CAMPAIGN.get_active_project_name() else f"{source_target}:{run.id}"
+            self._history_row_refs[iid] = {"run":run, "history":source_history, "target":source_target}
+            entries.append((iid, source_target, run))
+    entries.sort(key=lambda entry:str(getattr(entry[2], "created_at", "") or ""), reverse=True)
+    for iid, source_target, run in entries:
         if CAMPAIGN.get_active_project_name():
             try:
                 if not self._does_history_run_match_active_campaign_target(run):
                     continue
             except Exception:
                 continue
-        # Zachowaj pełne run.id, aby wybór historii i folderów był jednoznaczny.
+        # The UI ID includes storage scope; run.id remains unchanged.
         best_map = getattr(run, 'best_map50_95', 0.0) or 0.0
         run_target = ""
         try:
@@ -1101,6 +1140,9 @@ def _load_history(self):
                 ).strip().lower()
             except Exception:
                 run_target = ""
+        if not CAMPAIGN.get_active_project_name():
+            run_target = source_target or run_target
+        self._history_row_refs[iid]["target"] = run_target
         target_label = self._format_history_run_target_label(run_target)
         run_label = build_run_display_ref(run, kind_hint="training").id
         dataset_path = str(getattr(run, "dataset_path", "") or "").strip()
@@ -1144,7 +1186,7 @@ def _load_history(self):
             model_label = f"★ WYNIK {gate_label} | {model_label}"
             status_label = f"★ PODPIĘTY | {status_label}"
 
-        self.tree.insert("", tk.END, iid=str(run.id), values=(
+        self.tree.insert("", tk.END, iid=iid, values=(
             target_label,
             model_label,
             dataset_label,
@@ -1178,7 +1220,14 @@ def _load_history(self):
 def _delete_selected(self):
     run = self._selected_run()
     if run and messagebox.askyesno("Potwierdź", "Usunąć run treningu?"):
-        self.history.delete_run(run.id, delete_files=True)
+        selected = self.tree.selection()
+        ref = z4_history_runtime._history_row_ref(self, selected[0]) if selected else None
+        if ref is None or ref["run"] is not run:
+            return
+        # Refresh only the selected source before this explicit write, so a
+        # cached catalog cannot overwrite epochs persisted since it was opened.
+        source = TrainingHistory(history_dir=ref["history"].history_dir, reconcile_on_load=False)
+        source.delete_run(run.id, delete_files=True)
         self._load_history()
 
 def _open_run_folder(self):
@@ -1723,6 +1772,9 @@ def _resume_selected_run(self):
     if run is None:
         return
 
+    if not z4_history_runtime._ensure_history_run_storage_for_action(self, run):
+        return
+
     if not self._is_history_run_resume_allowed(run):
         if self._is_history_run_resumable(run) and CAMPAIGN.get_active_project_name():
             return messagebox.showerror(
@@ -2063,6 +2115,8 @@ def _use_selected_ranking_model_as_campaign_result(self):
 def _is_history_run_fine_tune_candidate(self, run) -> bool:
     if run is None:
         return False
+    if not z4_history_runtime._history_run_matches_active_storage(self, run):
+        return False
     if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.COMPLETED.value:
         return False
     try:
@@ -2093,6 +2147,8 @@ def _select_selected_run_as_fine_tune_base(self):
             "Brak runu",
             "Najpierw wybierz ukończony run z historii treningów."
         )
+    if not z4_history_runtime._ensure_history_run_storage_for_action(self, run):
+        return
     if not self._is_history_run_fine_tune_candidate(run):
         return messagebox.showwarning(
             "Nie można dotrenować",
@@ -2322,9 +2378,9 @@ def _close_run_details_dialog(self):
         pass
 
 def _open_current_run_details_analysis(self):
-    run = None
+    run = getattr(self, "_run_details_current_run", None)
     run_id = str(getattr(self, "_run_details_current_run_id", "") or "").strip()
-    if run_id:
+    if run is None and run_id:
         try:
             run = self.history.get_run(run_id)
         except Exception:
@@ -2336,9 +2392,9 @@ def _open_current_run_details_analysis(self):
     return self._open_run_analysis_window(run)
 
 def _open_current_run_details_folder(self):
-    run = None
+    run = getattr(self, "_run_details_current_run", None)
     run_id = str(getattr(self, "_run_details_current_run_id", "") or "").strip()
-    if run_id:
+    if run is None and run_id:
         try:
             run = self.history.get_run(run_id)
         except Exception:
@@ -2467,6 +2523,7 @@ def _open_run_details_modal(self, run):
         ).pack(side=tk.RIGHT)
 
     self._run_details_current_run_id = run_id
+    self._run_details_current_run = run
     try:
         self.run_details_title_lbl.configure(text=f"Szczegóły runu: {run_ref.id or self._shorten_training_text(run_name, 72)}")
     except Exception:
