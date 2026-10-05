@@ -13,6 +13,7 @@ from auto_annotation_tool.gui import z4_mz_experiment as gui, z4_training_runtim
 from auto_annotation_tool.gui import z4_device_runtime, z4_dataset_sources, z4_shared_ui, z4_training_metrics
 from auto_annotation_tool.training.mz_experiment_runtime import MZExperimentSelection
 from auto_annotation_tool.training import mz_experiment_runtime as shared_preflight
+from auto_annotation_tool.gui.tab_training import TrainingTab
 from test_mz_shared_preflight import frozen
 from test_z4_async_training_preflight import _Host, _Var, _Widget, _SlowTrainer
 
@@ -535,3 +536,20 @@ def test_strict_base_model_panel_consistently_identifies_official_checkpoint(hos
     assert z4_training_metrics._resolve_selected_training_base_model_display(value)==value.train_base_summary_values['selected'].cget('text')
     assert before==(value.base_model_var.get(),value.base_custom_var.get(),value._mz_protocol)
     assert not value.trainer.calls
+
+
+@pytest.mark.parametrize('variant',['MZ-n','MZ-s'])
+def test_normal_YOLO26_default_refresh_cannot_replace_frozen_checkpoint(host,variant):
+    value,protocol,repo=host
+    value._get_base_model_choices_for_mode=lambda mode=None:TrainingTab._get_base_model_choices_for_mode(value,mode)
+    value._get_default_base_model_for_mode=lambda mode=None:TrainingTab._get_default_base_model_for_mode(value,mode)
+    value._normalize_base_model_choice_for_ui=lambda key:TrainingTab._normalize_base_model_choice_for_ui(value,key)
+    value._on_base_model_change=Mock()
+    assert value._get_default_base_model_for_mode('char')=='yolo26n'
+    activate(value,protocol,repo,variant)
+    before=(value.base_model_var.get(),value.base_custom_var.get(),deepcopy(value._mz_protocol),value._mz_active_variant)
+    for _ in range(2):
+        TrainingTab._refresh_base_model_choices(value)
+    assert before==(value.base_model_var.get(),value.base_custom_var.get(),value._mz_protocol,value._mz_active_variant)
+    assert value.base_custom_var.get()==protocol['models'][variant]['checkpoint']
+    assert gui.is_active(value) and not value.trainer.calls

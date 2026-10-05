@@ -1299,7 +1299,11 @@ class TrainingTab:
         return self._get_custom_base_model_label() if self._is_custom_base_model_key(normalized) else normalized
 
     def _get_default_base_model_for_mode(self, mode: str | None = None) -> str:
-        choices = self._get_base_model_choices_for_mode(mode)
+        normalized = CONFIG.normalize_task_target(mode or self._get_selected_training_target())
+        choices = self._get_base_model_choices_for_mode(normalized)
+        preferred = {"plate": "yolo26n-pose", "char": "yolo26n", "vehicle": "yolo26n"}.get(normalized)
+        if preferred in choices:
+            return preferred
         for choice in choices:
             if not self._is_custom_base_model_key(choice):
                 return choice
