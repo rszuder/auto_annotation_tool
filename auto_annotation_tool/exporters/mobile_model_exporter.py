@@ -40,6 +40,38 @@ MAX_PACKAGE_ENTRIES = 256
 MAX_UNCOMPRESSED_BYTES = 512 * 1024 * 1024
 MAX_ALPR_PACKAGE_ENTRIES = 640
 MAX_ALPR_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024
+
+
+
+def _publish_package_with_destination_acl(source_package: Path, destination: Path) -> None:
+    """Publish a validated package without carrying ACLs from a private temp dir.
+
+    On Windows a file moved with os.replace() from TemporaryDirectory can retain
+    the temporary directory's restrictive DACL. Create a staging file directly
+    in the destination directory so it inherits the destination parent's ACL,
+    then atomically replace the final path.
+    """
+    source_package = Path(source_package)
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    staging = destination.parent / (
+        f".{destination.name}.publish-{os.getpid()}-{hashlib.sha256(os.urandom(32)).hexdigest()[:16]}.tmp"
+    )
+    try:
+        with source_package.open("rb") as src, staging.open("xb") as dst:
+            shutil.copyfileobj(src, dst, length=1024 * 1024)
+            dst.flush()
+            try:
+                os.fsync(dst.fileno())
+            except OSError:
+                pass
+        os.replace(str(staging), str(destination))
+    finally:
+        try:
+            staging.unlink()
+        except FileNotFoundError:
+            pass
 # Android AlprPackageImporter.readRootManifest() rejects a root manifest
 # larger than 2 MiB. Keep the desktop exporter on the same contract so an
 # artifact that passes desktop validation is also importable on Android.
@@ -1440,8 +1472,12 @@ class MobileModelExporter:
                 raise MobileExportError("Eksport nie utworzył żadnego wariantu modelu.")
 
             notify(76.0, "Buduję manifest i liczę sumy SHA-256.")
+            from ..training.source_inventory import inventory_for_export, strip_embedded_inventory, write_inventory
+
+            inventory = inventory_for_export(request.metadata, role=role)
+            manifest_request = replace(request, metadata=strip_embedded_inventory(request.metadata))
             manifest = self._build_manifest(
-                request=request,
+                request=manifest_request,
                 model_id=model_id,
                 role=role,
                 task=task,
@@ -1452,6 +1488,7 @@ class MobileModelExporter:
                 checkpoint=checkpoint,
                 model_info=model_info,
             )
+            manifest["training_source_inventory"] = write_inventory(package_root, inventory)
             self._validate_manifest_basic(manifest)
             manifest_path = package_root / "manifest.json"
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1462,7 +1499,7 @@ class MobileModelExporter:
             notify(94.0, "Sprawdzam paczkę po ponownym otwarciu ZIP.")
             self.validate_package(temp_package)
 
-            os.replace(str(temp_package), str(destination))
+            _publish_package_with_destination_acl(temp_package, destination)
             notify(100.0, f"Model mobilny gotowy: {destination.name}")
             return destination
 
@@ -1549,6 +1586,12 @@ class MobileModelExporter:
 
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             self._validate_manifest_basic(manifest)
+            from ..training.source_inventory import validate_archive_inventory
+
+            try:
+                validate_archive_inventory(archive, manifest)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise MobileExportError(f"Nieprawidłowe inventory SHA źródeł: {exc}") from exc
             name_set = set(names)
             for variant in manifest.get("variants", []):
                 files = list(variant.get("files") or ([variant.get("file")] if variant.get("file") else []))
@@ -2573,7 +2616,7 @@ class MobileAlprPackageExporter:
             notify(90.0, "Sprawdzam kompletny pakiet po ponownym otwarciu.")
             self.validate_package(temp_package)
 
-            os.replace(str(temp_package), str(destination))
+            _publish_package_with_destination_acl(temp_package, destination)
             notify(100.0, f"Kompletny pakiet ALPR gotowy: {destination.name}")
             return destination
 
@@ -2833,6 +2876,9 @@ class MobileAlprPackageExporter:
         plate_item: dict[str, Any],
         character_item: dict[str, Any],
     ) -> dict[str, Any]:
+        from ..training.source_inventory import strip_embedded_inventory
+
+        request = replace(request, metadata=strip_embedded_inventory(request.metadata))
         source_models = {
             "plate": plate_item,
             "character": character_item,

@@ -115,6 +115,27 @@ def test_complete_package_exports_and_preserves_each_child(models, tmp_path, rol
             read_alpr_package_manifest(invalid_path)
 
 
+
+
+
+def test_publish_package_inherits_destination_context_without_moving_source(tmp_path):
+    source_dir = tmp_path / "private-temp"
+    destination_dir = tmp_path / "published"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    source = source_dir / "model.alprmodel"
+    destination = destination_dir / "model.alprmodel"
+    source.write_bytes(b"validated package bytes")
+    destination.write_bytes(b"old package")
+
+    mobile._publish_package_with_destination_acl(source, destination)
+
+    assert source.exists(), "Publikacja ma kopiowac z temp, a nie przenosic plik z jego ACL."
+    assert source.read_bytes() == b"validated package bytes"
+    assert destination.read_bytes() == b"validated package bytes"
+    assert not list(destination_dir.glob(".*.publish-*.tmp"))
+
+
 def test_complete_package_rejects_root_manifest_above_android_limit(models, tmp_path):
     request = mobile.MobileAlprPackageRequest(
         destination=tmp_path / "too-large-root-manifest.alprmodel",

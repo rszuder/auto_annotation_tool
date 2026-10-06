@@ -361,6 +361,14 @@ def build_training_dataset_snapshot(
     snapshot.setdefault("schema", "alpr.training_dataset_snapshot.v1")
     snapshot.setdefault("captured_at", _utc_now_iso())
     snapshot.setdefault("snapshot_source", "frozen_at_training_start")
+    from .source_inventory import SNAPSHOT_KEY, build_source_inventory
+
+    if dataset_path:
+        snapshot[SNAPSHOT_KEY] = build_source_inventory(
+            dataset_path,
+            role={"char": "character", "car": "vehicle"}.get(snapshot.get("target"), snapshot.get("target")),
+            dataset_id=snapshot.get("dataset_id", ""),
+        )
     return _json_safe(snapshot)
 
 
