@@ -3387,6 +3387,8 @@ class CampaignTab:
         return campaign_project_browser._ensure_project_context_is_switchable(self, *args, **kwargs)
     def _reset_campaign_graph_runtime_state(self, *args, **kwargs):
         return campaign_project_browser._reset_campaign_graph_runtime_state(self, *args, **kwargs)
+    def _reset_campaign_project_runtime_state(self, *args, **kwargs):
+        return campaign_project_browser._reset_campaign_project_runtime_state(self, *args, **kwargs)
     def _add_new_project(self, *args, **kwargs):
         return campaign_project_browser._add_new_project(self, *args, **kwargs)
     def _get_selected_projects_from_list(self, *args, **kwargs):

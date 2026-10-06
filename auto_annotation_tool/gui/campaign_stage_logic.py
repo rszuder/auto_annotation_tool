@@ -2410,7 +2410,7 @@ def _get_iteration_target_lock_reason(self) -> str:
 
 def _get_step1_char_preflight_image_count(self) -> int:
     try:
-        plan = dict(self.current_ingest_plan or {})
+        plan = dict(self._get_active_step1_draft_plan() or {})
     except Exception:
         plan = {}
 

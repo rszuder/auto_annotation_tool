@@ -263,8 +263,14 @@ class CampaignManager:
     ) -> str:
         if candidate is None:
             return ""
+        raw_candidate = str(candidate or "").strip()
+        if not raw_candidate:
+            # Path("") resolves to the process working directory. An empty
+            # manifest/source field must never become an image directory,
+            # even when a caller intentionally disables the broad-dir guard.
+            return ""
         try:
-            path = Path(str(candidate or "").strip())
+            path = Path(raw_candidate)
         except Exception:
             return ""
         if not path.exists() or not path.is_dir():

@@ -1922,12 +1922,44 @@ def _build_step1_source_reuse_plan(self, base_plan: dict | None = None) -> dict:
     }
 
 def _ensure_current_ingest_plan_from_master_pool(self) -> bool:
+    try:
+        active_project = str(CAMPAIGN.get_active_project_name() or "").strip()
+        active_iteration = int(CAMPAIGN.get_current_iteration_num() or 1)
+    except Exception:
+        active_project = ""
+        active_iteration = 1
+
+    runtime_plan = self.current_ingest_plan if isinstance(self.current_ingest_plan, dict) else {}
+    try:
+        runtime_project = str(runtime_plan.get("project", "") or "").strip()
+        runtime_iteration = int(runtime_plan.get("iteration", 0) or 0)
+    except Exception:
+        runtime_project = ""
+        runtime_iteration = 0
+
+    runtime_matches_context = bool(
+        runtime_plan
+        and active_project
+        and runtime_project == active_project
+        and runtime_iteration == active_iteration
+    )
     if (
-        isinstance(self.current_ingest_plan, dict)
-        and int(self.current_ingest_plan.get("selected_total", 0) or 0) > 0
-        and self.current_ingest_plan.get("selected")
+        runtime_matches_context
+        and int(runtime_plan.get("selected_total", 0) or 0) > 0
+        and runtime_plan.get("selected")
     ):
         return True
+
+    if runtime_plan and not runtime_matches_context:
+        self.current_ingest_plan = {}
+        try:
+            self.ingest_plan_items = []
+        except Exception:
+            pass
+        try:
+            self._existing_iteration_ingest_plan_signature = None
+        except Exception:
+            pass
 
     plan = self._load_latest_ingest_plan_for_current_iteration()
     if isinstance(plan, dict) and int(plan.get("selected_total", 0) or 0) > 0 and plan.get("selected"):
