@@ -1070,6 +1070,171 @@ def _can_reuse_campaign_preview(host, key):
     )
 
 
+# T05PZ3FIX001: direct current-PZ2 checkpoint entry
+def _try_direct_campaign_pz3_checkpoint_entry(
+    host: "CharacterAnnotationTab",
+    source_context: dict | None,
+    *,
+    chars_dir=None,
+    datasets_dir=None,
+) -> dict | None:
+    """Open explicit T05/PZ3 from the current PZ2 checkpoint."""
+    try:
+        context = dict(source_context or {})
+    except Exception:
+        context = {}
+
+    def _truthy(value) -> bool:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "tak", "yes", "on"}
+        return bool(value)
+
+    target_hint = str(
+        context.get("target_substep")
+        or context.get("graph_target_substep")
+        or context.get("preferred_substep")
+        or ""
+    ).strip().lower()
+    explicit_pz3 = bool(
+        _truthy(context.get("force_pz3"))
+        or target_hint in {"3", "dataset", "pz3", "z3_pz3"}
+    )
+    if not explicit_pz3:
+        return None
+
+    try:
+        current_pz2_ready = bool(host._campaign_step3_pz2_current_contract_ready())
+    except Exception:
+        current_pz2_ready = False
+    if not current_pz2_ready:
+        return None
+
+    candidates = []
+    try:
+        current_preview = str(host.preview_dir_var.get() or "").strip()
+        if current_preview:
+            candidates.append(current_preview)
+    except Exception:
+        pass
+    try:
+        campaign_preview = str(CAMPAIGN.get_step3_preview_dir() or "").strip()
+        if campaign_preview and campaign_preview not in candidates:
+            candidates.append(campaign_preview)
+    except Exception:
+        pass
+    try:
+        saved_preview = str(host._get_saved_step3_preview_dir(require_plates=True) or "").strip()
+        if saved_preview and saved_preview not in candidates:
+            candidates.append(saved_preview)
+    except Exception:
+        pass
+
+    preview_dir = ""
+    for candidate in candidates:
+        try:
+            usable = bool(
+                host._is_usable_step3_preview_dir(
+                    candidate,
+                    require_plates=True,
+                    check_campaign_inflated=False,
+                )
+            )
+        except TypeError:
+            try:
+                usable = bool(host._is_usable_step3_preview_dir(candidate, require_plates=True))
+            except Exception:
+                usable = False
+        except Exception:
+            usable = False
+        if usable:
+            preview_dir = str(candidate)
+            break
+
+    if not preview_dir:
+        return None
+
+    # Ustaw kontekst PRZED select(PZ3). Zdarzenie NotebookTabChanged jest asynchroniczne
+    # i bez tego widzi force_pz3=False, po czym zrzuca kartę do PZ1.
+    host._step3_linear_mode = True
+    try:
+        host._campaign_force_pz2_entry = False
+        host._campaign_force_detect_entry = False
+        host._campaign_force_pz3_entry = True
+        host._campaign_graph_entry_context = dict(context)
+        host._campaign_step3_hold_pz2_after_reextract = False
+    except Exception:
+        pass
+
+    try:
+        host.preview_dir_var.set(preview_dir)
+    except Exception:
+        pass
+    try:
+        CAMPAIGN.set_step3_preview_dir(preview_dir)
+        CAMPAIGN.set_step3_stage1_done(True)
+        CAMPAIGN.set_step3_stage2_done(True)
+        CAMPAIGN.set_step3_substep(3)
+    except Exception:
+        pass
+
+    try:
+        host._campaign_chars_dir = str(chars_dir) if chars_dir else None
+        host._campaign_datasets_dir = str(datasets_dir) if datasets_dir else None
+    except Exception:
+        pass
+
+    try:
+        loaded = bool(_ensure_campaign_pz2_preview_loaded(host, force_reload=False))
+        host._campaign_pz2_preview_loaded_this_entry = loaded
+    except Exception:
+        pass
+
+    try:
+        host.go_to_substep_3(force=True)
+    except Exception as exc:
+        logger.error("Nie udało się otworzyć PZ3 z bieżącego checkpointu PZ2: %s", exc)
+        return {
+            "ok": False,
+            "reason": "direct_pz3_checkpoint_exception",
+            "message": str(exc),
+            "preview_dir": preview_dir,
+        }
+
+    try:
+        selected = str(host.main_nb.select() or "")
+        expected = str(host.tab_dataset)
+        if selected != expected:
+            return {
+                "ok": False,
+                "reason": "direct_pz3_selection_failed",
+                "message": "Jawne wejście T05/PZ3 nie utrzymało aktywnej karty PZ3.",
+                "preview_dir": preview_dir,
+            }
+    except Exception:
+        pass
+
+    for method_name in (
+        "_refresh_pz3_cards_ui",
+        "_refresh_pz3_status_panel_ui",
+        "_update_step3_finish_button_state",
+    ):
+        try:
+            method = getattr(host, method_name, None)
+            if callable(method):
+                method()
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "direct_pz3_checkpoint": True,
+        "preview_dir": preview_dir,
+        "using_preferred_source": False,
+        "reason": "current_pz2_checkpoint",
+    }
+
+
+
 def open_campaign_step3_entry(
     host: "CharacterAnnotationTab",
     preferred_source_context: dict | None = None,
@@ -1090,6 +1255,20 @@ def open_campaign_step3_entry(
     if not CAMPAIGN.get_active_project_name() or int(CAMPAIGN.get_current_step() or 0) < 3:
         return {"ok": False, "reason": "campaign_inactive"}
 
+    # Defensive context invariant: to jest wejście kampanijne.
+    # Nawet po restore/restart Z3 nie może odziedziczyć flag trybu swobodnego.
+    try:
+        host._step3_linear_mode = True
+    except Exception:
+        pass
+    try:
+        host.app.campaign_free_mode = False
+        set_campaign_mode = getattr(host.app, "set_campaign_mode", None)
+        if callable(set_campaign_mode):
+            set_campaign_mode(True)
+    except Exception:
+        pass
+
     # Finish edits to the previous loaded run before replacing its UI context.
     flush_preview = getattr(host, "_flush_scheduled_preview_metadata_save", None)
     if callable(flush_preview):
@@ -1108,6 +1287,17 @@ def open_campaign_step3_entry(
         return {"ok": False, "reason": "missing_campaign_dirs"}
 
     incoming_source_context = preferred_source_context if isinstance(preferred_source_context, dict) else {}
+
+    # T05PZ3FIX001: explicit PZ3 fast path
+    direct_pz3_checkpoint = _try_direct_campaign_pz3_checkpoint_entry(
+        host,
+        incoming_source_context,
+        chars_dir=chars_dir,
+        datasets_dir=datasets_dir,
+    )
+    if direct_pz3_checkpoint is not None:
+        return direct_pz3_checkpoint
+
 
     def _context_points_to_ready_source(context: dict | None) -> bool:
         if not isinstance(context, dict) or not context:
@@ -1582,22 +1772,27 @@ def open_campaign_step3_entry(
     def _can_continue_forced_pz3_without_reextract(refresh_state: dict | None = None) -> bool:
         if not force_dataset_entry:
             return False
-        # Completed PZ2 work cannot make a crop set from rejected geometry
-        # current. A changed approved source must pass through extraction.
-        if refresh_state and refresh_state.get("reason") in {
-            "preview_source_mismatch", "source_xml_changed", "source_run_changed",
-            "source_xml_newer_than_preview",
-        }:
-            return False
+        # Jawne wejście T05 -> PZ3 pracuje na ukończonym checkpointcie PZ2.
+        # Sam mismatch historycznego źródła Z2 nie może cofać operatora do PZ1.
+        # Bezpieczeństwo zapewniają niżej dwa warunki:
+        # 1) aktualny, nie-backfillowy kontrakt PZ2 bieżącej iteracji,
+        # 2) nadal używalny preview PZ2.
         try:
             if host.can_restore_step3_substep(3):
                 return True
         except Exception:
             pass
         try:
-            contracts = dict((CAMPAIGN.get_iteration_state() or {}).get("t06_contracts") or {})
-            pz2_contract = dict(contracts.get("pz2_char_boxes") or {})
-            pz2_ready = bool(pz2_contract.get("fulfilled") or CAMPAIGN.is_step3_stage2_done())
+            current_contract_ready = getattr(
+                host,
+                "_campaign_step3_pz2_current_contract_ready",
+                None,
+            )
+            pz2_ready = bool(
+                current_contract_ready()
+                if callable(current_contract_ready)
+                else False
+            )
         except Exception:
             pz2_ready = False
         if not pz2_ready:

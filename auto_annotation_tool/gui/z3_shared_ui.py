@@ -73,10 +73,35 @@ def build_lazy_subtab_placeholder(host: "CharacterAnnotationTab", parent, messag
 
 
 def is_step3_campaign_runtime(host: "CharacterAnnotationTab") -> bool:
+    # Aktywny projekt jest źródłem prawdy dla kontekstu Z3.
+    # Lokalna flaga może być stale po restore/restart i nie może wpuścić
+    # trybu swobodnego do aktywnego projektu.
     try:
-        return bool(getattr(host, "_step3_linear_mode", False) and CAMPAIGN.get_active_project_name())
+        active_project = bool(
+            str(CAMPAIGN.get_active_project_name() or "").strip()
+        )
     except Exception:
+        active_project = False
+
+    if not active_project:
         return False
+
+    try:
+        host._step3_linear_mode = True
+    except Exception:
+        pass
+
+    try:
+        app = getattr(host, "app", None)
+        if app is not None:
+            app.campaign_free_mode = False
+            set_campaign_mode = getattr(app, "set_campaign_mode", None)
+            if callable(set_campaign_mode):
+                set_campaign_mode(True)
+    except Exception:
+        pass
+
+    return True
 
 
 def get_step3_pz2_intro_text(host: "CharacterAnnotationTab") -> str:
@@ -1164,10 +1189,13 @@ def build_step3_extract_workflow_view_model(
         next_enabled=next_enabled,
         next_visible=current != "start",
         show_tab_nav=(
-            not linear_mode
-            and (not (route == "continue" and current == "start") or has_preview)
+            linear_mode
+            or (
+                not linear_mode
+                and (not (route == "continue" and current == "start") or has_preview)
+            )
         ),
-        show_back_nav=False,
+        show_back_nav=linear_mode,
         show_detect_nav=not linear_mode,
         clear_detect_emphasis=not linear_mode,
         step_cards=[
@@ -1229,10 +1257,15 @@ def refresh_extract_step_nav_buttons(
     if back_btn is not None:
         try:
             if workflow_vm.show_back_nav:
+                back_btn.config(state=tk.NORMAL)
+                if workflow_vm.linear_mode:
+                    back_btn.config(text="Wróć do pracy T05")
                 if not str(back_btn.winfo_manager()):
                     back_btn.grid(row=0, column=0, sticky="w")
-            elif str(back_btn.winfo_manager()):
-                back_btn.grid_remove()
+            else:
+                back_btn.config(state=tk.DISABLED)
+                if str(back_btn.winfo_manager()):
+                    back_btn.grid_remove()
         except Exception:
             pass
 

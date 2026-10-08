@@ -231,17 +231,48 @@ def _open_path(self, path: Path):
         messagebox.showinfo("Info", f"Nie mogę otworzyć: {path}\n\n{e}")
 
 def _get_visible_training_history_sources(self):
-    """UI sources are separate from the active trainer's writable history."""
+    """UI catalog = global histories + archived/project histories."""
     active = self.history
     if CAMPAIGN.get_active_project_name():
         return [(self.get_campaign_training_target(), active)]
+
     sources = []
-    active_dir = Path(active.history_dir).resolve()
-    for target in ("plate", "char", "vehicle"):
-        directory = Path(CONFIG.get_training_runs_dir(target))
-        source = active if directory.resolve() == active_dir else TrainingHistory(
-            history_dir=directory, reconcile_on_load=False)
+    seen_dirs = set()
+
+    def _add(target, directory):
+        try:
+            directory = Path(directory)
+            key = str(directory.resolve()).lower()
+        except Exception:
+            return
+        if key in seen_dirs or not directory.exists():
+            return
+        seen_dirs.add(key)
+        try:
+            source = active if Path(active.history_dir).resolve() == directory.resolve() else TrainingHistory(
+                history_dir=directory, reconcile_on_load=False
+            )
+        except Exception:
+            return
         sources.append((target, source))
+
+    for target in ("plate", "char", "vehicle"):
+        try:
+            _add(target, Path(CONFIG.get_training_runs_dir(target)))
+        except Exception:
+            pass
+
+    try:
+        projects_root = Path(CONFIG.DIR_9_PROJECTS)
+        if projects_root.exists():
+            for project_root in sorted(
+                (path for path in projects_root.iterdir() if path.is_dir()),
+                key=lambda path: path.name.lower(),
+            ):
+                _add("", project_root / "5_training_runs")
+    except Exception:
+        pass
+
     return sources
 
 

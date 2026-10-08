@@ -742,6 +742,7 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
             ready_label = getattr(host, "creator_ready_dataset_lbl", None)
             ready_radio = getattr(host, "creator_source_ready_radio", None)
             xml_radio = getattr(host, "creator_source_xml_radio", None)
+            ready_row = getattr(host, "creator_ready_dataset_row", None)
             xml_row = getattr(host, "creator_xml_row", None)
             auto_match_hint = getattr(host, "creator_auto_match_hint_lbl", None)
             images_row = getattr(host, "creator_images_row", None)
@@ -806,23 +807,72 @@ def refresh_step4_campaign_builder_inputs_ui(host: "TrainingTab"):
                 _set_pack_visible(getattr(host, "creator_campaign_summary_frame", None), False)
                 _set_pack_visible(getattr(host, "creator_campaign_summary_title", None), False)
                 _set_pack_visible(getattr(host, "creator_flow_strip", None), False)
+
+                # W trybie swobodnym użytkownik może teraz jawnie wybrać:
+                # 1) gotowy zamrożony split tablic albo 2) budowę splitu z XML.
+                _set_pack_visible(
+                    source_mode_frame,
+                    True,
+                    fill=tk.X,
+                    pady=(6, 8),
+                    after=host.creator_intro_lbl,
+                )
                 try:
-                    host._set_creator_source_mode("xml")
+                    ready_mode = host._get_creator_source_mode() == "ready"
                 except Exception:
-                    pass
-                _set_pack_visible(source_mode_frame, False)
-                if ready_label is not None:
-                    _set_pack_visible(ready_label, False)
+                    ready_mode = False
 
                 if source_summary is not None:
                     _set_pack_visible(source_summary, False)
-                _set_pack_visible(xml_row, True, fill=tk.X, pady=2, after=host.creator_intro_lbl)
-                _set_pack_visible(auto_match_hint, True, anchor=tk.W, fill=tk.X, pady=(2, 6), after=xml_row)
-                _set_pack_visible(images_row, True, fill=tk.X, pady=2, after=auto_match_hint)
                 _set_pack_visible(output_row, False)
-                _set_pack_visible(ratios_frame, True, fill=tk.X, pady=(12, 8), after=images_row)
-                _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(12, 8), after=ratios_frame)
-                _set_pack_visible(create_frame, True, fill=tk.X, pady=(12, 10), after=(augmentation_frame or ratios_frame))
+
+                if ready_mode:
+                    _set_pack_visible(
+                        ready_row,
+                        True,
+                        fill=tk.X,
+                        pady=2,
+                        after=source_mode_frame,
+                    )
+                    if ready_label is not None:
+                        _set_pack_visible(
+                            ready_label,
+                            True,
+                            anchor=tk.W,
+                            fill=tk.X,
+                            pady=(2, 6),
+                            after=ready_row,
+                        )
+                    _set_pack_visible(xml_row, False)
+                    _set_pack_visible(auto_match_hint, False)
+                    _set_pack_visible(images_row, False)
+                    # Split jest zamrożony — nie pokazuj suwaków train/val/test.
+                    _set_pack_visible(ratios_frame, False)
+                    _set_pack_visible(
+                        augmentation_frame,
+                        True,
+                        fill=tk.X,
+                        pady=(12, 8),
+                        after=(ready_label or ready_row or source_mode_frame),
+                    )
+                    _set_pack_visible(
+                        create_frame,
+                        True,
+                        fill=tk.X,
+                        pady=(12, 10),
+                        after=(augmentation_frame or ready_label or ready_row),
+                    )
+                else:
+                    _set_pack_visible(ready_row, False)
+                    if ready_label is not None:
+                        _set_pack_visible(ready_label, False)
+                    _set_pack_visible(xml_row, True, fill=tk.X, pady=2, after=source_mode_frame)
+                    _set_pack_visible(auto_match_hint, True, anchor=tk.W, fill=tk.X, pady=(2, 6), after=xml_row)
+                    _set_pack_visible(images_row, True, fill=tk.X, pady=2, after=auto_match_hint)
+                    _set_pack_visible(ratios_frame, True, fill=tk.X, pady=(12, 8), after=images_row)
+                    _set_pack_visible(augmentation_frame, True, fill=tk.X, pady=(12, 8), after=ratios_frame)
+                    _set_pack_visible(create_frame, True, fill=tk.X, pady=(12, 10), after=(augmentation_frame or ratios_frame))
+
                 if getattr(progress, "master", None) is not getattr(host, "step4_creator_action_inner", None):
                     _set_pack_visible(progress, True, fill=tk.X, pady=2, after=create_frame)
                 if getattr(status, "master", None) is not getattr(host, "step4_creator_action_inner", None):

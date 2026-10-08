@@ -1473,6 +1473,46 @@ def show_training_completion_summary(host: "TrainingTab", *, promoted: bool, can
     if str(getattr(host, "_last_training_completion_summary_run_id", "") or "").strip() == run_id:
         return
 
+    # Nie twórz modalnego Toplevel/grab, gdy aplikacja jest zminimalizowana.
+    # Dialog końca treningu jest odraczany do chwili przywrócenia root.
+    root = getattr(getattr(host, "app", None), "root", None)
+    root_state = ""
+    root_visible = False
+    if root is not None:
+        try:
+            root_state = str(root.state() or "")
+        except Exception:
+            root_state = ""
+        try:
+            root_visible = bool(root.winfo_viewable())
+        except Exception:
+            root_visible = root_state in {"normal", "zoomed"}
+
+    if root is not None and (root_state not in {"normal", "zoomed"} or not root_visible):
+        pending = getattr(host, "_training_completion_summary_after_id", None)
+        if pending is None:
+            def _retry_training_completion_summary():
+                host._training_completion_summary_after_id = None
+                try:
+                    show_training_completion_summary(
+                        host,
+                        promoted=promoted,
+                        can_finish_step4=can_finish_step4,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                host._training_completion_summary_after_id = root.after(
+                    350,
+                    _retry_training_completion_summary,
+                )
+            except Exception:
+                host._training_completion_summary_after_id = None
+        return
+
+    host._training_completion_summary_after_id = None
+
     run = None
     try:
         run = host.history.get_run(run_id)

@@ -842,12 +842,48 @@ def _build_creator_ui(self):
         command=self._on_creator_source_mode_change,
     )
 
+    # Tryb gotowego splitu jest pełnoprawnym wejściem PZ1 także w trybie
+    # swobodnym. Sam frame jest pokazywany/ukrywany przez z4_shared_ui.
+    self.creator_source_ready_radio.pack(anchor=tk.W)
+    self.creator_source_xml_radio.pack(anchor=tk.W, pady=(2, 0))
+
+    self.creator_ready_dataset_row = ttk.Frame(f)
+    ttk.Label(self.creator_ready_dataset_row, text="Gotowy split tablic:").pack(side=tk.LEFT)
+    self.creator_ready_dataset_var = tk.StringVar()
+    self.creator_ready_dataset_entry = ttk.Entry(
+        self.creator_ready_dataset_row,
+        textvariable=self.creator_ready_dataset_var,
+        state="readonly",
+    )
+    self.creator_ready_dataset_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+    self.btn_pick_creator_ready_dataset = ttk.Button(
+        self.creator_ready_dataset_row,
+        text="Przeglądaj datasety",
+        command=lambda: z4_dataset_builder._open_ready_plate_dataset_browser(self),
+    )
+    self.btn_pick_creator_ready_dataset.pack(side=tk.LEFT)
+
     self.creator_ready_dataset_lbl = ttk.Label(
         f,
-        text="",
+        text="Wskaż gotowy dataset YOLO Pose z data.yaml oraz istniejącym train / val / test.",
         justify=tk.LEFT,
         wraplength=720
     )
+
+    def _on_ready_plate_dataset_changed(*_args):
+        try:
+            self._refresh_dataset_creator_cta_state()
+        except Exception:
+            pass
+        try:
+            self._refresh_step4_augmentation_summary("plate")
+        except Exception:
+            pass
+
+    try:
+        self.creator_ready_dataset_var.trace_add("write", _on_ready_plate_dataset_changed)
+    except Exception:
+        pass
 
     row1 = ttk.Frame(f); row1.pack(fill=tk.X, pady=2)
     self.creator_xml_row = row1
@@ -1029,6 +1065,8 @@ def _build_creator_ui(self):
     HELP.bind_help(self.creator_source_mode_frame, "tr_cvat_source_mode")
     HELP.bind_help(self.creator_source_ready_radio, "tr_cvat_source_mode")
     HELP.bind_help(self.creator_source_xml_radio, "tr_cvat_source_mode")
+    HELP.bind_help(self.creator_ready_dataset_row, "tr_cvat_source_mode")
+    HELP.bind_help(self.btn_pick_creator_ready_dataset, "tr_cvat_source_mode")
     HELP.bind_help(self.btn_pick_cvat_xml, "tr_cvat_xml")
     HELP.bind_help(self.creator_auto_match_hint_lbl, "tr_cvat_img")
     HELP.bind_help(row2, "tr_cvat_img")

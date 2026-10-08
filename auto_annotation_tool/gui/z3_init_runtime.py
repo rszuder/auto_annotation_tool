@@ -79,7 +79,24 @@ def __init__(self, parent, app):
 
     # core state
     self.is_processing = False
-    self._step3_linear_mode = False
+
+    # Invariant kontekstu Z3:
+    # aktywny projekt zawsze ma pierwszeństwo nad lokalnym/starym stanem
+    # trybu swobodnego. To chroni restore/restart przed przeciekiem (F)->(C).
+    try:
+        _active_campaign_project = bool(
+            str(CAMPAIGN.get_active_project_name() or "").strip()
+        )
+    except Exception:
+        _active_campaign_project = False
+
+    self._step3_linear_mode = bool(_active_campaign_project)
+
+    if _active_campaign_project:
+        try:
+            self.app.campaign_free_mode = False
+        except Exception:
+            pass
 
     # preview/cache state
     self.preview_metadata = {}

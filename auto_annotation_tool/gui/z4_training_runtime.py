@@ -111,6 +111,7 @@ from . import z4_dataset_builder
 from . import z4_analysis_ranking
 from . import z4_mz_experiment
 from . import z4_history_runtime
+from . import z4_fine_tune_protocol
 from .z4_view_models import (
     Step4CampaignNavigationViewModel,
     Step4DatasetWorkflowViewModel,
@@ -391,6 +392,13 @@ def _start_training(self, _mz_selection=None):
         requested_imgsz = strict_request["img_size"] if strict_request is not None else self._safe_training_int_value("imgsz_var", default=640, minimum=0)
     except Exception:
         requested_imgsz = 0
+    # Z4FTGUI001-FIX02 runtime protocol
+    fine_tune_protocol = (
+        z4_fine_tune_protocol.collect(self)
+        if fine_tune_metadata and strict_request is None
+        else {}
+    )
+
     if is_pose_dataset and requested_imgsz < 256:
         return messagebox.showerror(
             "Zbyt mała rozdzielczość wejściowa",
@@ -450,6 +458,15 @@ def _start_training(self, _mz_selection=None):
         f"Rozdzielczość wejściowa: {strict_request['img_size'] if strict_request is not None else self._safe_training_int_value('imgsz_var', default=640, minimum=32)} | "
         f"Współczynnik uczenia: {strict_request['lr0'] if strict_request is not None else self._safe_training_float_value('lr0_var', default=0.01, minimum=0.0001)}"
     )
+    if fine_tune_protocol:
+        self._append_train_log(
+            "Fine-tuning runtime: "
+            f"polityka={fine_tune_protocol.get('memory_policy')} | "
+            f"AMP={fine_tune_protocol.get('amp')} | mosaic={fine_tune_protocol.get('mosaic')} | "
+            f"cache={fine_tune_protocol.get('cache')} | workers={fine_tune_protocol.get('workers')} | "
+            f"plots={fine_tune_protocol.get('plots')} | seed={fine_tune_protocol.get('seed')} | "
+            f"optimizer={fine_tune_protocol.get('optimizer')}"
+        )
     self._append_train_log("Liczebność zbiorów train/val/test zostanie sprawdzona w tle.")
     self._append_train_log("=" * 70)
 
@@ -469,6 +486,19 @@ def _start_training(self, _mz_selection=None):
         "validate_custom_model": model_task is None,
         **dict(fine_tune_metadata or {}),
     }
+    if fine_tune_protocol:
+        protocol_request = dict(fine_tune_protocol)
+        protocol_request.update({
+            "epochs": int(request.get("epochs", 0) or 0),
+            "batch": int(request.get("batch_size", 0) or 0),
+            "imgsz": int(request.get("img_size", 0) or 0),
+            "lr0": float(request.get("lr0", 0.0) or 0.0),
+            "device": request.get("device"),
+        })
+        # YOLOPoseTrainer ma istniejący kontrakt `training_protocol`; worker
+        # odczyta go z TrainingRun po zapisaniu przez start_training().
+        request["training_protocol"] = protocol_request
+
     _set_training_preparing_ui_state(self, text="Przygotowanie treningu: waliduję i zamrażam dane...", progress=5.0)
     detached_models = _detach_gpu_resources_before_training(self)
     trainer = self.trainer
@@ -1111,9 +1141,26 @@ def _load_history(self):
     self.tree.delete(*self.tree.get_children())
     self._history_row_refs = {}
     entries = []
+    used_iids = set()
     for source_target, source_history in z4_history_runtime._get_visible_training_history_sources(self):
+        try:
+            source_dir = Path(source_history.history_dir)
+            project_scope = source_dir.parent.name if source_dir.name == "5_training_runs" else source_dir.name
+        except Exception:
+            project_scope = "history"
+
         for run in source_history.get_all_runs():
-            iid = str(run.id) if CAMPAIGN.get_active_project_name() else f"{source_target}:{run.id}"
+            if CAMPAIGN.get_active_project_name():
+                iid = str(run.id)
+            else:
+                scope = source_target if source_target in {"plate", "char", "vehicle"} else f"project@{project_scope}"
+                iid = f"{scope}:{run.id}"
+                if iid in used_iids:
+                    suffix = 2
+                    while f"{iid}#{suffix}" in used_iids:
+                        suffix += 1
+                    iid = f"{iid}#{suffix}"
+            used_iids.add(iid)
             self._history_row_refs[iid] = {"run":run, "history":source_history, "target":source_target}
             entries.append((iid, source_target, run))
     entries.sort(key=lambda entry:str(getattr(entry[2], "created_at", "") or ""), reverse=True)
@@ -1140,8 +1187,8 @@ def _load_history(self):
                 ).strip().lower()
             except Exception:
                 run_target = ""
-        if not CAMPAIGN.get_active_project_name():
-            run_target = source_target or run_target
+        if not CAMPAIGN.get_active_project_name() and source_target in {"plate", "char", "vehicle"}:
+            run_target = source_target
         self._history_row_refs[iid]["target"] = run_target
         target_label = self._format_history_run_target_label(run_target)
         run_label = build_run_display_ref(run, kind_hint="training").id
@@ -2115,8 +2162,34 @@ def _use_selected_ranking_model_as_campaign_result(self):
 def _is_history_run_fine_tune_candidate(self, run) -> bool:
     if run is None:
         return False
-    if not z4_history_runtime._history_run_matches_active_storage(self, run):
-        return False
+
+    if CAMPAIGN.get_active_project_name():
+        if not z4_history_runtime._history_run_matches_active_storage(self, run):
+            return False
+    else:
+        active_target = str(self._get_selected_training_target() or "").strip().lower()
+        run_target = ""
+        try:
+            iid = z4_history_runtime._history_row_id_for_run(self, run)
+            ref = (getattr(self, "_history_row_refs", {}) or {}).get(iid, {})
+            ref_target = str(ref.get("target") or "").strip().lower()
+            if ref_target in {"plate", "char", "vehicle"}:
+                run_target = ref_target
+        except Exception:
+            run_target = ""
+        if not run_target:
+            try:
+                run_target = str(self._infer_history_run_target(run) or "").strip().lower()
+            except Exception:
+                run_target = ""
+        if not run_target:
+            try:
+                run_target = str(self._infer_dataset_target(getattr(run, "dataset_path", "")) or "").strip().lower()
+            except Exception:
+                run_target = ""
+        if active_target in {"plate", "char", "vehicle"} and run_target != active_target:
+            return False
+
     if str(getattr(run, "status", "") or "").strip().lower() != TrainingStatus.COMPLETED.value:
         return False
     try:
@@ -2147,8 +2220,9 @@ def _select_selected_run_as_fine_tune_base(self):
             "Brak runu",
             "Najpierw wybierz ukończony run z historii treningów."
         )
-    if not z4_history_runtime._ensure_history_run_storage_for_action(self, run):
-        return
+    if CAMPAIGN.get_active_project_name():
+        if not z4_history_runtime._ensure_history_run_storage_for_action(self, run):
+            return
     if not self._is_history_run_fine_tune_candidate(run):
         return messagebox.showwarning(
             "Nie można dotrenować",
@@ -2170,6 +2244,11 @@ def _select_selected_run_as_fine_tune_base(self):
         self._set_step4_fine_tune_parent_state(run, best_weights)
     finally:
         self._step4_setting_fine_tune_base = False
+
+    try:
+        z4_fine_tune_protocol.refresh_visibility(self)
+    except Exception:
+        pass
 
     try:
         self._refresh_training_base_model_selection_ui()
@@ -2439,7 +2518,16 @@ def _open_run_details_modal(self, run):
         dialog.title("Szczegóły runu treningowego")
         dialog.geometry("1180x760")
         dialog.minsize(980, 640)
-        dialog.transient(self.frame.winfo_toplevel())
+        # Zwykłe okno, nie transient. Na Windows transient usuwa z ramki
+        # przyciski minimalizacji/maksymalizacji.
+        try:
+            dialog.wm_transient("")
+        except Exception:
+            pass
+        try:
+            dialog.attributes("-toolwindow", False)
+        except Exception:
+            pass
         dialog.resizable(True, True)
         dialog.protocol("WM_DELETE_WINDOW", self._close_run_details_dialog)
         self._run_details_dialog = dialog
@@ -2545,6 +2633,12 @@ def _open_run_details_modal(self, run):
     )
 
     try:
+        # Wyczyść transient również przy ponownym pokazaniu istniejącego okna.
+        dialog.wm_transient("")
+        try:
+            dialog.attributes("-toolwindow", False)
+        except Exception:
+            pass
         dialog.title(f"Szczegóły runu | {run_ref.id or self._shorten_training_text(run_name, 48)}")
         dialog.deiconify()
         dialog.lift()

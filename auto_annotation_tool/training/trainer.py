@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Trener modeli YOLO Pose.
@@ -609,12 +609,13 @@ class YOLOPoseTrainer:
         lr0: float,
         dataset_profile: Dict,
         label: str,
+        preserve_lr: bool = False,
     ) -> Dict:
         is_pose = bool((dataset_profile or {}).get("is_pose"))
         safe_batch = 1 if is_pose else max(1, min(int(batch_size or 1), 2))
         safe_img_size = 512 if int(img_size or 640) >= 640 else self._next_lower_training_imgsz(int(img_size or 640))
         safe_img_size = max(256, int(safe_img_size))
-        safe_lr0 = round(max(0.0025, float(lr0 or 0.01) * 0.85), 4)
+        safe_lr0 = float(lr0) if preserve_lr else round(max(0.0025, float(lr0 or 0.01) * 0.85), 4)
         return {
             "batch_size": int(safe_batch),
             "img_size": int(safe_img_size),
@@ -624,6 +625,7 @@ class YOLOPoseTrainer:
             "close_mosaic": 0,
             "plots": False,
             "cache": False,
+            "workers": 0,
             "label": str(label),
             "ram_safe": True,
         }
@@ -643,6 +645,7 @@ class YOLOPoseTrainer:
         close_mosaic: int | None = None,
         plots: bool = True,
         cache: bool = False,
+        workers: int = 0,
     ) -> Dict:
         train_args = {
             "data": str(Path(dataset_path) / "data.yaml"),
@@ -660,7 +663,7 @@ class YOLOPoseTrainer:
             "save_period": 10,
             "patience": 50,
             "plots": bool(plots),
-            "workers": 0,
+            "workers": max(0, int(workers or 0)),
             # Jawne cache=False zapobiega niekontrolowanemu trzymaniu obrazów w RAM.
             "cache": bool(cache),
             "amp": bool(amp),
@@ -687,6 +690,11 @@ class YOLOPoseTrainer:
         requested = dict(getattr(run, "training_protocol_requested", None) or {})
         strict = bool(getattr(run, "strict_experiment", False))
         snapshot = training_protocol_snapshot(requested, arguments, strict=strict, source=source)
+        actual = dict(snapshot.get("actual") or {})
+        for key in ("memory_policy", "ram_safe_applied", "attempt_label"):
+            if key in arguments:
+                actual[key] = arguments.get(key)
+        snapshot["actual"] = actual
         self.history.update_run(run.id, training_protocol_snapshot=snapshot)
         run.training_protocol_snapshot = snapshot
         if strict and snapshot["differences"]:
@@ -1585,8 +1593,24 @@ class YOLOPoseTrainer:
 
             is_resuming = bool(resume_from and Path(resume_from).exists())
             dataset_profile = self._get_dataset_runtime_profile(dataset_path)
+            # Z4FTGUI001-FIX02 trainer protocol
+            requested_protocol = dict(getattr(run, "training_protocol_requested", None) or {})
+            explicit_ft_protocol = bool(requested_protocol.get("ui_fine_tune_protocol"))
+            ram_safe_enabled = bool(requested_protocol.get("ram_safe_enabled", True)) if explicit_ft_protocol else True
+            allow_automatic_safety = (not explicit_ft_protocol) or ram_safe_enabled
+            requested_amp = bool(requested_protocol.get("amp", True))
+            try:
+                requested_mosaic = float(requested_protocol.get("mosaic", 1.0))
+            except Exception:
+                requested_mosaic = 1.0
+            requested_close_mosaic = requested_protocol.get("close_mosaic", 0 if requested_mosaic <= 0.0 else None)
+            requested_cache = bool(requested_protocol.get("cache", False))
+            requested_workers = max(0, int(requested_protocol.get("workers", 0) or 0))
+            requested_plots = bool(requested_protocol.get("plots", True))
+
             disable_mosaic_from_start = bool(
-                not is_resuming
+                allow_automatic_safety
+                and not is_resuming
                 and bool(dataset_profile.get("is_pose"))
                 and int(dataset_profile.get("train_images", 0) or 0) >= 1000
             )
@@ -1595,14 +1619,16 @@ class YOLOPoseTrainer:
                 is_pose=bool(dataset_profile.get("is_pose")),
             )
             start_with_safe_pose_profile = bool(
-                not is_resuming
+                allow_automatic_safety
+                and not is_resuming
                 and bool(dataset_profile.get("is_pose"))
                 and int(batch_size) <= 1
                 and int(img_size) <= 448
             )
             ram_state = sample_system_memory()
             start_with_ram_safe_profile = bool(
-                not is_resuming
+                ram_safe_enabled
+                and not is_resuming
                 and self._is_ram_pressure_high(ram_state, dataset_profile)
             )
             strict_experiment = bool(getattr(run, "strict_experiment", False))
@@ -1629,6 +1655,16 @@ class YOLOPoseTrainer:
                 logger.warning(ram_msg)
                 if self.on_progress:
                     self.on_progress(0.0, ram_msg)
+
+            if explicit_ft_protocol and not ram_safe_enabled and self._is_ram_pressure_high(ram_state, dataset_profile):
+                fixed_msg = (
+                    "Fine-tuning ma politykę `Stałe parametry`. Wykryto presję RAM, "
+                    "ale aplikacja nie zmieni batch/imgsz/LR ani opcji runtime. "
+                    f"{self._format_ram_state(ram_state)}"
+                )
+                logger.warning(fixed_msg)
+                if self.on_progress:
+                    self.on_progress(0.0, fixed_msg)
 
             self.history.update_run(
                 run.id,
@@ -1836,6 +1872,7 @@ class YOLOPoseTrainer:
                         lr0=float(lr0),
                         dataset_profile=dataset_profile,
                         label="ram_safe_preflight",
+                        preserve_lr=explicit_ft_protocol,
                     )
                 ]
             else:
@@ -1844,23 +1881,25 @@ class YOLOPoseTrainer:
                         "batch_size": int(batch_size),
                         "img_size": int(img_size),
                         "lr0": float(lr0),
-                        "amp": (False if start_with_safe_pose_profile else True),
-                        "mosaic": (0.0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
-                        "close_mosaic": (0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None),
-                        "plots": True,
-                        "cache": False,
+                        "amp": (requested_amp if explicit_ft_protocol else (False if start_with_safe_pose_profile else True)),
+                        "mosaic": (requested_mosaic if explicit_ft_protocol else (0.0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None)),
+                        "close_mosaic": (requested_close_mosaic if explicit_ft_protocol else (0 if (disable_mosaic_from_start or start_with_safe_pose_profile) else None)),
+                        "plots": (requested_plots if explicit_ft_protocol else True),
+                        "cache": (requested_cache if explicit_ft_protocol else False),
+                        "workers": (requested_workers if explicit_ft_protocol else 0),
                         "label": "start",
                         "ram_safe": False,
                     }
                 ]
             used_memory_fallback = False
-            if not is_resuming and not start_with_ram_safe_profile and not strict_experiment:
+            if ram_safe_enabled and not is_resuming and not start_with_ram_safe_profile and not strict_experiment:
                 fallback_attempt = self._build_ram_safe_training_attempt(
                     batch_size=int(batch_size),
                     img_size=int(img_size),
                     lr0=float(lr0),
                     dataset_profile=dataset_profile,
                     label="oom_fallback",
+                    preserve_lr=explicit_ft_protocol,
                 )
                 if fallback_attempt != training_attempts[0]:
                     training_attempts.append(fallback_attempt)
@@ -1940,8 +1979,15 @@ class YOLOPoseTrainer:
                             close_mosaic=attempt.get("close_mosaic"),
                             plots=bool(attempt.get("plots", True)),
                             cache=bool(attempt.get("cache", False)),
+                            workers=int(attempt.get("workers", requested_workers) or 0),
                         )
-                        self._capture_training_protocol(run, train_args, source="model_train_arguments")
+                        protocol_actual = dict(train_args)
+                        protocol_actual.update({
+                            "memory_policy": ("adaptive" if ram_safe_enabled else "fixed"),
+                            "ram_safe_applied": bool(attempt.get("ram_safe")),
+                            "attempt_label": str(attempt.get("label") or ""),
+                        })
+                        self._capture_training_protocol(run, protocol_actual, source="model_train_arguments")
                         self.model.train(**train_args)
                     last_training_error = None
                     break
@@ -1949,9 +1995,18 @@ class YOLOPoseTrainer:
                     last_training_error = train_error
                     if strict_experiment and self._is_training_memory_error(train_error):
                         self._reject_experiment_memory_fallback(run, str(train_error))
+                    if explicit_ft_protocol and not ram_safe_enabled and self._is_training_memory_error(train_error):
+                        raise RuntimeError(
+                            "Fine-tuning z polityką `Stałe parametry` napotkał błąd pamięci. "
+                            "Aplikacja nie zmieni automatycznie batch/imgsz/LR ani opcji runtime. "
+                            "Zmień ustawienia jawnie w Z4/PZ2 i uruchom nowy run. "
+                            f"Ustawienia: batch={int(attempt['batch_size'])}, "
+                            f"imgsz={int(attempt['img_size'])}, lr0={float(attempt['lr0']):.6g}."
+                        ) from train_error
                     progressed_batches = int(batch_state.get("batch", 0) or 0) > 0
                     can_retry = (
-                        not strict_experiment
+                        ram_safe_enabled
+                        and not strict_experiment
                         and
                         attempt_index < (len(training_attempts) - 1)
                         and not is_resuming

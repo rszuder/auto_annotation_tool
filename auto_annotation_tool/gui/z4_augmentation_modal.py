@@ -211,7 +211,17 @@ class Step4AugmentationModal:
         self.scene_view_yaw_var = tk.DoubleVar(value=0.0)
         self.scene_view_pitch_var = tk.DoubleVar(value=89.0)
         self.scene_view_roll_var = tk.DoubleVar(value=0.0)
-        self.scene_plate_texture_var = tk.BooleanVar(value=bool(getattr(self.initial_profile, "scene_plate_texture_enabled", True)))
+        # Zakres zawartości:
+        # - target="plate" => MT, czyli pełne zdjęcie/scena z pojazdem,
+        # - target="char"  => MZ, czyli wycięta tablica.
+        # Tekstura/płaszczyzna tablicy ma sens tylko dla cropu tablicy.
+        self.scene_plate_texture_var = tk.BooleanVar(
+            value=(
+                bool(getattr(self.initial_profile, "scene_plate_texture_enabled", True))
+                if self.target != "plate"
+                else False
+            )
+        )
 
         def _default_plate_world(norm_x: float, norm_y: float, scale: float = 1.0) -> tuple[float, float]:
             plate_w = max(0.25, min(3.0, float(self.scene_plate_width_var.get() or 1.0)))
@@ -367,6 +377,14 @@ class Step4AugmentationModal:
         self._raw_preview_request_id = 0
         self._raw_preview_worker_running = False
         self._raw_preview_pending = False
+
+        # Pełny render efektu jest kosztowny. Nie wykonujemy go w głównej
+        # pętli Tk; kolejne szybkie zmiany suwaków są koaleskowane.
+        self._effect_preview_request_id = 0
+        self._effect_preview_worker_running = False
+        self._effect_preview_pending = False
+        self._effect_preview_pending_job = None
+
         self._vector_tool: str | None = None
         self._vector_drag_start: tuple[int, int] | None = None
         self._vector_drag_end: tuple[int, int] | None = None
@@ -403,7 +421,9 @@ class Step4AugmentationModal:
         self._scene_pan_drag: dict | None = None
         self._scene_projection_active: str = "xy"
         self._scene_viewport_mode: str = "xy"
-        self._scene_viewport_visible: bool = True
+        # Model 3D powierzchni tablicy jest wyłącznie narzędziem cropu MZ.
+        # Dla MT podgląd pozostaje zwykłym pełnym obrazem.
+        self._scene_viewport_visible: bool = self.target != "plate"
         self._scene_view_rotation_matrix: tuple[tuple[float, float, float], ...] | None = None
         self._scene_view_rotation_key: tuple[float, float, float] | None = None
         self._scene_view_pan_x = 0.0
@@ -1066,8 +1086,8 @@ class Step4AugmentationModal:
             frame.grid(row=group_index, column=0, sticky=tk.EW, pady=(0, 10))
             frame.columnconfigure(2, weight=1)
             applicable = bool(spec.get("applicable", True))
-            enabled_var = tk.BooleanVar(value=bool(group_state.get("enabled")) and applicable)
-            amount_var = tk.DoubleVar(value=float(group_state.get("amount", 100.0) if applicable else 0.0))
+            enabled_var = tk.BooleanVar(value=bool(group_state.get("enabled", False)) and applicable)
+            amount_var = tk.DoubleVar(value=float(group_state.get("amount", 0.0) if applicable else 0.0))
             variables[group_key] = {"enabled": enabled_var, "amount": amount_var, "fields": {}}
             _make_percent_row(
                 frame,
@@ -1085,8 +1105,8 @@ class Step4AugmentationModal:
             for field_index, field_spec in enumerate(spec.get("fields", [])):
                 field_key = str(field_spec.get("key") or "")
                 field_state = raw_fields.get(field_key, {}) if isinstance(raw_fields, dict) else {}
-                field_enabled = tk.BooleanVar(value=bool(field_state.get("enabled", True)) and applicable)
-                field_amount = tk.DoubleVar(value=float(field_state.get("amount", 100.0) if applicable else 0.0))
+                field_enabled = tk.BooleanVar(value=bool(field_state.get("enabled", False)) and applicable)
+                field_amount = tk.DoubleVar(value=float(field_state.get("amount", 0.0) if applicable else 0.0))
                 variables[group_key]["fields"][field_key] = {"enabled": field_enabled, "amount": field_amount}
                 _make_percent_row(
                     frame,
@@ -1691,7 +1711,7 @@ class Step4AugmentationModal:
             if key != previous_key:
                 self._toolbox_panel_scroll = 0.0
         scene_visibility_changed = False
-        desired_scene_visible = True
+        desired_scene_visible = self.target != "plate"
         if bool(getattr(self, "_scene_viewport_visible", False)) != desired_scene_visible:
             self._scene_viewport_visible = desired_scene_visible
             scene_visibility_changed = True
@@ -1857,7 +1877,7 @@ class Step4AugmentationModal:
             else:
                 self._add_inspector_spin(shell, row, str(field["label"]), field["var"], field["from"], field["to"], field["step"], field.get("width", 8))
             row += 1
-        if active_toolbox == "illumination":
+        if active_toolbox == "illumination" and self.target != "plate":
             row = self._render_headlight_inspector_section(shell, row)
         self._schedule_pending_inspector_scroll()
         if fields or active_toolbox == "illumination":
@@ -4931,6 +4951,44 @@ class Step4AugmentationModal:
                 {"label": "Połysk mokrego błota", "type": "slider", "var": self.wet_mud_gloss_var, "from": 0.0, "to": 1.0, "step": 0.01},
             ]
         if key == "illumination":
+            if self.target == "plate":
+                return [
+                    {
+                        "type": "section",
+                        "label": "Oświetlenie pełnej sceny",
+                        "text": (
+                            "MT pracuje na całym zdjęciu pojazdu/sceny. "
+                            "Nie modelujemy tu powierzchni tablicy, reliefu znaków "
+                            "ani reflektorów ustawianych względem płaszczyzny tablicy."
+                        ),
+                        "priority": True,
+                    },
+                    {
+                        "label": "Noc",
+                        "type": "slider",
+                        "var": self.night_var,
+                        "from": 0.0,
+                        "to": 1.0,
+                        "step": 0.01,
+                    },
+                    {
+                        "label": "Światło bazowe",
+                        "type": "slider",
+                        "var": self.night_light_var,
+                        "from": 0.0,
+                        "to": 1.0,
+                        "step": 0.01,
+                        "hint": "Globalne doświetlenie całego obrazu; bez modelu powierzchni tablicy.",
+                    },
+                    {
+                        "label": "Barwa ambientu (zimna -> ciepła)",
+                        "type": "slider",
+                        "var": self.night_warmth_var,
+                        "from": 0.0,
+                        "to": 1.0,
+                        "step": 0.01,
+                    },
+                ]
             return [
                 {
                     "type": "section",
@@ -5016,6 +5074,32 @@ class Step4AugmentationModal:
                 ),
             ]
         if key == "rain":
+            if self.target == "plate":
+                return [
+                    {
+                        "type": "section",
+                        "label": "Pogoda pełnej sceny",
+                        "text": (
+                            "Efekty obejmują cały obraz. Nie wykrywamy konturów znaków "
+                            "i nie budujemy efektów zależnych od fizycznej powierzchni tablicy."
+                        ),
+                        "priority": True,
+                    },
+                    {"label": "Gęstość deszczu", "type": "slider", "var": self.rain_var, "from": 0.0, "to": 1.0, "step": 0.01},
+                    {
+                        "label": "Rozmiar kropli",
+                        "type": "range_slider",
+                        "min_var": self.rain_drop_size_min_var,
+                        "max_var": self.rain_drop_size_max_var,
+                        "from": 0.0,
+                        "to": 1.0,
+                        "step": 0.005,
+                    },
+                    {"label": "Alfa kropli", "type": "slider", "var": self.rain_alpha_var, "from": 0.0, "to": 1.0, "step": 0.01},
+                    {"label": "Soczewka kropli", "type": "slider", "var": self.rain_lens_var, "from": 0.0, "to": 1.0, "step": 0.01},
+                    {"label": "Pole wektorowe", "type": "slider", "var": self.rain_vector_field_var, "from": 0.0, "to": 1.0, "step": 0.01},
+                    {"label": "Wiry lokalne", "type": "slider", "var": self.rain_vortex_var, "from": 0.0, "to": 1.0, "step": 0.01},
+                ]
             return [
                 {"label": "Gęstość deszczu", "type": "slider", "var": self.rain_var, "from": 0.0, "to": 1.0, "step": 0.01},
                 {
@@ -5220,13 +5304,25 @@ class Step4AugmentationModal:
         rain_vortex = float(self.rain_vortex_var.get() or 0.0)
         rain_alpha = float(self.rain_alpha_var.get() or 0.0)
         rain_lens = float(self.rain_lens_var.get() or 0.0)
-        rain_edge_mist = float(self.rain_edge_mist_var.get() or 0.0)
+        rain_edge_mist = (
+            0.0
+            if is_plate_dataset
+            else float(self.rain_edge_mist_var.get() or 0.0)
+        )
         rain_edge_mist_radius = float(self.rain_edge_mist_radius_var.get() or 0.0)
-        tyndall_strength = float(self.tyndall_var.get() or 0.0)
+        tyndall_strength = (
+            0.0
+            if is_plate_dataset
+            else float(self.tyndall_var.get() or 0.0)
+        )
         if rain_drop_size_min > rain_drop_size_max:
             rain_drop_size_min, rain_drop_size_max = rain_drop_size_max, rain_drop_size_min
         rain_drop_size = (rain_drop_size_min + rain_drop_size_max) / 2.0
-        relief_strength = float(self.dark_relief_var.get() or 0.0)
+        relief_strength = (
+            0.0
+            if is_plate_dataset
+            else float(self.dark_relief_var.get() or 0.0)
+        )
         relief_profile_preset = normalize_relief_profile_preset(self.relief_profile_preset_var.get())
         relief_profile_curve = relief_profile_curve_for_preset(
             relief_profile_preset,
@@ -5238,7 +5334,11 @@ class Step4AugmentationModal:
         camera_z = max(0.35, min(4.0, self._read_float_var(self.scene_camera_z_var, 1.65)))
         camera_target_x = 0.0
         camera_target_y = 0.0
-        light_normal = self._camera_axis_strength_from_distance(camera_z, camera_target_x, camera_target_y)
+        light_normal = (
+            0.0
+            if is_plate_dataset
+            else self._camera_axis_strength_from_distance(camera_z, camera_target_x, camera_target_y)
+        )
         overhang_shadow = 0.0 if is_plate_dataset else float(self.overhang_shadow_var.get() or 0.0)
         overhang_shadow_depth = 0.60 if is_plate_dataset else float(self.overhang_shadow_depth_var.get() or 0.0)
         overhang_shadow_skew = 0.0 if is_plate_dataset else float(self.overhang_shadow_skew_var.get() or 0.0)
@@ -5250,7 +5350,11 @@ class Step4AugmentationModal:
         night_iso_noise = float(self.night_iso_noise_var.get() or 0.0)
         night_warmth = float(self.night_warmth_var.get() or 0.0)
         traffic_headlight_raw = float(self.traffic_headlight_var.get() or 0.0)
-        traffic_headlight = traffic_headlight_raw if self._headlight_effect_enabled(1) else 0.0
+        traffic_headlight = (
+            0.0
+            if is_plate_dataset
+            else (traffic_headlight_raw if self._headlight_effect_enabled(1) else 0.0)
+        )
         traffic_headlight_1_warmth = float(self.traffic_headlight_1_warmth_var.get() or 0.0)
         traffic_headlight_1_r = float(self.traffic_headlight_1_r_var.get() or 0.0)
         traffic_headlight_1_g = float(self.traffic_headlight_1_g_var.get() or 0.0)
@@ -5258,7 +5362,11 @@ class Step4AugmentationModal:
         traffic_headlight_1_cone = float(self.traffic_headlight_1_cone_var.get() or 0.45)
         traffic_headlight_1_source_radius = float(self.traffic_headlight_1_source_radius_var.get() or 0.0)
         traffic_headlight_2_raw = float(self.traffic_headlight_2_var.get() or 0.0)
-        traffic_headlight_2 = traffic_headlight_2_raw if self._headlight_effect_enabled(2) else 0.0
+        traffic_headlight_2 = (
+            0.0
+            if is_plate_dataset
+            else (traffic_headlight_2_raw if self._headlight_effect_enabled(2) else 0.0)
+        )
         traffic_headlight_2_warmth = float(self.traffic_headlight_2_warmth_var.get() or 0.0)
         traffic_headlight_2_r = float(self.traffic_headlight_2_r_var.get() or 0.0)
         traffic_headlight_2_g = float(self.traffic_headlight_2_g_var.get() or 0.0)
@@ -5266,7 +5374,11 @@ class Step4AugmentationModal:
         traffic_headlight_2_cone = float(self.traffic_headlight_2_cone_var.get() or 0.45)
         traffic_headlight_2_source_radius = float(self.traffic_headlight_2_source_radius_var.get() or 0.0)
         traffic_headlight_3_raw = float(self.traffic_headlight_3_var.get() or 0.0)
-        traffic_headlight_3 = traffic_headlight_3_raw if self._headlight_effect_enabled(3) else 0.0
+        traffic_headlight_3 = (
+            0.0
+            if is_plate_dataset
+            else (traffic_headlight_3_raw if self._headlight_effect_enabled(3) else 0.0)
+        )
         traffic_headlight_3_warmth = float(self.traffic_headlight_3_warmth_var.get() or 0.0)
         traffic_headlight_3_r = float(self.traffic_headlight_3_r_var.get() or 0.0)
         traffic_headlight_3_g = float(self.traffic_headlight_3_g_var.get() or 0.0)
@@ -5290,7 +5402,9 @@ class Step4AugmentationModal:
         # no longer control the night effect.
         night_luma_min = 0.56
         night_luma_max = 0.92
-        wet_reflection_strength = max(0.0, min(1.0, rain_strength * active_light_strength * (0.80 + 0.60 * light_normal))) if is_plate_dataset else 0.0
+        # Dotychczas target=plate uruchamiał model odbić powierzchni tablicy
+        # na całym zdjęciu. MT jest pełną sceną, więc ten efekt musi być wyłączony.
+        wet_reflection_strength = 0.0
         flare_strength = max(0.0, min(1.0, (active_light_strength - 0.58) * light_normal * 0.36))
         overexposure_strength = max(0.0, min(1.0, (active_light_strength - 0.62) * light_normal * 0.46))
         dirt_flow_points = 0 if is_plate_dataset else int(float(self.dirt_flow_points_var.get() or 0))
@@ -5442,7 +5556,9 @@ class Step4AugmentationModal:
             scene_view_yaw=self._read_float_var(self.scene_view_yaw_var, 35.0),
             scene_view_pitch=self._read_float_var(self.scene_view_pitch_var, -24.0),
             scene_view_roll=self._read_float_var(self.scene_view_roll_var, 0.0),
-            scene_plate_texture_enabled=bool(self.scene_plate_texture_var.get()),
+            scene_plate_texture_enabled=(
+                False if is_plate_dataset else bool(self.scene_plate_texture_var.get())
+            ),
             traffic_headlight_strength=traffic_headlight,
             traffic_headlight_count=traffic_headlight_count,
             traffic_headlight_source_x=headlight_1_source_x,
@@ -5586,13 +5702,13 @@ class Step4AugmentationModal:
         self.scene_camera_target_z_var.set(0.0)
         self._scene_projection_active = "xy"
         self._scene_viewport_mode = "xy"
-        self._scene_viewport_visible = True
+        self._scene_viewport_visible = self.target != "plate"
         self._scene_view_pan_x = 0.0
         self._scene_view_pan_y = 0.0
         self._scene_view_zoom = 1.0
         self._scene_pan_drag = None
         self._apply_scene_view_preset("xy")
-        self.scene_plate_texture_var.set(True)
+        self.scene_plate_texture_var.set(self.target != "plate")
         self.traffic_headlight_var.set(0.0)
         self.traffic_headlight_count_var.set(1)
         self.traffic_headlight_1_warmth_var.set(0.35)
@@ -5932,7 +6048,7 @@ class Step4AugmentationModal:
         except Exception:
             pass
 
-    def _schedule_preview_refresh(self, delay_ms: int = 180):
+    def _schedule_preview_refresh(self, delay_ms: int = 260):
         self._refresh_scene_summary()
         if bool(getattr(self, "_preview_refresh_suspended", False)):
             if self._preview_live_edit_active():
@@ -6188,6 +6304,136 @@ class Step4AugmentationModal:
             f"wolne {snapshot.get('system_free_gb', 0.0):.1f} GB"
         )
 
+    def _request_effect_preview(self) -> None:
+        """Renderuj efekt poza wątkiem Tk i zachowuj tylko najnowsze żądanie."""
+        sample = getattr(self, "_current_sample", None)
+        if sample is None:
+            return
+
+        try:
+            profile = self._profile_from_vars()
+        except Exception as exc:
+            try:
+                self.preview_status_lbl.configure(
+                    text=f"Nie udało się odczytać ustawień podglądu: {exc}"
+                )
+            except Exception:
+                pass
+            return
+
+        self._effect_preview_request_id += 1
+        request_id = int(self._effect_preview_request_id)
+        sample_path = Path(sample)
+        self._effect_preview_pending_job = (request_id, sample_path, profile)
+        self._effect_preview_pending = True
+
+        if bool(getattr(self, "_effect_preview_worker_running", False)):
+            try:
+                self.preview_status_lbl.configure(
+                    text=(
+                        f"{sample_path.name} | Parametry zmienione — "
+                        "pokażę najnowszy efekt po zakończeniu bieżącego renderu."
+                    )
+                )
+            except Exception:
+                pass
+            return
+
+        self._start_effect_preview_worker()
+
+    def _start_effect_preview_worker(self) -> None:
+        if bool(getattr(self, "_effect_preview_worker_running", False)):
+            return
+        job = getattr(self, "_effect_preview_pending_job", None)
+        if not job:
+            return
+
+        request_id, sample_path, profile = job
+        self._effect_preview_pending_job = None
+        self._effect_preview_pending = False
+        self._effect_preview_worker_running = True
+
+        self._capture_memory_snapshot("przed renderem")
+        try:
+            self.preview_status_lbl.configure(
+                text=f"{Path(sample_path).name} | Renderuję efekt w tle..."
+            )
+        except Exception:
+            pass
+
+        def _worker():
+            try:
+                ok, msg, payload = preview_augmentation_image(sample_path, profile)
+            except Exception as exc:
+                ok, msg, payload = False, f"Błąd renderu podglądu: {exc}", {}
+
+            def _finish():
+                self._finish_effect_preview_worker(
+                    request_id,
+                    sample_path,
+                    bool(ok),
+                    str(msg or ""),
+                    payload if isinstance(payload, dict) else {},
+                )
+
+            try:
+                self.window.after(0, _finish)
+            except Exception:
+                pass
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name="z4-augmentation-preview",
+        ).start()
+
+    def _finish_effect_preview_worker(
+        self,
+        request_id: int,
+        sample_path: Path,
+        ok: bool,
+        msg: str,
+        payload: dict,
+    ) -> None:
+        self._effect_preview_worker_running = False
+
+        try:
+            if not bool(self.window.winfo_exists()):
+                return
+        except Exception:
+            return
+
+        self._capture_memory_snapshot("po renderze")
+        current = Path(getattr(self, "_current_sample", ""))
+        latest = int(getattr(self, "_effect_preview_request_id", 0) or 0)
+
+        if current == Path(sample_path) and int(request_id) == latest:
+            try:
+                self.preview_status_lbl.configure(
+                    text=f"{Path(sample_path).name} | {msg}"
+                )
+            except Exception:
+                pass
+
+            if ok:
+                self._last_preview_payload = payload
+                self._draw_preview_images(payload)
+                try:
+                    self.augmented_canvas.update_idletasks()
+                    self.window.update_idletasks()
+                except Exception:
+                    pass
+            else:
+                original_canvas = getattr(self, "original_canvas", None)
+                if original_canvas is not None:
+                    self._draw_canvas_message(original_canvas, Path(sample_path).name)
+                self._draw_canvas_message(self.augmented_canvas, msg)
+
+        if bool(getattr(self, "_effect_preview_pending", False)) or getattr(
+            self, "_effect_preview_pending_job", None
+        ):
+            self._start_effect_preview_worker()
+
     def _refresh_preview(self, redraw_only: bool = False):
         if not redraw_only:
             self._raw_preview_request_id += 1
@@ -6217,23 +6463,11 @@ class Step4AugmentationModal:
             self._draw_preview_images(payload)
             return
 
-        self._capture_memory_snapshot("przed renderem")
         try:
             self._draw_vector_overlay()
-            self.window.update_idletasks()
         except Exception:
             pass
-        ok, msg, payload = preview_augmentation_image(self._current_sample, self._profile_from_vars())
-        self._capture_memory_snapshot("po renderze")
-        self.preview_status_lbl.configure(text=f"{Path(self._current_sample).name} | {msg}")
-        if ok:
-            self._last_preview_payload = payload
-            self._draw_preview_images(payload)
-        else:
-            original_canvas = getattr(self, "original_canvas", None)
-            if original_canvas is not None:
-                self._draw_canvas_message(original_canvas, Path(self._current_sample).name)
-            self._draw_canvas_message(self.augmented_canvas, msg)
+        self._request_effect_preview()
 
     def _draw_preview_images(self, payload: dict):
         original = payload.get("original_rgb")
@@ -6870,10 +7104,18 @@ class Step4AugmentationModal:
             actions = (("dice", "obraz"), ("layout", "układ"), ("reset", "zero"), ("zoom", "zoom"), ("fullscreen", "ent"))
             actions_left = max(10, width - (len(actions) * 44 - 6))
             mode_icons_right = max(x + 150, actions_left - 118)
-            try:
-                self._draw_scene_viewport_mode_icons(canvas, width, height, start_x=x + 4, start_y=10, max_right=mode_icons_right)
-            except Exception:
-                pass
+            if scene_visible:
+                try:
+                    self._draw_scene_viewport_mode_icons(
+                        canvas,
+                        width,
+                        height,
+                        start_x=x + 4,
+                        start_y=10,
+                        max_right=mode_icons_right,
+                    )
+                except Exception:
+                    pass
             action_x = actions_left
             for action, label in actions:
                 self._draw_canvas_action_icon(canvas, action, label, action_x, 10)
@@ -6915,7 +7157,7 @@ class Step4AugmentationModal:
                 or self._vector_drag_start is not None
             ):
                 self._draw_memory_overlay(canvas, width, height)
-            if (
+            if self.target != "plate" and (
                 self._normalize_toolbox_key(getattr(self, "_active_toolbox", "")) == "illumination"
                 or self._headlight_cones_are_visible()
                 or active_headlight is not None
@@ -10411,6 +10653,9 @@ class Step4AugmentationModal:
     def _cancel_pending_preview(self):
         self._raw_preview_request_id += 1
         self._raw_preview_pending = False
+        self._effect_preview_request_id += 1
+        self._effect_preview_pending = False
+        self._effect_preview_pending_job = None
         if self._preview_after_id is not None:
             try:
                 self.window.after_cancel(self._preview_after_id)

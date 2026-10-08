@@ -108,6 +108,7 @@ from . import z4_tab_shell
 from . import z4_history_runtime
 from . import z4_dataset_panels
 from . import z4_dataset_tab_builder
+from . import z4_fine_tune_protocol
 from .z4_view_models import (
     Step4CampaignNavigationViewModel,
     Step4DatasetWorkflowViewModel,
@@ -1022,6 +1023,9 @@ def _build_train_tab(self):
     )
     self.train_recommendation_note_lbl.pack(anchor=tk.W, fill=tk.X, pady=(2, 14))
     self._register_train_left_wrap_target(self.train_recommendation_note_lbl, padding=16, min_wrap=220)
+
+    # Z4FTGUI001: zaawansowane opcje są widoczne tylko przy fine-tuningu.
+    z4_fine_tune_protocol.build_panel(self, settings_col)
     self.epochs_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())
     self.epochs_var.trace_add("write", lambda *args: self._refresh_training_execution_summary())
     self.batch_var.trace_add("write", lambda *args: self._refresh_training_recommendation_table())

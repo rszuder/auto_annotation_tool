@@ -962,7 +962,7 @@ def _step_continue_characters_from_ready_source(self, preferred_source_context: 
             except Exception:
                 pass
             return
-    self._step_goto_characters(preferred_source_context=source_context)
+    return self._step_goto_characters(preferred_source_context=source_context)
 
 
 def _step_goto_characters_detect(self, preferred_source_context: dict | None = None):
@@ -972,7 +972,7 @@ def _step_goto_characters_detect(self, preferred_source_context: dict | None = N
     source_context = dict(preferred_source_context or {})
     source_context["target_substep"] = "detect"
     source_context["force_pz2"] = "1"
-    self._step_goto_characters(preferred_source_context=source_context)
+    return self._step_goto_characters(preferred_source_context=source_context)
 
 
 def _step_goto_characters(self, preferred_source_context: dict | None = None):
@@ -1014,8 +1014,9 @@ def _step_goto_characters(self, preferred_source_context: dict | None = None):
         ).strip().lower()
         explicit_pz2 = bool(source_context.get("force_pz2")) or target_hint in {"2", "detect", "pz2", "z3_pz2"}
         explicit_pz3 = bool(source_context.get("force_pz3")) or target_hint in {"3", "dataset", "pz3", "z3_pz3"}
-        if gate_hint == "T06":
-            # T06 ma dwa kroki robocze: PZ2 przygotowuje ramki znaków, a PZ3 eksportuje AZ.
+        if gate_hint in {"T05", "T06"}:
+            # T05 ma dwa kroki robocze: PZ2 przygotowuje ramki znaków, a PZ3 eksportuje AZ.
+            # T06 pozostaje akceptowany wyłącznie jako legacy identyfikator starszych sesji.
             # Jeśli kontrakt PZ2 jest już spełniony, kontynuacja powinna wracać od razu do PZ3.
             if explicit_pz3:
                 source_context["target_substep"] = "pz3"
@@ -1087,6 +1088,12 @@ def _step_goto_characters(self, preferred_source_context: dict | None = None):
 
     try:
         tab_char._step3_linear_mode = True
+        # T05PZ3FIX001: prime PZ3 navigation before NotebookTabChanged
+        if should_prime_dataset_surface:
+            tab_char._campaign_force_pz2_entry = False
+            tab_char._campaign_force_detect_entry = False
+            tab_char._campaign_force_pz3_entry = True
+            tab_char._campaign_graph_entry_context = dict(source_context or {})
         if should_prime_dataset_surface:
             tab_char._campaign_pz2_sync_loading = False
             tab_char._campaign_step3_entry_splash_pinned = False
@@ -1158,7 +1165,7 @@ def _step_goto_characters(self, preferred_source_context: dict | None = None):
             tab_char._hide_campaign_detect_splash()
         except Exception:
             pass
-        return
+        return result
 
     latest_xml = str(result.get("latest_xml") or "").strip()
     images_dir = str(result.get("images_dir") or "").strip()
@@ -1206,6 +1213,9 @@ def _step_goto_characters(self, preferred_source_context: dict | None = None):
             tab_char._campaign_pz2_sync_loading = False
     except Exception:
         pass
+
+    # Z3NAVRET001: propagate real Z3 entry result
+    return result
 
 
 def _step_goto_training(self, preferred_subtab: str | None = None):

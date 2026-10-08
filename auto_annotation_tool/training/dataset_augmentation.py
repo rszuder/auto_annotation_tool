@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from ..config import CONFIG, CV2_AVAILABLE, YAML_AVAILABLE, cv2, logger, np, yaml
+from ..config import CONFIG, CV2_AVAILABLE, YAML_AVAILABLE, cv2, logger, np, yaml, get_torch_module, is_cuda_available
 from ..utils import safe_load_yaml
 
 
@@ -526,15 +526,15 @@ def _percent(value: object, default: float = 100.0) -> float:
 
 
 def default_manual_randomness_config(target: str | None = None) -> dict:
+    """Ręczne odchyłki są opt-in: domyślnie wszystko OFF / 0%."""
     normalized_target = _normalize_task_target_value(target, fallback="char") if target else "char"
     groups: dict[str, dict] = {}
     for spec in manual_randomness_group_specs(normalized_target):
-        applicable = bool(spec.get("applicable", True))
         groups[spec["key"]] = {
-            "enabled": bool(applicable),
-            "amount": 100.0 if applicable else 0.0,
+            "enabled": False,
+            "amount": 0.0,
             "fields": {
-                field_spec["key"]: {"enabled": bool(applicable), "amount": 100.0 if applicable else 0.0}
+                field_spec["key"]: {"enabled": False, "amount": 0.0}
                 for field_spec in spec.get("fields", [])
             },
         }
@@ -8516,6 +8516,41 @@ def _apply_plate_reflectance_effect(image, profile: AugmentationProfile, rng) ->
 
 def _apply_image_postprocess(image, profile: AugmentationProfile, rng=None, *, return_debug: bool = False) -> object:
     profile = (profile or AugmentationProfile()).normalized()
+
+    # Content-scope guard:
+    # target="plate" = MT / pełna scena,
+    # target="char"  = MZ / crop tablicy.
+    #
+    # Stary preset nie może spowodować, że cały samochód/scena zostanie
+    # potraktowany jak fizyczna powierzchnia tablicy.
+    if _profile_task_target(profile) == "plate":
+        profile = replace(
+            profile,
+            scene_plate_texture_enabled=False,
+            dark_relief_strength=0.0,
+            relief_bounce_depth=1,
+            relief_bounce_strength=0.0,
+            light_normal_strength=0.0,
+            wet_mud_gloss_strength=0.0,
+            water_film_strength=0.0,
+            water_film_lens_strength=0.0,
+            wet_reflection_strength=0.0,
+            plate_reflect_gradient_strength=0.0,
+            plate_reflect_glare_strength=0.0,
+            plate_reflect_curve_strength=0.0,
+            dirt_streak_strength=0.0,
+            dirt_flow_strength=0.0,
+            dirt_flow_points=0,
+            dirt_flow_stop_on_dark_contour=False,
+            overhang_shadow_strength=0.0,
+            rain_edge_mist_strength=0.0,
+            tyndall_strength=0.0,
+            traffic_headlight_strength=0.0,
+            traffic_headlight_2_strength=0.0,
+            traffic_headlight_3_strength=0.0,
+            traffic_headlight_count=0,
+        ).normalized()
+
     rng = rng or random.Random(profile.seed)
     base_seed = int(rng.randint(1, 2_147_483_647))
 
@@ -8795,11 +8830,18 @@ def preview_augmentation_image(image_path: Path, profile: AugmentationProfile) -
     try:
         height, width = image.shape[:2]
         pixel_count = int(width) * int(height)
-        if pixel_count > MAX_AUGMENTATION_PREVIEW_PIXELS:
-            scale = math.sqrt(MAX_AUGMENTATION_PREVIEW_PIXELS / float(pixel_count))
+        preview_pixel_limit = int(MAX_AUGMENTATION_PREVIEW_PIXELS)
+        if _profile_task_target(profile) == "plate":
+            preview_pixel_limit = min(preview_pixel_limit, 650_000)
+        if pixel_count > preview_pixel_limit:
+            scale = math.sqrt(preview_pixel_limit / float(pixel_count))
             resized_w = max(4, int(round(width * scale)))
             resized_h = max(4, int(round(height * scale)))
-            image = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+            image = cv2.resize(
+                image,
+                (resized_w, resized_h),
+                interpolation=cv2.INTER_AREA,
+            )
             preview_note = f" Podgląd w skali {scale * 100.0:.0f}% chroni RAM."
     except Exception:
         preview_note = ""
@@ -8815,12 +8857,21 @@ def preview_augmentation_image(image_path: Path, profile: AugmentationProfile) -
             profile,
             seed=geometry_seed,
         )
-        augmented_image, debug_payload = _apply_image_postprocess(
-            augmented_image,
-            profile,
-            random.Random(geometry_seed),
-            return_debug=True,
-        )
+        if _mt_scene_cuda_fastpath_eligible(profile):
+            augmented_image, preview_backend = _apply_mt_scene_postprocess_cuda(
+                augmented_image,
+                profile,
+                seed=geometry_seed,
+            )
+            debug_payload = {}
+            preview_note += f" Backend: {preview_backend}."
+        else:
+            augmented_image, debug_payload = _apply_image_postprocess(
+                augmented_image,
+                profile,
+                random.Random(geometry_seed),
+                return_debug=True,
+            )
     except Exception as exc:
         return False, f"Nie udało się przygotować podglądu augmentacji: {exc}", {}
 
@@ -9169,6 +9220,463 @@ def iter_augmentation_preset_files(target: str | None = None) -> list[Path]:
     return files
 
 
+def _profile_has_geometry_effect(profile: AugmentationProfile) -> bool:
+    try:
+        return bool(
+            abs(float(getattr(profile, "rotation_limit", 0.0) or 0.0)) > 0.001
+            or float(getattr(profile, "translate_limit", 0.0) or 0.0) > 0.00001
+            or float(getattr(profile, "scale_limit", 0.0) or 0.0) > 0.00001
+        )
+    except Exception:
+        return True
+
+
+def _mt_scene_cuda_fastpath_eligible(profile: AugmentationProfile) -> bool:
+    profile = (profile or AugmentationProfile()).normalized()
+    if _profile_task_target(profile) != "plate":
+        return False
+    blocked = (
+        "rain_edge_mist_strength",
+        "tyndall_strength",
+        "wet_reflection_strength",
+        "water_film_strength",
+        "water_film_lens_strength",
+        "dark_relief_strength",
+        "plate_reflect_gradient_strength",
+        "plate_reflect_glare_strength",
+        "plate_reflect_curve_strength",
+        "dirt_streak_strength",
+        "dirt_flow_strength",
+        "overhang_shadow_strength",
+        "traffic_headlight_strength",
+        "traffic_headlight_2_strength",
+        "traffic_headlight_3_strength",
+        "flare_strength",
+        "overexposure_strength",
+    )
+    for name in blocked:
+        try:
+            if abs(float(getattr(profile, name, 0.0) or 0.0)) > 0.001:
+                return False
+        except Exception:
+            return False
+    try:
+        return bool(is_cuda_available())
+    except Exception:
+        return False
+
+
+def _torch_gaussian_blur_map(torch, data, sigma: float):
+    sigma = float(max(0.0, sigma))
+    if sigma <= 0.01:
+        return data
+    h, w = int(data.shape[-2]), int(data.shape[-1])
+    max_radius = max(1, min(64, (min(h, w) - 1) // 2))
+    radius = max(1, min(max_radius, int(math.ceil(3.0 * sigma))))
+    coords = torch.arange(
+        -radius, radius + 1,
+        device=data.device,
+        dtype=torch.float32,
+    )
+    kernel = torch.exp(-(coords * coords) / max(1e-6, 2.0 * sigma * sigma))
+    kernel = kernel / torch.clamp(kernel.sum(), min=1e-8)
+    x = data[None, None, :, :]
+    pad_mode = "reflect" if min(h, w) > radius else "replicate"
+    x = torch.nn.functional.pad(x, (radius, radius, 0, 0), mode=pad_mode)
+    x = torch.nn.functional.conv2d(x, kernel.view(1, 1, 1, -1))
+    x = torch.nn.functional.pad(x, (0, 0, radius, radius), mode=pad_mode)
+    x = torch.nn.functional.conv2d(x, kernel.view(1, 1, -1, 1))
+    return x[0, 0]
+
+
+def _apply_mt_scene_night_cuda(image, profile: AugmentationProfile, torch):
+    strength = max(0.0, min(1.0, float(profile.night_strength or 0.0)))
+    light_strength = max(0.0, min(1.0, float(getattr(profile, "night_light_strength", 0.0) or 0.0)))
+    bloom_strength = max(0.0, min(1.0, float(getattr(profile, "night_bloom_strength", 0.0) or 0.0)))
+    iso_strength = max(0.0, min(1.0, float(getattr(profile, "night_iso_noise_strength", 0.0) or 0.0)))
+    if strength <= 0.001 and light_strength <= 0.001 and bloom_strength <= 0.001 and iso_strength <= 0.001:
+        return image
+
+    device = torch.device("cuda:0")
+    x = torch.from_numpy(image).to(device=device, dtype=torch.float32) / 255.0
+    h, w = int(x.shape[0]), int(x.shape[1])
+    night = float(math.pow(strength, 0.82))
+
+    luma = x[:, :, 0] * 0.114 + x[:, :, 1] * 0.587 + x[:, :, 2] * 0.299
+    channel_max = torch.max(x, dim=2).values
+    channel_min = torch.min(x, dim=2).values
+    chroma_mask = torch.clamp(
+        (channel_max - channel_min) / torch.clamp(channel_max, min=0.08),
+        0.0, 1.0,
+    )
+    chroma_mask = chroma_mask * chroma_mask * (3.0 - 2.0 * chroma_mask)
+    bright_mask = torch.clamp((luma - 0.42) / 0.46, 0.0, 1.0)
+    bright_mask = bright_mask * bright_mask * (3.0 - 2.0 * bright_mask)
+
+    warmth = max(0.0, min(1.0, float(getattr(profile, "night_light_warmth", 0.35) if getattr(profile, "night_light_warmth", None) is not None else 0.35)))
+    iso_strength = max(iso_strength, night * 0.24)
+
+    effective_night = torch.full_like(luma, night)
+    color_darken = chroma_mask * (1.0 - bright_mask * 0.35)
+    darken = torch.clamp(
+        0.34 * effective_night
+        + 0.52 * effective_night * bright_mask
+        + 0.30 * effective_night * color_darken,
+        0.0, 0.96,
+    )
+    x = x * (1.0 - darken[:, :, None])
+    gamma = 1.0 + 1.10 * effective_night
+    x = torch.pow(torch.clamp(x, 0.0, 1.0), gamma[:, :, None])
+
+    luma_after = torch.clamp(
+        x[:, :, 0] * 0.114 + x[:, :, 1] * 0.587 + x[:, :, 2] * 0.299,
+        0.0, 1.0,
+    )
+    cool_gray = torch.empty_like(x)
+    cool_gray[:, :, 0] = luma_after * 1.08 + 0.010 * effective_night
+    cool_gray[:, :, 1] = luma_after * 0.94 + 0.004 * effective_night
+    cool_gray[:, :, 2] = luma_after * 0.66
+    desaturate = torch.clamp(
+        0.34 * effective_night
+        + 0.44 * effective_night * chroma_mask
+        + 0.12 * effective_night * bright_mask,
+        0.0, 0.88,
+    )
+    x = x * (1.0 - desaturate[:, :, None]) + cool_gray * desaturate[:, :, None]
+
+    ambient = torch.tensor([0.020, 0.008, -0.050], device=device, dtype=torch.float32)
+    x = x + ambient * (
+        0.50 * effective_night[:, :, None]
+        + 0.34 * effective_night[:, :, None] * (1.0 - bright_mask[:, :, None])
+    )
+
+    cold = torch.tensor([1.12, 1.06, 0.96], device=device, dtype=torch.float32)
+    warm = torch.tensor([0.78, 1.02, 1.28], device=device, dtype=torch.float32)
+    bloom_source = torch.clamp(bright_mask * (0.36 + 0.36 * effective_night), 0.0, 1.0)
+    bloom_light_color = cold * (1.0 - warmth) + warm * warmth
+
+    if light_strength > 0.001:
+        ambient_color = bloom_light_color
+        ambient_response = max(strength, 0.36)
+        exposure_gain = light_strength * (0.055 + 0.245 * ambient_response)
+        tint_gain = light_strength * (0.10 + 0.22 * ambient_response)
+        floor_gain = light_strength * (0.010 + 0.040 * ambient_response)
+        x = torch.clamp(x * (1.0 + exposure_gain), 0.0, 1.0)
+        tinted = torch.clamp(x * ambient_color, 0.0, 1.0)
+        x = x * (1.0 - tint_gain) + tinted * tint_gain
+        x = x + (torch.clamp(ambient_color, 0.0, 1.0) - x) * floor_gain
+
+    if bloom_strength > 0.001 and h > 1 and w > 1:
+        src = luma[None, None, :, :]
+        kx = torch.tensor(
+            [[[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]],
+            device=device, dtype=torch.float32,
+        ).unsqueeze(0)
+        ky = torch.tensor(
+            [[[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]],
+            device=device, dtype=torch.float32,
+        ).unsqueeze(0)
+        padded = torch.nn.functional.pad(src, (1, 1, 1, 1), mode="replicate")
+        gx = torch.nn.functional.conv2d(padded, kx)[0, 0]
+        gy = torch.nn.functional.conv2d(padded, ky)[0, 0]
+        edge = torch.clamp(torch.abs(gx) + torch.abs(gy), 0.0, 1.0)
+        edge = _torch_gaussian_blur_map(torch, edge, 0.65)
+        source = torch.clamp(
+            bloom_source
+            + edge * (0.10 + 0.22 * bloom_strength + 0.16 * max(strength, light_strength)),
+            0.0, 1.0,
+        )
+        sigma_wide = max(1.2, min(w, h) * (0.010 + 0.036 * bloom_strength))
+        sigma_core = max(0.6, min(w, h) * (0.003 + 0.010 * bloom_strength))
+        bloom = (
+            _torch_gaussian_blur_map(torch, source, sigma_wide) * 0.72
+            + _torch_gaussian_blur_map(torch, source, sigma_core) * 0.28
+        )
+        bloom = torch.clamp(bloom, 0.0, 1.0)
+        percentile = torch.quantile(bloom.reshape(-1), 0.992)
+        if float(percentile.item()) > 0.0:
+            bloom = torch.clamp(bloom / percentile, 0.0, 1.0)
+        gain = bloom_strength * (
+            0.11 + 0.18 * strength + 0.16 * light_strength + 0.10 * max(0.0, 1.0 - strength)
+        )
+        x = x + bloom[:, :, None] * bloom_light_color * gain
+
+    if iso_strength > 0.001:
+        gen = torch.Generator(device=device)
+        gen.manual_seed(int(getattr(profile, "seed", 42) or 42) + 1931)
+        luma2 = torch.clamp(
+            x[:, :, 0] * 0.114 + x[:, :, 1] * 0.587 + x[:, :, 2] * 0.299,
+            0.0, 1.0,
+        )
+        noise_scale = (0.010 + 0.065 * iso_strength) * (0.45 + 0.90 * (1.0 - luma2))
+        mono = torch.randn(luma2.shape, generator=gen, device=device, dtype=torch.float32) * noise_scale
+        chroma = torch.randn(x.shape, generator=gen, device=device, dtype=torch.float32) * (noise_scale[:, :, None] * 0.45)
+        x = x + mono[:, :, None] + chroma
+
+    return torch.clamp(x * 255.0, 0.0, 255.0).to(dtype=torch.uint8).cpu().numpy()
+
+
+def _apply_mt_scene_coarse_noise_cuda(image, profile: AugmentationProfile, torch, seed: int):
+    strength = max(0.0, min(0.08, float(getattr(profile, "noise_strength", 0.0) or 0.0)))
+    if strength <= 0.0:
+        return image
+    device = torch.device("cuda:0")
+    x = torch.from_numpy(image).to(device=device, dtype=torch.float32)
+    h, w = int(x.shape[0]), int(x.shape[1])
+    grain = max(1, int(getattr(profile, "noise_grain_size", 1) or 1))
+    nh = max(1, (h + grain - 1) // grain)
+    nw = max(1, (w + grain - 1) // grain)
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed) & 0x7FFFFFFF)
+    std = max(1.0, strength * 255.0)
+    noise = torch.randn((1, 1, nh, nw), generator=gen, device=device, dtype=torch.float32) * std
+    if nh != h or nw != w:
+        noise = torch.nn.functional.interpolate(noise, size=(h, w), mode="nearest")
+    noise = noise[0, 0, :, :, None]
+    x = torch.clamp(x + noise, 0.0, 255.0)
+    return x.to(dtype=torch.uint8).cpu().numpy()
+
+
+def _apply_mt_scene_rain_cuda(
+    image,
+    profile: AugmentationProfile,
+    torch,
+    *,
+    seed: int,
+):
+    """Deszcz pełnej sceny MT rasteryzowany na CUDA/Torch."""
+    strength = max(0.0, min(1.0, float(getattr(profile, "rain_strength", 0.0) or 0.0)))
+    if strength <= 0.001:
+        return image
+
+    alpha = max(0.0, min(1.0, float(getattr(profile, "rain_alpha", 0.22) or 0.0)))
+    size_min = max(
+        0.0,
+        min(
+            1.0,
+            float(
+                getattr(
+                    profile,
+                    "rain_drop_size_min",
+                    getattr(profile, "rain_drop_size", 0.07),
+                )
+                or 0.0
+            ),
+        ),
+    )
+    size_max = max(
+        0.0,
+        min(
+            1.0,
+            float(
+                getattr(
+                    profile,
+                    "rain_drop_size_max",
+                    getattr(profile, "rain_drop_size", 0.07),
+                )
+                or 0.0
+            ),
+        ),
+    )
+    if size_min > size_max:
+        size_min, size_max = size_max, size_min
+
+    vector_strength = max(
+        0.0,
+        min(1.0, float(getattr(profile, "rain_vector_field_strength", 0.0) or 0.0)),
+    )
+    vortex_strength = max(
+        0.0,
+        min(1.0, float(getattr(profile, "rain_vortex_strength", 0.0) or 0.0)),
+    )
+    lens_strength = max(
+        0.0,
+        min(1.0, float(getattr(profile, "rain_lens_strength", 0.0) or 0.0)),
+    )
+
+    device = torch.device("cuda:0")
+    x = torch.from_numpy(image).to(device=device, dtype=torch.float32)
+    h, w = int(x.shape[0]), int(x.shape[1])
+    if h < 4 or w < 4:
+        return image
+
+    gen = torch.Generator(device=device)
+    gen.manual_seed(int(seed) & 0x7FFFFFFF)
+
+    pixel_count = h * w
+    density_load = 18.0 + 380.0 * strength + 1500.0 * (strength ** 1.55)
+    count = int(max(8, (pixel_count / 90000.0) * density_load))
+    count = max(8, min(32000, count))
+
+    ax = torch.randint(0, w, (count,), generator=gen, device=device)
+    ay = torch.randint(0, h, (count,), generator=gen, device=device)
+
+    sizes = size_min + (size_max - size_min) * torch.rand(
+        (count,),
+        generator=gen,
+        device=device,
+    )
+    lengths = 2.0 + 8.0 * sizes + 8.0 * strength + 7.0 * sizes * strength
+    max_steps = max(2, min(28, int(torch.ceil(lengths.max()).item()) + 1))
+
+    nx = ax.to(torch.float32) / max(1.0, float(w - 1))
+    ny = ay.to(torch.float32) / max(1.0, float(h - 1))
+    dx = torch.full((count,), 0.10, device=device, dtype=torch.float32)
+    dy = torch.ones((count,), device=device, dtype=torch.float32)
+
+    if vector_strength > 0.001:
+        field = (
+            torch.sin((nx * 3.1 + ny * 1.7) * (2.0 * math.pi)) * 0.68
+            + torch.cos((nx * 1.2 - ny * 2.6) * (2.0 * math.pi)) * 0.32
+        )
+        dx = dx + field * vector_strength * 0.95
+        dy = dy + torch.cos(
+            (nx * 1.6 + ny * 2.1) * (2.0 * math.pi)
+        ) * vector_strength * 0.12
+
+    if vortex_strength > 0.001:
+        for cx, cy, sign in (
+            (0.24, 0.35, 1.0),
+            (0.72, 0.48, -1.0),
+            (0.50, 0.78, 1.0),
+        ):
+            rx = nx - cx
+            ry = ny - cy
+            dist2 = rx * rx + ry * ry
+            falloff = torch.exp(-dist2 * 8.0) * vortex_strength
+            dx = dx + (-ry) * falloff * sign * 1.8
+            dy = dy + rx * falloff * sign * 0.55
+
+    norm = torch.sqrt(dx * dx + dy * dy).clamp_min(1e-6)
+    dx = dx / norm
+    dy = dy / norm
+
+    steps = torch.arange(max_steps, device=device, dtype=torch.float32)[None, :]
+    active = steps <= torch.clamp(lengths[:, None], min=1.0)
+    px = torch.round(ax[:, None].to(torch.float32) + dx[:, None] * steps).to(torch.int64)
+    py = torch.round(ay[:, None].to(torch.float32) + dy[:, None] * steps).to(torch.int64)
+
+    valid = active & (px >= 0) & (px < w) & (py >= 0) & (py < h)
+    flat_idx = (py * w + px)[valid]
+    per_drop = (0.16 + 0.24 * sizes + 0.12 * strength).clamp(0.08, 0.48)
+    values = per_drop[:, None].expand(-1, max_steps)[valid]
+
+    rain = torch.zeros((h * w,), device=device, dtype=torch.float32)
+    rain.index_add_(0, flat_idx, values)
+    rain = rain.view(h, w).clamp(0.0, 1.0)
+
+    avg_size = float((size_min + size_max) * 0.5)
+    kernel = 1
+    if avg_size > 0.18:
+        kernel = 3
+    if avg_size > 0.58:
+        kernel = 5
+    if kernel > 1:
+        rain = torch.nn.functional.max_pool2d(
+            rain[None, None, :, :],
+            kernel_size=kernel,
+            stride=1,
+            padding=kernel // 2,
+        )[0, 0]
+
+    rain = _torch_gaussian_blur_map(
+        torch,
+        rain,
+        0.30 + 0.55 * avg_size,
+    ).clamp(0.0, 1.0)
+
+    if lens_strength > 0.001:
+        src = rain[None, None, :, :]
+        kx = torch.tensor(
+            [[[-1.0, 0.0, 1.0],
+              [-2.0, 0.0, 2.0],
+              [-1.0, 0.0, 1.0]]],
+            device=device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        ky = torch.tensor(
+            [[[-1.0, -2.0, -1.0],
+              [0.0, 0.0, 0.0],
+              [1.0, 2.0, 1.0]]],
+            device=device,
+            dtype=torch.float32,
+        ).unsqueeze(0)
+        padded = torch.nn.functional.pad(src, (1, 1, 1, 1), mode="replicate")
+        gx = torch.nn.functional.conv2d(padded, kx)[0, 0]
+        gy = torch.nn.functional.conv2d(padded, ky)[0, 0]
+        scale = torch.quantile(
+            (torch.abs(gx) + torch.abs(gy)).reshape(-1),
+            0.992,
+        ).clamp_min(1e-6)
+        gx = torch.clamp(gx / scale, -1.0, 1.0)
+        gy = torch.clamp(gy / scale, -1.0, 1.0)
+
+        max_shift = 0.6 + 4.2 * lens_strength * (0.45 + avg_size)
+        xs = torch.linspace(-1.0, 1.0, w, device=device)
+        ys = torch.linspace(-1.0, 1.0, h, device=device)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        grid = torch.stack(
+            (
+                grid_x + gx * max_shift * (2.0 / max(1.0, float(w - 1))),
+                grid_y + gy * max_shift * (2.0 / max(1.0, float(h - 1))),
+            ),
+            dim=-1,
+        )[None, :, :, :]
+        chw = x.permute(2, 0, 1)[None, :, :, :]
+        x = torch.nn.functional.grid_sample(
+            chw,
+            grid,
+            mode="bilinear",
+            padding_mode="reflection",
+            align_corners=True,
+        )[0].permute(1, 2, 0)
+
+    local_alpha = torch.clamp(
+        rain * (0.10 + 0.70 * alpha) * (0.58 + 0.42 * strength),
+        0.0,
+        0.62,
+    )
+    rain_color = torch.tensor(
+        [
+            165.0 + 25.0 * strength,
+            172.0 + 26.0 * strength,
+            184.0 + 28.0 * strength,
+        ],
+        device=device,
+        dtype=torch.float32,
+    )
+    x = x * (1.0 - local_alpha[:, :, None]) + rain_color * local_alpha[:, :, None]
+
+    return (
+        torch.clamp(x, 0.0, 255.0)
+        .to(dtype=torch.uint8)
+        .cpu()
+        .numpy()
+    )
+
+
+def _apply_mt_scene_postprocess_cuda(image, profile: AugmentationProfile, *, seed: int):
+    if not _mt_scene_cuda_fastpath_eligible(profile):
+        return _apply_image_postprocess(image, profile, random.Random(seed)), "CPU/OpenCV/NumPy"
+    torch = get_torch_module()
+    if torch is None or not torch.cuda.is_available():
+        return _apply_image_postprocess(image, profile, random.Random(seed)), "CPU/OpenCV/NumPy"
+    try:
+        out = _apply_mt_scene_night_cuda(image, profile, torch)
+        out = _apply_mt_scene_coarse_noise_cuda(out, profile, torch, seed)
+        out = _apply_mt_scene_rain_cuda(
+            out,
+            profile,
+            torch,
+            seed=seed + 17011,
+        )
+        return out, "CUDA/Torch scene fastpath"
+    except Exception as exc:
+        logger.debug(f"CUDA scene fastpath fallback CPU: {exc}")
+        return _apply_image_postprocess(image, profile, random.Random(seed)), "CPU/OpenCV/NumPy (fallback)"
+
+
+
 def augment_yolo_dataset_train_split(
     dataset_dir: Path,
     profile: AugmentationProfile,
@@ -9197,7 +9705,19 @@ def augment_yolo_dataset_train_split(
         "completion_ok": False,
         "completion_status": "PENDING",
         "stop_reason": "",
+        "execution_backend": "CPU/OpenCV/NumPy",
+        "gpu_acceleration": False,
+        "cuda_scene_fastpath_generated": 0,
+        "opencv_threads": 0,
     }
+
+    try:
+        cpu_count = max(1, int(os.cpu_count() or 1))
+        cv_threads = max(1, min(4, cpu_count))
+        cv2.setNumThreads(cv_threads)
+        stats["opencv_threads"] = int(cv2.getNumThreads())
+    except Exception:
+        stats["opencv_threads"] = 0
 
     if not profile.enabled or profile.extra_count <= 0:
         stats["completion_ok"] = True
@@ -9299,14 +9819,22 @@ def augment_yolo_dataset_train_split(
         )
 
         try:
-            transform = _build_transform(sample_profile, has_keypoints=has_keypoints)
-            _seed_transform(transform, sample_seed)
-            augmented = transform(
-                image=image,
-                bboxes=bboxes,
-                class_labels=class_labels,
-                keypoints=keypoints if has_keypoints else [],
-            )
+            if _profile_has_geometry_effect(sample_profile):
+                transform = _build_transform(sample_profile, has_keypoints=has_keypoints)
+                _seed_transform(transform, sample_seed)
+                augmented = transform(
+                    image=image,
+                    bboxes=bboxes,
+                    class_labels=class_labels,
+                    keypoints=keypoints if has_keypoints else [],
+                )
+            else:
+                augmented = {
+                    "image": image,
+                    "bboxes": bboxes,
+                    "class_labels": class_labels,
+                    "keypoints": keypoints if has_keypoints else [],
+                }
         except Exception as exc:
             logger.debug(f"Augmentacja pominięta dla {image_path.name}: {exc}")
             stats["skipped"] += 1
@@ -9342,11 +9870,20 @@ def augment_yolo_dataset_train_split(
             sample_profile,
             seed=(sample_seed + 31337) % 2_147_483_647,
         )
-        augmented_image = _apply_image_postprocess(
+        post_seed = (sample_seed + 7919) % 2_147_483_647 or 1
+        augmented_image, backend_used = _apply_mt_scene_postprocess_cuda(
             augmented_image,
             sample_profile,
-            random.Random((sample_seed + 7919) % 2_147_483_647 or 1),
+            seed=post_seed,
         )
+        if backend_used.startswith("CUDA/"):
+            stats["cuda_scene_fastpath_generated"] = int(
+                stats.get("cuda_scene_fastpath_generated", 0) or 0
+            ) + 1
+            stats["gpu_acceleration"] = True
+            stats["execution_backend"] = "CUDA/Torch scene fastpath + CPU I/O/labels"
+        elif not bool(stats.get("gpu_acceleration")):
+            stats["execution_backend"] = backend_used
         if not cv2.imwrite(str(out_img), augmented_image):
             stats["skipped"] += 1
             continue

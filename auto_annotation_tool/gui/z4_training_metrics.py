@@ -106,6 +106,7 @@ from .z4_shared_ui import (
     step4_train_go_back,
 )
 from . import z4_dataset_sources
+from . import z4_fine_tune_protocol
 from .z4_view_models import (
     Step4CampaignNavigationViewModel,
     Step4DatasetWorkflowViewModel,
@@ -873,6 +874,29 @@ def _build_training_run_detail_rows(self, run) -> list[tuple[str, str]]:
             f"Dotrenowanie od runu {parent_run_display} ({parent_model_name or 'best.pt'}){parent_suffix}",
         ))
 
+    protocol_rows = []
+    requested_protocol = dict(getattr(run, "training_protocol_requested", None) or {})
+    protocol_snapshot = dict(getattr(run, "training_protocol_snapshot", None) or {})
+    if requested_protocol:
+        protocol_rows.append((
+            "Protokół żądany",
+            " | ".join(
+                f"{key}={requested_protocol.get(key)}"
+                for key in ("memory_policy","batch","imgsz","lr0","amp","mosaic","cache","workers","plots","seed","optimizer")
+                if key in requested_protocol
+            ) or "-",
+        ))
+    actual_protocol = dict(protocol_snapshot.get("actual") or protocol_snapshot.get("effective") or {})
+    if actual_protocol:
+        protocol_rows.append((
+            "Protokół efektywny",
+            " | ".join(
+                f"{key}={actual_protocol.get(key)}"
+                for key in ("memory_policy","batch","batch_size","imgsz","img_size","lr0","amp","mosaic","cache","workers","plots","seed","optimizer","ram_safe_applied","attempt_label")
+                if key in actual_protocol
+            ) or "-",
+        ))
+
     rows = [
         ("ID runu", getattr(run_ref, "id", "") or run_id or "-"),
         ("Nazwa techniczna", run_name or run_id or "-"),
@@ -890,6 +914,7 @@ def _build_training_run_detail_rows(self, run) -> list[tuple[str, str]]:
                 f"współczynnik uczenia {float(getattr(run, 'lr0', 0.0) or 0.0):.4f}"
             ),
         ),
+        *protocol_rows,
         ("Urządzenie", self._shorten_training_text(device_text, 28)),
         ("Najlepsze wagi", best_weights_detail),
         ("Checkpoint last.pt", last_weights_name),
@@ -2490,11 +2515,25 @@ def _training_base_model_context(self) -> dict:
 def _set_step4_fine_tune_parent_state(self, run, model_path: str | Path) -> None:
     self._step4_fine_tune_parent_run_id = str(getattr(run, "id", "") or "").strip()
     self._step4_fine_tune_parent_model_path = str(model_path or "").strip()
+    self._step4_fine_tune_parent_history_dir = ""
+    try:
+        from . import z4_history_runtime
+        iid = z4_history_runtime._history_row_id_for_run(self, run)
+        ref = (getattr(self, "_history_row_refs", {}) or {}).get(iid, {})
+        history = ref.get("history")
+        if history is not None:
+            self._step4_fine_tune_parent_history_dir = str(Path(history.history_dir))
+    except Exception:
+        self._step4_fine_tune_parent_history_dir = ""
+    # Z4FTGUI001 visibility
+    z4_fine_tune_protocol.refresh_visibility(self)
 
 
 def _clear_step4_fine_tune_parent_state(self) -> None:
     self._step4_fine_tune_parent_run_id = ""
     self._step4_fine_tune_parent_model_path = ""
+    self._step4_fine_tune_parent_history_dir = ""
+    z4_fine_tune_protocol.refresh_visibility(self)
 
 
 def _resolve_step4_fine_tune_parent_run(self):
@@ -2524,6 +2563,30 @@ def _resolve_step4_fine_tune_parent_run(self):
         run = history.get_run(parent_run_id) if history is not None else None
     except Exception:
         run = None
+
+    if run is None:
+        history_dir = str(getattr(self, "_step4_fine_tune_parent_history_dir", "") or "").strip()
+        if history_dir:
+            try:
+                external_history = TrainingHistory(
+                    history_dir=Path(history_dir),
+                    reconcile_on_load=False,
+                )
+                run = external_history.get_run(parent_run_id)
+            except Exception:
+                run = None
+
+    if run is None:
+        try:
+            refs = getattr(self, "_history_row_refs", {}) or {}
+            for ref in refs.values():
+                candidate = ref.get("run")
+                if str(getattr(candidate, "id", "") or "").strip() == parent_run_id:
+                    run = candidate
+                    break
+        except Exception:
+            run = None
+
     if run is None:
         return None
 
