@@ -94,23 +94,18 @@ class DatasetSplitter:
         if not all_images:
             return False, "Nie znaleziono obrazów z etykietami", {}
         
-        # Przetasuj
-        random.seed(self.random_seed)
-        random.shuffle(all_images)
-        
-        # Podziel
+        from .scene_split import (assign_scene_splits, dataset_scene_hashes,
+                                  check_new_split_destination, save_scene_assignment)
+        try:
+            check_new_split_destination(source_dir, output_dir)
+            cfg = safe_load_yaml(source_dir / "data.yaml") if (source_dir / "data.yaml").is_file() else {}
+            role = "character" if len((cfg or {}).get("names") or []) == 36 and not (cfg or {}).get("kpt_shape") else "plate"
+            source_hashes = dataset_scene_hashes(source_dir, [row["image"] for row in all_images], role=role)
+            splits_data, assignment = assign_scene_splits(
+                all_images, ratios, seed=self.random_seed, source_hashes=source_hashes)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return False, str(exc), {}
         n_total = len(all_images)
-        splits_data = {}
-        start_idx = 0
-        
-        for split_name, ratio in ratios.items():
-            n_split = int(n_total * ratio)
-            if split_name == list(ratios.keys())[-1]:
-                # Ostatni split bierze resztę
-                n_split = n_total - start_idx
-            
-            splits_data[split_name] = all_images[start_idx:start_idx + n_split]
-            start_idx += n_split
         
         # Utwórz strukturę
         for split_name in ratios.keys():
@@ -141,6 +136,7 @@ class DatasetSplitter:
         
         # Kopiuj/utwórz data.yaml
         self._create_data_yaml(source_dir, output_dir, list(ratios.keys()))
+        save_scene_assignment(output_dir, assignment)
         
         return True, f"Podzielono {stats['total']} obrazów", stats
     

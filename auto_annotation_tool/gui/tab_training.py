@@ -1645,6 +1645,12 @@ class TrainingTab:
         selected_raw = str(
             raw_value if raw_value is not None else getattr(self, "rank_data_dir", tk.StringVar()).get()
         ).strip()
+        from ..ranking.eval396 import is_selection, selection_reference
+        if is_selection(selected_raw):
+            try:
+                return selection_reference(selected_raw)
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "kind": "eval396", "selected_path": selected_raw, "message": str(exc)}
         if self._get_ranking_task_target() == "char":
             split_name = self._get_ranking_split_name()
             result = {
@@ -1927,6 +1933,12 @@ class TrainingTab:
         cancel_button = getattr(self, "btn_cancel_rank", None)
         if button is None:
             return
+        from .z4_eval396 import selected_eval396
+        if selected_eval396(self):
+            button.configure(state=tk.NORMAL, text="[ WYNIKI ] Zweryfikuj i odczytaj MZ")
+            if cancel_button is not None:
+                cancel_button.configure(state=tk.DISABLED)
+            return
 
         if getattr(self, "rank_is_running", False):
             if cancel_button is not None:
@@ -2115,6 +2127,16 @@ class TrainingTab:
                 pass
 
         self._refresh_ranking_start_state()
+
+        if info.get("kind") == "eval396":
+            for attr, text in (("rank_track_lbl", info["message"]),
+                               ("rank_track_count_value_lbl", "396 scen / 449 tekstów"),
+                               ("rank_target_lbl", "EVAL396: MZ-s / MZ-DAY / MZ-NIGHT — zapisane wyniki"),
+                               ("rank_scope_value_lbl", "Zamrożona selekcja"),
+                               ("rank_count_value_lbl", "3 MZ")):
+                widget = getattr(self, attr, None)
+                if widget is not None:
+                    widget.configure(text=text)
 
         try:
             self._load_ranking()

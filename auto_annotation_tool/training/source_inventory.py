@@ -97,7 +97,7 @@ def build_source_inventory(dataset_path, *, role, dataset_id=""):
     data_root = _yaml_root(root, cfg)
     rows = {}
     errors = 0
-    for name in ("metadata_manifest.json", "split_assignment_manifest.json"):
+    for name in ("metadata_manifest.json", "split_assignment_manifest.json", "scene_split_assignment.json"):
         path = root / name
         if not path.exists():
             continue

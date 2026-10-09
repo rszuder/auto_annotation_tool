@@ -1468,7 +1468,7 @@ def _collect_current_ranking_report_context(self) -> dict:
     }
 
 
-def _ranking_report_bar_svg(rows: list[dict], *, title: str) -> str:
+def _ranking_report_bar_svg(rows: list[dict], *, title: str, maximum=100.0, unit="%", precision=2, subtitle=None) -> str:
     top_rows = rows[:12]
     width = 1180
     row_height = 42
@@ -1480,14 +1480,14 @@ def _ranking_report_bar_svg(rows: list[dict], *, title: str) -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
         '<rect width="100%" height="100%" fill="#101820"/>',
         f'<text x="24" y="36" fill="#f4f7f6" font-size="24" font-family="Segoe UI, Arial" font-weight="700">{_ranking_report_escape(title)}</text>',
-        '<text x="24" y="58" fill="#9fb0aa" font-size="13" font-family="Segoe UI, Arial">Ocena rankingowa w procentach. Dłuższy pasek oznacza lepszy wynik na tym samym torze testowym.</text>',
+        '<text x="24" y="58" fill="#9fb0aa" font-size="13" font-family="Segoe UI, Arial">' + _ranking_report_escape(subtitle or "Ocena rankingowa w procentach. Dłuższy pasek oznacza lepszy wynik na tym samym torze testowym.") + '</text>',
     ]
     if not top_rows:
         parts.append('<text x="24" y="110" fill="#f0b44c" font-size="18" font-family="Segoe UI, Arial">Brak wyników do wykresu.</text>')
     for index, row in enumerate(top_rows):
         y = top + index * row_height
-        score = max(0.0, min(100.0, float(row.get("score", 0.0) or 0.0)))
-        bar_len = (score / 100.0) * bar_width
+        score = max(0.0, float(row.get("score", 0.0) or 0.0))
+        bar_len = min(1.0, score / maximum) * bar_width
         fill = "#2ecc71" if index == 0 else "#4aa3ff"
         label = textwrap.shorten(str(row.get("label", "-")), width=44, placeholder="...")
         parts.extend(
@@ -1495,7 +1495,7 @@ def _ranking_report_bar_svg(rows: list[dict], *, title: str) -> str:
                 f'<text x="24" y="{y + 20}" fill="#f4f7f6" font-size="14" font-family="Segoe UI, Arial">#{index + 1} {_ranking_report_escape(label)}</text>',
                 f'<rect x="{left}" y="{y + 5}" width="{bar_width}" height="22" rx="8" fill="#26343a"/>',
                 f'<rect x="{left}" y="{y + 5}" width="{bar_len:.1f}" height="22" rx="8" fill="{fill}"/>',
-                f'<text x="{left + bar_width + 18}" y="{y + 22}" fill="#f4f7f6" font-size="15" font-family="Segoe UI, Arial" font-weight="700">{score:.2f}%</text>',
+                f'<text x="{left + bar_width + 18}" y="{y + 22}" fill="#f4f7f6" font-size="15" font-family="Segoe UI, Arial" font-weight="700">{score:.{precision}f}{unit}</text>',
             ]
         )
     parts.append("</svg>")
@@ -1907,6 +1907,9 @@ def _draw_ranking_plate_diffs_canvas(canvas: tk.Canvas, rows: list[dict], palett
 
 
 def _open_ranking_report_viewer(self):
+    from .z4_eval396 import selected_eval396, open_results
+    if selected_eval396(self):
+        return open_results(self)
     try:
         context = _collect_current_ranking_report_context(self)
     except Exception as exc:
@@ -2164,6 +2167,9 @@ def _open_ranking_report_viewer(self):
 
 
 def _export_ranking_analysis_report(self):
+    from .z4_eval396 import selected_eval396, open_results
+    if selected_eval396(self):
+        return open_results(self, export_after_load=True)
     try:
         context = _collect_current_ranking_report_context(self)
     except Exception as exc:
@@ -2329,6 +2335,11 @@ def _collect_ranking_track_candidates(self) -> list[dict]:
     selected_split = self._get_ranking_split_name()
     candidates: list[dict] = []
     seen: set[str] = set()
+    from .z4_eval396 import track_candidate
+    eval_candidate = track_candidate(Path(__file__).resolve().parents[2])
+    if eval_candidate:
+        candidates.append(eval_candidate)
+        seen.add(_ranking_path_key(eval_candidate["path"]))
 
     def add_candidate(path_like, *, source: str) -> None:
         raw = str(path_like or "").strip()
@@ -2464,7 +2475,7 @@ def _collect_ranking_track_candidates(self) -> list[dict]:
 
     candidates.sort(
         key=lambda row: (
-            0 if row.get("source") in {"Aktualny", "Aktualny wariant"} else 1,
+            0 if row.get("source") in {"Aktualny", "Aktualny wariant", "Zamrożony"} else 1,
             0 if row.get("ready") else 1,
             str(row.get("created") or ""),
             str(row.get("id") or ""),
@@ -2521,8 +2532,8 @@ def _open_ranking_track_modal(self):
     ttk.Label(
         shell,
         text=(
-            "Wybierz jeden wspólny materiał testowy. Wszystkie modele pobiegną po tym samym torze, "
-            "więc wynik będzie porównywalny."
+            "Wybierz wspólny materiał do porównania. EVAL396 udostępnia zweryfikowany odczyt "
+            "ukończonych wyników MZ; wybór tej selekcji nie uruchamia nowego pomiaru."
         ),
         style="PanelMuted.TLabel",
         anchor=tk.W,
@@ -2617,7 +2628,7 @@ def _open_ranking_track_modal(self):
             if selected_key and path_key == selected_key:
                 tags.append("current")
             item_id = tree.insert("", tk.END, values=(
-                "jest" if row.get("ready") else "-",
+                row.get("status") or ("jest" if row.get("ready") else "-"),
                 row.get("id") or "-",
                 row.get("type") or "-",
                 str(row.get("split") or "-"),
@@ -2668,6 +2679,16 @@ def _open_ranking_track_modal(self):
         close_dialog()
 
     tree.bind("<Double-1>", lambda _event: accept_selection(), add="+")
+    def describe_selection(_event=None):
+        selected = tree.selection()
+        row = rows_by_id.get(selected[0], {}) if selected else {}
+        frozen = row.get("split") == "EVAL396"
+        if split_combo is not None:
+            split_combo.configure(state="disabled" if frozen else "readonly")
+        if frozen:
+            status_lbl.configure(text="EVAL396: 396 scen / 479 tablic MT / 449 tekstów MZ. "
+                "Split YOLO nie dotyczy tej selekcji. SHA: 1f2db18cd073114f…")
+    tree.bind("<<TreeviewSelect>>", describe_selection, add="+")
     if split_combo is not None:
         try:
             split_combo.bind("<<ComboboxSelected>>", lambda _event: load_rows(), add="+")
@@ -2708,6 +2729,9 @@ def _open_ranking_track_modal(self):
 
 
 def _open_ranking_participants_modal(self):
+    from .z4_eval396 import selected_eval396, open_results
+    if selected_eval396(self):
+        return open_results(self)
     existing = getattr(self, "_ranking_participants_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -3731,6 +3755,9 @@ def _build_ranking_panel_v2(self, parent):
     self._refresh_ranking_reference_ui()
 
 def _open_ranking_results_modal(self):
+    from .z4_eval396 import selected_eval396, open_results
+    if selected_eval396(self):
+        return open_results(self)
     existing = getattr(self, "_ranking_results_modal", None)
     try:
         if existing is not None and existing.winfo_exists():
@@ -4179,6 +4206,9 @@ def _open_ranking_advanced_modal(self):
         dialog.geometry("560x390")
 
 def _run_ranking_v2(self):
+    from .z4_eval396 import selected_eval396, open_results
+    if selected_eval396(self):
+        return open_results(self)
     if self.rank_is_running:
         return
 
@@ -4230,6 +4260,7 @@ def _run_ranking_v2(self):
     self._start_ranking_watchdog("start przygotowania rankingu")
 
     def worker():
+        temporary_ranking_dir = None
         try:
             ranking_started_at = time.perf_counter()
             cancelled = False
@@ -4449,7 +4480,11 @@ def _run_ranking_v2(self):
             comparator = AnnotationComparator()
             conf_thresh = float(CONFIG.DEFAULT_CONFIDENCE)
             total_models = len(models_to_test)
-            temp_xml_path = Path(str(reference_info.get("reference_dir") or models_dir)) / "temp_ranking_auto.xml"
+            import tempfile
+            scratch_root = Path(CONFIG.get_ranking_dir(target)) / "temporary"
+            scratch_root.mkdir(parents=True, exist_ok=True)
+            temporary_ranking_dir = tempfile.TemporaryDirectory(prefix="ranking_", dir=scratch_root)
+            temp_xml_path = Path(temporary_ranking_dir.name) / "predictions.xml"
             self._append_ranking_log(
                 f"Przygotowanie zakończone. Modele pose: {total_models} | obrazy do porównania: {len(images)}"
             )
@@ -4574,6 +4609,8 @@ def _run_ranking_v2(self):
             self._ui(lambda err=e: messagebox.showerror("Błąd", f"Błąd w trakcie rankingu:\n{err}"))
             self._set_ranking_ui_state(status="Błąd rankingu", status_color="red")
         finally:
+            if temporary_ranking_dir is not None:
+                temporary_ranking_dir.cleanup()
             self._stop_ranking_watchdog()
             self.rank_is_running = False
             self.rank_cancel_requested = False

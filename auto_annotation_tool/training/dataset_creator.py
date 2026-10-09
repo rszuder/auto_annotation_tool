@@ -314,24 +314,18 @@ class DatasetCreator:
                 images_data[ann.image_name] = []
             images_data[ann.image_name].append(ann)
         
-        # Przygotuj podział
-        image_names = list(images_data.keys())
-        
-        import random
-        random.seed(42)
-        random.shuffle(image_names)
-        
+        from .scene_split import assign_scene_splits, check_new_split_destination, save_scene_assignment
+        image_names = list(images_data)
         n_total = len(image_names)
-        split_counts = self._allocate_split_counts(n_total, split_ratios)
-        if not split_counts:
-            return False, "Do treningu YOLO Pose potrzebne sa co najmniej 2 oznaczone obrazy, aby wypelnic train i val.", stats
-
-        splits = {}
-        offset = 0
-        for split_name in split_counts.keys():
-            split_count = int(split_counts.get(split_name, 0) or 0)
-            splits[split_name] = set(image_names[offset:offset + split_count])
-            offset += split_count
+        try:
+            check_new_split_destination(images_dir, output_dir)
+            if split_ratios.get("train", 0) <= 0 or split_ratios.get("val", 0) <= 0:
+                raise ValueError("YOLO Pose wymaga niepustych splitów train i val.")
+            grouped, assignment = assign_scene_splits(
+                [{"name": name, "image": Path(images_dir) / name} for name in image_names], split_ratios)
+        except (OSError, ValueError) as exc:
+            return False, str(exc), stats
+        splits = {split: {item["name"] for item in items} for split, items in grouped.items()}
         
         # Utwórz foldery
         output_dir = Path(output_dir)
@@ -381,6 +375,7 @@ class DatasetCreator:
         
         # Utwórz data.yaml
         self._create_data_yaml(output_dir)
+        save_scene_assignment(output_dir, assignment)
         
         return True, f"Utworzono dataset: {stats['total']} obrazów", stats
     

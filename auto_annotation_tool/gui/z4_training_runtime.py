@@ -2771,6 +2771,15 @@ def _run_validation(self):
 def _load_ranking(self):
     if not hasattr(self, "rank_tree"):
         return
+    from .z4_eval396 import selected_eval396
+    if selected_eval396(self):
+        self.rank_tree.delete(*self.rank_tree.get_children())
+        self._ranking_tree_entry_refs = {}
+        for attr in ("rank_leader_title", "rank_leader_hint", "rank_metrics_hint_lbl"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widget.configure(text="EVAL396: otwórz WYNIKI — Exact Match / CER na 449 cropach GT.")
+        return
     self._ensure_plate_ranking_engine()
     target = self._get_ranking_task_target()
     target_task = self._get_ranking_task_label(target)
