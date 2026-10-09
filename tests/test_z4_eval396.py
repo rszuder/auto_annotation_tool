@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import time
+import threading
 import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
@@ -130,6 +131,8 @@ def test_real_tk_error_clears_table_and_disables_export(tmp_path, monkeypatch):
         assert "FAIL" in dialog.status_variable.get()
         assert not dialog.result_table.get_children()
         assert dialog.verified_report is None
+        assert str(dialog.progress_bar.cget("mode")) == "determinate"
+        assert float(dialog.progress_bar.cget("value")) == 0
     finally:
         root.destroy()
 
@@ -147,6 +150,89 @@ def test_existing_z4_controls_dispatch_to_reader_before_inference(tmp_path, monk
     assert len(calls) == 5 and calls[-1] == {"export_after_load": True}
 
 
+def test_real_tk_window_controls_ticks_and_progress(mz_fixture, monkeypatch):
+    runs, selection = mz_fixture
+    report = {"summaries": adapter._read_mz_results(adapter.EvidenceReader(), runs, selection),
+        "experiment_id": "fixture", "selection_sha": "s", "gt_freeze_sha": "g", "comparison_sha": "c", "runs_dir": str(runs)}
+    release_load, release_export = threading.Event(), threading.Event()
+    def load(*args, progress=None, **kwargs):
+        progress("Kontrola danych testowych")
+        if not release_load.wait(10):
+            raise TimeoutError("Test did not release the loader")
+        return report
+    def export(*args, progress=None, **kwargs):
+        progress("Eksport danych testowych")
+        if not release_export.wait(10):
+            raise TimeoutError("Test did not release the exporter")
+        return runs / "report"
+    monkeypatch.setattr(view, "load_eval396", load)
+    monkeypatch.setattr(view, "export_report", export)
+    root = tk.Tk()
+    tab = SimpleNamespace(frame=ttk.Frame(root), rank_data_dir=tk.StringVar(value=str(runs)))
+    def until(predicate):
+        end = time.monotonic() + 5
+        while time.monotonic() < end:
+            root.update()
+            if predicate():
+                return
+            time.sleep(.01)
+        raise AssertionError("GUI did not reach the expected state")
+    try:
+        dialog = view.open_results(tab)
+        until(lambda: "danych testowych" in dialog.status_variable.get())
+        assert not dialog.transient()
+        assert dialog.resizable() == (1, 1)
+        assert str(dialog.progress_bar.cget("mode")) == "indeterminate"
+        initial = float(dialog.progress_bar.cget("value"))
+        until(lambda: float(dialog.progress_bar.cget("value")) != initial)
+        if root.tk.call("tk", "windowingsystem") == "win32":
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.WinDLL("user32")
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            native = user32.GetAncestor(dialog.winfo_id(), 2)
+            style = user32.GetWindowLongW(native, -16)
+            assert style & 0x00020000 and style & 0x00010000  # Native min/max buttons.
+            dialog.iconify()
+            until(lambda: dialog.state() == "iconic")
+            assert root.state() != "iconic"
+            assert view.open_results(tab) is dialog
+            until(lambda: dialog.state() == "normal")
+            dialog.state("zoomed")
+            until(lambda: dialog.state() == "zoomed")
+            dialog.state("normal")
+        release_load.set()
+        until(lambda: dialog.status_variable.get().startswith("PASS"))
+        assert str(dialog.progress_bar.cget("mode")) == "determinate"
+        assert float(dialog.progress_bar.cget("value")) == 100
+        ticks = lambda: [dialog.result_chart.itemcget(item, "text")
+                         for item in dialog.result_chart.find_withtag("axis_tick")]
+        assert ticks() == ["0%", "25%", "50%", "75%", "100%"]
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        combos = [child for child in descendants(dialog) if isinstance(child, ttk.Combobox)]
+        criterion = next(combo for combo in combos if "CER" in combo.cget("values"))
+        criterion.set("CER")
+        criterion.event_generate("<<ComboboxSelected>>")
+        root.update()
+        assert ticks() == ["0%", "12,5%", "25%", "37,5%", "50%"]  # fixture CER = 0.5
+        dialog.export_eval_report()
+        until(lambda: "Eksport danych testowych" in dialog.status_variable.get())
+        assert str(dialog.progress_bar.cget("mode")) == "indeterminate"
+        release_export.set()
+        until(lambda: "raport zapisany" in dialog.status_variable.get())
+        assert float(dialog.progress_bar.cget("value")) == 100
+    finally:
+        release_load.set()
+        release_export.set()
+        root.destroy()
+
+
 def test_local_evidence_import_and_export(tmp_path):
     repo = Path(__file__).resolve().parents[1]
     selection = adapter.default_selection(repo)
@@ -160,6 +246,23 @@ def test_local_evidence_import_and_export(tmp_path):
     destination = view.export_report(report, tmp_path / "reports")
     assert json.loads((destination / "status.json").read_text())["status"] == "PASS"
     assert "66.59" in (destination / "report.md").read_text(encoding="utf-8")
-    assert "0.0927" in (destination / "cer.svg").read_text(encoding="utf-8")
+    assert "9,27%" in (destination / "cer.svg").read_text(encoding="utf-8")
+    assert "9,27%" in (destination / "report.md").read_text(encoding="utf-8")
+    assert "0.0927" in (destination / "report.md").read_text(encoding="utf-8")
+    markdown = (destination / "report.md").read_text(encoding="utf-8")
+    assert "**MZ-s** — Bazowy model rozpoznawania znaków YOLO Detect w wariancie small." in markdown
+    assert "**MZ-DAY** — Model dostrojony z wykorzystaniem materiału i augmentacji dziennych." in markdown
+    assert "**MZ-NIGHT** — Model dostrojony z wykorzystaniem materiału i augmentacji nocnych." in markdown
+    assert "„s” oznacza rozmiar modelu (small), nie domenę" in markdown
+    import csv
+    with (destination / "results.csv").open(encoding="utf-8-sig", newline="") as stream:
+        day_all = next(row for row in csv.DictReader(stream, delimiter=";")
+                       if row["model"] == "MZ-DAY" and row["domain"] == "ALL")
+    assert float(day_all["cer"]) == metrics["cer"]
+    assert json.loads((destination / "provenance.json").read_text(encoding="utf-8"))["summaries"]["MZ-DAY"]["per_domain"]["ALL"]["cer"] == metrics["cer"]
     assert "Mniej = lepiej" in (destination / "cer.svg").read_text(encoding="utf-8")
+    import xml.etree.ElementTree as ET
+    texts = [node.text for node in ET.parse(destination / "exact_match_rate.svg").iter()
+             if node.tag.endswith("}text")]
+    assert all(tick in texts for tick in ("0%", "25%", "50%", "75%", "100%"))
     assert len((destination / "results.csv").read_text(encoding="utf-8-sig").splitlines()) == 10

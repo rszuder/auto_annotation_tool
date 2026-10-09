@@ -1468,7 +1468,7 @@ def _collect_current_ranking_report_context(self) -> dict:
     }
 
 
-def _ranking_report_bar_svg(rows: list[dict], *, title: str, maximum=100.0, unit="%", precision=2, subtitle=None) -> str:
+def _ranking_report_bar_svg(rows: list[dict], *, title: str, maximum=100.0, unit="%", precision=2, subtitle=None, axis_ticks=False) -> str:
     top_rows = rows[:12]
     width = 1180
     row_height = 42
@@ -1484,6 +1484,17 @@ def _ranking_report_bar_svg(rows: list[dict], *, title: str, maximum=100.0, unit
     ]
     if not top_rows:
         parts.append('<text x="24" y="110" fill="#f0b44c" font-size="18" font-family="Segoe UI, Arial">Brak wyników do wykresu.</text>')
+    if axis_ticks:
+        axis_y = height - 30
+        parts.append(f'<line x1="{left}" y1="{axis_y}" x2="{left + bar_width}" y2="{axis_y}" stroke="#9fb0aa"/>')
+        for index in range(5):
+            x = left + bar_width * index / 4
+            tick = f"{maximum * index / 4:g}{unit}".replace(".", ",")
+            parts.extend([
+                f'<line x1="{x}" y1="{top}" x2="{x}" y2="{axis_y}" stroke="#26343a" stroke-dasharray="3 4"/>',
+                f'<line x1="{x}" y1="{axis_y}" x2="{x}" y2="{axis_y + 5}" stroke="#9fb0aa"/>',
+                f'<text x="{x}" y="{axis_y + 18}" text-anchor="middle" fill="#c1cdc8" font-size="13" font-family="Segoe UI, Arial">{_ranking_report_escape(tick)}</text>',
+            ])
     for index, row in enumerate(top_rows):
         y = top + index * row_height
         score = max(0.0, float(row.get("score", 0.0) or 0.0))
@@ -1495,7 +1506,7 @@ def _ranking_report_bar_svg(rows: list[dict], *, title: str, maximum=100.0, unit
                 f'<text x="24" y="{y + 20}" fill="#f4f7f6" font-size="14" font-family="Segoe UI, Arial">#{index + 1} {_ranking_report_escape(label)}</text>',
                 f'<rect x="{left}" y="{y + 5}" width="{bar_width}" height="22" rx="8" fill="#26343a"/>',
                 f'<rect x="{left}" y="{y + 5}" width="{bar_len:.1f}" height="22" rx="8" fill="{fill}"/>',
-                f'<text x="{left + bar_width + 18}" y="{y + 22}" fill="#f4f7f6" font-size="15" font-family="Segoe UI, Arial" font-weight="700">{score:.{precision}f}{unit}</text>',
+                f'<text x="{left + bar_width + 18}" y="{y + 22}" fill="#f4f7f6" font-size="15" font-family="Segoe UI, Arial" font-weight="700">{_ranking_report_escape(row.get("score_label") or f"{score:.{precision}f}{unit}")}</text>',
             ]
         )
     parts.append("</svg>")

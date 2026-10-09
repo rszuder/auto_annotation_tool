@@ -266,6 +266,7 @@ def load_eval396(selection_dir, *, repo_root=None, runs_dir=None, progress=None)
     runs_dir = Path(runs_dir or repo_root / "Workspace/E-MZ-DN-01/evaluation_runs" / EXPERIMENT_ID)
     reader = EvidenceReader(progress)
     try:
+        reader.progress("Weryfikuję selekcję i pliki GT…")
         manifest, selection = _read_selection(reader, selection_dir, repo_root)
         summaries = _read_mz_results(reader, runs_dir, selection)
         reader.finish()

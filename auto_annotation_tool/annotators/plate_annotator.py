@@ -216,7 +216,7 @@ class PlateAnnotator(BaseAnnotator):
                 status_message="Przetwarzanie przerwane"
             )
         
-        width, height = get_image_size(image_path)
+        width, height = 0, 0
         
         annotation = ImageAnnotation(
             filename=image_path.name,
@@ -238,6 +238,8 @@ class PlateAnnotator(BaseAnnotator):
                 annotation.status_message = self._describe_image_read_error(image_path)
                 return annotation
             yolo_source = str(image_path) if image is True else image
+            width, height = self._model_input_size(image_path, image)
+            annotation.width, annotation.height = width, height
             
             results = self.model(
                 yolo_source,

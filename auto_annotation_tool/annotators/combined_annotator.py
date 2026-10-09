@@ -93,7 +93,7 @@ class CombinedAnnotator(BaseAnnotator):
         cleanup_gpu_memory()
 
     def process_image(self, image_path: Path) -> ImageAnnotation:
-        width, height = get_image_size(image_path)
+        width, height = 0, 0
 
         annotation = ImageAnnotation(
             filename=image_path.name,
@@ -110,6 +110,8 @@ class CombinedAnnotator(BaseAnnotator):
                 )
 
             yolo_source = str(image_path) if image_source is True else image_source
+            width, height = self._model_input_size(image_path, image_source)
+            annotation.width, annotation.height = width, height
             image = None if image_source is True else image_source
 
             vehicles = self._detect_vehicles(yolo_source)
