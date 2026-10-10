@@ -142,12 +142,15 @@ def test_existing_z4_controls_dispatch_to_reader_before_inference(tmp_path, monk
     (tmp_path / "selection_manifest.json").write_text("{}")
     host = SimpleNamespace(rank_data_dir=SimpleNamespace(get=lambda: str(tmp_path)))
     calls = []
+    participant_calls = []
     monkeypatch.setattr(view, "open_results", lambda tab, **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(view, "open_participants", lambda tab: participant_calls.append(tab))
     for function in (ranking._run_ranking_v2, ranking._open_ranking_results_modal,
                      ranking._open_ranking_report_viewer, ranking._open_ranking_participants_modal,
                      ranking._export_ranking_analysis_report):
         function(host)
-    assert len(calls) == 5 and calls[-1] == {"export_after_load": True}
+    assert len(calls) == 4 and calls[-1] == {"export_after_load": True}
+    assert participant_calls == [host]
 
 
 def test_real_tk_window_controls_ticks_and_progress(mz_fixture, monkeypatch):

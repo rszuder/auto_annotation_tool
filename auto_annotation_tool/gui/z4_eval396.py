@@ -57,6 +57,159 @@ def selected_eval396(tab):
     return is_selection(variable.get()) if variable is not None else False
 
 
+def participant_models(selection_dir):
+    """Read the pinned participant list, without history reconciliation or model loading."""
+    from ..ranking import eval396 as contract
+    selection_dir = Path(selection_dir).resolve()
+    if selection_dir.name == "selection_manifest.json":
+        selection_dir = selection_dir.parent
+    reader = EvidenceReader()
+    manifest = reader.json(selection_dir / "selection_manifest.json", contract.SELECTION_MANIFEST_SHA)
+    contract.require(manifest.get("schema") == "emzdn01.eval_scene_selection.v1"
+                     and manifest.get("selection_fingerprint_sha256") == contract.SELECTION_SHA,
+                     "SELECTION_FINGERPRINT_MISMATCH")
+    models = reader.json(selection_dir / "model_lineage.json", manifest["files"]["model_lineage.json"])
+    contract.require(len(models) == len(contract.MODELS)
+                     and {m["label"] for m in models} == set(contract.MODELS), "SIX_MODELS_REQUIRED")
+    for model in models:
+        role = "plate" if model["label"].startswith("MT-") else "character"
+        contract.require(model.get("role") == role and bool(model.get("checkpoint_file"))
+                         and len(model.get("checkpoint_sha256", "")) == 64
+                         and bool(model.get("run_id")), "MODEL_LINEAGE_INVALID")
+    reader.finish()
+    return sorted(models, key=lambda m: contract.MODELS.index(m["label"]))
+
+
+def open_participants(tab):
+    """The Horses CTA shows the fixed EVAL396 models, separately from result windows."""
+    selection_dir = Path(tab.rank_data_dir.get()).resolve()
+    if selection_dir.name == "selection_manifest.json":
+        selection_dir = selection_dir.parent
+    existing = getattr(tab, "_eval396_participants_dialog", None)
+    if existing is not None and existing.winfo_exists():
+        if existing.selection_dir == selection_dir:
+            existing.deiconify()
+            existing.lift()
+            return existing
+        existing.destroy()
+    dialog = tk.Toplevel(tab.frame)
+    tab._eval396_participants_dialog = dialog
+    dialog.selection_dir = selection_dir
+    dialog.title("Z4 — EVAL396 — konie / modele")
+    dialog.geometry("1080x520")
+    dialog.minsize(780, 440)
+    dialog.resizable(True, True)
+    dialog.wm_transient("")
+    dialog._aat_skip_window_recovery = True
+    shell = ttk.Frame(dialog, padding=16)
+    shell.pack(fill="both", expand=True)
+    shell.columnconfigure(0, weight=1)
+    shell.rowconfigure(3, weight=1)
+    ttk.Label(shell, text="Konie — modele EVAL396", font=("Segoe UI", 16, "bold")).grid(row=0, sticky="w")
+    intro = ttk.Label(shell, text="EVAL396 ma ustalony skład: 3 modele MT i 3 modele MZ. "
+                      "Zaznacz model, aby zobaczyć jego wagi i pochodzenie.", wraplength=1000)
+    intro.grid(row=1, sticky="ew", pady=(5, 12))
+    controls = ttk.Frame(shell)
+    controls.grid(row=2, sticky="ew", pady=(0, 8))
+    ttk.Label(controls, text="Modele:").pack(side="left")
+    groups = ("MT — tablice", "MZ — znaki", "Wszystkie")
+    target = getattr(tab, "_get_ranking_task_target", lambda: "")()
+    group = tk.StringVar(value=groups[0] if target == "plate" else groups[1] if target in {"char", "character"} else groups[2])
+    choice = ttk.Combobox(controls, textvariable=group, values=groups, state="readonly", width=22)
+    choice.pack(side="left", padx=(6, 16))
+    status = tk.StringVar(value="Odczytuję listę modeli…")
+    ttk.Label(controls, textvariable=status).pack(side="left")
+    table_frame = ttk.Frame(shell)
+    table_frame.grid(row=3, sticky="nsew")
+    table_frame.columnconfigure(0, weight=1)
+    table_frame.rowconfigure(0, weight=1)
+    tree = ttk.Treeview(table_frame, columns=("model", "task", "variant", "run", "weights"),
+                        show="headings", selectmode="browse", height=6)
+    for column, caption, width in (("model", "Model", 120), ("task", "Zadanie", 170),
+                                   ("variant", "Wariant", 120), ("run", "Trening", 170), ("weights", "Wagi", 190)):
+        tree.heading(column, text=caption)
+        tree.column(column, width=width, minwidth=90, stretch=column in ("task", "weights"))
+    tree.grid(row=0, column=0, sticky="nsew")
+    ys = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+    xs = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+    tree.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+    ys.grid(row=0, column=1, sticky="ns")
+    xs.grid(row=1, column=0, sticky="ew")
+    details = ttk.LabelFrame(shell, text="Wybrany model", padding=10)
+    details.grid(row=4, sticky="ew", pady=(10, 8))
+    details.columnconfigure(1, weight=1)
+    description, weights, sha, parent = (tk.StringVar() for _ in range(4))
+    description_label = ttk.Label(details, textvariable=description, wraplength=960)
+    description_label.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 7))
+    for row, title, variable in ((1, "Plik wag:", weights), (2, "SHA w protokole:", sha),
+                                  (3, "Trening bazowy:", parent)):
+        ttk.Label(details, text=title).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=2)
+        ttk.Entry(details, textvariable=variable, state="readonly").grid(row=row, column=1, sticky="ew")
+    bottom = ttk.Frame(shell)
+    bottom.grid(row=5, sticky="ew")
+    ttk.Label(bottom, text="DAY / NIGHT: oświetlenie • n / s: rozmiar modelu. Weryfikacja wag odbywa się przed pomiarem.",
+              wraplength=650).pack(side="left", fill="x", expand=True)
+
+    def close():
+        if getattr(tab, "_eval396_participants_dialog", None) is dialog:
+            tab._eval396_participants_dialog = None
+        dialog.destroy()
+
+    ttk.Button(bottom, text="Zamknij", command=close).pack(side="right", padx=(12, 0))
+    dialog.protocol("WM_DELETE_WINDOW", close)
+    dialog.bind("<Escape>", lambda _event: close())
+    models = {}
+    descriptions = dict(MODEL_DESCRIPTIONS)
+    descriptions.update({
+        "MT-n": "Bazowy model lokalizacji tablic YOLO Pose w wariancie nano.",
+        "MT-DAY": "Model MT-n dostrojony z wykorzystaniem materiału i augmentacji dziennych.",
+        "MT-NIGHT": "Model MT-n dostrojony z wykorzystaniem materiału i augmentacji nocnych."})
+
+    def selected(_event=None):
+        selection = tree.selection()
+        model = models.get(selection[0]) if selection else None
+        description.set(descriptions[model["label"]] if model else "")
+        weights.set(model["checkpoint_file"] if model else "")
+        sha.set(model["checkpoint_sha256"] if model else "")
+        parent.set((model.get("parent_run_id") or "Model bazowy") if model else "")
+
+    def refresh(_event=None):
+        tree.delete(*tree.get_children())
+        for label, model in models.items():
+            if group.get() == groups[0] and model["role"] != "plate":
+                continue
+            if group.get() == groups[1] and model["role"] != "character":
+                continue
+            tree.insert("", "end", iid=label, values=(label,
+                "Lokalizacja tablic" if model["role"] == "plate" else "Rozpoznawanie znaków",
+                "Bazowy" if not model.get("parent_run_id") else label.split("-", 1)[1],
+                model["run_id"], Path(model["checkpoint_file"]).name))
+        status.set(f"Pokazano {len(tree.get_children())} z {len(models)} modeli protokołu")
+        if tree.get_children():
+            tree.selection_set(tree.get_children()[0])
+        selected()
+
+    def resized(event):
+        if event.widget is dialog:
+            intro.configure(wraplength=max(500, event.width - 40))
+            description_label.configure(wraplength=max(500, event.width - 70))
+
+    tree.bind("<<TreeviewSelect>>", selected)
+    choice.bind("<<ComboboxSelected>>", refresh)
+    dialog.bind("<Configure>", resized, add="+")
+    dialog.participant_table, dialog.participant_group = tree, choice
+    dialog.participant_status = status
+    dialog.participant_weights, dialog.participant_sha = weights, sha
+    try:
+        models.update((m["label"], m) for m in participant_models(selection_dir))
+        refresh()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        status.set("Nie można odczytać modeli EVAL396")
+        description.set(str(exc))
+        choice.configure(state="disabled")
+    return dialog
+
+
 def track_candidate(repo_root):
     path = default_selection(repo_root)
     if not path.is_dir():
