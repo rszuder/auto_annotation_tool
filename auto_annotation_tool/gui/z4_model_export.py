@@ -79,6 +79,10 @@ from .zoomable_canvas import ZoomableCanvas
 from .z4_mobile_report_browser import open_mobile_report_browser
 from .z4_mobile_export_locations import MobileExportSourceLocations
 from .z4_mobile_export_contract import describe_mobile_export_selection
+from .z4_tflite_precision import open_tflite_precision_dialog
+from .z4_int8_calibration import open_int8_calibration_dialog, CalibrationModeControl, calibration_request_options
+from ..exporters import exploratory_calibration
+from ..exporters.int8_calibration import validate_manifest as validate_calibration_manifest
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
@@ -2921,31 +2925,30 @@ def _mobile_export_calibration_yaml_candidates(candidate: dict | None, *, limit:
 
 
 def _mobile_export_default_calibration_path(candidate: dict | None) -> str:
-    suggestions = _mobile_export_calibration_yaml_candidates(candidate, limit=1)
-    if suggestions:
-        return str(suggestions[0].get("path") or "")
+    # A training YAML is never proof of independent calibration.
     return ""
 
 
-def _mobile_export_calibration_problem(candidate: dict | None, calibration_path: Path | None) -> str:
+def _mobile_export_calibration_problem(candidate: dict | None, calibration_path: Path | None, *, options=None) -> str:
     if calibration_path is None:
-        return "Wariant INT8 wymaga reprezentatywnego pliku data.yaml dla tego modelu."
+        return "BLOCKED: INT8 wymaga manifestu z okna Bezpieczna kalibracja INT8."
     try:
-        safe_path = Path(calibration_path)
-        if not safe_path.exists() or not safe_path.is_file():
-            return "Wybrany plik data.yaml kalibracji INT8 nie istnieje."
-    except Exception:
-        return "Nie można odczytać pliku data.yaml kalibracji INT8."
-    if not isinstance(candidate, dict):
-        return ""
-    target = CONFIG.normalize_task_target(str(candidate.get("target") or ""))
-    score, reason = _mobile_export_yaml_target_score(safe_path, target)
-    if score < 35:
-        marker = _mobile_export_target_marker(candidate)
-        return (
-            f"{marker}: data.yaml wygląda na niezgodny z torem modelu "
-            f"({reason}). Wybierz YAML z tego samego toru albo wskaż właściwy plik ręcznie."
-        )
+        candidate = candidate or {}
+        target = CONFIG.normalize_task_target(str(candidate.get("target") or ""))
+        role = {"char": "character", "plate": "plate", "car": "vehicle"}.get(target)
+        mode = calibration_request_options(options or {})
+        if mode["calibration_mode"] == "strict":
+            validate_calibration_manifest(calibration_path, role=role, checkpoint=candidate.get("best_weights"))
+        elif mode["calibration_mode"] == "exploratory" and mode["exploratory_confirmation"] is True:
+            def value(key):
+                v = (options or {}).get(key)
+                return v.get() if hasattr(v, "get") else v
+            exploratory_calibration.validate_manifest(calibration_path, role=role, checkpoint=candidate.get("best_weights"),
+                image_size=value("imgsz"), confidence_threshold=value("conf"), iou_threshold=value("iou"))
+        else:
+            raise ValueError("Wymagane jawne potwierdzenie trybu badawczego.")
+    except Exception as exc:
+        return f"BLOCKED: kalibracja INT8: {exc}"
     return ""
 
 def _mobile_export_percent_value(value) -> float | None:
@@ -4434,7 +4437,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
     calibration_row = tk.Frame(form, bg=card_bg)
     calibration_row.grid(row=5, column=1, sticky="ew", pady=4)
     calibration_row.grid_columnconfigure(0, weight=1)
-    calibration_suggestions = _mobile_export_calibration_yaml_candidates(calibration_candidate)
+    calibration_suggestions = []  # Explicit approved JSON only.
     calibration_labels = [str(item.get("label") or item.get("path") or "") for item in calibration_suggestions]
     calibration_by_label = {
         str(item.get("label") or item.get("path") or ""): item
@@ -4461,7 +4464,7 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
     else:
         tk.Label(
             calibration_row,
-            text="Brak zgodnych propozycji. Przy INT8 wskaż data.yaml ręcznie.",
+            text="INT8: przygotuj manifest w oknie Bezpieczna kalibracja INT8.",
             bg=card_bg,
             fg=warning,
             font=("Segoe UI", 8, "bold"),
@@ -4471,14 +4474,18 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
 
     def choose_calibration() -> None:
         selected = filedialog.askopenfilename(
-            title="Wybierz data.yaml do kalibracji INT8",
+            title="Wybierz zatwierdzony manifest kalibracji INT8",
             parent=dialog,
-            filetypes=(("YOLO data.yaml", "data.yaml"), ("YAML", "*.yaml *.yml"), ("Wszystkie pliki", "*.*")),
+            filetypes=(("Manifest kalibracji", "*.json"),),
         )
         if selected:
             calibration_var.set(selected)
 
-    ttk.Button(calibration_row, text="Wybierz data.yaml", command=choose_calibration).grid(row=1, column=1, sticky="e")
+    ttk.Button(calibration_row, text="Wybierz manifest INT8", command=choose_calibration).grid(row=1, column=1, sticky="e")
+    calibration_options = {"calibration": calibration_var, "imgsz": imgsz_var, "conf": conf_var,
+                           "iou": iou_var, "litert": litert_var, "int8": int8_var, "onnx": onnx_var,
+                           "onnx_int8": onnx_int8_var, "ncnn": ncnn_var}
+    CalibrationModeControl(calibration_row, calibration_options).grid(row=2, column=0, columnspan=2, sticky="ew")
 
     status_box = tk.Frame(root, bg=blend_hex_colors(bg, accent, 0.03), padx=12, pady=10, highlightthickness=1, highlightbackground=blend_hex_colors(accent, bg, 0.45))
     status_box.grid(row=3, column=0, sticky="ew", pady=(12, 0))
@@ -4632,7 +4639,9 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             image_size=int(imgsz_var.get() or img_size),
             quantizations=tuple(dict.fromkeys(quantizations)),
             format_quantizations=format_quantizations,
-            calibration_data=calibration,
+            calibration_data=calibration if calibration and calibration.suffix.lower() != ".json" else None,
+            calibration_manifest=calibration if calibration and calibration.suffix.lower() == ".json" else None,
+            **calibration_request_options(calibration_options),
             confidence_threshold=max(0.0, min(1.0, float(conf_var.get() or CONFIG.DEFAULT_CONFIDENCE))),
             iou_threshold=max(0.0, min(1.0, float(iou_var.get() or CONFIG.DEFAULT_IOU))),
             model_id=self._safe_model_export_slug(model_id_seed, fallback=f"{role}-model")[:80],
@@ -4837,6 +4846,8 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         conf_var,
         iou_var,
         calibration_var,
+        calibration_options["calibration_mode"],
+        calibration_options["exploratory_confirmation"],
     ):
         try:
             export_option_var.trace_add("write", mark_preflight_dirty)
@@ -7978,14 +7989,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
     def choose_calibration() -> None:
         selected = filedialog.askopenfilename(
-            title="Wybierz data.yaml do kalibracji INT8",
+            title="Wybierz zatwierdzony manifest kalibracji INT8",
             parent=dialog,
-            filetypes=(("YOLO data.yaml", "data.yaml"), ("YAML", "*.yaml *.yml"), ("Wszystkie pliki", "*.*")),
+            filetypes=(("Manifest kalibracji", "*.json"),),
         )
         if selected:
             calibration_var.set(selected)
 
-    ttk.Button(calibration_row, text="Wybierz data.yaml", command=choose_calibration).grid(row=0, column=1, sticky="e")
+    ttk.Button(calibration_row, text="Wybierz manifest INT8", command=choose_calibration).grid(row=0, column=1, sticky="e")
 
     row_label(6, "Wykres")
     metric_chart_canvas = tk.Canvas(
@@ -9709,9 +9720,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
         )
         rows.append(
             (
-                "Brak" if calibration_problem or not request.calibration_data else "Jest",
+                "Brak" if calibration_problem or not request.calibration_manifest else "Jest",
                 "Kalibracja INT8",
-                str(request.calibration_data or "Wymagana tylko dla kwantyzacji INT8."),
+                str(request.calibration_manifest or "Wymagana tylko dla kwantyzacji INT8."),
             )
             if "int8" in quantizations
             else ("-", "Kalibracja INT8", "Kwantyzacja INT8 nie jest wybrana.")
@@ -9804,7 +9815,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         default_calibration_path = _mobile_export_resolve_data_yaml(
             candidate.get("dataset_path") or getattr(run, "dataset_path", "")
         )
-        default_calibration = str(default_calibration_path) if default_calibration_path else ""
+        default_calibration = ""  # Operator must choose a verified calibration manifest.
         metric_text = _candidate_metric_label(candidate)
 
         preflight_refresh_state["suspend"] = True
@@ -10048,7 +10059,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
             image_size=int(_option_value("imgsz", imgsz_var.get()) or img_size),
             quantizations=tuple(dict.fromkeys(quantizations)),
             format_quantizations=format_quantizations,
-            calibration_data=calibration,
+            calibration_data=calibration if calibration and calibration.suffix.lower() != ".json" else None,
+            calibration_manifest=calibration if calibration and calibration.suffix.lower() == ".json" else None,
+            **calibration_request_options(options),
             confidence_threshold=max(0.0, min(1.0, float(_option_value("conf", conf_var.get()) or CONFIG.DEFAULT_CONFIDENCE))),
             iou_threshold=max(0.0, min(1.0, float(_option_value("iou", iou_var.get()) or CONFIG.DEFAULT_IOU))),
             model_id=self._safe_model_export_slug(model_id_seed, fallback=f"{role}-model")[:80],
@@ -10951,7 +10964,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         def _make_model_state(candidate: dict) -> dict:
             run = candidate.get("run")
             img_size = int(candidate.get("img_size") or getattr(run, "img_size", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE)
-            calibration_suggestions = _mobile_export_calibration_yaml_candidates(candidate)
+            calibration_suggestions = []  # No implicit calibration dataset.
             return {
                 "candidate": candidate,
                 "marker": _mobile_export_target_marker(candidate),
@@ -11126,7 +11139,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 row=2,
                 column=1,
                 title="ONNX INT8",
-                body="Kwantyzowany ONNX do badan porownawczych. Wymaga data.yaml kalibracji.",
+                body="Kwantyzowany ONNX. Wymaga ścisłego manifestu bezpiecznej kalibracji INT8.",
                 color=warning,
                 bg_color=formats["bg"],
                 variable=state["onnx_int8"],
@@ -11201,26 +11214,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 for item in calibration_suggestions
                 if str(item.get("label") or item.get("path") or "")
             }
-            if marker == "MP":
-                calibration_intro = (
-                    "INT8 dla MP: użyj data.yaml z reprezentatywnych kadrów O. To kalibracja, nie trening."
-                )
-                calibration_suggestion_text = (
-                    f"Propozycje: {len(calibration_labels)}. Preferuj kadry projektu; COCO tylko awaryjnie."
-                )
-                calibration_missing_text = (
-                    "Brak propozycji. FP32 działa bez data.yaml; INT8 wymaga kadrów O."
-                )
-            else:
-                calibration_intro = (
-                    "Kalibracja INT8: użyj data.yaml z tego samego toru co model. "
-                    "To tylko reprezentatywna próbka do pomiaru zakresów, nie ponowny trening."
-                )
-                calibration_suggestion_text = (
-                    f"Propozycji: {len(calibration_labels)}. "
-                    "Pierwsza pozycja jest ustawiana automatycznie, gdy pasuje do kandydata."
-                )
-                calibration_missing_text = "Brak zgodnych propozycji. Przy INT8 wskaż data.yaml ręcznie."
+            calibration_intro = "INT8: manifest train + SHA. Wybierz tryb poniżej."
+            calibration_suggestion_text = "Wybór jawny; brak automatycznego datasetu kalibracji."
+            calibration_missing_text = "Przygotuj manifest w oknie Bezpieczna kalibracja INT8 (MT/MZ). FP32 nie wymaga kalibracji."
             tk.Label(
                 calibration,
                 text=calibration_intro,
@@ -11274,14 +11270,15 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
             def choose_model_calibration(current_state=state) -> None:
                 selected = filedialog.askopenfilename(
-                    title=f"Wybierz data.yaml kalibracji INT8 dla {current_state.get('marker')}",
+                    title=f"Wybierz manifest kalibracji INT8 dla {current_state.get('marker')}",
                     parent=executor_modal,
-                    filetypes=(("YOLO data.yaml", "data.yaml"), ("YAML", "*.yaml *.yml"), ("Wszystkie pliki", "*.*")),
+                    filetypes=(("Manifest kalibracji", "*.json"),),
                 )
                 if selected:
                     current_state["calibration"].set(selected)
 
-            ttk.Button(calibration, text="Wybierz data.yaml", command=choose_model_calibration).grid(row=3, column=1, sticky="e")
+            ttk.Button(calibration, text="Wybierz manifest INT8", command=choose_model_calibration).grid(row=3, column=1, sticky="e")
+            CalibrationModeControl(calibration, state).grid(row=4, column=0, columnspan=2, sticky="ew", pady=5)
 
             def _sync_int8_calibration_hint(*_args, current_state=state) -> None:
                 try:
@@ -11302,7 +11299,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             except Exception:
                 pass
 
-            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes"):
+            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes", "calibration_mode", "exploratory_confirmation"):
                 try:
                     state[key].trace_add("write", _mark_executor_dirty)
                 except Exception:
@@ -11811,7 +11808,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 except Exception:
                     calibration_text = ""
                 calibration_path = Path(calibration_text) if calibration_text else None
-                calibration_problem = _mobile_export_calibration_problem(candidate, calibration_path)
+                calibration_problem = _mobile_export_calibration_problem(candidate, calibration_path, options=state)
                 calibration_ok = not bool(calibration_problem)
                 rows.append(
                     (
@@ -11819,7 +11816,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         marker,
                         "Kalibracja INT8",
                         (
-                            f"Dataset kalibracyjny zgodny z torem {marker}: {calibration_path}"
+                            f"Manifest train / SHA zgodny z torem {marker}: {calibration_path}"
                             if calibration_ok
                             else calibration_problem
                         ),
@@ -11840,7 +11837,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 except Exception:
                     calibration_text = ""
                 calibration_path = Path(calibration_text) if calibration_text else None
-                problem = _mobile_export_calibration_problem(candidate, calibration_path)
+                problem = _mobile_export_calibration_problem(candidate, calibration_path, options=state)
                 if problem:
                     problems.append(f"{marker}: {problem}")
             return problems
@@ -12763,9 +12760,15 @@ def _open_mobile_model_export_center(self, initial_run=None):
         text="Raporty z telefonu",
         command=lambda: open_mobile_report_browser(self, parent=dialog),
     ).grid(row=0, column=0, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-    export_button.grid(row=0, column=1, sticky="e", padx=(0, 7), ipadx=10, ipady=2)
+    ttk.Button(actions, text="Sprawdź precyzję TFLite",
+               command=lambda: open_tflite_precision_dialog(dialog)).grid(
+                   row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
+    ttk.Button(actions, text="Bezpieczna kalibracja INT8",
+               command=lambda: open_int8_calibration_dialog(dialog)).grid(
+                   row=0, column=2, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
+    export_button.grid(row=0, column=3, sticky="e", padx=(0, 7), ipadx=10, ipady=2)
     close_button = ttk.Button(actions, text="Zamknij", command=dialog.destroy)
-    close_button.grid(row=0, column=2, sticky="e", ipadx=7, ipady=2)
+    close_button.grid(row=0, column=4, sticky="e", ipadx=7, ipady=2)
     try:
         dependency_tool_shell.grid_remove()
     except Exception:

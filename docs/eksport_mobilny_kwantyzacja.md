@@ -98,14 +98,14 @@ Parametry `conf` i `IoU` trafiają do manifestu, ponieważ telefon wykonuje wła
 
 ### Kalibracja INT8
 
-Pole `data.yaml` jest używane tylko dla wariantu `LiteRT/TFLite INT8`.
+Od F4-B2 oba warianty, `LiteRT/TFLite INT8` oraz `ONNX INT8`, wymagają zatwierdzonego manifestu kalibracji JSON. Samo `data.yaml` nie jest dowodem niezależności danych.
 
 Kalibracja nie jest treningiem. Jest etapem pomiarowym wykonywanym po treningu, podczas konwersji modelu FP32 do INT8.
 
 Proces:
 
 1. Eksporter otrzymuje wytrenowany model FP32.
-2. Użytkownik wskazuje `data.yaml` opisujący reprezentatywny zbiór obrazów.
+2. Użytkownik przygotowuje w Z4 manifest próbek train z zatwierdzonego treningu i kontrolą inwentarzy SHA EVAL396 oraz final_test.
 3. Konwerter przepuszcza próbkę obrazów przez model.
 4. Dla tensorów i aktywacji mierzone są typowe zakresy wartości.
 5. Na podstawie tych zakresów wartości FP32 są mapowane na zakres INT8.
@@ -246,7 +246,7 @@ Dla pracy inżynierskiej sugerowany schemat eksperymentu:
 
 1. Wybrać jeden model źródłowy `best.pt`.
 2. Wyeksportować warianty: `LiteRT FP32`, `ONNX FP32`, opcjonalnie `LiteRT INT8`.
-3. Dla INT8 użyć reprezentatywnego `data.yaml`.
+3. Dla INT8 przygotować w Z4 zatwierdzony manifest kalibracji (procedura F4-B2 poniżej).
 4. Uruchomić inferencję na tym samym zbiorze testowym.
 5. Porównać:
    - jakość detekcji;
@@ -295,7 +295,7 @@ W nowszej dokumentacji Ultralytics `ONNX` obsluguje `quantize=8`, ale lokalne
 srodowisko moze miec starsza implementacje eksportera, ktora odrzuca argument
 `quantize`. Z tego powodu desktopowy exporter powinien byc odporny na wersje
 biblioteki: buduje `ONNX FP32`, a nastepnie tworzy `ONNX INT8` przez statyczna
-kwantyzacje ONNX Runtime z obrazami kalibracyjnymi z `data.yaml`.
+kwantyzacje ONNX Runtime z obrazami wskazanymi w zatwierdzonym manifeście train (F4-B2).
 
 Kwantyzacja ONNX INT8 powinna omijac elementy glowicy dekodujacej YOLO i
 kwantyzowac przede wszystkim operacje z wagami (`Conv`, `Gemm`, `MatMul`).
@@ -304,3 +304,155 @@ wspolrzednych ramek.
 
 `NCNN` pozostaje wariantem `FP32`, poniewaz oficjalna tabela eksportu
 Ultralytics nie deklaruje wsparcia `INT8` dla NCNN w tej sciezce eksportu.
+
+## F4-B1: rzeczywista precyzja grafu TFLite
+
+W „Centrum eksportu mobilnego” przycisk **„Sprawdź precyzję TFLite”** otwiera
+natywne okno odczytu istniejącego `.tflite` lub `.alprmodel` (również MT+MZ).
+**„Wybierz model lub paczkę”** uruchamia odczyt FlatBuffers i kontrolę SHA,
+bez interpretera, konwersji i inferencji. **„Zapisz raport analizy”** zapisuje
+osobny JSON; plik modelu/paczki pozostaje niezmieniony.
+
+Klasyfikator `exporters/tflite_precision.py` rozróżnia:
+
+- `FP32`: rozpoznane operacje i dane FLOAT32; tensory kształtów/indeksów INT32,
+  INT64 oraz bool nie są same w sobie kwantyzacją modelu.
+- `INT8`: rozpoznany graf ze signed INT8 dla aktywacji i wag oraz signed INT8
+  na wejściu/wyjściu. Bias INT32 i operacje strukturalne są dozwolone.
+  Parametry kwantyzacji muszą być poprawne; kontrolowane są także skale biasu.
+- `MIXED`: np. FLOAT32 aktywacji z wagami INT8, gałęzie float+integer lub
+  float I/O z Quantize/Dequantize. Nazwa `int8` nie zmienia tego wyniku.
+- `UNVERIFIED`: brak parsera, uszkodzony plik, nierozpoznana operacja/wersja,
+  nieobsługiwany typ, control flow, dane sparse/dynamic lub nieprawidłowe
+  parametry. Polityka jest konserwatywna; nie dowodzi obsługi każdego modelu.
+
+Analiza obejmuje wszystkie podgrafy i raportuje typy tensorów, parametry
+kwantyzacji, operatory, role wag/biasu/aktywacji, SHA artefaktu i digest analizy.
+Nie stanowi pełnej weryfikacji wykonywalności TFLite ani dowodu typu kerneli.
+**`execution_precision=UNVERIFIED` zawsze pozostaje oddzielne od wyniku grafu.**
+
+Schematy `alpr.model.v1` / `alpr.package.v1` pozostają bez zmian. Starsze paczki
+bez dowodu nadal przechodzą walidację struktury i SHA; niezgodność deklaracji
+jest ostrzeżeniem i trafia do raportu. `validate_package(...,
+precision_reports=lista, require_precision=True)` pozwala wymusić kontrolę.
+Dotychczasowe wywołanie `validate_package(path)` nadal zwraca `None`.
+
+Przyszły nowy eksport TFLite wymaga zgodności grafu z wybraną precyzją.
+Wybór pliku opiera się na grafie, nie nazwie. Wariant ma opcjonalne pole
+`graph_precision`; pełny raport jest w `precision/<variant>.json`, z SHA
+raportu i pliku modelu. Walidator ponownie analizuje bajty i odrzuca fałszywy,
+nieaktualny albo nieodtwarzalny dowód. Nowa paczka nie może publikować MIXED
+pod deklaracją INT8. Inspekcja historycznej paczki niczego w niej nie zmienia.
+
+F4-B1 nie wdraża kalibracji train-only ani instrumentacji Androida.
+
+## F4-B2: jawna kalibracja train i kontrola niezależności
+
+W istniejącym „Centrum eksportu mobilnego” przycisk **„Bezpieczna kalibracja INT8”**
+otwiera natywne okno przygotowania dowodu. Nie uruchamia konwersji ani treningu.
+
+1. Wybierz **„MT — sceny”** lub **„MZ — cropy”**, historię ukończonego treningu,
+   kliknij **„Wczytaj treningi”** i wskaż jego identyfikator.
+2. Wskaż **„Inwentarz SHA EVAL396”** oraz **„Inwentarz SHA final_test”**. Odczytywane
+   są wyłącznie dokumenty SHA; obrazy i GT zbiorów wykluczonych nie są otwierane.
+3. Ustaw imgsz i maksymalną liczbę próbek (domyślnie 300; to limit techniczny,
+   nie wynik optymalizacji jakości), podaj operatora i zaznacz zatwierdzenie źródła train.
+4. **„Sprawdź i przygotuj manifest”** oblicza SHA, pochodzenie oraz fingerprint.
+   **„Zapisz manifest / raport BLOCKED”** zapisuje wyłącznie nowy JSON poza źródłami.
+5. W ustawieniach danego modelu **„Wybierz manifest INT8”** wskazuje ten JSON.
+   Eksporter akceptuje wyłącznie READY; zmiana modelu, danych, imgsz, środowiska lub
+   inwentarza wymaga ponownej kontroli. FP32 nadal działa bez kalibracji.
+
+Źródłem są fizyczne `images/train` realnego datasetu bazowego wskazanego przez
+zatwierdzony trening. SHA obrazów i scen muszą należeć do jego kompletnego,
+zamrożonego inwentarza. Dla MZ zarówno zamrożony `metadata_manifest.json`, jak i
+`split_assignment_manifest.json` muszą zgodnie wiązać dokładną ścieżkę cropa
+z SHA sceny. Nie odczytuje się etykiet ani pikseli źródłowych scen cropów.
+Próbki dzielące SHA ze splitami val/test są jawnie wykluczane. Pozostałe obrazy
+są sortowane po SHA i ścieżce, deduplikowane po SHA i ograniczane do jawnego limitu.
+Różne cropy jednej sceny pozostają różnymi próbkami, ale kontrola wycieku uwzględnia
+ich wspólną scenę. Nakładanie SHA z EVAL396/final_test blokuje przygotowany plan.
+
+`alpr.int8_calibration.v1` zawiera konfigurację, checkpoint SHA, źródła i ich SHA,
+inwentarze wykluczeń, liczności, próbki z SHA i source_scene_sha256, wykluczenia,
+preprocessing oraz `input_fingerprint`. Pochodzenie zatwierdza operator; zapis jego
+nazwy nie jest podpisem kryptograficznym. Fingerprint nie dowodzi reprezentatywności
+ani braku podobnych obrazów o innych bajtach.
+
+Oba rzeczywiste loadery dostają tę samą listę próbek: RGB bez automatycznego EXIF,
+letterbox z cv2.INTER_LINEAR, centrowaniem, paddingiem 114 i dozwolonym powiększeniem.
+ONNX otrzymuje NCHW float32 / 255. Loader LiteRT daje NCHW uint8; kontrolowana ścieżka
+Ultralytics przekazuje NHWC float32 do onnx2tf z mean=0 i std=255. Adapter LiteRT jest
+odebrany dla lokalnej wersji Ultralytics 8.4.19; zmiana wersji wymaga ponownego odbioru.
+Callback przypisuje loader do pojedynczej instancji eksportera, wymusza split=train,
+batch=1 i fraction=1.0. Nie korzysta z domyślnego YOLODataset ani jego fallbacku val.
+Nie tworzy cache ani etykiet w datasetach. Oba loadery kontrolują SHA tych samych
+bajtów, które dekodują, oraz pełne zużycie zatwierdzonej listy.
+
+Nowe eksporty INT8 dodają opcjonalny `calibration_manifest.json` i `calibration_evidence`
+z SHA w dotychczasowym kontrakcie `alpr.model.v1`. Starsze paczki pozostają czytelne;
+brak dowodu nie jest poświadczoną niezależnością historycznej kalibracji. Pole API
+`calibration_data` pozostaje dostępne, a nowe `calibration_manifest` jest opcjonalne
+w strukturze żądania, lecz wymagane przy nowym INT8. B1 nadal blokuje MIXED/UNVERIFIED
+jako pełne INT8; sama kalibracja nie gwarantuje grafu integer ani wykonania integer na telefonie.
+
+### Bramka final_test
+
+Brak wiarygodnego inwentarza daje **FINAL_TEST_INVENTORY_NOT_VERIFIED / BLOCKED**.
+Brak znalezionych plików nie jest dowodem niezależności. Nie generuje się pustego
+inwentarza ani zastępczej kohorty. Ustanowienie rzeczywistego inwentarza jest odrębną
+procedurą operatora, bez strojenia lub inferencji na tych obrazach.
+
+Obsługiwany dokument wykluczeń `alpr.holdout_source_hashes.v1` wymaga `purpose`
+(`final_test` albo `EVAL396`), `status=frozen`, niepustych `cohort_id` i `approved_by`,
+unikalnej niepustej listy `source_scene_hashes` (64 znaki hex), zgodnego `scene_count`
+i `inventory_fingerprint` (SHA-256 kanonicznego JSON wszystkich pozostałych pól,
+UTF-8, sort_keys, separators=(',',':'), ensure_ascii=False). Ten kontrakt opisuje
+rzeczywisty inwentarz dostarczony przez operatora; nie jest narzędziem jego tworzenia.
+EVAL396 obsługuje również natywny `selection_manifest.json` z weryfikowanym SHA
+`included_scenes.json` i liczbą 396. Żaden loader nie otwiera obrazów wymienionych
+w dokumentach wykluczeń.
+Zgodność grafu INT8 nie potwierdza wykonania integer na telefonie; wymaga ono
+oddzielnego dowodu runtime/delegata. Produkcyjna konwersja i kolejne etapy
+wymagają odrębnego polecenia operatora oraz usunięcia blokad danych.
+
+### Kalibracja badawcza F4 EXP INT8 (2026-10-11)
+
+Z4 ma odrębny wybór **Badawcza kalibracja INT8 — bez final_test**. Nie zmienia on
+ścisłego `alpr.int8_calibration.v1`, READY ani `FINAL_TEST_INVENTORY_NOT_VERIFIED`.
+Manifest `alpr.int8_calibration.exploratory.v1` ma `purpose=research_calibration`
+i status `EXPLORATORY_ONLY` dopiero po osobnym potwierdzeniu operatora. Zachowuje
+zagnieżdżony audyt ścisły jako BLOCKED. Nie można użyć starego BLOCKED przez zmianę
+nazwy pliku, schematu lub statusu. Fingerprint nie jest podpisem kryptograficznym osoby.
+
+Źródła: zakończony run, rzeczywisty checkpoint SHA, kompletny zamrożony inventory,
+bazowy train, wykluczenie exact SHA EVAL396, deduplikacja i wykluczenie scen/cropów
+wspólnych z val/test. MZ zachowuje crop → scena oraz dostępne group_id. To nie jest
+dowód niezależności wizualnej ani grup pozyskania. Final_test pozostaje NOT_VERIFIED.
+Limit trzeba wpisać jawnie; historyczne 300 nie jest domyślnym zatwierdzeniem.
+
+Operator: **Integracje → Eksport mobilny → Bezpieczna kalibracja INT8**. Wybierz
+tryb badawczy, MT/MZ, historię i ukończony run, EVAL396; ustaw MT 512/MZ 320,
+conf .25/IoU .45, liczbę próbek i operatora. Oblicz/sprawdź SHA checkpointu.
+Potwierdź źródła train oraz dokładne ograniczenie eksploracyjne. Przygotuj i zapisz
+nowy manifest poza datasetem. Zmiana dowolnego wejścia kasuje zgodę i wynik.
+
+W **Eksportuj zaznaczone** każdy slot ma osobny tryb i potwierdzenie. Wybierz
+manifest właściwego runu, wprowadź zgodne imgsz/conf/IoU, zaznacz **Android stabilny**
+oraz **Android lekki**. Eksploracyjna ścieżka obsługuje LiteRT CPU; ONNX pozostaje
+w ścisłej ścieżce. Nie wybieraj ONNX/NCNN w żądaniu badawczym. FP32 nie wymaga
+manifestu. Zmiana parametrów/formatów/pliku kasuje potwierdzenie i gotowość.
+Po tych pracach rzeczywista kalibracja i eksport wymagają osobnego polecenia operatora.
+
+Ultralytics 8.4.19 zwraca `_int8.tflite` z float I/O. W trybie badawczym eksporter
+wybiera wygenerowany przez tę samą konwersję onnx2tf plik `_full_integer_quant.tflite`
+i sprawdza rzeczywisty graf oraz signed INT8 I/O. Nazwa jest wyłącznie lokalizatorem.
+Brak pliku, MIXED lub UNVERIFIED kończą tę ścieżkę błędem; brak przełączenia konwertera
+lub fallbacku. Obecny onnx2tf dopuszcza SELECT_TF_OPS: powstanie pełnego integer
+nie jest gwarantowane i wymaga analizy każdego rzeczywistego artefaktu.
+
+Nowe opcjonalne pola `research_calibration`, `calibration_evidence.mode` i plik
+`calibration_usage.json` zachowują schemat paczki. Po pełnym zużyciu przez kontrolowany
+loader zapisują SHA próbek, SHA scen i dostępne grupy źródłowe do wykluczeń przyszłego
+holdoutu. Plan źródeł nie jest dowodem zużycia. Nested MT+MZ zachowuje pełne dowody
+w obu paczkach i manifestach potomnych. Wykonanie na Androidzie pozostaje UNVERIFIED.
