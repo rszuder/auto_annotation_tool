@@ -416,43 +416,66 @@ Zgodność grafu INT8 nie potwierdza wykonania integer na telefonie; wymaga ono
 oddzielnego dowodu runtime/delegata. Produkcyjna konwersja i kolejne etapy
 wymagają odrębnego polecenia operatora oraz usunięcia blokad danych.
 
-### Kalibracja badawcza F4 EXP INT8 (2026-10-11)
+### Kalibracja badawcza F4 EXP INT8 (2026-10-12)
 
-Z4 ma odrębny wybór **Badawcza kalibracja INT8 — bez final_test**. Nie zmienia on
-ścisłego `alpr.int8_calibration.v1`, READY ani `FINAL_TEST_INVENTORY_NOT_VERIFIED`.
-Manifest `alpr.int8_calibration.exploratory.v1` ma `purpose=research_calibration`
-i status `EXPLORATORY_ONLY` dopiero po osobnym potwierdzeniu operatora. Zachowuje
-zagnieżdżony audyt ścisły jako BLOCKED. Nie można użyć starego BLOCKED przez zmianę
-nazwy pliku, schematu lub statusu. Fingerprint nie jest podpisem kryptograficznym osoby.
+Nowy manifest `alpr.int8_calibration.exploratory.v2` ma
+`purpose=research_calibration` i po przejściu kontroli technicznych status
+`EXPLORATORY_ONLY`. Nie zawiera podpisu operatora, checkboxów ani fingerprintu
+zgody. `input_fingerprint` obejmuje źródła, konfigurację i wersje bibliotek.
+Zagnieżdżony audyt ścisły pozostaje **BLOCKED** z powodu braku final_test oraz
+formalnego podpisu; te dwie konkretne przyczyny nie są błędami źródeł badawczych.
+Pozostałe blokady danych nadal uniemożliwiają eksport.
 
-Źródła: zakończony run, rzeczywisty checkpoint SHA, kompletny zamrożony inventory,
-bazowy train, wykluczenie exact SHA EVAL396, deduplikacja i wykluczenie scen/cropów
-wspólnych z val/test. MZ zachowuje crop → scena oraz dostępne group_id. To nie jest
-dowód niezależności wizualnej ani grup pozyskania. Final_test pozostaje NOT_VERIFIED.
-Limit trzeba wpisać jawnie; historyczne 300 nie jest domyślnym zatwierdzeniem.
+Historyczne manifesty badawcze v1 zachowują swój schemat, podpis i fingerprinty.
+Są odczytywane i odtwarzane według dawnego kontraktu, bez migracji i nadpisania.
+Eksport nie wymaga ponownego checkboxa dla v1 ani v2. Ścisły F4-B2 oraz formaty
+`alpr.model.v1` / `alpr.package.v1` pozostają odrębne i niezmienione.
 
-Operator: **Integracje → Eksport mobilny → Bezpieczna kalibracja INT8**. Wybierz
-tryb badawczy, MT/MZ, historię i ukończony run, EVAL396; ustaw MT 512/MZ 320,
-conf .25/IoU .45, liczbę próbek i operatora. Oblicz/sprawdź SHA checkpointu.
-Potwierdź źródła train oraz dokładne ograniczenie eksploracyjne. Przygotuj i zapisz
-nowy manifest poza datasetem. Zmiana dowolnego wejścia kasuje zgodę i wynik.
+W Centrum eksportu wskaż model MT/MZ i otwórz kalibrację; z modalu pakietu użyj
+akcji właściwego slotu. Wybierz jawnie tryb badawczy, sprawdź źródła i SHA, ustaw
+limit oraz parametry modelu, następnie **Przygotuj manifest → Zapisz manifest →
+Wróć do eksportu → Sprawdź gotowość eksportu → Eksportuj**. W tym trybie nie ma
+pola Operator ani deklaracji do zaznaczenia. Widoczny pozostaje status
+`EXPLORATORY_ONLY · FINAL_TEST_NOT_VERIFIED`. Zmiana wejść unieważnia wynik,
+fingerprint i gotowość, bez podstawiania zgody automatycznej.
 
-W **Eksportuj zaznaczone** każdy slot ma osobny tryb i potwierdzenie. Wybierz
-manifest właściwego runu, wprowadź zgodne imgsz/conf/IoU, zaznacz **Android stabilny**
-oraz **Android lekki**. Eksploracyjna ścieżka obsługuje LiteRT CPU; ONNX pozostaje
-w ścisłej ścieżce. Nie wybieraj ONNX/NCNN w żądaniu badawczym. FP32 nie wymaga
-manifestu. Zmiana parametrów/formatów/pliku kasuje potwierdzenie i gotowość.
-Po tych pracach rzeczywista kalibracja i eksport wymagają osobnego polecenia operatora.
+Train-only, zamrożone pochodzenie, EVAL396, deduplikacja, cross-split, crop→scena,
+SHA checkpointu i plików, imgsz/conf/IoU oraz wersje są nadal weryfikowane.
+Walidator przed eksportem odtwarza bieżące źródła. Loader sprawdza bajty każdej
+próbki; `calibration_usage.json` powstaje dopiero po potwierdzeniu pełnego zużycia,
+nie na podstawie samego przygotowanego manifestu. Nie dowodzi to niezależności
+final_test, dokładności ani wykonania integer na Androidzie.
 
-Ultralytics 8.4.19 zwraca `_int8.tflite` z float I/O. W trybie badawczym eksporter
-wybiera wygenerowany przez tę samą konwersję onnx2tf plik `_full_integer_quant.tflite`
-i sprawdza rzeczywisty graf oraz signed INT8 I/O. Nazwa jest wyłącznie lokalizatorem.
-Brak pliku, MIXED lub UNVERIFIED kończą tę ścieżkę błędem; brak przełączenia konwertera
-lub fallbacku. Obecny onnx2tf dopuszcza SELECT_TF_OPS: powstanie pełnego integer
-nie jest gwarantowane i wymaga analizy każdego rzeczywistego artefaktu.
+**Android stabilny** oznacza FP32 — po wyłączeniu wszystkich opcji INT8 nie wymaga
+manifestu kalibracji. **Android lekki** oznacza INT8 i nadal wymaga poprawnego
+manifestu oraz dowodu signed INT8 grafu i I/O. Nie ma automatycznego fallbacku.
 
-Nowe opcjonalne pola `research_calibration`, `calibration_evidence.mode` i plik
-`calibration_usage.json` zachowują schemat paczki. Po pełnym zużyciu przez kontrolowany
-loader zapisują SHA próbek, SHA scen i dostępne grupy źródłowe do wykluczeń przyszłego
-holdoutu. Plan źródeł nie jest dowodem zużycia. Nested MT+MZ zachowuje pełne dowody
-w obu paczkach i manifestach potomnych. Wykonanie na Androidzie pozostaje UNVERIFIED.
+### Trwała diagnostyka odrzuconego signed INT8
+
+Po odrzuceniu istniejącego `_full_integer_quant.tflite` eksporter zachowuje jego
+bajty i pełny wynik inspektora w unikalnym lokalnym katalogu
+`output/mobile_export_diagnostics/rejected_int8_*/`:
+
+- `rejected_model.tflite` — odrzucony artefakt, nie model do publikacji;
+- `rejected_precision.json` — pełny graf, I/O/kwantyzacja, operatory, niezweryfikowane
+  sygnatury, SHA źródła i kopii, rozmiary, tożsamość żądania i wersje narzędzi.
+
+Kopia musi mieć identyczny SHA i rozmiar co plik przeanalizowany. JSON jest
+publikowany atomowo dopiero po kontroli kopii. Nie kopiuje się obrazów, GT ani
+list ścieżek próbek; prawa dostępu są dziedziczone, ACL nie są zmieniane. Katalog
+`output/` jest ignorowany przez Git. Nie publikować tych lokalnych modeli.
+
+Nadal zwracany jest `FULL_INT8_OUTPUT_NOT_PROVEN` z rzeczywistą ścieżką raportu.
+Błąd zapisu dodaje `DIAGNOSTICS_WRITE_FAILED`, nie potwierdza zachowania dowodów
+ani nie daje PASS. Częściowy katalog bez końcowego JSON nie jest kompletnym
+dowodem. Brak pliku zachowuje odrębne `FULL_INT8_OUTPUT_NOT_AVAILABLE`. Kolejne
+porażki otrzymują oddzielne katalogi; nie ma drugiej konwersji ani powtórzenia.
+
+`INT8_NOT_PROVEN`, `execution_precision=UNVERIFIED`, `diagnostic_only=true`,
+`publication_status=NOT_PUBLISHED` obowiązują również dla zachowanej kopii.
+Raport rozdziela obserwowane float I/O, obliczenia float, QUANTIZE/DEQUANTIZE,
+custom/Flex oraz nierozpoznane sygnatury. Przyczyna po stronie konwertera pozostaje
+`NOT_IDENTIFIED`, jeśli nie ma osobnego dowodu.
+
+Patch z 12.10.2026 nie uruchamia rzeczywistej konwersji. Ewentualna pojedyncza
+próba MT-DAY jest osobnym poleceniem po odbiorze kodu i testów.

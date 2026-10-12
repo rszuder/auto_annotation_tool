@@ -4,16 +4,18 @@ from unittest.mock import patch
 import pytest
 from auto_annotation_tool.gui import z4_int8_calibration as ui
 from auto_annotation_tool.exporters import exploratory_calibration as exp
-from test_z4_int8_calibration import root, pump, fill
+from test_z4_int8_calibration import root, pump, fill, calibration_tk_runtime
 from test_exploratory_calibration import prepared
 
 
 def fill_research(d, f):
     d.mode.set(exp.LABEL)
-    fill(d, f)
+    for key, value in f["config"].items():
+        if key not in {"approved_by", "final_inventory"}:
+            d.values[key].set(str(value) if key != "role" else ("MT" if value == "plate" else "MZ"))
     d.read_checkpoint_sha()
-    d.approval.set(True)
-    d.research_approval.set(True)
+    pump(d, lambda: not d._busy)
+    assert not d.approval.get() and not d.values["approved_by"].get()
 
 
 @pytest.mark.parametrize("role", ["plate", "character"])
@@ -23,7 +25,7 @@ def test_native_mode_manifest_warning_and_defaults(root, tmp_path, role):
     d.values["role"].set("MT" if role == "plate" else "MZ")
     d.mode.set(exp.LABEL)
     assert d.values["image_size"].get() == ("512" if role == "plate" else "320")
-    assert d.values["limit"].get() == "" and not d.research_approval.get()
+    assert d.values["limit"].get() == "" and not hasattr(d, "research_check")
     assert "FINAL_TEST_NOT_VERIFIED" in d.status.get()
     fill_research(d,f)
     d.prepare_button.invoke(); pump(root,lambda:not d._busy)
@@ -31,7 +33,7 @@ def test_native_mode_manifest_warning_and_defaults(root, tmp_path, role):
     assert "FINAL_TEST_NOT_VERIFIED" in d.status.get()
     assert d.result["source_audit"]["status"] == "BLOCKED"
     d.mode.set("Ścisła kalibracja INT8 — wymaga final_test")
-    assert d.result is None and not d.research_approval.get()
+    assert d.result is None and not hasattr(d, "research_check")
     d.destroy()
 
 
@@ -40,7 +42,7 @@ def test_native_source_change_resets_all_authority(root,tmp_path,key):
     f,_,_,_ = prepared(tmp_path)
     d = ui.Int8CalibrationDialog(root); fill_research(d,f)
     d.values[key].set("changed")
-    assert not d.approval.get() and not d.research_approval.get() and d.result is None
+    assert not d.approval.get() and not hasattr(d, "research_check") and d.result is None
     assert str(d.save_button["state"]) == "disabled"
     d.destroy()
 
@@ -50,7 +52,7 @@ def test_native_runtime_change_resets_all_authority(root,tmp_path,key):
     f,_,_,_ = prepared(tmp_path)
     d = ui.Int8CalibrationDialog(root); fill_research(d,f)
     d.research_values[key].set("changed")
-    assert not d.approval.get() and not d.research_approval.get()
+    assert not d.approval.get() and not hasattr(d, "research_check")
     d.destroy()
 
 
@@ -63,8 +65,8 @@ def test_close_native_dialog_during_worker_does_not_call_destroyed_widgets(root,
         started.set(); release.wait(5)
         try: return original(**kwargs)
         finally: finished.set()
+    d=ui.Int8CalibrationDialog(root); fill_research(d,f)
     with patch.object(exp,"build_manifest",side_effect=slow):
-        d=ui.Int8CalibrationDialog(root); fill_research(d,f)
         d.prepare_button.invoke(); assert started.wait(2)
         d.destroy(); release.set(); assert finished.wait(5)
         root.update()
@@ -72,16 +74,17 @@ def test_close_native_dialog_during_worker_does_not_call_destroyed_widgets(root,
 
 
 @pytest.mark.parametrize("key", ["calibration", "imgsz", "conf", "iou", "int8", "candidate_identity"])
-def test_real_export_slot_resets_confirmation_on_any_input(root,key):
+def test_real_export_slot_has_no_confirmation_for_any_input(root,key):
     values={name:tk.StringVar(root,"initial") for name in ("calibration","imgsz","conf","iou","int8","candidate_identity")}
     control=ui.CalibrationModeControl(root,values)
-    assert ui.calibration_request_options(values)==dict(calibration_mode="strict",exploratory_confirmation=False)
+    assert ui.calibration_request_options(values)==dict(calibration_mode="strict")
     control.choice.set(exp.LABEL)
-    assert exp.CONFIRMATION in control.notice["text"]
-    control.check.invoke()
-    assert ui.calibration_request_options(values)["exploratory_confirmation"]
+    assert "EXPLORATORY_ONLY" in control.notice["text"]
+    assert not hasattr(control, "check")
+    assert ui.calibration_request_options(values)==dict(calibration_mode="exploratory")
     values[key].set("new")
-    assert not values["exploratory_confirmation"].get()
+    assert "exploratory_confirmation" not in values
+    assert ui.calibration_request_options(values)==dict(calibration_mode="exploratory")
     control.destroy()
 
 
@@ -92,5 +95,6 @@ def test_export_slot_live_manifest_validation_requires_explicit_mode(root,tmp_pa
     options=dict(calibration_mode="exploratory",exploratory_confirmation=True,imgsz=32,conf=.25,iou=.45)
     assert not _mobile_export_calibration_problem(candidate,p,options=options)
     assert "BLOCKED" in _mobile_export_calibration_problem(candidate,p)
-    for change in (dict(exploratory_confirmation=False),dict(imgsz=64),dict(conf=.4)):
+    assert not _mobile_export_calibration_problem(candidate,p,options={**options,"exploratory_confirmation":False})
+    for change in (dict(imgsz=64),dict(conf=.4)):
         assert "BLOCKED" in _mobile_export_calibration_problem(candidate,p,options={**options,**change})

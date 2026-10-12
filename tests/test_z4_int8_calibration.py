@@ -1,4 +1,5 @@
 import json
+import gc
 import threading
 import time
 import tkinter as tk
@@ -11,13 +12,35 @@ import pytest
 from auto_annotation_tool.gui import z4_int8_calibration as ui
 from int8_calibration_fixture import fixture
 
+_calibration_runtime = None
 
-@pytest.fixture
-def root():
-    r = tk.Tk()
+@pytest.fixture(scope="session")
+def calibration_tk_runtime():
+    # Match the application: one Tcl/Tk runtime, separate Toplevel per case.
+    # Imported fixtures are registered separately for each test module; share
+    # the actual interpreter too (Tk variables otherwise bind the wrong root).
+    global _calibration_runtime
+    if _calibration_runtime is None:
+        _calibration_runtime = tk.Tk()
+    r = _calibration_runtime
     r.withdraw()
     yield r
-    r.destroy()
+    if _calibration_runtime is r:
+        r.destroy()
+        _calibration_runtime = None
+
+
+@pytest.fixture
+def root(calibration_tk_runtime):
+    r = calibration_tk_runtime
+    r.withdraw()
+    callback = r.report_callback_exception
+    yield r
+    for child in list(r.winfo_children()):
+        child.destroy()
+    r.report_callback_exception = callback
+    r.update_idletasks()
+    gc.collect()  # Dispose Tk-owned Python objects on the UI thread.
 
 
 def pump(root, done):
@@ -49,10 +72,12 @@ def test_real_tk_build_save_and_invalidate_manifest(root, tmp_path, role):
     target = tmp_path / "manifest.json"
     with patch.object(ui.filedialog, "asksaveasfilename", return_value=str(target)):
         d.save_button.invoke()
+        pump(root, lambda: not d._busy)
     assert json.loads(target.read_text(encoding="utf-8"))["split"] == "train"
     before = target.read_bytes()
     with patch.object(ui.filedialog, "asksaveasfilename", return_value=str(target)), patch.object(ui.messagebox, "showerror") as error:
         d.save_button.invoke()
+        pump(root, lambda: not d._busy)
         error.assert_called_once()
     assert target.read_bytes() == before
     d.values["image_size"].set("64")
@@ -74,6 +99,7 @@ def test_missing_final_test_is_visible_blocked_and_not_approval(root, tmp_path):
     target = tmp_path / "blocked.json"
     with patch.object(ui.filedialog, "asksaveasfilename", return_value=str(target)):
         d.save_button.invoke()
+        pump(root, lambda: not d._busy)
     assert json.loads(target.read_text(encoding="utf-8"))["status"] == "BLOCKED"
     d.destroy()
 
@@ -128,7 +154,7 @@ def test_existing_export_center_opens_calibration_without_export(root, tmp_path)
          patch.object(export.MobileModelExporter, "export", side_effect=AssertionError("export forbidden")):
         d = export._open_mobile_model_export_center(host)
         root.update()
-        button = next(w for w in walk(d) if isinstance(w, ttk.Button) and w["text"] == "Bezpieczna kalibracja INT8")
+        button = next(w for w in walk(d) if isinstance(w, ttk.Button) and w["text"] == "Wybierz trening ręcznie")
         button.invoke()
         open_dialog.assert_called_once_with(d)
         d.destroy()

@@ -83,6 +83,7 @@ from .z4_tflite_precision import open_tflite_precision_dialog
 from .z4_int8_calibration import open_int8_calibration_dialog, CalibrationModeControl, calibration_request_options
 from ..exporters import exploratory_calibration
 from ..exporters.int8_calibration import validate_manifest as validate_calibration_manifest
+from .z4_calibration_context import context_from_candidate, export_image_size, assert_manifest_context
 from .dataset_display import build_dataset_display_ref
 from .model_display import build_model_display_ref
 from .run_display import build_run_display_ref
@@ -2929,6 +2930,43 @@ def _mobile_export_default_calibration_path(candidate: dict | None) -> str:
     return ""
 
 
+def _open_candidate_int8_calibration(parent, candidate, *, options, source, status, current_candidate=None, on_saved=None):
+    """UI adapter: highlighted candidate or exactly one slot, never export checkboxes."""
+    def value(key, fallback=None):
+        v = options.get(key, fallback)
+        return v.get() if hasattr(v, "get") else v
+    def current_context():
+        selected = current_candidate() if current_candidate else candidate
+        return context_from_candidate(selected, image_size=value("imgsz"), confidence_threshold=value("conf", .25),
+                                      iou_threshold=value("iou", .45), source=source)
+    def snapshot():
+        return {k: v.get() for k, v in options.items() if isinstance(v, tk.Variable)}
+    try:
+        context = current_context()
+    except (ValueError, TypeError, OSError) as exc:
+        status(str(exc))
+        return None
+    initial = snapshot()
+    def saved(path, payload):
+        if snapshot() != initial or current_context().identity() != context.identity():
+            raise ValueError("Model lub ustawienia eksportu zmieniły się przy otwartym oknie. Manifest nie został przypisany.")
+        assert_manifest_context(payload, context)
+        mode = "exploratory" if payload["schema"] in exploratory_calibration.SUPPORTED_SCHEMAS else "strict"
+        options["calibration"].set(str(path))
+        if "calibration_fingerprint" not in options:
+            options["calibration_fingerprint"] = tk.StringVar(parent, "")
+        options["calibration_fingerprint"].set(payload["input_fingerprint"])
+        control = options.get("_mode_control")
+        if control:
+            control.choice.set(exploratory_calibration.LABEL if mode == "exploratory" else "Ścisła — wymaga final_test")
+        if on_saved:
+            on_saved(context, dict(path=str(path), fingerprint=payload["input_fingerprint"], mode=mode))
+        status(f"Manifest {payload['status']} przypisany do {context.role}, run {context.run_id}. "
+               "Przygotuj drugi slot lub sprawdź gotowość; nie uruchomiono konwersji.")
+    return open_int8_calibration_dialog(parent, context=context, on_saved=saved,
+                                        mode=value("calibration_mode", "strict"))
+
+
 def _mobile_export_calibration_problem(candidate: dict | None, calibration_path: Path | None, *, options=None) -> str:
     if calibration_path is None:
         return "BLOCKED: INT8 wymaga manifestu z okna Bezpieczna kalibracja INT8."
@@ -2939,14 +2977,14 @@ def _mobile_export_calibration_problem(candidate: dict | None, calibration_path:
         mode = calibration_request_options(options or {})
         if mode["calibration_mode"] == "strict":
             validate_calibration_manifest(calibration_path, role=role, checkpoint=candidate.get("best_weights"))
-        elif mode["calibration_mode"] == "exploratory" and mode["exploratory_confirmation"] is True:
+        elif mode["calibration_mode"] == "exploratory":
             def value(key):
                 v = (options or {}).get(key)
                 return v.get() if hasattr(v, "get") else v
             exploratory_calibration.validate_manifest(calibration_path, role=role, checkpoint=candidate.get("best_weights"),
                 image_size=value("imgsz"), confidence_threshold=value("conf"), iou_threshold=value("iou"))
         else:
-            raise ValueError("Wymagane jawne potwierdzenie trybu badawczego.")
+            raise ValueError("Nieznany tryb kalibracji.")
     except Exception as exc:
         return f"BLOCKED: kalibracja INT8: {exc}"
     return ""
@@ -4847,7 +4885,6 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
         iou_var,
         calibration_var,
         calibration_options["calibration_mode"],
-        calibration_options["exploratory_confirmation"],
     ):
         try:
             export_option_var.trace_add("write", mark_preflight_dirty)
@@ -7768,6 +7805,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         value="Do eksportu nie wybrano jeszcze modelu. Zaznacz pojedynczy MP, MT lub MZ albo komplet MT+MZ / MP+MT+MZ."
     )
     selected_state = {"candidate": None}
+    prepared_calibrations = {}
 
     summary_canvas = tk.Canvas(
         form,
@@ -9810,7 +9848,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         role = str(candidate.get("role") or _mobile_role_from_training_target(target)).strip()
         task = str(candidate.get("task") or ("pose" if role == "plate" else "detect")).strip()
         best_weights = Path(candidate.get("best_weights"))
-        img_size = int(candidate.get("img_size") or getattr(run, "img_size", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE)
+        img_size = export_image_size(candidate)
         default_destination = self._build_mobile_model_export_path(run, target, best_weights)
         default_calibration_path = _mobile_export_resolve_data_yaml(
             candidate.get("dataset_path") or getattr(run, "dataset_path", "")
@@ -10062,6 +10100,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             calibration_data=calibration if calibration and calibration.suffix.lower() != ".json" else None,
             calibration_manifest=calibration if calibration and calibration.suffix.lower() == ".json" else None,
             **calibration_request_options(options),
+            calibration_fingerprint=str(_option_value("calibration_fingerprint", "") or ""),
             confidence_threshold=max(0.0, min(1.0, float(_option_value("conf", conf_var.get()) or CONFIG.DEFAULT_CONFIDENCE))),
             iou_threshold=max(0.0, min(1.0, float(_option_value("iou", iou_var.get()) or CONFIG.DEFAULT_IOU))),
             model_id=self._safe_model_export_slug(model_id_seed, fallback=f"{role}-model")[:80],
@@ -10963,8 +11002,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
         def _make_model_state(candidate: dict) -> dict:
             run = candidate.get("run")
-            img_size = int(candidate.get("img_size") or getattr(run, "img_size", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE)
+            img_size = export_image_size(candidate)
             calibration_suggestions = []  # No implicit calibration dataset.
+            binding = {}
+            try:
+                binding = prepared_calibrations.get(context_from_candidate(candidate, image_size=img_size).identity(), {})
+            except (ValueError, TypeError, OSError):
+                pass
             return {
                 "candidate": candidate,
                 "marker": _mobile_export_target_marker(candidate),
@@ -10974,9 +11018,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 "onnx_int8": tk.BooleanVar(value=False),
                 "ncnn": tk.BooleanVar(value=False),
                 "imgsz": tk.IntVar(value=img_size),
-                "conf": tk.DoubleVar(value=CONFIG.DEFAULT_CONFIDENCE),
-                "iou": tk.DoubleVar(value=CONFIG.DEFAULT_IOU),
-                "calibration": tk.StringVar(value=_default_calibration_for_candidate(candidate)),
+                "conf": tk.DoubleVar(value=.25),
+                "iou": tk.DoubleVar(value=.45),
+                "calibration": tk.StringVar(value=binding.get("path", _default_calibration_for_candidate(candidate))),
+                "calibration_fingerprint": tk.StringVar(value=binding.get("fingerprint", "")),
+                "calibration_mode": tk.StringVar(value=binding.get("mode", "strict")),
                 "calibration_choice": tk.StringVar(
                     value=str(calibration_suggestions[0].get("label") or "") if calibration_suggestions else ""
                 ),
@@ -11278,7 +11324,17 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     current_state["calibration"].set(selected)
 
             ttk.Button(calibration, text="Wybierz manifest INT8", command=choose_model_calibration).grid(row=3, column=1, sticky="e")
-            CalibrationModeControl(calibration, state).grid(row=4, column=0, columnspan=2, sticky="ew", pady=5)
+            control = CalibrationModeControl(calibration, state)
+            state["_mode_control"] = control
+            control.grid(row=4, column=0, columnspan=2, sticky="ew", pady=5)
+            def prepare_slot_calibration(current_state=state):
+                return _open_candidate_int8_calibration(executor_modal, current_state["candidate"], options=current_state,
+                    source="Slot eksportu " + current_state["marker"], status=exec_status_var.set,
+                    current_candidate=lambda: current_state["candidate"],
+                    on_saved=lambda ctx, binding: prepared_calibrations.__setitem__(ctx.identity(), binding))
+            ttk.Button(calibration, text=f"Przygotuj kalibrację dla {marker}", command=prepare_slot_calibration).grid(
+                row=5, column=0, columnspan=2, sticky="ew")
+            state["calibration"].trace_add("write", lambda *_, current_state=state: current_state["calibration_fingerprint"].set(""))
 
             def _sync_int8_calibration_hint(*_args, current_state=state) -> None:
                 try:
@@ -11299,7 +11355,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             except Exception:
                 pass
 
-            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes", "calibration_mode", "exploratory_confirmation"):
+            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes", "calibration_mode"):
                 try:
                     state[key].trace_add("write", _mark_executor_dirty)
                 except Exception:
@@ -12763,12 +12819,24 @@ def _open_mobile_model_export_center(self, initial_run=None):
     ttk.Button(actions, text="Sprawdź precyzję TFLite",
                command=lambda: open_tflite_precision_dialog(dialog)).grid(
                    row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-    ttk.Button(actions, text="Bezpieczna kalibracja INT8",
-               command=lambda: open_int8_calibration_dialog(dialog)).grid(
+    center_calibration_options = {"imgsz": imgsz_var, "conf": conf_var, "iou": iou_var, "calibration": calibration_var}
+    def calibrate_highlighted():
+        return _open_candidate_int8_calibration(dialog, selected_state["candidate"], options=center_calibration_options,
+            source="Centrum — wskazany model (nie checkbox Eksport)",
+            status=lambda message: set_status(message, "info"), current_candidate=lambda: selected_state["candidate"],
+            on_saved=lambda ctx, binding: prepared_calibrations.__setitem__(ctx.identity(), binding))
+    ttk.Button(actions, text="Kalibracja INT8 — wskazany model",
+               command=calibrate_highlighted).grid(
                    row=0, column=2, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-    export_button.grid(row=0, column=3, sticky="e", padx=(0, 7), ipadx=10, ipady=2)
+    ttk.Button(actions, text="Wybierz trening ręcznie", command=lambda: open_int8_calibration_dialog(dialog)).grid(
+        row=0, column=3, sticky="w", padx=(0, 16), ipadx=8, ipady=2)
+    export_button.grid(row=0, column=4, sticky="e", padx=(0, 8), ipadx=8, ipady=2)
     close_button = ttk.Button(actions, text="Zamknij", command=dialog.destroy)
-    close_button.grid(row=0, column=4, sticky="e", ipadx=7, ipady=2)
+    close_button.grid(row=0, column=5, sticky="e", ipadx=8, ipady=2)
+    # One action row at every supported width/DPI; no clipped or orphaned CTA.
+    dialog.update_idletasks()
+    required_width = actions.winfo_reqwidth() + 32
+    dialog.minsize(max(1100, required_width), 660)
     try:
         dependency_tool_shell.grid_remove()
     except Exception:

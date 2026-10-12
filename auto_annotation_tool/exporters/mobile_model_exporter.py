@@ -147,7 +147,7 @@ class MobileExportRequest:
     calibration_manifest: Path | None = None
     calibration_fingerprint: str = ""
     calibration_mode: str = "strict"
-    exploratory_confirmation: bool = False
+    exploratory_confirmation: bool = False  # Legacy caller compatibility; not an export gate.
 
 
 @dataclass(frozen=True)
@@ -592,7 +592,6 @@ def _export_request_payload(request: MobileExportRequest) -> dict[str, Any]:
         "calibration_manifest": _path_reproducibility_payload(request.calibration_manifest),
         "calibration_fingerprint": request.calibration_fingerprint,
         "calibration_mode": request.calibration_mode,
-        "exploratory_confirmation": request.exploratory_confirmation,
         "calibration_required_for": _request_int8_calibration_targets(request),
     }
 
@@ -1394,8 +1393,8 @@ class MobileModelExporter:
     def _calibration_for_request(self, request: MobileExportRequest) -> dict:
         if request.calibration_mode == "strict":
             return self._approved_calibration(request)
-        if request.calibration_mode != exploratory.MODE or request.exploratory_confirmation is not True:
-            raise MobileExportError("BLOCKED: wybierz tryb i jawnie potwierdź użycie badawcze.")
+        if request.calibration_mode != exploratory.MODE:
+            raise MobileExportError("BLOCKED: wybierz jawnie tryb kalibracji.")
         try:
             if set(request.formats) != {"litert"}:
                 raise ValueError("Tryb badawczy wymaga formatu LiteRT CPU.")
@@ -1403,13 +1402,17 @@ class MobileModelExporter:
                 checkpoint=request.checkpoint, image_size=request.image_size,
                 confidence_threshold=request.confidence_threshold, iou_threshold=request.iou_threshold)
             if request.calibration_fingerprint and request.calibration_fingerprint != payload["input_fingerprint"]:
-                raise ValueError("Zmieniono fingerprint zgody badawczej.")
+                raise ValueError("Zmieniono fingerprint kalibracji badawczej.")
             return payload
         except Exception as exc:
             raise MobileExportError(f"BLOCKED: kontrola kalibracji badawczej: {exc}") from exc
 
     @staticmethod
-    def _exploratory_signed_output(export_result):
+    def _precision_diagnostics_root():
+        return Path(__file__).resolve().parents[2] / "output" / "mobile_export_diagnostics"
+
+    @staticmethod
+    def _exploratory_signed_output(export_result, *, request=None):
         """Select a sibling from the SAME supported conversion, then prove its graph.
 
         Ultralytics 8.4.19 returns the float-I/O artifact. onnx2tf also generates
@@ -1420,11 +1423,19 @@ class MobileModelExporter:
             raise MobileExportError("FULL_INT8_OUTPUT_NOT_VERIFIED: nieznany wynik konwertera; brak fallbacku.")
         full = returned.with_name(returned.name[:-len("_int8.tflite")] + "_full_integer_quant.tflite")
         if not full.is_file():
-            raise MobileExportError("FULL_INT8_OUTPUT_NOT_AVAILABLE: konwerter nie utworzył signed INT8; wymagana diagnoza.")
+            raise MobileExportError("FULL_INT8_OUTPUT_NOT_AVAILABLE: konwerter nie utworzył signed INT8; DIAGNOSTICS_WRITE_FAILED: brak pliku do zachowania.")
         report = analyze_tflite_file(full)
         io = [tensor for graph in report.get("subgraphs", []) for key in ("inputs", "outputs") for tensor in graph[key]]
         if report["classification"] != "INT8" or not io or any(t["dtype"] != "INT8" for t in io):
-            raise MobileExportError(f"FULL_INT8_OUTPUT_NOT_PROVEN: graf={report['classification']}; wymagane signed INT8 I/O.")
+            reason = f"FULL_INT8_OUTPUT_NOT_PROVEN: graf={report['classification']}; wymagane signed INT8 I/O."
+            try:
+                from .rejected_precision import write_rejected_precision
+                diagnostic = write_rejected_precision(full, report,
+                    root=MobileModelExporter._precision_diagnostics_root(), request=request)
+            except Exception as exc:
+                raise MobileExportError(reason + f" DIAGNOSTICS_WRITE_FAILED: {type(exc).__name__}; "
+                    "nie potwierdzono zachowania raportu i modelu.") from exc
+            raise MobileExportError(reason + f" Diagnostyka: {diagnostic}")
         return full
 
     @staticmethod
@@ -1797,7 +1808,7 @@ class MobileModelExporter:
                     else:
                         validate_calibration_evidence(calibration, role=manifest.get("role"))
                     if (hashlib.sha256(data).hexdigest() != evidence["sha256"]
-                            or calibration.get("schema") != (exploratory.SCHEMA if research else "alpr.int8_calibration.v1")
+                            or calibration.get("schema") not in (exploratory.SUPPORTED_SCHEMAS if research else {"alpr.int8_calibration.v1"})
                             or calibration.get("status") != ("EXPLORATORY_ONLY" if research else "READY")
                             or calibration.get("split") != "train"
                             or calibration.get("role") != manifest.get("role")
@@ -2146,7 +2157,7 @@ class MobileModelExporter:
                     with bind_litert_loader(model, calibration):
                         result = model.export(format="tflite", int8=True, **args)
                     if request.calibration_mode == exploratory.MODE:
-                        return self._exploratory_signed_output(result)
+                        return self._exploratory_signed_output(result, request=request)
                     return result
                 return model.export(format="tflite", **args)
         raise MobileExportError(f"Nieobsługiwany runtime eksportu: {runtime}")

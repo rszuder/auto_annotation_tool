@@ -9,14 +9,7 @@ import pytest
 
 from auto_annotation_tool.gui import z4_tflite_precision as ui
 from tflite_precision_fixture import graph_bytes
-
-
-@pytest.fixture
-def root():
-    r = tk.Tk()
-    r.withdraw()
-    yield r
-    r.destroy()
+from test_z4_int8_calibration import root, calibration_tk_runtime
 
 
 def pump(root, done, timeout=8):

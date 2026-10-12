@@ -20,7 +20,7 @@ def prepared(tmp_path, role="plate", **overrides):
     cfg = {k:v for k,v in f["config"].items() if k != "final_inventory"}
     cfg.update(operator_confirmation=True, checkpoint_sha256=strict.file_sha256(f["checkpoint"]))
     cfg.update(overrides)
-    m = exp.build_manifest(**cfg)
+    m = exp.build_manifest_v1(**cfg)
     p = write_json(tmp_path / "research.json", m)
     req = mobile.MobileExportRequest(checkpoint=f["checkpoint"], destination=tmp_path / "unused.alprmodel",
         role=role, formats=("litert",), image_size=32, quantizations=("int8",), calibration_manifest=p,
@@ -31,7 +31,7 @@ def prepared(tmp_path, role="plate", **overrides):
 @pytest.mark.parametrize("role", ["plate", "character"])
 def test_separate_authority_preserves_strict_blockade(tmp_path, role):
     f, m, p, req = prepared(tmp_path, role)
-    assert m == exp.build_manifest(**m["config"])
+    assert m == exp.rebuild_manifest(m)
     assert exp.validate_manifest(p, role=role) == m
     assert m["status"] == "EXPLORATORY_ONLY" and m["source_audit"]["status"] == "BLOCKED"
     assert "FINAL_TEST_NOT_VERIFIED" in m["warnings"] and m["execution_precision"] == "UNVERIFIED"
@@ -66,7 +66,7 @@ def test_missing_authority_or_eval_is_blocked(tmp_path, missing):
 def test_eval_scene_overlap_blocks_also_mz_crop(tmp_path, role):
     f,m,p,req = prepared(tmp_path, role)
     holdout(f["eval_path"], "EVAL396", [m["samples"][0]["source_scene_sha256"]])
-    changed = exp.build_manifest(**m["config"])
+    changed = exp.rebuild_manifest(m)
     assert changed["source_status"] == changed["status"] == "BLOCKED"
     with pytest.raises(mobile.MobileExportError):
         mobile.MobileModelExporter()._calibration_for_request(req)
@@ -100,8 +100,12 @@ def test_changed_inputs_reject_live_validation(tmp_path, change):
                                         ("calibration_mode","auto"), ("formats",("onnx",))])
 def test_request_cannot_reuse_approval_for_different_input(tmp_path, field, value):
     _,_,_,req = prepared(tmp_path)
-    with pytest.raises(mobile.MobileExportError):
-        mobile.MobileModelExporter()._calibration_for_request(replace(req, **{field:value}))
+    if field == "exploratory_confirmation":
+        # Historical v1 retains its original evidence, but export needs no second click.
+        assert mobile.MobileModelExporter()._calibration_for_request(replace(req, **{field:value}))["status"] == "EXPLORATORY_ONLY"
+    else:
+        with pytest.raises(mobile.MobileExportError):
+            mobile.MobileModelExporter()._calibration_for_request(replace(req, **{field:value}))
 
 
 @pytest.mark.parametrize("role", ["plate", "character"])
@@ -109,7 +113,7 @@ def test_cross_split_removed_and_exact_pixels_reach_both_loaders(tmp_path, role)
     f,m,p,req = prepared(tmp_path, role)
     f["inv"]["source_scene_hashes"][0]["splits"].append("val")
     write_json(f["history"], {"runs": {"synthetic": f["run"]}})
-    m = exp.build_manifest(**m["config"])
+    m = exp.rebuild_manifest(m)
     exp.validate_embedded_manifest(m)
     assert m["counts"]["cross_split_rejected"] == 2  # source plus duplicate
     a,b = strict.ApprovedOnnxReader(m,"images"), strict.ApprovedLiteRTLoader(m)
@@ -133,7 +137,7 @@ def test_yaml_cannot_redirect_research_to_holdout(tmp_path, split):
     y.write_text(f"train: images/{split}\n")
     f["run"]["training_dataset_snapshot"]["data_yaml_sha256"] = strict.file_sha256(y)
     write_json(f["history"], {"runs": {"synthetic": f["run"]}})
-    with pytest.raises(strict.CalibrationError): exp.build_manifest(**m["config"])
+    with pytest.raises(strict.CalibrationError): exp.rebuild_manifest(m)
 
 
 @pytest.mark.parametrize("kind", ["incomplete", "changed"])
@@ -150,7 +154,8 @@ def test_loaders_recheck_actual_bytes_and_complete_consumption(tmp_path, kind):
 
 
 @pytest.mark.parametrize("kind", ["fp32", "int8", "mixed", "missing"])
-def test_signed_artifact_selection_requires_actual_graph(tmp_path, kind):
+def test_signed_artifact_selection_requires_actual_graph(tmp_path, kind, monkeypatch):
+    monkeypatch.setattr(mobile.MobileModelExporter, "_precision_diagnostics_root", staticmethod(lambda: tmp_path / "diagnostics"))
     from tflite_precision_fixture import graph_bytes
     returned = tmp_path / "model_int8.tflite"
     returned.write_bytes(graph_bytes("mixed"))
@@ -268,7 +273,7 @@ def test_incomplete_provenance_never_authorizes_research(tmp_path,fault):
     else: write_json(f["dataset"]/"augmentation_manifest.json",{})
     write_json(f["history"],{"runs":{"synthetic":f["run"]}})
     with pytest.raises((strict.CalibrationError,ValueError)):
-        exp.build_manifest(**m["config"])
+        exp.rebuild_manifest(m)
 
 
 def test_native_export_writes_research_manifest_usage_and_both_variant_shas(tmp_path):
