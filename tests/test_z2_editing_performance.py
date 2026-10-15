@@ -104,11 +104,12 @@ def test_explicit_save_supersedes_queued_autosave_completion(tmp_path):
     host, path, callbacks = owner(tmp_path)
     assert autosave.start_preview_autosave(host)
     autosave.wait_for_pending_save(host)
-    host.current_annotations[0].detections[0].polygon[0] = (22, 23)
+    # Keep a convex quad: this test exercises save ordering, not invalid geometry.
+    host.current_annotations[0].detections[0].polygon[0] = (22, 5)
     assert CVATExporter().export(host.current_annotations, path, only_successful=False)
     for callback in callbacks:
         callback()
-    assert ET.parse(path).getroot().find("image/polygon").get("points").startswith("22.00,23.00")
+    assert ET.parse(path).getroot().find("image/polygon").get("points").startswith("22.00,5.00")
     host._update_annotation_run_manifest.assert_not_called()
 
 

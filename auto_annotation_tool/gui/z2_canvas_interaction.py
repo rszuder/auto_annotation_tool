@@ -116,6 +116,7 @@ from ..annotators.runtime_factory import validate_pt_model_path_for_runtime
 from ..icons import IconManager
 from ..exporters import CVATExporter, ReportGenerator
 from ..quality_metrics import compute_plate_polygon_fit_metrics
+from ..pose_geometry import finalize_manual_geometry
 from ..project_cache import PROJECT_CACHE
 from ..training import DatasetCreator
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
@@ -2128,16 +2129,32 @@ def _set_preview_corner_drag_modifier(self, active: bool):
         self._finish_preview_vertex_drag(
             mark_dirty=bool(self._preview_drag_state.get("was_moved", False))
         )
-        return
+        # Continue: earlier plates in this W sequence may still await
+        # finalization when W is released during the final active drag.
     if not next_state and self._preview_drag_state is None and self._preview_dirty_images:
         ann = self._get_preview_annotation()
         if ann is not None:
             try:
-                for det in self._get_plate_detections(ann):
-                    fixed_polygon = PolygonValidator.fix_polygon(self._detection_polygon(det))
-                    det.polygon = fixed_polygon
-                    det.bbox = self._bbox_from_polygon(fixed_polygon)
-                    det.keypoints = self._keypoints_from_polygon(fixed_polygon)
+                touched_by_image = getattr(self, "_preview_geometry_touched", {})
+                # Navigation can change the current image while W remains
+                # held. Finalize only touched detections across that sequence.
+                candidates = getattr(self, "current_annotations", None) or [ann]
+                for edited_ann in candidates:
+                    touched = touched_by_image.pop(edited_ann.filename, set())
+                    if not touched:
+                        continue
+                    finalized = False
+                    for det in self._get_plate_detections(edited_ann):
+                        if id(det) in touched:
+                            finalize_manual_geometry(det, self._detection_polygon(det),
+                                                     image_size=(edited_ann.width, edited_ann.height))
+                            finalized = True
+                    if finalized:
+                        # A worker may still be saving the pre-release W
+                        # snapshot. Version the final geometry so its later
+                        # completion cannot clear this newer dirty state.
+                        self._mark_preview_image_dirty(edited_ann, refresh_list=False,
+                                                       refresh_row=False, invalidate_runtime=False)
             except Exception:
                 pass
         try:

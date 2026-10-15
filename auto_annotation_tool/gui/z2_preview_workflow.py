@@ -44,6 +44,7 @@ from ..exporters import CVATExporter, ReportGenerator
 from ..icons import IconManager
 from ..project_cache import PROJECT_CACHE
 from ..quality_metrics import compute_plate_polygon_fit_metrics
+from ..pose_geometry import hydrate_stored_geometry
 from ..rectification.polygon_validator import PolygonValidator
 from ..training import DatasetCreator
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
@@ -3135,10 +3136,12 @@ def _parse_cvat_preview_annotations(self, xml_path: Path) -> list[ImageAnnotatio
             except (TypeError, ValueError):
                 continue
 
-            if len(points) < 4:
+            if not points:
                 continue
 
-            polygon = PolygonValidator.fix_polygon(points[:4], quiet=True)
+            # Reading is not an annotation edit. Keep stored coordinates/order;
+            # only the temporary display cycle may be normalized.
+            polygon = list(points)
             confidence = 1.0
             attributes = {}
             for attr_el in poly_el.findall("attribute"):
@@ -3164,10 +3167,11 @@ def _parse_cvat_preview_annotations(self, xml_path: Path) -> list[ImageAnnotatio
                 label="plate",
                 confidence=confidence,
                 bbox=self._bbox_from_polygon(polygon),
-                keypoints=self._keypoints_from_polygon(polygon),
+                keypoints=None,
                 polygon=polygon,
                 attributes=attributes,
             )
+            hydrate_stored_geometry(detection, image_size=(width, height), points_text=points_text)
             try:
                 setattr(detection, "_cvat_source", polygon_source or "auto")
             except Exception:

@@ -1,0 +1,91 @@
+{
+  "approval_contract_sha256": "df3eb7559e4d2593520fd93c2a594ab799a3ae5768665a1737e5a7c43b549cb6",
+  "authorization_basis": "Explicit user approval in this conversation: controlled I/O compatibility for this run only; no automatic inference",
+  "compatibility_checker_sha256": "c9c6184c477712396d4678b33bb7b4c1c6d3052647bd0cbbdaee58efad9af1a7",
+  "created_date": "2026-10-10",
+  "document_id": "F3C_IO_RETRY_20261010_v1",
+  "evidence_files_sha256": {
+    "atomic_fix_regression.xml": "5b320254086b5ad83ca4cacd634f54fb7cb42bc150b88c282393e929de0677c7",
+    "atomic_fix_test_summary.json": "1a5a0d65e6992275e1fd9f023e411cd20dda6bdeadc15f2815638088a8c38ea7",
+    "atomic_write_fix.diff": "bbe168a6455d0bcbcf64ba85c7e102f88426c909320f3f44eb4470fc2a643c90",
+    "corrected_mt_eval_runner.py.txt": "c0e9ec16951381c6e4274e055153cfd4663f660afe104faefb439431060e11b1",
+    "original_e2e_eval_runner.py.txt": "86d5d9ce18ff7d4ce9ffc1ff0e0362d3fa3457d3a22041c0b077b5ed8946150e",
+    "original_mt_eval_runner.py.txt": "dfcd0d637ca04f21875bebc4ad38fa504faaac385044f32e0d6587f41747642f",
+    "original_run_binding.zip": "9c9d858bed12885d6b9b5e25e0573c8b7fa404db3b92801bfe207bf05697d1d1"
+  },
+  "immutable_run_files_sha256": {
+    "approval.json": "b1ffa605d9b908887b1a53a665e8991c08463f41739792e548f62c7b2b416f25",
+    "inputs.json": "033236ca6defaed1b192810f7ca0ecd26fd4ad420c60e1915647f651a7b0c525",
+    "manifest.json": "8fc9a75c422d2a306501536f559a7ad5bc755bab187181182a1ad42253e60bdf",
+    "protocol.json": "2ef8143a13e302181f7b48a3036194852696687954cdc0babe53745f9fd8f01c",
+    "provenance.json": "9d3921a1462103ef147e986ddd4a79bb794c5792c070dc077acebc8e8ed5f761"
+  },
+  "integration": {
+    "original_runner_sha256": "86d5d9ce18ff7d4ce9ffc1ff0e0362d3fa3457d3a22041c0b077b5ed8946150e",
+    "policy": "Exact WIRING substitutions reconstructed from pinned original; all other bytes rejected",
+    "purposes": [
+      "code receipt and experiment-scoped compatibility validation",
+      "resume directory binding at both runtime checks",
+      "append-only compatibility provenance before native recovery",
+      "read and completion-hash verification of that addendum",
+      "Native report/export includes separate continuation provenance"
+    ]
+  },
+  "limits": {
+    "automatic_inference_forbidden": true,
+    "manual_recovery_forbidden": true,
+    "new_experiment_forbidden": true,
+    "protocol_rewrite_forbidden": true
+  },
+  "original_operator_signature": "rs",
+  "protocol_sha256": "9ddf557a7f23b2a497f08ba65edb46b125dff9e619f3d8efcd7f0d18c937e39a",
+  "provenance_exporter_sha256": "2b542463b26f34698e8df8559643a29e086309de7b4c3829b9d2992b0ce27f8f",
+  "recovery_baseline": {
+    "files_sha256": {
+      "pending.json": "70e17d1d2d3f0f1b77f9f761efa62b64daeb4c66ae03273f6bae3b114ea9ea9b",
+      "progress.json": "c307742432a18492b19d398db8058da46b89df9b2c1e7d6385dcee57e7e0f713",
+      "raw/MT-n__MZ-s/scenes/535ba0646ab2554a34343ec0f0bd52826fff96a2b48c543de5698d9a16d90758.json": "ef8169116de98449b3d25eb4464a5deb81d621d36c91a32d2d1c4179df151df4"
+    },
+    "ledger_records": 588,
+    "persisted_mz_forwards": 324,
+    "recoverable_records": 589
+  },
+  "run_relative_path": "Workspace/E-MZ-DN-01/evaluation_runs/EVAL396_E2E_run_20261010_130727_74a41238",
+  "schema": "alpr.e2e.io_compatibility.v1",
+  "scope": {
+    "ast_outside_writer_identical": true,
+    "atomic_replace": true,
+    "delays_seconds": [
+      0.025,
+      0.05,
+      0.1,
+      0.2,
+      0.4
+    ],
+    "exclusive_publication_unchanged": true,
+    "function": "mt_eval_runner._write_json",
+    "inference_geometry_scoring_parameters_unchanged": true,
+    "max_attempts": 6,
+    "platform": "Windows",
+    "same_closed_fsynced_temporary": true,
+    "winerrors": [
+      5,
+      32,
+      33
+    ]
+  },
+  "tests": {
+    "atomic_fix_regression": {
+      "errors": 0,
+      "evidence": "atomic_fix_regression.xml",
+      "failed": 0,
+      "native_windows_reader_error": 5,
+      "passed": 207
+    },
+    "compatibility_regression": "Reported separately with final document SHA to avoid cyclic hashes."
+  },
+  "writer_sha256": {
+    "corrected": "c0e9ec16951381c6e4274e055153cfd4663f660afe104faefb439431060e11b1",
+    "original": "dfcd0d637ca04f21875bebc4ad38fa504faaac385044f32e0d6587f41747642f"
+  }
+}

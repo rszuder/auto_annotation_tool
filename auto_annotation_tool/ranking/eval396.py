@@ -90,8 +90,18 @@ def default_selection(repo_root):
 
 
 def is_selection(path):
+    """UI routing only: a known but unreadable selection still opens its gate.
+
+    Recognition never certifies data. load_selection/load_eval396 retain all
+    source SHA checks and propagate read failures to the native status panel.
+    """
     path = Path(str(path or ""))
-    return path.name == "selection_manifest.json" or (path / "selection_manifest.json").is_file()
+    if path.name in {"selection_manifest.json", SELECTION_NAME}:
+        return True
+    try:
+        return (path / "selection_manifest.json").is_file()
+    except OSError:
+        return False
 
 
 def selection_reference(path):
@@ -214,6 +224,26 @@ def _read_selection(reader, selection_dir, repo_root):
                 "SCENE_DOMAIN_COUNTS_CHANGED")
     _verify_models(reader, repo_root, data["model_lineage.json"], included)
     return manifest, data
+
+
+def load_selection(selection_dir, *, repo_root=None, progress=None):
+    """Verify frozen inputs and six-model lineage without reading old MZ results.
+
+    This is the same strict selection/freeze/independence gate as the MZ
+    importer. PermissionError and incomplete inventories are never waived.
+    """
+    root = Path(repo_root or Path(__file__).resolve().parents[2]).resolve()
+    directory = Path(selection_dir).resolve()
+    if directory.name == "selection_manifest.json":
+        directory = directory.parent
+    reader = EvidenceReader(progress)
+    manifest, data = _read_selection(reader, directory, root)
+    reader.finish()
+    return {"selection_dir": str(directory), "repo_root": str(root),
+            "selection_sha": SELECTION_SHA, "gt_freeze_sha": FREEZE_SHA,
+            "manifest": manifest, "scenes": data["included_scenes.json"],
+            "plates": data["included_plates.json"], "models": data["model_lineage.json"],
+            "source_files": dict(reader.receipt)}
 
 
 def _read_mz_results(reader, runs_dir, selection):

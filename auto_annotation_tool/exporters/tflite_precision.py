@@ -346,6 +346,14 @@ def _operator_mode(name, ins, outs, prefix, issues):
             issues.append(prefix + "UNSUPPORTED_INTEGER_SIGNATURE")
         return ("FP32" if mode == "FLOAT32" else mode), weights, bias
     # CAST of index/shape data to real arithmetic remains float computation.
+    # F4_RESEARCH_INT8_CLASS_INDEX_CAST_V1
+    # CAST INT64->INT8 is a supported integer TFLite kernel.
+    # This is the narrow one-class YOLO Pose ID=0, not a MIXED waiver.
+    if (name == "CAST" and len(ins) == len(outs) == 1
+            and ins[0]["dtype"] == "INT64" and outs[0]["dtype"] == "INT8"
+            and ins[0]["shape"] == outs[0]["shape"] == [1, 300, 1]
+            and outs[0]["scale"] == [1.0] and outs[0]["zero_point"] == [0]):
+        return "INT8", weights, bias
     if name == "CAST" and kinds <= STRUCTURAL | {"FLOAT32"}:
         return "FP32", weights, bias
     issues.append(prefix + "UNSUPPORTED_TYPE_SIGNATURE " + ",".join(sorted(kinds)))

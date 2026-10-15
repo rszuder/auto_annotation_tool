@@ -336,6 +336,8 @@ def open_results(tab, *, export_after_load=False):
     geometry = GeometryReviewPanel(notebook, tab.rank_data_dir.get())
     notebook.add(geometry, text="MT — lokalizacja i geometria")
     dialog.evaluation_notebook, dialog.mt_geometry_panel = notebook, geometry
+    from .z4_e2e_results import install_e2e_panel
+    dialog.after_idle(lambda: install_e2e_panel(dialog, notebook, tab.rank_data_dir.get()))
     shell.columnconfigure(0, weight=1)
     shell.rowconfigure(6, weight=1)
     ttk.Label(shell, text="EVAL396 — zamrożona selekcja", font=("Segoe UI", 17, "bold")).grid(row=0, sticky="w")

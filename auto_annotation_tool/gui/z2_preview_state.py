@@ -118,6 +118,7 @@ from ..annotators.runtime_factory import validate_pt_model_path_for_runtime
 from ..icons import IconManager
 from ..exporters import CVATExporter, ReportGenerator
 from ..quality_metrics import compute_plate_polygon_fit_metrics
+from ..pose_geometry import geometry_display_polygon, finalize_manual_geometry
 from ..project_cache import PROJECT_CACHE
 from ..training import DatasetCreator
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
@@ -1784,6 +1785,8 @@ def _get_plate_detections(self, ann) -> list[Detection]:
 
 
 def _detection_polygon(det: Detection) -> list[tuple[float, float]]:
+    if isinstance(getattr(det, "geometry", None), dict):
+        return geometry_display_polygon(det)
     if det.polygon and len(det.polygon) >= 4:
         return [(float(x), float(y)) for x, y in det.polygon[:4]]
 
@@ -1962,6 +1965,7 @@ def _clone_preview_history_detection(det: Detection) -> Detection:
         text=getattr(det, "text", None),
         text_confidence=float(getattr(det, "text_confidence", 0.0) or 0.0),
         attributes=dict(getattr(det, "attributes", {}) or {}),
+        geometry=copy.deepcopy(getattr(det, "geometry", None)),
     )
 
 
@@ -2067,6 +2071,21 @@ def _restore_preview_annotation_history_snapshot(self, snapshot, *, action_label
             return False
 
         self.current_annotations[safe_index] = restored_ann
+        # Undo/Redo clones detections, so object IDs from a held-W sequence
+        # must be rebound to the restored objects, never to unrelated plates.
+        touched = getattr(self, "_preview_geometry_touched", None)
+        if not isinstance(touched, dict):
+            touched = {}
+            self._preview_geometry_touched = touched
+        pending = [det for det in restored_ann.detections
+                   if (getattr(det, "geometry", None) or {}).get("manual_pending")
+                   and (getattr(det, "geometry", None) or {}).get("manual_edit")]
+        if pending and bool(getattr(self, "_preview_corner_drag_modifier_down", False)):
+            touched[restored_ann.filename] = {id(det) for det in pending}
+        else:
+            touched.pop(restored_ann.filename, None)
+            for det in pending:
+                finalize_manual_geometry(det, image_size=(restored_ann.width, restored_ann.height))
         selected_plate_idx = snapshot.get("selected_plate_idx") if isinstance(snapshot, dict) else None
         selected_vehicle_idx = snapshot.get("selected_vehicle_idx") if isinstance(snapshot, dict) else None
         self._set_selected_plate_index_for_ann(restored_ann, selected_plate_idx)

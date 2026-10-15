@@ -973,11 +973,14 @@ def _apply_preview_plate_layout_override(self, override: str | None, *, source: 
             data.pop("layout_separator", None)
         elif next_override == "two_row":
             try:
+                # Zmiana 1R -> 2R jest zmianą semantyki czytania, nie geometrii.
+                # Po pracy w 1R rekordy mogą mieć zapisane reading_row=1 dla
+                # wszystkich znaków. Użycie tych starych rzędów do constraintów
+                # ścinałoby dolne boxy do górnej połowy tablicy. Zachowujemy
+                # boxy tam, gdzie są, budujemy separator z ich geometrii, a
+                # dalsza anotacja przeliczy reading_row/reading_col względem
+                # separatora.
                 self._ensure_preview_layout_separator(data, chars)
-                chars = self._apply_preview_layout_separator_constraints_to_chars(
-                    data,
-                    chars,
-                )
             except Exception:
                 pass
     else:

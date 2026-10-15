@@ -119,6 +119,7 @@ from ..annotators.runtime_factory import validate_pt_model_path_for_runtime
 from ..icons import IconManager
 from ..exporters import CVATExporter, ReportGenerator
 from ..quality_metrics import compute_plate_polygon_fit_metrics
+from ..pose_geometry import finalize_manual_geometry, set_manual_display_point, geometry_warning
 from ..project_cache import PROJECT_CACHE
 from ..training import DatasetCreator
 from ..utils import cleanup_gpu_memory, count_images_in_directory, format_duration, get_image_files, get_image_size
@@ -1083,6 +1084,12 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
         if drag_active and selected_plate_idx is not None and plate_idx != selected_plate_idx:
             continue
         polygon = self._detection_polygon(det)
+        if not polygon:
+            if selected_plate_idx == plate_idx:
+                canvas.create_text(12, 54, anchor="nw", fill="#f0a020",
+                                   text=geometry_warning(det) or "Nieprawidłowa geometria — sprawdź narożniki",
+                                   tags=("preview_overlay",))
+            continue
         points = []
         for px, py in polygon:
             cx, cy = canvas.image_to_canvas_coords(px, py)
@@ -1115,6 +1122,18 @@ def _draw_annotation_preview_overlay(self, canvas: ZoomableCanvas):
             dash=dash,
             tags=("preview_overlay", "preview_plate_outline")
         )
+
+        warning = geometry_warning(det)
+        if warning and is_selected and not light_overlay and points:
+            # The GT card occupies the strip above the polygon. Put the
+            # diagnostic below the outline so both remain readable.
+            warning_y = min(max(points[1::2]) + 14,
+                            float(canvas.canvasy(canvas.winfo_height())) - 24)
+            canvas.create_text(
+                min(points[::2]), warning_y,
+                text=warning, fill="#f0a020", anchor="nw",
+                font=("Segoe UI", 9, "bold"), tags=("preview_overlay",),
+            )
 
         # DET/FIT jest renderowane we wspólnym boxie z polem GT.
         if is_selected and not is_delete_candidate:
@@ -2590,18 +2609,22 @@ def _finish_preview_vertex_drag(self, mark_dirty: bool = True):
 
     plate_detections = self._get_plate_detections(ann)
     plate_idx = int(drag_state.get("plate_idx", -1))
-    if 0 <= plate_idx < len(plate_detections):
+    if 0 <= plate_idx < len(plate_detections) and mark_dirty and bool(drag_state.get("was_moved", mark_dirty)):
         det = plate_detections[plate_idx]
         current_polygon = self._detection_polygon(det)
         # Przy trzymanym W uzytkownik zwykle poprawia kilka naroznikow pod rzad.
         # Ciezsza normalizacja wraca po zakonczeniu serii, zeby kolejny chwyt
         # nie czekal na prace UI po poprzednim rogu.
-        fixed_polygon = current_polygon if sequence_active else PolygonValidator.fix_polygon(current_polygon)
-        det.polygon = fixed_polygon
-        det.bbox = self._bbox_from_polygon(fixed_polygon)
-        det.keypoints = self._keypoints_from_polygon(fixed_polygon)
-        det.attributes["manually_edited"] = "true"
-        det.attributes["manual_source"] = "preview"
+        finalize_manual_geometry(det, current_polygon,
+                                 image_size=(ann.width, ann.height), normalize=not sequence_active)
+        touched = getattr(self, "_preview_geometry_touched", None)
+        if not isinstance(touched, dict):
+            touched = {}
+            self._preview_geometry_touched = touched
+        if sequence_active:
+            touched.setdefault(ann.filename, set()).add(id(det))
+        else:
+            touched.get(ann.filename, set()).discard(id(det))
         if mark_dirty:
             # Podczas seryjnej korekty rogĂłw nie odswiezamy od razu calej listy
             # wynikow, bo to bylo odczuwalne wlasnie przed drugim chwytem.
@@ -2768,11 +2791,12 @@ def _commit_new_preview_polygon(self):
         label="plate",
         confidence=1.0,
         bbox=self._bbox_from_polygon(fixed_points),
-        keypoints=self._keypoints_from_polygon(fixed_points),
+        keypoints=None,
         polygon=fixed_points,
     )
     new_det.attributes["manually_edited"] = "true"
     new_det.attributes["manual_source"] = "preview"
+    finalize_manual_geometry(new_det, fixed_points, image_size=(ann.width, ann.height))
     ann.detections.append(new_det)
     try:
         # Adding a polygon mutates an existing annotation in place. Bump the
@@ -3720,7 +3744,7 @@ def on_zoomable_canvas_drag(self, canvas: ZoomableCanvas, event):
         start_vertex_x + (float(cursor_x) - start_cursor_x),
         start_vertex_y + (float(cursor_y) - start_cursor_y),
     )
-    det.polygon = polygon
+    set_manual_display_point(det, polygon)
     # Bbox i keypointy przeliczamy dopiero po puszczeniu myszy. W trakcie
     # dragu liczy się płynny podgląd narożnika, nie pełna normalizacja detekcji.
     det.attributes["manually_edited"] = "true"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from ..pose_geometry import geometry_warning
 
 from ..campaign_manager import CAMPAIGN
 from ..plate_ground_truth import (
@@ -68,6 +69,8 @@ def format_plate_info(host, det, ann) -> str:
         confidence = float(getattr(det, "confidence", 0.0) or 0.0)
     except Exception:
         confidence = 0.0
+    if geometry_warning(det):
+        return f"DET {confidence:.2f}   ! geometria"
     try:
         fit_score = host._get_plate_detection_fit_score(det, ann)
     except Exception:

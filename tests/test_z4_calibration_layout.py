@@ -109,7 +109,7 @@ def test_disclosures_keep_identity_and_manifest_available_without_empty_report(t
 
 
 @pytest.mark.parametrize("width,scaling", [(1100, 1.3333), (1920, 1.3333), (1100, 1.6667), (1920, 1.6667)])
-def test_export_center_all_six_actions_share_one_visible_row(themed, tmp_path, width, scaling):
+def test_export_center_selection_actions_share_one_visible_row(themed, tmp_path, width, scaling):
     root = themed.root
     root.tk.call("tk", "scaling", scaling)
     themed._setup_style("light_visual_cs")
@@ -121,8 +121,11 @@ def test_export_center_all_six_actions_share_one_visible_row(themed, tmp_path, w
         center = export._open_mobile_model_export_center(host)
         center.geometry(f"{width}x800+0+0")
         root.update()
-        labels = ["Raporty z telefonu", "Sprawdź precyzję TFLite", "Kalibracja INT8 — wskazany model",
-                  "Wybierz trening ręcznie", "Eksportuj zaznaczone", "Zamknij"]
+        labels = ["Eksportuj zaznaczone", "Zamknij"]
+        forbidden = {"Sprawdź precyzję TFLite", "Kalibracja INT8 — wskazany model",
+                     "Wybierz trening ręcznie", "Raporty z telefonu"}
+        assert not any(isinstance(w, ttk.Button) and w.cget("text") in forbidden
+                       for w in ui.Int8CalibrationDialog._walk(center))
         buttons = [next(w for w in ui.Int8CalibrationDialog._walk(center)
                         if isinstance(w, ttk.Button) and w.cget("text") == label) for label in labels]
         assert len({w.winfo_rooty() for w in buttons}) == 1

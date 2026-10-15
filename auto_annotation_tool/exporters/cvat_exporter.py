@@ -7,6 +7,7 @@ Eksporter anotacji do formatu CVAT XML.
 import xml.etree.ElementTree as ET
 import os
 import tempfile
+import copy
 from xml.dom import minidom
 from pathlib import Path
 from datetime import datetime
@@ -15,6 +16,8 @@ from typing import List, Dict, Optional
 from ..config import CONFIG, logger, CVAT_IMPORT_INFO
 from ..data_models import Detection, ImageAnnotation
 from ..plate_ground_truth import ensure_plate_detection_contract
+from ..pose_geometry import GEOMETRY_XML_ATTR, geometry_xml_payload, geometry_matches_stored_polygon, attach_pose_geometry
+from ..rectification.quad_geometry import analyze_quad
 
 
 def write_cvat_tree_atomic(root: ET.Element, output_path: Path) -> None:
@@ -187,11 +190,34 @@ class CVATExporter:
         poly.set("occluded", "0")
         poly.set("z_order", "1")
         
-        if det.polygon and len(det.polygon) >= 4:
-            points_str = ";".join([f"{p[0]:.2f},{p[1]:.2f}" for p in det.polygon[:4]])
+        geometry = getattr(det, "geometry", None) or {}
+        evidence_det = det
+        preserved_xml = geometry.get("stored_polygon_xml")
+        matches_stored = geometry_matches_stored_polygon(det)
+        unchanged_legacy = (geometry.get("source") == "legacy_xml" and not geometry.get("manual_edit")
+                            and matches_stored)
+        if det.polygon:
+            analysis = analyze_quad(det.polygon)
+            if not analysis.is_geometrically_valid and not unchanged_legacy:
+                raise ValueError(f"Nieprawidłowa geometria tablicy: {analysis.status}. Sprawdź narożniki.")
+            if preserved_xml and not geometry.get("manual_edit") and matches_stored:
+                points_str = preserved_xml
+            else:
+                def coordinate(value):
+                    value = float(value)
+                    return f"{value:.2f}" if value == round(value, 2) else repr(value)
+                points_str = ";".join(f"{coordinate(p[0])},{coordinate(p[1])}" for p in det.polygon)
         else:
             # Fallback z bbox
+            if geometry:
+                raise ValueError("Brak polygonu roboczego mimo istniejących metadanych geometrii.")
             x1, y1, x2, y2 = det.bbox
+            fallback = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+            if not analyze_quad(fallback).is_geometrically_valid:
+                raise ValueError("Nieprawidłowy bbox zastępczy tablicy.")
+            if not geometry:
+                evidence_det = copy.deepcopy(det)
+                attach_pose_geometry(evidence_det, None)
             points_str = f"{x1:.2f},{y1:.2f};{x2:.2f},{y1:.2f};{x2:.2f},{y2:.2f};{x1:.2f},{y2:.2f}"
         
         poly.set("points", points_str)
@@ -201,6 +227,10 @@ class CVATExporter:
             attr.set("name", "confidence")
             attr.text = f"{det.confidence:.3f}"
         self._add_detection_attributes(poly, det, include_confidence=include_confidence)
+        payload = geometry_xml_payload(evidence_det)
+        if payload:
+            attr = ET.SubElement(poly, "attribute", name=GEOMETRY_XML_ATTR)
+            attr.text = payload
 
     @staticmethod
     def _add_detection_attributes(parent: ET.Element, det: Detection, *, include_confidence: bool):
@@ -211,6 +241,8 @@ class CVATExporter:
             if not name or not value:
                 continue
             if include_confidence and name == "confidence":
+                continue
+            if name == GEOMETRY_XML_ATTR and getattr(det, "geometry", None):
                 continue
             attr = ET.SubElement(parent, "attribute")
             attr.set("name", name)

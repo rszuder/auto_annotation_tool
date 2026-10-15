@@ -29,10 +29,10 @@ def test_scene_weather_is_called_from_cuda_postprocess():
     assert "_apply_mt_scene_rain_cuda(" in chunk
     assert "seed=seed + 17011" in chunk
 
-def test_plate_local_weather_controls_still_block_scene_fastpath():
+def test_plate_surface_weather_still_blocks_but_scene_collisions_are_allowed():
     text = source()
     start = text.index("def _mt_scene_cuda_fastpath_eligible")
     end = text.index("\ndef ", start + 10)
     chunk = text[start:end]
-    assert '"rain_edge_mist_strength"' in chunk
+    assert '"rain_edge_mist_strength"' not in chunk
     assert '"tyndall_strength"' in chunk

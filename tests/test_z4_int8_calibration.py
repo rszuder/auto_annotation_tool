@@ -138,12 +138,10 @@ def test_change_settings_while_worker_runs_discards_result(root, tmp_path):
         d.destroy()
 
 
-def test_existing_export_center_opens_calibration_without_export(root, tmp_path):
+def test_export_modal_calibration_is_contextual_and_no_export(root, tmp_path):
     from auto_annotation_tool.gui import z4_model_export as export
-    p = tmp_path / "synthetic.pt"
-    p.write_bytes(b"placeholder")
-    candidate = dict(best_weights=p, model_label="Synthetic MT", role="plate", target="plate", task="pose",
-                     model_version="YOLO26n-pose", training_provenance={"provenance_version": 1})
+    from test_z4_calibration_context import candidate_fixture
+    _,candidate=candidate_fixture(tmp_path)
     host = SimpleNamespace(app=SimpleNamespace(root=root, palette={}, show_assistant_message=Mock()), frame=root,
                            _build_mobile_model_export_path=lambda *_: tmp_path / "unused.alprmodel")
     def walk(w):
@@ -152,12 +150,18 @@ def test_existing_export_center_opens_calibration_without_export(root, tmp_path)
     with patch.object(export, "_collect_mobile_export_candidates", return_value=[candidate]), \
          patch.object(export, "open_int8_calibration_dialog") as open_dialog, \
          patch.object(export.MobileModelExporter, "export", side_effect=AssertionError("export forbidden")):
-        d = export._open_mobile_model_export_center(host)
-        root.update()
-        button = next(w for w in walk(d) if isinstance(w, ttk.Button) and w["text"] == "Wybierz trening ręcznie")
-        button.invoke()
-        open_dialog.assert_called_once_with(d)
-        d.destroy()
+        center = export._open_mobile_model_export_center(host);center.deiconify();root.update()
+        tree=next(w for w in walk(center) if isinstance(w,ttk.Treeview) and len(w.get_children())==1)
+        tree.see(candidate['iid']);root.update();box=tree.bbox(candidate['iid'],'#1');assert box
+        tree.event_generate('<Button-1>',x=box[0]+5,y=box[1]+box[3]//2);root.update()
+        next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Eksportuj zaznaczone').invoke();root.update()
+        from auto_annotation_tool.gui.z4_int8_calibration import CalibrationModeControl
+        slot=next(w for w in walk(center) if isinstance(w,CalibrationModeControl))
+        slot.variables['litert'].set(False);slot.variables['int8'].set(True)
+        next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Przygotuj manifest INT8 — MT').invoke()
+        assert open_dialog.call_count==1
+        assert open_dialog.call_args.kwargs['context'].role=='plate'
+        center.destroy()
 
 
 def test_model_slot_validates_manifest_and_never_auto_selects_yaml(tmp_path):

@@ -89,6 +89,29 @@ def test_selection_stays_on_same_character_after_reordering(host):
     assert host._get_preview_active_data()["characters"][host._preview_char_selected_index]["character"] == "B"
 
 
+def test_switch_1r_to_2r_ignores_stale_single_row_assignments_and_preserves_boxes(host):
+    data = host._get_preview_active_data()
+    data["plate_layout"] = "single_row"
+    for index, rec in enumerate(data["characters"], start=1):
+        rec["reading_row"] = 1
+        rec["reading_col"] = index
+        rec["reading_index"] = index
+
+    before = {rec["character"]: list(rec["bbox"]) for rec in data["characters"]}
+
+    assert control.toggle_plate_rows(host) == "break"
+
+    assert data["plate_layout_override"] == "two_row"
+    assert {rec["character"]: list(rec["bbox"]) for rec in data["characters"]} == before
+    assert [(rec["character"], rec["reading_row"]) for rec in data["characters"]] == [
+        ("A", 1),
+        ("B", 1),
+        ("C", 2),
+        ("D", 2),
+    ]
+    assert data["layout_separator"]["y1"] == data["layout_separator"]["y2"] == 50
+
+
 def test_frame_control_is_retained_vertical_and_right_of_frame(host):
     canvas = host.preview_canvas
     data = host._get_preview_active_data()

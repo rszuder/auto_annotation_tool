@@ -138,18 +138,26 @@ def test_bad_gt_is_blocked_without_mutation(box, quad, reason):
 
 
 @pytest.fixture
-def review(tmp_path):
+def review(tmp_path, monkeypatch):
+    from pose478_fixture import cohort, bind_source_fixture
     source = asymmetric_image(tmp_path)
     image, info = orientation.inspect_oriented_image(source)
     sha = hashlib.sha256(source.read_bytes()).hexdigest()
     scene = {"file": source.name, "sha256": sha, "domain": "DAY", "image": info,
              "plates": [{"plate_id": "fixture", "bbox": BOX, "quad": QUAD, "geometry_issue": ""}]}
+    scenes = cohort(scene)
+    metric_policy = gate.load_metric_policy()
+    scope = gate.assess_metric_scope(scenes, metric_policy)
     report = {"schema": gate.REVIEW_SCHEMA, "status": "READY_FOR_REVIEW", "selection_sha": gate.SELECTION_SHA,
-              "gt_freeze_sha": gate.FREEZE_SHA, "policy": deepcopy(gate.POLICY), "models": [],
-              "scenes": [scene], "counts": {}, "geometry_issues": [], "review_scene_hashes": [sha],
+              "gt_freeze_sha": gate.FREEZE_SHA, "policy": deepcopy(gate.POLICY),
+              "models": [{"label": name, "role": "plate"} for name in metric_policy["model_labels"]],
+              "scenes": scenes, "counts": gate.cohort_counts(scenes), **scope,
+              "review_scene_hashes": gate.required_review_scenes(scenes, scope["geometry_issues"]),
+              "metric_policy": metric_policy, "metric_policy_sha256": gate.METRIC_POLICY_SHA,
               "runtime": {}, "code_sha256": {}, "source_files": {str(source.resolve()): sha},
-              "source_scene_root": str(tmp_path), "selection_dir": str(tmp_path / "selection"),
+              "repo_root": str(tmp_path), "source_scene_root": str(tmp_path), "selection_dir": str(tmp_path / "selection"),
               "freeze_dir": str(tmp_path / "freeze")}
+    bind_source_fixture(report, tmp_path, monkeypatch)
     report["review_sha256"] = gate.review_fingerprint(report)
     return report
 
@@ -176,10 +184,14 @@ def test_gate_requires_explicit_complete_decision_and_detects_changed_source(rev
         gate.require_current_approval(review, decision)
 
 
-def test_rejection_and_failed_geometry_cannot_authorize_measurement(review, tmp_path):
+def test_rejection_and_failed_geometry_cannot_authorize_measurement(review, tmp_path, monkeypatch):
     output = tmp_path.parent / (tmp_path.name + "_contracts")
     review["status"] = "FAIL"
-    review["geometry_issues"] = [{"reason": "GT_CORNER_ORDER_REVERSED"}]
+    review["scenes"][0]["plates"][0]["quad"] = list(reversed(QUAD))
+    review.update(gate.assess_metric_scope(review["scenes"], review["metric_policy"]))
+    review["review_scene_hashes"] = gate.required_review_scenes(review["scenes"], review["geometry_issues"])
+    from pose478_fixture import bind_source_fixture
+    bind_source_fixture(review, tmp_path, monkeypatch)
     review["review_sha256"] = gate.review_fingerprint(review)
     with pytest.raises(ValueError, match="PREFLIGHT_NOT_READY"):
         gate.save_operator_decision(review, output, operator="fixture", reviewed_scenes=review["review_scene_hashes"], accepted=True)
@@ -236,11 +248,14 @@ def test_native_mt_tab_no_auto_mz_or_approval_and_failed_gt_blocks_gate(review, 
         assert panel.approve_button.instate(["disabled"])
         assert len(panel.detail.find_withtag("preview_overlay")) > 4
         panel.confirm_button.invoke()
+        # Simulated visual confirmations for the synthetic cohort controls.
+        panel.reviewed.update(panel.report["review_scene_hashes"])
         panel.operator.set("TEST FIXTURE ONLY")
         assert not panel.approve_button.instate(["disabled"])
         assert panel.measure_button.instate(["disabled"])
         panel.report["status"] = "FAIL"
         panel.report["geometry_issues"] = [{"plate_id": "fixture", "reason": "GT_CORNER_ORDER_REVERSED"}]
+        panel.report["blocking_geometry_issues"] = panel.report["geometry_issues"]
         panel.scene["plates"][0]["geometry_issue"] = "GT_CORNER_ORDER_REVERSED"
         panel.update_controls()
         assert panel.approve_button.instate(["disabled"])

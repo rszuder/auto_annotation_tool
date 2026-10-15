@@ -1,0 +1,24 @@
+{
+  "tests": "207",
+  "failures": "0",
+  "errors": "0",
+  "skipped": "0",
+  "time": "59.330",
+  "native_windows_test": {
+    "native_reader_replace_winerror": "[5]"
+  },
+  "test_files": [
+    "tests.test_atomic_write_recovery",
+    "tests.test_e2e_backend_contract",
+    "tests.test_e2e_eval_runner",
+    "tests.test_e2e_geometry_and_metrics",
+    "tests.test_e2e_gt_text_contract",
+    "tests.test_mt_eval_backend_contract",
+    "tests.test_mt_eval_metrics",
+    "tests.test_mt_eval_report",
+    "tests.test_mt_eval_runner",
+    "tests.test_mt_eval_runner_persistence",
+    "tests.test_mz_whole_plate_evaluation",
+    "tests.test_z4_e2e_ui"
+  ]
+}

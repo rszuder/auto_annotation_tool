@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Z4 trained model export helpers extracted from tab_training.py."""
+# PATCH: Z4_REUSE_VERIFIED_MT_INT8_20261012_V1
+# PATCH: Z4_INT8_MANIFEST_AUTO_DISCOVERY_UI_20261012_V2_REBASE
 
 from __future__ import annotations
 
 import json
+import math
 import importlib.util
 import importlib.metadata as importlib_metadata
 import os
 import queue
 import re
 import shutil
+import tempfile
+from dataclasses import replace
 import subprocess
 import sys
 import threading
@@ -80,6 +85,16 @@ from .z4_mobile_report_browser import open_mobile_report_browser
 from .z4_mobile_export_locations import MobileExportSourceLocations
 from .z4_mobile_export_contract import describe_mobile_export_selection
 from .z4_tflite_precision import open_tflite_precision_dialog
+from .z4_mobile_package_reuse import validate_existing_mt_package, file_sha256 as _mt_package_sha256
+from .z4_mobile_package_role_reuse import validate_existing_mz_package
+from .z4_mobile_f4_no_conversion import (
+    require_f4_selection, require_f4_no_conversion_request,
+)
+from .z4_mobile_conversion_journal import (
+    build_conversion_plan, record_conversion_starts, record_conversion_results,
+    record_conversion_unconfirmed,
+)
+from .z4_mobile_manifest_index import discover_matching_calibrations
 from .z4_int8_calibration import open_int8_calibration_dialog, CalibrationModeControl, calibration_request_options
 from ..exporters import exploratory_calibration
 from ..exporters.int8_calibration import validate_manifest as validate_calibration_manifest
@@ -1910,6 +1925,20 @@ def _mobile_export_module_available(name: str) -> bool:
         return importlib.util.find_spec(str(name or "").strip()) is not None
     except Exception:
         return False
+
+def _mobile_export_threshold_or_default(value, default: float) -> float:
+    """Keep explicit zero thresholds; only truly missing values use defaults.
+
+    Applies the pre-existing [0,1] clamping policy. Non-finite values are
+    rejected rather than leaking silently into source/provenance manifests.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
+        value = default
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("Próg conf/IoU musi być skończoną liczbą.")
+    return max(0.0, min(1.0, number))
+
 
 def _mobile_export_progress_value(percent: float | int | None) -> float:
     try:
@@ -4663,8 +4692,8 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
                 "quantizations": list(dict.fromkeys(quantizations)),
                 "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
                 "image_size": int(imgsz_var.get() or img_size),
-                "confidence_threshold": max(0.0, min(1.0, float(conf_var.get() or CONFIG.DEFAULT_CONFIDENCE))),
-                "iou_threshold": max(0.0, min(1.0, float(iou_var.get() or CONFIG.DEFAULT_IOU))),
+                "confidence_threshold": _mobile_export_threshold_or_default(conf_var.get(), CONFIG.DEFAULT_CONFIDENCE),
+                "iou_threshold": _mobile_export_threshold_or_default(iou_var.get(), CONFIG.DEFAULT_IOU),
                 "calibration_data": str(calibration or ""),
                 "calibration_choice": str(calibration_choice_var.get() or ""),
             }
@@ -4680,8 +4709,8 @@ def _export_selected_run_model_to_mobile_package_legacy(self):
             calibration_data=calibration if calibration and calibration.suffix.lower() != ".json" else None,
             calibration_manifest=calibration if calibration and calibration.suffix.lower() == ".json" else None,
             **calibration_request_options(calibration_options),
-            confidence_threshold=max(0.0, min(1.0, float(conf_var.get() or CONFIG.DEFAULT_CONFIDENCE))),
-            iou_threshold=max(0.0, min(1.0, float(iou_var.get() or CONFIG.DEFAULT_IOU))),
+            confidence_threshold=_mobile_export_threshold_or_default(conf_var.get(), CONFIG.DEFAULT_CONFIDENCE),
+            iou_threshold=_mobile_export_threshold_or_default(iou_var.get(), CONFIG.DEFAULT_IOU),
             model_id=self._safe_model_export_slug(model_id_seed, fallback=f"{role}-model")[:80],
             name=f"{self._format_training_target_label(target)} | {getattr(run, 'id', '') or best_weights.stem}",
             version="1",
@@ -10076,13 +10105,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     "quantizations": list(dict.fromkeys(quantizations)),
                     "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
                     "image_size": int(_option_value("imgsz", imgsz_var.get()) or img_size),
-                    "confidence_threshold": max(
-                        0.0,
-                        min(1.0, float(_option_value("conf", conf_var.get()) or CONFIG.DEFAULT_CONFIDENCE)),
+                    "confidence_threshold": _mobile_export_threshold_or_default(
+                        _option_value("conf", conf_var.get()), CONFIG.DEFAULT_CONFIDENCE,
                     ),
-                    "iou_threshold": max(
-                        0.0,
-                        min(1.0, float(_option_value("iou", iou_var.get()) or CONFIG.DEFAULT_IOU)),
+                    "iou_threshold": _mobile_export_threshold_or_default(
+                        _option_value("iou", iou_var.get()), CONFIG.DEFAULT_IOU,
                     ),
                     "calibration_data": str(calibration or ""),
                     "calibration_choice": str(_option_value("calibration_choice", "") or ""),
@@ -10101,8 +10128,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
             calibration_manifest=calibration if calibration and calibration.suffix.lower() == ".json" else None,
             **calibration_request_options(options),
             calibration_fingerprint=str(_option_value("calibration_fingerprint", "") or ""),
-            confidence_threshold=max(0.0, min(1.0, float(_option_value("conf", conf_var.get()) or CONFIG.DEFAULT_CONFIDENCE))),
-            iou_threshold=max(0.0, min(1.0, float(_option_value("iou", iou_var.get()) or CONFIG.DEFAULT_IOU))),
+            confidence_threshold=_mobile_export_threshold_or_default(_option_value("conf", conf_var.get()), CONFIG.DEFAULT_CONFIDENCE),
+            iou_threshold=_mobile_export_threshold_or_default(_option_value("iou", iou_var.get()), CONFIG.DEFAULT_IOU),
             model_id=self._safe_model_export_slug(model_id_seed, fallback=f"{role}-model")[:80],
             name=f"{candidate.get('target_label') or self._format_training_target_label(target)} | {candidate.get('model_label') or best_weights.stem}",
             version="1",
@@ -10896,12 +10923,16 @@ def _open_mobile_model_export_center(self, initial_run=None):
             font=("Segoe UI", 14, "bold"),
             anchor=tk.W,
         ).grid(row=0, column=0, sticky="ew")
+        f4_no_conversion = tk.BooleanVar(value=(set(selected_by_marker) == {"MT", "MZ"}))
+        intro_shell = tk.Frame(exec_root, bg=bg)
+        intro_shell.grid(row=1, column=0, sticky="ew", pady=(3, 10))
         tk.Label(
-            exec_root,
+            intro_shell,
             text=(
                 artifact.message + "\n"
-                "Najpierw ustaw parametry dla każdego modelu. Potem możesz sprawdzić gotowość, uzupełnić braki "
-                "i zapisać gotowy plik .alprmodel dla klienta mobilnego. Przy eksporcie sprawdzenie uruchomi się automatycznie."
+                "Zaznacz gotowe modele w kartach poniżej, a potem sprawdź gotowość. "
+                "W trybie F4 bez konwersji wymagane są dwa pakiety .alprmodel tej samej precyzji. "
+                "To kontrola techniczna Desktop, nie potwierdzenie uruchomienia na Androidzie."
             ),
             bg=bg,
             fg=muted,
@@ -10909,7 +10940,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
             anchor=tk.W,
             justify=tk.LEFT,
             wraplength=980,
-        ).grid(row=1, column=0, sticky="ew", pady=(3, 10))
+        ).pack(fill=tk.X)
+        if "MT" in selected_by_marker and "MZ" in selected_by_marker:
+            ttk.Checkbutton(
+                intro_shell,
+                text="F4: tylko istniejące MT+MZ, bez ponownej konwersji (zabezpieczenie)",
+                variable=f4_no_conversion,
+            ).pack(anchor=tk.W, pady=(6, 0))
 
         model_grid = tk.Frame(exec_root, bg=bg)
         model_grid.grid(row=2, column=0, sticky="nsew")
@@ -10996,6 +11033,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             "ready": False,
         }
         exec_buttons: dict[str, ttk.Button] = {}
+        last_exported_package = {"path": None}
 
         def _default_calibration_for_candidate(candidate: dict) -> str:
             return _mobile_export_default_calibration_path(candidate)
@@ -11028,12 +11066,61 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 ),
                 "calibration_suggestions": calibration_suggestions,
                 "vehicle_classes": tk.StringVar(value=", ".join(_mobile_export_default_vehicle_class_labels(candidate))),
+                "reuse_mt": tk.BooleanVar(value=False),
+                "reuse_mt_precision": tk.StringVar(value="int8"),
+                "reuse_mt_path": tk.StringVar(value=""),
+                "reuse_mz": tk.BooleanVar(value=False),
+                "reuse_mz_precision": tk.StringVar(value="int8"),
+                "reuse_mz_path": tk.StringVar(value=""),
+                "manifest_status": tk.StringVar(value="Włącz INT8, aby odnaleźć zgodny manifest."),
+                "manifest_filename": tk.StringVar(value="Plik: nie wybrano"),
+                "_manifest_lookup_token": 0,
+                "_manifest_programmatic": False,
             }
+
+        def _state_reuses_existing_mt(state: dict) -> bool:
+            return (str(state.get("marker") or "") == "MT"
+                    and "MZ" in selected_by_marker and bool(state["reuse_mt"].get()))
+
+        def _state_reuses_existing_mz(state: dict) -> bool:
+            return (str(state.get("marker") or "") == "MZ"
+                    and "MT" in selected_by_marker and bool(state["reuse_mz"].get()))
+
+        def _open_slot_mobile_library(current_state: dict) -> None:
+            """Bind a library *selection*; full graph/checkpoint verification is in preflight."""
+            if worker_state.get("running"):
+                return
+            marker = str(current_state.get("marker") or "")
+            if marker not in {"MT", "MZ"}:
+                return
+            from .z4_mobile_artifact_library import open_mobile_artifact_library
+
+            def selected_package(path: Path) -> None:
+                if not executor_modal.winfo_exists() or worker_state.get("running"):
+                    return
+                key = marker.lower()
+                current_state[f"reuse_{key}_path"].set(str(path))
+                current_state[f"reuse_{key}"].set(True)
+                exec_status_var.set(
+                    f"{marker}: paczka wskazana z biblioteki — użyj Sprawdź gotowość, "
+                    "aby zweryfikować graf i źródłowy checkpoint; konwersja nie ruszyła."
+                )
+
+            open_mobile_artifact_library(
+                executor_modal, on_choose=selected_package, choose_role=marker,
+                choose_checkpoint=Path(current_state["candidate"]["best_weights"]),
+                choose_image_size=export_image_size(current_state["candidate"]),
+                choose_mt_precision=(current_state["reuse_mt_precision"].get() if marker == "MT" else "int8"),
+                choose_mz_precision=(current_state["reuse_mz_precision"].get() if marker == "MZ" else "int8"),
+            )
 
         def _mark_executor_dirty(*_args) -> None:
             exec_preflight_state.update({"ready": False, "problems": [], "installable": False})
-            exec_status_var.set("Ustawienia zmienione. Sprawdzenie gotowości zostanie wykonane ponownie przy eksporcie.")
+            exec_status_var.set("Ustawienia zmienione. Przegląd wyboru jest aktualny; zweryfikuj gotowość przed eksportem.")
             _sync_executor_buttons()
+            _schedule_pending_executor_rows()
+
+        f4_no_conversion.trace_add("write", _mark_executor_dirty)
 
         def _executor_panel_wraplength() -> int:
             if single_model_layout:
@@ -11128,13 +11215,164 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 wraplength=_executor_panel_wraplength(),
             ).grid(row=1, column=0, sticky="ew", pady=(2, 8))
 
+            if marker == "MT" and "MZ" in selected_by_marker:
+                mt_source = tk.Frame(
+                    panel, bg=blend_hex_colors(panel_bg, success, 0.045),
+                    padx=8, pady=6, highlightthickness=1,
+                    highlightbackground=blend_hex_colors(success, panel_bg, 0.45),
+                )
+                mt_source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+                mt_source.grid_columnconfigure(0, weight=1)
+                ttk.Checkbutton(
+                    mt_source,
+                    text="Użyj gotowego MT (.alprmodel), bez ponownej konwersji",
+                    variable=state["reuse_mt"],
+                ).grid(row=0, column=0, sticky="w")
+                mt_precision_row = ttk.Frame(mt_source)
+                mt_precision_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
+                ttk.Label(mt_precision_row, text="Wariant gotowego MT:").pack(side=tk.LEFT, padx=(0, 8))
+                ttk.Radiobutton(mt_precision_row, text="INT8", value="int8",
+                                variable=state["reuse_mt_precision"]).pack(side=tk.LEFT, padx=(0, 9))
+                ttk.Radiobutton(mt_precision_row, text="FP32", value="fp32",
+                                variable=state["reuse_mt_precision"]).pack(side=tk.LEFT)
+                mt_source_controls = tk.Frame(mt_source, bg=mt_source["bg"])
+                mt_source_controls.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+                mt_source_controls.grid_columnconfigure(0, weight=1)
+                mt_path_entry = ttk.Entry(mt_source_controls, textvariable=state["reuse_mt_path"])
+                mt_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+                mt_filename_var = tk.StringVar(value="Plik MT: nie wybrano")
+
+                def _update_mt_filename(*_args):
+                    current = str(state["reuse_mt_path"].get() or "").strip()
+                    mt_filename_var.set("Plik MT: " + Path(current).name if current else "Plik MT: nie wybrano")
+                    try:
+                        mt_path_entry.xview_moveto(1.0)
+                    except Exception:
+                        pass
+
+                state["reuse_mt_path"].trace_add("write", _update_mt_filename)
+
+                def _show_mt_folder():
+                    raw = str(state["reuse_mt_path"].get() or "").strip()
+                    if not raw or not Path(raw).is_file():
+                        exec_status_var.set("Najpierw wskaż istniejący pakiet MT (.alprmodel).")
+                        return
+                    try:
+                        folder = str(Path(raw).resolve().parent)
+                        if os.name == "nt":
+                            os.startfile(folder)
+                        else:
+                            subprocess.Popen(["xdg-open", folder])
+                    except Exception as exc:
+                        exec_status_var.set(f"Nie udało się otworzyć folderu MT: {exc}")
+
+                def choose_verified_mt(current_state=state):
+                    initial_dir = Path(CONFIG.get_mobile_model_packages_dir("plate"))
+                    selected = filedialog.askopenfilename(
+                        title=f"Wybierz istniejący pakiet MT {current_state['reuse_mt_precision'].get().upper()} (.alprmodel)",
+                        parent=executor_modal,
+                        initialdir=str(initial_dir),
+                        filetypes=(("Gotowy pakiet MT", "*.alprmodel"),),
+                    )
+                    if selected:
+                        current_state["reuse_mt_path"].set(selected)
+                        current_state["reuse_mt"].set(True)
+
+                ttk.Button(mt_source_controls, text="Wybierz MT",
+                           command=choose_verified_mt).grid(row=0, column=1, sticky="e")
+                ttk.Button(mt_source_controls, text="Z biblioteki MT",
+                           command=lambda current_state=state: _open_slot_mobile_library(current_state)).grid(
+                    row=0, column=2, sticky="e", padx=(5, 0))
+                tk.Label(mt_source_controls, textvariable=mt_filename_var,
+                         bg=mt_source["bg"], fg=muted, font=("Segoe UI", 8),
+                         anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
+                    row=1, column=0, sticky="ew", pady=(4, 0))
+                ttk.Button(mt_source_controls, text="Pokaż folder", command=_show_mt_folder).grid(
+                    row=1, column=1, sticky="e", pady=(4, 0))
+                tk.Label(
+                    mt_source_controls,
+                    text="Gotowy MT musi odpowiadać zaznaczonemu best.pt (SHA), "
+                         "imgsz oraz przejść kontrolę grafu TFLite zgodną z wybranym INT8 lub FP32. "
+                         "INT8 zachowuje status kalibracji zapisany w paczce; FP32 nie wymaga kalibracji.",
+                    bg=mt_source["bg"], fg=muted, font=("Segoe UI", 7),
+                    anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength(),
+                ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+                state["_reuse_mt_source_controls"] = mt_source_controls
+
+            if marker == "MZ" and "MT" in selected_by_marker:
+                mz_source = tk.Frame(
+                    panel, bg=blend_hex_colors(panel_bg, success, 0.045),
+                    padx=8, pady=6, highlightthickness=1,
+                    highlightbackground=blend_hex_colors(success, panel_bg, 0.45),
+                )
+                mz_source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+                mz_source.grid_columnconfigure(0, weight=1)
+                ttk.Checkbutton(
+                    mz_source,
+                    text="Użyj gotowego MZ (.alprmodel), bez ponownej konwersji",
+                    variable=state["reuse_mz"],
+                ).grid(row=0, column=0, sticky="w")
+                mz_precision_row = ttk.Frame(mz_source)
+                mz_precision_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
+                ttk.Label(mz_precision_row, text="Wariant gotowego MZ:").pack(side=tk.LEFT, padx=(0, 8))
+                ttk.Radiobutton(mz_precision_row, text="INT8", value="int8",
+                                variable=state["reuse_mz_precision"]).pack(side=tk.LEFT, padx=(0, 9))
+                ttk.Radiobutton(mz_precision_row, text="FP32", value="fp32",
+                                variable=state["reuse_mz_precision"]).pack(side=tk.LEFT)
+                controls_mz = tk.Frame(mz_source, bg=mz_source["bg"])
+                controls_mz.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+                controls_mz.grid_columnconfigure(0, weight=1)
+                mz_path_entry = ttk.Entry(controls_mz, textvariable=state["reuse_mz_path"])
+                mz_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
+                mz_filename = tk.StringVar(value="Plik MZ: nie wybrano")
+
+                def update_mz_filename(*_args):
+                    current = str(state["reuse_mz_path"].get() or "").strip()
+                    mz_filename.set("Plik MZ: " + Path(current).name if current else "Plik MZ: nie wybrano")
+                    try:
+                        mz_path_entry.xview_moveto(1.0)
+                    except Exception:
+                        pass
+
+                state["reuse_mz_path"].trace_add("write", update_mz_filename)
+
+                def choose_mz_file(current_state=state):
+                    selected = filedialog.askopenfilename(
+                        title=f"Wybierz istniejący pakiet MZ {current_state['reuse_mz_precision'].get().upper()} (.alprmodel)",
+                        parent=executor_modal,
+                        initialdir=str(Path(CONFIG.get_mobile_model_packages_dir("char"))),
+                        filetypes=(("Gotowy pakiet MZ", "*.alprmodel"),),
+                    )
+                    if selected:
+                        current_state["reuse_mz_path"].set(selected)
+                        current_state["reuse_mz"].set(True)
+
+                ttk.Button(controls_mz, text="Wybierz MZ", command=choose_mz_file).grid(
+                    row=0, column=1, sticky="e")
+                ttk.Button(controls_mz, text="Z biblioteki MZ",
+                           command=lambda current_state=state: _open_slot_mobile_library(current_state)).grid(
+                    row=0, column=2, sticky="e", padx=(5, 0))
+                tk.Label(controls_mz, textvariable=mz_filename,
+                         bg=mz_source["bg"], fg=muted, font=("Segoe UI", 8),
+                         anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
+                    row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+                tk.Label(
+                    mz_source,
+                    text="Gotowy MZ musi odpowiadać best.pt (SHA), mieć zgodne imgsz i dokładnie "
+                         "jeden zweryfikowany wariant TFLite wybranej precyzji INT8 albo FP32. "
+                         "Surowy MZ-DAY CLEAN .tflite pozostaje wyłącznie artefaktem badawczym.",
+                    bg=mz_source["bg"], fg=muted, font=("Segoe UI", 7),
+                    anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength(),
+                ).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+                state["_reuse_mz_source_controls"] = controls_mz
+
             formats = tk.Frame(panel, bg=blend_hex_colors(panel_bg, accent, 0.045), padx=9, pady=7)
-            formats.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+            formats.grid(row=3, column=0, sticky="ew", pady=(0, 8))
             formats.grid_columnconfigure(0, weight=1, uniform="mobile_export_format_cards")
             formats.grid_columnconfigure(1, weight=1, uniform="mobile_export_format_cards")
             tk.Label(
                 formats,
-                text="Formaty wykonawcze",
+                text=f"1. Formaty i precyzja — {marker}",
                 bg=formats["bg"],
                 fg=fg,
                 font=("Segoe UI", 8, "bold"),
@@ -11201,8 +11439,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 variable=state["ncnn"],
             )
 
+            params_title = tk.Label(panel, text="2. Parametry inferencji", bg=panel_bg, fg=fg,
+                                    font=("Segoe UI", 8, "bold"), anchor=tk.W)
+            params_title.grid(row=4, column=0, sticky="ew", pady=(0, 4))
             params = tk.Frame(panel, bg=panel_bg)
-            params.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+            params.grid(row=5, column=0, sticky="ew", pady=(0, 8))
             for grid_col in range(6):
                 params.grid_columnconfigure(grid_col, weight=1 if grid_col in {1, 3, 5} else 0)
             tk.Label(params, text="imgsz", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5))
@@ -11212,7 +11453,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             tk.Label(params, text="IoU", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=4, sticky="w", padx=(0, 5))
             ttk.Spinbox(params, from_=0.00001, to=1.0, increment=0.01, textvariable=state["iou"], width=7, format="%.5f").grid(row=0, column=5, sticky="w")
 
-            next_row = 5
+            next_row = 6
             if marker == "MP":
                 vehicle_box = tk.Frame(
                     panel,
@@ -11260,9 +11501,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 for item in calibration_suggestions
                 if str(item.get("label") or item.get("path") or "")
             }
-            calibration_intro = "INT8: manifest train + SHA. Wybierz tryb poniżej."
+            calibration_intro = f"3. Kalibracja INT8 — {marker} (train + SHA-256)"
             calibration_suggestion_text = "Wybór jawny; brak automatycznego datasetu kalibracji."
-            calibration_missing_text = "Przygotuj manifest w oknie Bezpieczna kalibracja INT8 (MT/MZ). FP32 nie wymaga kalibracji."
+            calibration_missing_text = "Wybierz tryb, przygotuj lub wskaż manifest dla tego modelu."
             tk.Label(
                 calibration,
                 text=calibration_intro,
@@ -11302,39 +11543,277 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     wraplength=_executor_panel_wraplength(),
                 ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
             else:
-                tk.Label(
+                state["_manifest_status_label"] = tk.Label(
                     calibration,
-                    text=calibration_missing_text,
+                    textvariable=state["manifest_status"],
                     bg=panel_bg,
-                    fg=warning,
+                    fg=muted,
                     font=("Segoe UI", 8, "bold"),
                     anchor=tk.W,
                     justify=tk.LEFT,
                     wraplength=_executor_panel_wraplength(),
-                ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-            ttk.Entry(calibration, textvariable=state["calibration"]).grid(row=3, column=0, sticky="ew", padx=(0, 7))
+                )
+                state["_manifest_status_label"].grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+            # W tej sekcji istnieje jedna ścieżka: tryb → przygotuj lub wybierz → manifest.
+            control = CalibrationModeControl(calibration, state)
+            state["_mode_control"] = control
+            control.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 7))
+
+            def prepare_slot_calibration(current_state=state):
+                return _open_candidate_int8_calibration(
+                    executor_modal, current_state["candidate"], options=current_state,
+                    source="Slot eksportu " + current_state["marker"], status=exec_status_var.set,
+                    current_candidate=lambda: current_state["candidate"],
+                    on_saved=lambda ctx, binding: prepared_calibrations.__setitem__(ctx.identity(), binding),
+                )
+
+            # Read-only discovery is only a candidate prefilter. Binding is permitted
+            # solely after the existing authoritative validation against live SHA.
+            manifest_edit_timer = {"id": None}
+            manifest_auto_timer = {"id": None}
+
+            def _calibration_parameters(current_state=state):
+                candidate_info = current_state["candidate"]
+                role = str(candidate_info.get("role") or _mobile_role_from_training_target(candidate_info.get("target") or ""))
+                mode = str(calibration_request_options(current_state).get("calibration_mode") or "strict")
+                return {
+                    "checkpoint": Path(candidate_info["best_weights"]),
+                    "role": role,
+                    "mode": mode,
+                    "imgsz": int(current_state["imgsz"].get()),
+                    "conf": float(current_state["conf"].get()),
+                    "iou": float(current_state["iou"].get()),
+                }
+
+            def _manifest_status(message: str, tone: str = "info", current_state=state) -> None:
+                current_state["manifest_status"].set(str(message))
+                label = current_state.get("_manifest_status_label")
+                if label is not None:
+                    try:
+                        label.configure(fg={"success": success, "warning": warning,
+                                            "error": error, "info": muted}.get(tone, muted))
+                    except Exception:
+                        pass
+
+            def _show_manifest_in_folder(current_state=state) -> None:
+                path_text = str(current_state["calibration"].get() or "").strip()
+                if not path_text or not Path(path_text).is_file():
+                    _manifest_status("Brak pliku do pokazania; wyszukaj lub wybierz manifest.", "warning")
+                    return
+                try:
+                    folder = Path(path_text).resolve().parent
+                    if os.name == "nt":
+                        os.startfile(str(folder))
+                    else:
+                        subprocess.Popen(["xdg-open", str(folder)])
+                except Exception as exc:
+                    _manifest_status(f"Nie udało się otworzyć folderu: {exc}", "warning")
+
+            def _apply_verified_manifest(item: dict, current_state=state) -> None:
+                # Manual edits are respected until the operator explicitly searches.
+                current_state["_manifest_programmatic"] = True
+                try:
+                    current_state["calibration"].set(str(item["path"]))
+                    current_state["calibration_fingerprint"].set(str(item["fingerprint"]))
+                    current_state["manifest_filename"].set("Plik: " + Path(item["path"]).name)
+                finally:
+                    current_state["_manifest_programmatic"] = False
+                _manifest_status(
+                    f"Zgodny manifest • {item['sample_count']} próbek train • "
+                    f"{item['status']} • SHA sprawdzony", "success",
+                )
+                try:
+                    path_widget.xview_moveto(1.0)  # show the filename, not C:/Users/...
+                except Exception:
+                    pass
+
+            def _choose_from_verified(options: list[dict], current_state=state) -> None:
+                selected_parameters = _calibration_parameters(current_state)
+                chooser = tk.Toplevel(executor_modal)
+                chooser.title("Zgodne manifesty INT8 — wybierz jeden")
+                chooser.transient(executor_modal)
+                chooser.geometry("740x320")
+                chooser.minsize(580, 240)
+                shell = tk.Frame(chooser, bg=bg, padx=15, pady=12)
+                shell.pack(fill="both", expand=True)
+                tk.Label(shell,
+                         text="Znaleziono kilka zgodnych manifestów. Wybierz właściwy — niczego nie wybieram automatycznie.",
+                         bg=bg, fg=fg, font=("Segoe UI", 10, "bold"),
+                         wraplength=680, justify=tk.LEFT, anchor=tk.W).pack(fill="x", pady=(0, 10))
+                choices = tk.Listbox(shell, height=min(8, max(3, len(options))), exportselection=False,
+                                     font=("Segoe UI", 9))
+                choices.pack(fill="both", expand=True)
+                for item in options:
+                    path = Path(item["path"])
+                    choices.insert(tk.END, f"{path.name}  |  {item['sample_count']} train  |  {path.parent}")
+                choices.selection_set(0)
+
+                def accept():
+                    selection = choices.curselection()
+                    if not selection:
+                        return
+                    if selected_parameters != _calibration_parameters(current_state):
+                        _manifest_status("Ustawienia zmieniły się od wyszukania — ponów sprawdzenie.", "warning")
+                        chooser.destroy()
+                        return
+                    _apply_verified_manifest(options[int(selection[0])], current_state)
+                    chooser.destroy()
+
+                buttons = tk.Frame(shell, bg=bg)
+                buttons.pack(fill="x", pady=(12, 0))
+                ttk.Button(buttons, text="Anuluj", command=chooser.destroy).pack(side=tk.RIGHT)
+                ttk.Button(buttons, text="Użyj wybranego manifestu", command=accept).pack(side=tk.RIGHT, padx=(0, 8))
+
+            def _search_manifest(*, manual_path: str = "", current_state=state) -> None:
+                if not (bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get())):
+                    _manifest_status("Najpierw zaznacz format INT8.", "warning")
+                    return
+                try:
+                    params = _calibration_parameters(current_state)
+                    if not params["checkpoint"].is_file():
+                        raise ValueError("Nie odnaleziono checkpointu best.pt.")
+                except Exception as exc:
+                    _manifest_status("Nie można sprawdzić manifestu: " + str(exc), "error")
+                    return
+                current_state["_manifest_lookup_token"] = int(current_state["_manifest_lookup_token"]) + 1
+                ticket = int(current_state["_manifest_lookup_token"])
+                _manifest_status("Sprawdzam wskazany manifest (SHA + źródła train)..." if manual_path
+                                 else "Szukam manifestów pasujących do checkpointu, imgsz i ustawień...", "info")
+
+                def worker():
+                    validated = []
+                    failures = []
+                    truncated = False
+                    try:
+                        from ..exporters.mobile_model_exporter import sha256_file as _checkpoint_sha
+                        if manual_path:
+                            paths = [str(Path(manual_path).resolve())]
+                        else:
+                            root_path = Path(__file__).resolve().parents[2]
+                            result = discover_matching_calibrations(
+                                root_path, role=params["role"],
+                                checkpoint_sha256=_checkpoint_sha(params["checkpoint"]),
+                                image_size=params["imgsz"],
+                                confidence_threshold=params["conf"],
+                                iou_threshold=params["iou"], mode=params["mode"],
+                            )
+                            paths = [item["path"] for item in result["matches"]]
+                            truncated = bool(result["truncated"])
+                        for candidate_path in paths:
+                            try:
+                                manifest = Path(candidate_path)
+                                if params["mode"] == "exploratory":
+                                    payload = exploratory_calibration.validate_manifest(
+                                        manifest, role=params["role"],
+                                        checkpoint=params["checkpoint"], image_size=params["imgsz"],
+                                        confidence_threshold=params["conf"], iou_threshold=params["iou"],
+                                    )
+                                else:
+                                    payload = validate_calibration_manifest(
+                                        manifest, role=params["role"],
+                                        checkpoint=params["checkpoint"], image_size=params["imgsz"],
+                                    )
+                                validated.append({
+                                    "path": str(manifest.resolve()),
+                                    "status": str(payload["status"]),
+                                    "fingerprint": str(payload["input_fingerprint"]),
+                                    "sample_count": len(payload["samples"]),
+                                })
+                            except Exception as exc:
+                                failures.append(f"{Path(candidate_path).name}: {str(exc)[:300]}")
+                    except Exception as exc:
+                        failures.append(f"{type(exc).__name__}: {str(exc)[:300]}")
+
+                    def done() -> None:
+                        try:
+                            if not executor_modal.winfo_exists() or ticket != int(current_state["_manifest_lookup_token"]):
+                                return
+                            if params != _calibration_parameters(current_state):
+                                _manifest_status("Ustawienia zmieniły się podczas sprawdzania. Ponów wyszukiwanie.", "warning")
+                                return
+                            if manual_path:
+                                if validated:
+                                    _apply_verified_manifest(validated[0], current_state)
+                                else:
+                                    current_state["calibration_fingerprint"].set("")
+                                    _manifest_status("Manifest niezgodny: " + (failures[0] if failures else "brak poprawnych danych"), "error")
+                                return
+                            if truncated:
+                                _manifest_status("Wyszukiwanie przekroczyło limit katalogów/plików. Wybierz plik ręcznie.", "warning")
+                            elif len(validated) == 1:
+                                if str(current_state["calibration"].get() or "").strip():
+                                    _manifest_status("Znaleziono zgodny manifest; aktualnego wyboru nie nadpisano.", "warning")
+                                else:
+                                    _apply_verified_manifest(validated[0], current_state)
+                            elif len(validated) > 1:
+                                _manifest_status(f"Znaleziono {len(validated)} zgodnych manifestów. Wybierz jeden.", "warning")
+                                _choose_from_verified(validated, current_state)
+                            elif failures:
+                                _manifest_status(f"Nie potwierdzono zgodnego manifestu: {failures[0]}", "warning")
+                            else:
+                                _manifest_status("Brak zgodnego manifestu w katalogach projektu i raportów. Możesz wskazać plik ręcznie.", "warning")
+                        except Exception as exc:
+                            _manifest_status(f"Nie udało się zakończyć sprawdzania manifestu: {exc}", "error")
+
+                    try:
+                        executor_modal.after(0, done)
+                    except Exception:
+                        pass
+
+                threading.Thread(target=worker, name=f"z4-manifest-{marker.lower()}", daemon=True).start()
 
             def choose_model_calibration(current_state=state) -> None:
+                initial_dir = Path(__file__).resolve().parents[2] / "Workspace"
+                existing = str(current_state["calibration"].get() or "").strip()
+                if existing and Path(existing).is_file():
+                    initial_dir = Path(existing).parent
                 selected = filedialog.askopenfilename(
                     title=f"Wybierz manifest kalibracji INT8 dla {current_state.get('marker')}",
                     parent=executor_modal,
+                    initialdir=str(initial_dir),
                     filetypes=(("Manifest kalibracji", "*.json"),),
                 )
                 if selected:
                     current_state["calibration"].set(selected)
+                    # Entry variable trace debounces the authoritative validation.
 
-            ttk.Button(calibration, text="Wybierz manifest INT8", command=choose_model_calibration).grid(row=3, column=1, sticky="e")
-            control = CalibrationModeControl(calibration, state)
-            state["_mode_control"] = control
-            control.grid(row=4, column=0, columnspan=2, sticky="ew", pady=5)
-            def prepare_slot_calibration(current_state=state):
-                return _open_candidate_int8_calibration(executor_modal, current_state["candidate"], options=current_state,
-                    source="Slot eksportu " + current_state["marker"], status=exec_status_var.set,
-                    current_candidate=lambda: current_state["candidate"],
-                    on_saved=lambda ctx, binding: prepared_calibrations.__setitem__(ctx.identity(), binding))
-            ttk.Button(calibration, text=f"Przygotuj kalibrację dla {marker}", command=prepare_slot_calibration).grid(
-                row=5, column=0, columnspan=2, sticky="ew")
-            state["calibration"].trace_add("write", lambda *_, current_state=state: current_state["calibration_fingerprint"].set(""))
+            ttk.Button(calibration, text="Znajdź zgodny manifest", command=lambda: _search_manifest()).grid(
+                row=4, column=0, columnspan=2, sticky="ew", pady=(0, 5))
+            ttk.Button(calibration, text="Przygotuj nowy manifest", command=prepare_slot_calibration).grid(
+                row=5, column=0, sticky="ew", padx=(0, 5), pady=(0, 4))
+            ttk.Button(calibration, text="Wybierz plik ręcznie", command=choose_model_calibration).grid(
+                row=5, column=1, sticky="ew", pady=(0, 4))
+            path_widget = ttk.Entry(calibration, textvariable=state["calibration"])
+            path_widget.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+            tk.Label(calibration, textvariable=state["manifest_filename"], bg=panel_bg,
+                     fg=muted, font=("Segoe UI", 8), anchor=tk.W,
+                     justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
+                row=7, column=0, sticky="ew", pady=(0, 4))
+            ttk.Button(calibration, text="Pokaż folder", command=_show_manifest_in_folder).grid(
+                row=7, column=1, sticky="e", pady=(0, 4))
+
+            def _on_manifest_path_change(*_args, current_state=state) -> None:
+                if current_state.get("_manifest_programmatic"):
+                    return
+                current_state["calibration_fingerprint"].set("")
+                path_text = str(current_state["calibration"].get() or "").strip()
+                current_state["manifest_filename"].set("Plik: " + Path(path_text).name if path_text else "Plik: nie wybrano")
+                current_state["_manifest_lookup_token"] = int(current_state["_manifest_lookup_token"]) + 1
+                _manifest_status("Ścieżka zmieniona — czekam na pełną weryfikację SHA." if path_text
+                                 else "Brak wybranego manifestu.", "warning")
+                pending = manifest_edit_timer.get("id")
+                if pending:
+                    try:
+                        executor_modal.after_cancel(pending)
+                    except Exception:
+                        pass
+                if path_text and (bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get())):
+                    manifest_edit_timer["id"] = executor_modal.after(
+                        450, lambda selected=path_text: _search_manifest(manual_path=selected, current_state=current_state))
+
+            state["calibration"].trace_add("write", _on_manifest_path_change)
+            if str(state["calibration"].get() or "").strip():
+                state["manifest_filename"].set("Plik: " + Path(str(state["calibration"].get())).name)
 
             def _sync_int8_calibration_hint(*_args, current_state=state) -> None:
                 try:
@@ -11355,7 +11834,81 @@ def _open_mobile_model_export_center(self, initial_run=None):
             except Exception:
                 pass
 
-            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes", "calibration_mode"):
+            def _queue_auto_manifest_lookup(*_args, current_state=state) -> None:
+                # Only when there is no manual selection, never overwrite a path.
+                if marker == "MT" and _state_reuses_existing_mt(current_state):
+                    return
+                if not (bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get())):
+                    return
+                selected_path = str(current_state["calibration"].get() or "").strip()
+                if selected_path:
+                    current_state["calibration_fingerprint"].set("")
+                    current_state["_manifest_lookup_token"] += 1
+                    _manifest_status("Weryfikuję manifest po zmianie ustawień...", "info")
+                pending = manifest_auto_timer.get("id")
+                if pending:
+                    try:
+                        executor_modal.after_cancel(pending)
+                    except Exception:
+                        pass
+                manifest_auto_timer["id"] = executor_modal.after(
+                    500 if selected_path else 240,
+                    lambda chosen=selected_path: _search_manifest(manual_path=chosen, current_state=current_state),
+                )
+
+            for _param_key in ("int8", "onnx_int8", "imgsz", "conf", "iou", "calibration_mode"):
+                state[_param_key].trace_add("write", _queue_auto_manifest_lookup)
+
+            def _sync_calibration_visibility(*_args, current_state=state) -> None:
+                if bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get()):
+                    calibration.grid()
+                else:
+                    calibration.grid_remove()
+
+            state["int8"].trace_add("write", _sync_calibration_visibility)
+            state["onnx_int8"].trace_add("write", _sync_calibration_visibility)
+            _sync_calibration_visibility()
+
+            if marker == "MT" and "MZ" in selected_by_marker:
+                def sync_reused_mt_ui(*_args):
+                    use_existing = _state_reuses_existing_mt(state)
+                    fields = state["_reuse_mt_source_controls"]
+                    if use_existing:
+                        fields.grid()
+                        for widget in (formats, params_title, params, calibration):
+                            widget.grid_remove()
+                    else:
+                        fields.grid_remove()
+                        for widget in (formats, params_title, params):
+                            widget.grid()
+                        _sync_calibration_visibility()
+
+                state["reuse_mt"].trace_add("write", sync_reused_mt_ui)
+                state["reuse_mt"].trace_add("write", _mark_executor_dirty)
+                state["reuse_mt_path"].trace_add("write", _mark_executor_dirty)
+                sync_reused_mt_ui()
+
+            if marker == "MZ" and "MT" in selected_by_marker:
+                def sync_reused_mz_ui(*_args):
+                    use_existing = _state_reuses_existing_mz(state)
+                    fields = state["_reuse_mz_source_controls"]
+                    if use_existing:
+                        fields.grid()
+                        for widget in (formats, params_title, params, calibration):
+                            widget.grid_remove()
+                    else:
+                        fields.grid_remove()
+                        for widget in (formats, params_title, params):
+                            widget.grid()
+                        _sync_calibration_visibility()
+
+                state["reuse_mz"].trace_add("write", sync_reused_mz_ui)
+                state["reuse_mz"].trace_add("write", _mark_executor_dirty)
+                state["reuse_mz_path"].trace_add("write", _mark_executor_dirty)
+                state["reuse_mz_precision"].trace_add("write", _mark_executor_dirty)
+                sync_reused_mz_ui()
+
+            for key in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz", "conf", "iou", "calibration", "vehicle_classes", "calibration_mode", "reuse_mt_precision"):
                 try:
                     state[key].trace_add("write", _mark_executor_dirty)
                 except Exception:
@@ -11366,6 +11919,190 @@ def _open_mobile_model_export_center(self, initial_run=None):
             model_states.append(state)
             _create_model_panel(model_cards_content, state, idx)
         _bind_model_cards_mousewheel(model_cards_content)
+
+        def show_f4_inventory() -> None:
+            """Read-only checkpoint-SHA-anchored FP32/INT8 matrix; no exporters."""
+            if worker_state.get("running"):
+                return
+            from .z4_mobile_artifact_registry import (
+                list_managed_packages, research_candidate, sha256_file,
+            )
+            from .z4_mobile_f4_inventory import build_f4_inventory, describe_f4_inventory
+            from .z4_mobile_f4_comparability import compare_f4_cross_precision, describe_f4_cross_precision
+            view = tk.Toplevel(executor_modal)
+            view.title("F4 — macierz gotowych paczek FP32 / INT8")
+            view.geometry("1030x700")
+            view.minsize(760, 460)
+            view.resizable(True, True)
+            ttk.Label(view, text="Inwentarz F4 — manifesty (bez walidacji grafu i bez konwersji).",
+                      padding=(14, 12, 14, 4)).pack(anchor="w")
+            from .z4_mobile_f4_pair_selection import validate_f4_pair_choice, F4PairBindingError
+            from .z4_mobile_artifact_registry import read_archive
+
+            pair_frame = ttk.LabelFrame(view, text="Wybierz istniejącą parę F4 — bez konwersji", padding=(10, 7))
+            pair_frame.pack(fill=tk.X, padx=12, pady=(0, 6))
+            fmt_var = tk.StringVar(value="INT8")
+            choice_var = {role: tk.StringVar(value="") for role in ("MT", "MZ")}
+            dropdowns = {}
+            options_by_role = {role: {} for role in ("MT", "MZ")}
+            inventory_context = {"report": None}
+            ttk.Label(pair_frame, text="Precyzja").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
+            fmt_dropdown = ttk.Combobox(pair_frame, textvariable=fmt_var, values=("INT8", "FP32"),
+                                        state="readonly", width=9)
+            fmt_dropdown.grid(row=0, column=1, sticky="w", padx=(0, 15), pady=3)
+            for index, role in enumerate(("MT", "MZ"), start=1):
+                ttk.Label(pair_frame, text=f"Paczka {role}").grid(row=index, column=0, sticky="w", padx=(0, 6), pady=3)
+                field = ttk.Combobox(pair_frame, textvariable=choice_var[role], state="disabled", width=90)
+                field.grid(row=index, column=1, columnspan=3, sticky="ew", pady=3)
+                dropdowns[role] = field
+            pair_frame.grid_columnconfigure(1, weight=1)
+            selection_notice = tk.StringVar(value="Najpierw poczekaj na wynik skanowania.")
+            ttk.Label(pair_frame, textvariable=selection_notice, wraplength=870).grid(
+                row=3, column=0, columnspan=3, sticky="w", pady=(4, 1))
+
+            def _sync_pair_action(*_args):
+                report = inventory_context.get("report")
+                fmt = str(fmt_var.get() or "").lower()
+                pair = ((report or {}).get("pairs") or {}).get(fmt) or {}
+                complete = (report is not None and not report.get("scan_truncated")
+                            and pair.get("state") == "MANIFEST_CANDIDATES_REQUIRE_FULL_VALIDATION"
+                            and all(choice_var[role].get() in options_by_role[role] for role in ("MT", "MZ")))
+                choose_button.configure(state=tk.NORMAL if complete else tk.DISABLED)
+
+            def _populate_pair_choices(_event=None):
+                report = inventory_context.get("report")
+                fmt = str(fmt_var.get() or "").lower()
+                pair = ((report or {}).get("pairs") or {}).get(fmt) or {}
+                allowed = (report is not None and not report.get("scan_truncated")
+                           and pair.get("state") == "MANIFEST_CANDIDATES_REQUIRE_FULL_VALIDATION")
+                for role in ("MT", "MZ"):
+                    role_options = options_by_role[role]
+                    role_options.clear()
+                    values = []
+                    if allowed:
+                        for i, item in enumerate(((pair.get("candidates") or {}).get(role) or []), start=1):
+                            path = str(item.get("path") or "")
+                            label = f"{i}. {Path(path).name}  |  {path}"
+                            role_options[label] = path
+                            values.append(label)
+                    choice_var[role].set("")
+                    dropdowns[role].configure(values=values, state="readonly" if values else "disabled")
+                if allowed:
+                    selection_notice.set("Wskaż osobno MT i MZ; przycisk przypisze paczki do kart eksportu. Pełna kontrola grafu pozostaje w preflight.")
+                else:
+                    selection_notice.set("Brak kompletnej pary w tej precyzji lub niekompletny skan. Przypisanie zablokowane.")
+                _sync_pair_action()
+
+            def _bind_selected_pair() -> None:
+                if worker_state.get("running") or not executor_modal.winfo_exists():
+                    return
+                report = inventory_context.get("report")
+                fmt = str(fmt_var.get() or "").lower()
+                try:
+                    binding = validate_f4_pair_choice(
+                        report,
+                        precision=fmt,
+                        package_paths={role: options_by_role[role].get(choice_var[role].get())
+                                       for role in ("MT", "MZ")},
+                        checkpoint_paths={role: Path(_state_for_marker(role)["candidate"]["best_weights"])
+                                          for role in ("MT", "MZ")},
+                        expected_image_size={role: export_image_size(_state_for_marker(role)["candidate"])
+                                             for role in ("MT", "MZ")},
+                        read_archive=read_archive,
+                        sha256_file=sha256_file,
+                    )
+                except (F4PairBindingError, OSError, ValueError, TypeError, KeyError) as exc:
+                    selection_notice.set(f"PRZYPISANIE ZABLOKOWANE: {exc}")
+                    return
+                snapshots = {}
+                try:
+                    for role in ("MT", "MZ"):
+                        state = _state_for_marker(role)
+                        key = f"reuse_{role.lower()}"
+                        snapshots[role] = (state[key].get(), state[key + "_path"].get(), state[key + "_precision"].get())
+                    for role in ("MT", "MZ"):
+                        state = _state_for_marker(role)
+                        key = f"reuse_{role.lower()}"
+                        state[key + "_precision"].set(fmt)
+                        state[key + "_path"].set(binding["roles"][role]["path"])
+                        state[key].set(True)
+                    f4_no_conversion.set(True)
+                except Exception as exc:
+                    for role, values in snapshots.items():
+                        try:
+                            state = _state_for_marker(role)
+                            key = f"reuse_{role.lower()}"
+                            state[key].set(values[0]); state[key + "_path"].set(values[1]); state[key + "_precision"].set(values[2])
+                        except Exception:
+                            pass
+                    selection_notice.set(f"Nie można przypisać pary do kart eksportu: {exc}")
+                    return
+                exec_preflight_state.update({"ready": False, "problems": [], "installable": False})
+                _sync_executor_buttons()
+                exec_status_var.set(f"F4 {fmt.upper()}: przypisano dwa istniejące pakiety z macierzy; preflight zweryfikuje graf i SHA ponownie. NIE uruchomiono eksportu.")
+                view.destroy()
+
+            choose_button = ttk.Button(pair_frame, text="Przypisz MT + MZ do eksportu (bez konwersji)",
+                                       command=_bind_selected_pair, state=tk.DISABLED)
+            choose_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+            fmt_dropdown.bind("<<ComboboxSelected>>", _populate_pair_choices, add="+")
+            for role in ("MT", "MZ"):
+                dropdowns[role].bind("<<ComboboxSelected>>", _sync_pair_action, add="+")
+
+            content = tk.Text(view, height=26, wrap="word", font=("Consolas", 9))
+            content.pack(fill="both", expand=True, padx=12, pady=(5, 3))
+            content.insert("1.0", "Sprawdzam dostępne paczki i SHA obu checkpointów...")
+            content.configure(state="disabled")
+            ttk.Button(view, text="Zamknij", command=view.destroy).pack(anchor="e", padx=12, pady=(5, 10))
+            results = queue.Queue(maxsize=1)
+
+            def scan():
+                try:
+                    pins = {}
+                    for state in model_states:
+                        role = str(state.get("marker") or "")
+                        if role not in {"MT", "MZ"}:
+                            continue
+                        path = Path(state["candidate"].get("best_weights"))
+                        pins[role] = sha256_file(path) if path.is_file() else ""
+                    packages_root = Path(CONFIG.DIR_6_MODELS_MOBILE_PACKAGES)
+                    rows, truncated = list_managed_packages(packages_root)
+                    candidate = research_candidate(Path(__file__).resolve().parents[2])
+                    if candidate is not None:
+                        rows.append(candidate)
+                    report = build_f4_inventory(rows, checkpoint_sha_by_role=pins,
+                                                scan_truncated=truncated)
+                    comparison = compare_f4_cross_precision(rows, report)
+                    matrix_text = describe_f4_inventory(report) + "\n\n" + describe_f4_cross_precision(comparison)
+                    results.put((True, matrix_text, report))
+                except Exception as exc:
+                    results.put((False, f"Nie udało się zbudować macierzy F4: {type(exc).__name__}: {exc}", None))
+
+            def collect():
+                if not view.winfo_exists():
+                    return
+                try:
+                    ok, message, report = results.get_nowait()
+                except queue.Empty:
+                    view.after(120, collect)
+                    return
+                inventory_context["report"] = report if ok else None
+                _populate_pair_choices()
+                content.configure(state="normal")
+                content.delete("1.0", "end")
+                content.insert("1.0", message)
+                content.configure(state="disabled")
+                if not ok:
+                    exec_status_var.set(message[:250])
+
+            threading.Thread(target=scan, name="z4-f4-readonly-inventory", daemon=True).start()
+            view.after(90, collect)
+
+        if set(selected_by_marker) == {"MT", "MZ"}:
+            ttk.Button(
+                intro_shell, text="Sprawdź warianty F4 na dysku (bez konwersji)",
+                command=show_f4_inventory,
+            ).pack(anchor=tk.W, pady=(3, 0))
 
         checks_shell = tk.Frame(
             model_grid,
@@ -11383,7 +12120,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         checks_shell.grid_rowconfigure(1, weight=1, minsize=340)
         tk.Label(
             checks_shell,
-            text="Gotowość eksportu i zależności",
+            text="4. Gotowość eksportu i zależności",
             bg=checks_shell["bg"],
             fg=fg,
             font=("Segoe UI", 10, "bold"),
@@ -11434,6 +12171,32 @@ def _open_mobile_model_export_center(self, initial_run=None):
             except Exception:
                 pass
 
+        # Narzędzia kontroli są w modalu EKSPORTU, nie w Centrum wyboru kandydatów.
+        verify_section = tk.Frame(checks_shell, bg=checks_shell["bg"])
+        verify_section.grid(row=2, column=0, sticky="ew", pady=(9, 0))
+        verify_section.grid_columnconfigure(0, weight=1)
+        verify_section.grid_columnconfigure(1, weight=1)
+        tk.Label(verify_section, text="Kontrola gotowego pakietu / wyniki z telefonu",
+                 bg=verify_section["bg"], fg=fg, font=("Segoe UI", 9, "bold"),
+                 anchor=tk.W).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+
+        def _inspect_last_or_selected_tflite() -> None:
+            if worker_state.get("running"):
+                return
+            precision_dialog = open_tflite_precision_dialog(executor_modal)
+            finished = last_exported_package.get("path")
+            if finished and Path(finished).is_file():
+                precision_dialog.after_idle(
+                    lambda dialog_ref=precision_dialog, package_path=Path(finished): dialog_ref.inspect(package_path)
+                )
+
+        ttk.Button(verify_section, text="Sprawdź precyzję TFLite",
+                   command=_inspect_last_or_selected_tflite).grid(
+            row=1, column=0, sticky="ew", padx=(0, 5))
+        ttk.Button(verify_section, text="Raporty z telefonu",
+                   command=lambda: open_mobile_report_browser(self, parent=executor_modal)).grid(
+            row=1, column=1, sticky="ew", padx=(5, 0))
+
         status_shell = tk.Frame(exec_root, bg=bg)
         status_shell.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         status_shell.grid_columnconfigure(0, weight=1)
@@ -11466,6 +12229,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
         actions_exec = tk.Frame(exec_root, bg=bg)
         actions_exec.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         actions_exec.grid_columnconfigure(0, weight=1)
+        tk.Label(actions_exec, text="5. Następny krok", bg=bg, fg=fg,
+                 font=("Segoe UI", 9, "bold"), anchor=tk.W).grid(
+            row=0, column=0, sticky="w", padx=(0, 12))
 
         def _set_executor_status(text: str, tone: str = "info") -> None:
             colors = {
@@ -11593,22 +12359,40 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 except Exception:
                     return fallback if value is None else value
 
-            return self._json_safe_training_value(
-                {
-                    "schema": "alpr.export.model_slot_settings.v1",
-                    "marker": str(state.get("marker") or _mobile_export_target_marker(candidate)),
-                    "candidate": _mobile_export_candidate_manifest_snapshot(candidate),
-                    "formats": list(formats),
-                    "quantizations": list(dict.fromkeys(quantizations)),
-                    "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
-                    "image_size": int(_state_value("imgsz", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE),
-                    "confidence_threshold": max(0.0, min(1.0, float(_state_value("conf", CONFIG.DEFAULT_CONFIDENCE) or CONFIG.DEFAULT_CONFIDENCE))),
-                    "iou_threshold": max(0.0, min(1.0, float(_state_value("iou", CONFIG.DEFAULT_IOU) or CONFIG.DEFAULT_IOU))),
-                    "calibration_data": str(_state_value("calibration", "") or ""),
-                    "calibration_choice": str(_state_value("calibration_choice", "") or ""),
-                    "vehicle_classes": str(_state_value("vehicle_classes", "") or ""),
-                }
-            )
+            snapshot = {
+                "schema": "alpr.export.model_slot_settings.v1",
+                "marker": str(state.get("marker") or _mobile_export_target_marker(candidate)),
+                "candidate": _mobile_export_candidate_manifest_snapshot(candidate),
+                "formats": list(formats),
+                "quantizations": list(dict.fromkeys(quantizations)),
+                "format_quantizations": {key: list(value) for key, value in format_quantizations.items()},
+                "image_size": int(_state_value("imgsz", CONFIG.DEFAULT_IMG_SIZE) or CONFIG.DEFAULT_IMG_SIZE),
+                "confidence_threshold": _mobile_export_threshold_or_default(_state_value("conf", CONFIG.DEFAULT_CONFIDENCE), CONFIG.DEFAULT_CONFIDENCE),
+                "iou_threshold": _mobile_export_threshold_or_default(_state_value("iou", CONFIG.DEFAULT_IOU), CONFIG.DEFAULT_IOU),
+                "calibration_data": str(_state_value("calibration", "") or ""),
+                "calibration_choice": str(_state_value("calibration_choice", "") or ""),
+                "vehicle_classes": str(_state_value("vehicle_classes", "") or ""),
+                "source_kind": "fresh_export",
+            }
+            if _state_reuses_existing_mt(state):
+                snapshot.update(
+                    source_kind="verified_existing_mt_package",
+                    source_package=str(state["reuse_mt_path"].get() or "").strip(),
+                    formats=["litert"], quantizations=[str(state["reuse_mt_precision"].get()).lower()],
+                    format_quantizations={"litert": [str(state["reuse_mt_precision"].get()).lower()]},
+                    image_size=int(export_image_size(candidate)),
+                    calibration_data="", calibration_choice="",
+                )
+            if _state_reuses_existing_mz(state):
+                snapshot.update(
+                    source_kind="verified_existing_mz_package",
+                    source_package=str(state["reuse_mz_path"].get() or "").strip(),
+                    formats=["litert"], quantizations=[str(state["reuse_mz_precision"].get()).lower()],
+                    format_quantizations={"litert": [str(state["reuse_mz_precision"].get()).lower()]},
+                    image_size=int(export_image_size(candidate)),
+                    calibration_data="", calibration_choice="",
+                )
+            return self._json_safe_training_value(snapshot)
 
         def _state_for_marker(marker: str) -> dict | None:
             for state in model_states:
@@ -11624,6 +12408,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
             vehicle_state = _state_for_marker("MP")
             if not plate_state or not char_state:
                 raise MobileExportError("Komplet ALPR wymaga dokladnie jednego modelu MT i jednego modelu MZ.")
+            if f4_no_conversion.get():
+                require_f4_selection(
+                    has_vehicle=(vehicle_state is not None),
+                    use_mt=_state_reuses_existing_mt(plate_state),
+                    use_mz=_state_reuses_existing_mz(char_state),
+                    mt_precision=str(plate_state["reuse_mt_precision"].get()),
+                    mz_precision=str(char_state["reuse_mz_precision"].get()),
+                )
             package_parts = []
             if vehicle_state:
                 package_parts.append(str(vehicle_state["candidate"].get("model_label") or "MP"))
@@ -11642,14 +12434,50 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     destination=destination.parent / "_mp_single_for_bundle.alprmodel",
                     include_metadata=include_metadata,
                 )
+            plate_package = None
+            plate_request = None
+            verified_existing_mt = None
+            if _state_reuses_existing_mt(plate_state):
+                candidate = plate_state["candidate"]
+                verified_existing_mt = validate_existing_mt_package(
+                    Path(str(plate_state["reuse_mt_path"].get() or "").strip()),
+                    Path(candidate.get("best_weights")),
+                    expected_image_size=export_image_size(candidate),
+                    validate_package=exporter.validate_package,
+                    expected_precision=str(plate_state["reuse_mt_precision"].get()).lower(),
+                )
+                plate_package = Path(verified_existing_mt["path"])
+            else:
+                plate_request = _build_state_request(
+                    plate_state,
+                    destination=destination.parent / "_mt_single_for_bundle.alprmodel",
+                    include_metadata=include_metadata,
+                )
+            character_package = None
+            character_request = None
+            verified_existing_mz = None
+            if _state_reuses_existing_mz(char_state):
+                verified_existing_mz = validate_existing_mz_package(
+                    Path(str(char_state["reuse_mz_path"].get() or "").strip()),
+                    Path(char_state["candidate"].get("best_weights")),
+                    expected_image_size=export_image_size(char_state["candidate"]),
+                    validate_package=exporter.validate_package,
+                    expected_precision=str(char_state["reuse_mz_precision"].get()).lower(),
+                )
+                character_package = Path(verified_existing_mz["path"])
             package_metadata = {
                 "source": "mobile_export_center",
                 "purpose": "mobile_detection_package",
                 "pipeline_variant": package_variant,
+                "f4_zero_conversion_only": bool(f4_no_conversion.get()),
                 "vehicle_candidate_iid": str(vehicle_state["candidate"].get("iid") or "") if vehicle_state else "",
                 "plate_candidate_iid": str(plate_state["candidate"].get("iid") or ""),
                 "character_candidate_iid": str(char_state["candidate"].get("iid") or ""),
             }
+            if verified_existing_mt is not None:
+                package_metadata["reused_verified_mt"] = dict(verified_existing_mt)
+            if verified_existing_mz is not None:
+                package_metadata["reused_verified_mz"] = dict(verified_existing_mz)
             if include_metadata:
                 package_metadata["package_configuration"] = self._json_safe_training_value(
                     {
@@ -11683,6 +12511,28 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         },
                     }
                 )
+            if verified_existing_mt is not None and include_metadata:
+                mt_snapshot = package_metadata["package_configuration"]["selected_models"]["MT"]
+                mt_precision = verified_existing_mt["precision"]
+                mt_snapshot.update(
+                    formats=["litert"], quantizations=[mt_precision],
+                    format_quantizations={"litert": [mt_precision]},
+                    confidence_threshold=verified_existing_mt["confidence_threshold"],
+                    iou_threshold=verified_existing_mt["iou_threshold"],
+                    calibration_status=verified_existing_mt["calibration_status"],
+                    source_package_sha256=verified_existing_mt["package_sha256"],
+                )
+            if verified_existing_mz is not None and include_metadata:
+                mz_snapshot = package_metadata["package_configuration"]["selected_models"]["MZ"]
+                mz_precision = verified_existing_mz["precision"]
+                mz_snapshot.update(
+                    formats=["litert"], quantizations=[mz_precision],
+                    format_quantizations={"litert": [mz_precision]},
+                    confidence_threshold=verified_existing_mz["confidence_threshold"],
+                    iou_threshold=verified_existing_mz["iou_threshold"],
+                    calibration_status=verified_existing_mz["calibration_status"],
+                    source_package_sha256=verified_existing_mz["package_sha256"],
+                )
             if vehicle_state:
                 vehicle_classes_value = vehicle_state.get("vehicle_classes")
                 try:
@@ -11693,19 +12543,17 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     vehicle_state["candidate"],
                     vehicle_classes_value,
                 )
-            return MobileAlprPackageRequest(
+            bundle_request = MobileAlprPackageRequest(
                 destination=destination,
                 vehicle_request=vehicle_request,
-                plate_request=_build_state_request(
-                    plate_state,
-                    destination=destination.parent / "_mt_single_for_bundle.alprmodel",
-                    include_metadata=include_metadata,
-                ),
+                plate_package=plate_package,
+                plate_request=plate_request,
+                character_package=character_package,
                 character_request=_build_state_request(
                     char_state,
                     destination=destination.parent / "_mz_single_for_bundle.alprmodel",
                     include_metadata=include_metadata,
-                ),
+                ) if character_package is None else None,
                 package_id=self._safe_model_export_slug(package_id_seed, fallback="ALPR-package")[:80],
                 name=(
                     f"ALPR {package_variant} | "
@@ -11714,8 +12562,50 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 version="1",
                 metadata=package_metadata,
             )
+            if f4_no_conversion.get():
+                require_f4_no_conversion_request(bundle_request)
+            return bundle_request
+
+        def _pending_executor_rows() -> list[tuple[str, str, str, str]]:
+            rows = []
+            for current_state in model_states:
+                current_marker = str(current_state.get("marker") or "-")
+                description = _executor_formats_description(current_state)
+                if _state_reuses_existing_mt(current_state):
+                    path_text = str(current_state["reuse_mt_path"].get() or "").strip()
+                    description += " | MT z istniejącej paczki: " + (Path(path_text).name if path_text else "nie wskazano")
+                elif _state_reuses_existing_mz(current_state):
+                    path_text = str(current_state["reuse_mz_path"].get() or "").strip()
+                    description += " | MZ z istniejącej paczki: " + (Path(path_text).name if path_text else "nie wskazano")
+                elif bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get()):
+                    path_text = str(current_state["calibration"].get() or "").strip()
+                    description += " | kalibracja: " + (Path(path_text).name if path_text else "wyszukiwanie / brak wyboru")
+                rows.append(("-", current_marker, "Wybór — do kontroli", description))
+            return rows
+
+        _pending_executor_rows_after = {"id": None}
+
+        def _schedule_pending_executor_rows() -> None:
+            if _pending_executor_rows_after.get("id"):
+                return
+
+            def paint():
+                _pending_executor_rows_after["id"] = None
+                if not exec_preflight_state.get("ready"):
+                    _set_executor_rows(_pending_executor_rows())
+
+            try:
+                _pending_executor_rows_after["id"] = executor_modal.after_idle(paint)
+            except Exception:
+                pass
 
         def _executor_formats_description(state: dict) -> str:
+            if _state_reuses_existing_mt(state):
+                requested = str(state["reuse_mt_precision"].get() or "?").upper()
+                return f"LiteRT/TFLite {requested} — z gotowego, sprawdzanego pakietu MT"
+            if _state_reuses_existing_mz(state):
+                requested = str(state["reuse_mz_precision"].get() or "?").upper()
+                return f"LiteRT/TFLite {requested} — z gotowego, sprawdzanego pakietu MZ"
             formats, quantizations = _selected_export_formats_and_quantizations(state)
             format_quantizations = _selected_export_format_quantizations(state)
             request = MobileExportRequest(
@@ -11730,6 +12620,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
             return _formats_description(request)
 
         def _executor_dependency_specs_for_state(state: dict) -> list[dict]:
+            if _state_reuses_existing_mt(state) or _state_reuses_existing_mz(state):
+                # Reused packages need validation, not YOLO reconversion dependencies.
+                return []
             formats, quantizations = _selected_export_formats_and_quantizations(state)
             descriptions = {
                 "ultralytics": "Eksport checkpointu YOLO do formatu mobilnego.",
@@ -11814,6 +12707,27 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 )
             )
 
+            if _state_reuses_existing_mt(state):
+                reusable_path = Path(str(state["reuse_mt_path"].get() or "").strip())
+                path_ok = reusable_path.is_file() and reusable_path.suffix.lower() == ".alprmodel"
+                rows.append((
+                    "Jest" if path_ok else "Brak", marker, "Gotowy pakiet MT",
+                    (f"Wskazany: {reusable_path}. SHA, graf i checkpoint weryfikuje preflight."
+                     if path_ok else "Wskaż istniejący plik MT (.alprmodel)."),
+                ))
+                rows.append(("Jest", marker, "Konwersja MT", f"Pominięta po weryfikacji; użyję istniejącego MT {state['reuse_mt_precision'].get().upper()}."))
+                return rows
+            if _state_reuses_existing_mz(state):
+                reusable_path = Path(str(state["reuse_mz_path"].get() or "").strip())
+                path_ok = reusable_path.is_file() and reusable_path.suffix.lower() == ".alprmodel"
+                rows.append((
+                    "Jest" if path_ok else "Brak", marker, "Gotowy pakiet MZ",
+                    (f"Wskazany: {reusable_path}. SHA, graf i checkpoint weryfikuje preflight."
+                     if path_ok else "Wskaż istniejący pakiet MZ (.alprmodel)."),
+                ))
+                rows.append(("Jest", marker, "Konwersja MZ", f"Pominięta wyłącznie po walidacji paczki MZ {state['reuse_mz_precision'].get().upper()}."))
+                return rows
+
             formats, quantizations = _selected_export_formats_and_quantizations(state)
             format_text = _executor_formats_description(state)
             rows.append(
@@ -11885,6 +12799,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
             for state in model_states:
                 candidate = state.get("candidate") if isinstance(state.get("candidate"), dict) else {}
                 marker = str(state.get("marker") or _mobile_export_target_marker(candidate) or "-")
+                if _state_reuses_existing_mt(state) or _state_reuses_existing_mz(state):
+                    continue  # Existing package validation owns its calibration evidence.
                 _formats, quantizations = _selected_export_formats_and_quantizations(state)
                 if "int8" not in quantizations:
                     continue
@@ -11991,7 +12907,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     )
                 _sync_executor_buttons()
                 return False
-            _set_executor_status("Eksport gotowy. Możesz zapisać gotowy plik .alprmodel.", "success")
+            _set_executor_status(
+                "F4: pakiety źródłowe MT+MZ zweryfikowane — składanie bez konwersji. "
+                "Wykonanie ALPR Mobile nadal wymaga osobnego testu na telefonie."
+                if f4_no_conversion.get() else
+                "Kontrola wstępna PASS. Warianty świeżego eksportu wymagają weryfikacji po konwersji.",
+                "success",
+            )
             exec_progress.stop()
             exec_progress.configure(mode="determinate")
             exec_progress_var.set(100.0)
@@ -12135,6 +13057,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 return
             try:
                 request = _build_executor_package_request(destination, include_metadata=True)
+                if isinstance(request, MobileAlprPackageRequest) and bool(
+                    (request.metadata or {}).get("f4_zero_conversion_only")
+                ):
+                    # Final user-selected path: no pre-existing F4 archive may be overwritten.
+                    require_f4_no_conversion_request(request, require_fresh_destination=True)
             except Exception as exc:
                 _set_executor_status(str(exc), "error")
                 return messagebox.showerror("Błąd eksportu mobilnego", str(exc), parent=executor_modal)
@@ -12173,16 +13100,122 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 except Exception:
                     pass
 
+            # One ID groups the started/result events of a single user export.
+            import uuid as _z4lib_uuid
+            _z4lib_operation_id = "Z4_" + _z4lib_uuid.uuid4().hex
+            _z4lib_operation_kind = (
+                "COMPLETE_PACKAGE_EXPORT" if isinstance(request, MobileAlprPackageRequest)
+                else "SINGLE_MODEL_EXPORT"
+            )
+
+            def _z4lib_event(outcome: str, *, path: str = "", detail: str = "") -> None:
+                from .z4_mobile_artifact_registry import append_event
+                append_event(
+                    CONFIG.DIR_6_MODELS_MOBILE_PACKAGES,
+                    operation_id=_z4lib_operation_id,
+                    operation=_z4lib_operation_kind,
+                    outcome=outcome, artifact_path=path, detail=detail,
+                )
+
             def worker() -> None:
+                conversion_plan = []
                 try:
+                    if bool((request.metadata or {}).get("f4_zero_conversion_only")):
+                        # Secondary fail-closed gate on immutable request, immediately
+                        # before any journal write or exporter/conversion dispatch.
+                        require_f4_no_conversion_request(request, require_fresh_destination=True)
+                    # Plan records only fresh checkpoint requests; reused packages
+                    # are never described as new conversions.
+                    conversion_plan = build_conversion_plan(
+                        request, parent_operation_id=_z4lib_operation_id,
+                    )
+                    # Journal is durable before any exporter/converter is started.
+                    _z4lib_event("STARTED", detail=f"Z4: {package_kind}")
+                    record_conversion_starts(
+                        CONFIG.DIR_6_MODELS_MOBILE_PACKAGES, conversion_plan,
+                        destination=Path(request.destination),
+                    )
                     if isinstance(request, MobileAlprPackageRequest):
-                        package_path = package_exporter.export(request, progress=progress_cb)
+                        def export_with_pinned_mz(active_request):
+                            """Do not allow a selected MZ file to change during packaging."""
+                            if active_request.character_package is None:
+                                return package_exporter.export(active_request, progress=progress_cb)
+                            provenance = dict((active_request.metadata or {}).get("reused_verified_mz") or {})
+                            expected_sha = str(provenance.get("package_sha256") or "").lower()
+                            if not expected_sha or _mt_package_sha256(active_request.character_package) != expected_sha:
+                                raise MobileExportError("MZ: plik pakietu zmienił się od kontroli SHA.")
+                            Path(active_request.destination).parent.mkdir(parents=True, exist_ok=True)
+                            with tempfile.TemporaryDirectory(prefix="alpr_mz_source_snapshot_",
+                                                             dir=str(Path(active_request.destination).parent)) as snapshot_dir:
+                                snapshot = Path(snapshot_dir) / "verified_mz.alprmodel"
+                                shutil.copyfile(active_request.character_package, snapshot)
+                                if _mt_package_sha256(snapshot) != expected_sha:
+                                    raise MobileExportError("MZ: migawka pakietu nie zgadza się z SHA źródła.")
+                                progress_cb(5.0, "MZ: zapisano zweryfikowany pakiet do migawki SHA; bez konwersji MZ.")
+                                return package_exporter.export(
+                                    replace(active_request, character_package=snapshot), progress=progress_cb,
+                                )
+
+                        def export_without_f4_overwrite(active_request):
+                            # Keep the legacy exporter unchanged for normal exports.
+                            # F4 publishes via atomic create-if-absent, NOT os.replace.
+                            if bool((active_request.metadata or {}).get("f4_zero_conversion_only")):
+                                from .z4_mobile_f4_atomic_publish import export_f4_atomic_no_overwrite
+                                return export_f4_atomic_no_overwrite(
+                                    active_request,
+                                    export_fn=export_with_pinned_mz,
+                                    validate_final=lambda candidate: package_exporter.validate_package(
+                                        candidate, require_precision=True,
+                                    ),
+                                )
+                            return export_with_pinned_mz(active_request)
+
+                        if request.plate_package is not None:
+                            # Pin original validated MT bytes before the long MZ export.
+                            # This prevents a changed source file from being bundled later.
+                            provenance = dict((request.metadata or {}).get("reused_verified_mt") or {})
+                            expected_sha = str(provenance.get("package_sha256") or "").lower()
+                            if not expected_sha or _mt_package_sha256(request.plate_package) != expected_sha:
+                                raise MobileExportError("MT: plik pakietu zmienił się od kontroli SHA.")
+                            Path(request.destination).parent.mkdir(parents=True, exist_ok=True)
+                            with tempfile.TemporaryDirectory(prefix="alpr_mt_source_snapshot_",
+                                                             dir=str(Path(request.destination).parent)) as snapshot_dir:
+                                snapshot = Path(snapshot_dir) / "verified_mt_selected_precision.alprmodel"
+                                shutil.copyfile(request.plate_package, snapshot)
+                                if _mt_package_sha256(snapshot) != expected_sha:
+                                    raise MobileExportError("MT: migawka pakietu nie zgadza się z SHA źródła.")
+                                progress_cb(4.0, "MT: zapisano zweryfikowany pakiet do migawki SHA; bez konwersji MT.")
+                                pinned_request = replace(request, plate_package=snapshot)
+                                package_path = export_without_f4_overwrite(pinned_request)
+                        else:
+                            package_path = export_without_f4_overwrite(request)
                         log_text = f"[MOBILE EXPORT] Utworzono pakiet ALPR {package_kind}: {package_path}"
                     else:
                         package_path = exporter.export(request, progress=progress_cb)
                         log_text = f"[MOBILE EXPORT] Utworzono model mobilny: {package_path}"
 
+                    _z4lib_registry_warning = ""
+                    try:
+                        conversion_warnings = record_conversion_results(
+                            CONFIG.DIR_6_MODELS_MOBILE_PACKAGES, conversion_plan,
+                            artifact_path=Path(package_path),
+                        )
+                        if conversion_warnings:
+                            _z4lib_registry_warning = "; ".join(conversion_warnings)
+                    except Exception as _conversion_error:
+                        _z4lib_registry_warning = f"Historia konwersji: {_conversion_error}"
+                    try:
+                        _z4lib_event("SUCCEEDED", path=str(package_path), detail=f"Z4: {package_kind}")
+                    except Exception as _z4lib_error:
+                        # The archive was produced successfully. Never report conversion failure
+                        # for a separate journal failure, but surface it explicitly to operator.
+                        _z4lib_registry_warning = (
+                            (_z4lib_registry_warning + "; ") if _z4lib_registry_warning else ""
+                        ) + str(_z4lib_error)
+                        logger.exception("Z4: nie udało się zapisać historii eksportu")
+
                     def done() -> None:
+                        last_exported_package["path"] = str(package_path)
                         set_running(False)
                         _sync_executor_buttons()
                         exec_progress.stop()
@@ -12195,6 +13228,12 @@ def _open_mobile_model_export_center(self, initial_run=None):
                             self._append_train_log(log_text)
                         except Exception:
                             pass
+                        if _z4lib_registry_warning:
+                            messagebox.showwarning(
+                                "Rejestr konwersji i eksportów",
+                                "Pakiet powstał, ale dziennik wymaga uwagi: " + _z4lib_registry_warning,
+                                parent=executor_modal,
+                            )
                         messagebox.showinfo(
                             artifact.success_title,
                             f"{artifact.message}\n{package_path}",
@@ -12205,6 +13244,18 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 except Exception as exc:
                     logger.exception("Nie udało się wykonać eksportu mobilnego")
                     error_text = str(exc)
+                    if conversion_plan:
+                        try:
+                            record_conversion_unconfirmed(
+                                CONFIG.DIR_6_MODELS_MOBILE_PACKAGES, conversion_plan,
+                                reason=error_text,
+                            )
+                        except Exception:
+                            logger.exception("Z4: błąd rejestracji niepotwierdzonych konwersji")
+                    try:
+                        _z4lib_event("FAILED", detail=error_text)
+                    except Exception:
+                        logger.exception("Z4: nie udało się zapisać błędu w rejestrze eksportów")
 
                     def failed() -> None:
                         set_running(False)
@@ -12240,17 +13291,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         exec_buttons["close"] = ttk.Button(actions_exec, text="Zamknij", command=executor_modal.destroy)
         exec_buttons["close"].grid(row=0, column=3, sticky="e", ipadx=8, ipady=3)
 
-        _set_executor_rows(
-            [
-                (
-                    "-",
-                    str(state.get("marker") or "-"),
-                    "Czeka na sprawdzenie",
-                    _executor_formats_description(state),
-                )
-                for state in model_states
-            ]
-        )
+        _set_executor_rows(_pending_executor_rows())
         _sync_executor_buttons()
 
         # Re-fit after the complete executor UI (including the footer) exists.
@@ -12805,34 +13846,25 @@ def _open_mobile_model_export_center(self, initial_run=None):
     candidate_tree.bind("<KeyRelease-Up>", lambda _event: dialog.after_idle(on_candidate_select), add="+")
     candidate_tree.bind("<KeyRelease-Down>", lambda _event: dialog.after_idle(on_candidate_select), add="+")
 
+    # Z4LIB001: browse existing mobile artifacts; read-only until operator chooses an action.
+    def _open_z4_mobile_artifact_library() -> None:
+        from .z4_mobile_artifact_library import open_mobile_artifact_library
+        open_mobile_artifact_library(dialog)
+
+    ttk.Button(
+        actions, text="Biblioteka modeli mobilnych", command=_open_z4_mobile_artifact_library
+    ).grid(row=1, column=0, columnspan=3, sticky="w", padx=(0, 8), pady=(5, 0), ipadx=8, ipady=2)
+
     export_button = ttk.Button(
         actions,
         text="Eksportuj zaznaczone",
         command=open_selected_mobile_export_executor,
         state=tk.DISABLED,
     )
-    ttk.Button(
-        actions,
-        text="Raporty z telefonu",
-        command=lambda: open_mobile_report_browser(self, parent=dialog),
-    ).grid(row=0, column=0, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-    ttk.Button(actions, text="Sprawdź precyzję TFLite",
-               command=lambda: open_tflite_precision_dialog(dialog)).grid(
-                   row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-    center_calibration_options = {"imgsz": imgsz_var, "conf": conf_var, "iou": iou_var, "calibration": calibration_var}
-    def calibrate_highlighted():
-        return _open_candidate_int8_calibration(dialog, selected_state["candidate"], options=center_calibration_options,
-            source="Centrum — wskazany model (nie checkbox Eksport)",
-            status=lambda message: set_status(message, "info"), current_candidate=lambda: selected_state["candidate"],
-            on_saved=lambda ctx, binding: prepared_calibrations.__setitem__(ctx.identity(), binding))
-    ttk.Button(actions, text="Kalibracja INT8 — wskazany model",
-               command=calibrate_highlighted).grid(
-                   row=0, column=2, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-    ttk.Button(actions, text="Wybierz trening ręcznie", command=lambda: open_int8_calibration_dialog(dialog)).grid(
-        row=0, column=3, sticky="w", padx=(0, 16), ipadx=8, ipady=2)
-    export_button.grid(row=0, column=4, sticky="e", padx=(0, 8), ipadx=8, ipady=2)
+    # Z4_MODAL_EXPORT_UX_MT_MZ_V1_20261012: Centrum = wybór modeli, bez narzędzi eksportu.
+    export_button.grid(row=0, column=1, sticky="e", padx=(0, 8), ipadx=8, ipady=2)
     close_button = ttk.Button(actions, text="Zamknij", command=dialog.destroy)
-    close_button.grid(row=0, column=5, sticky="e", ipadx=8, ipady=2)
+    close_button.grid(row=0, column=2, sticky="e", ipadx=8, ipady=2)
     # One action row at every supported width/DPI; no clipped or orphaned CTA.
     dialog.update_idletasks()
     required_width = actions.winfo_reqwidth() + 32

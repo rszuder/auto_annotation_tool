@@ -177,40 +177,37 @@ def test_strict_missing_final_inventory_still_visible_and_blocked(root,tmp_path)
     d.destroy()
 
 
-def test_center_highlight_is_independent_of_export_checkboxes_and_slot(root,tmp_path):
+def test_contextual_modal_slots_preserve_original_candidate_identity(root,tmp_path):
     pairs=[candidate_fixture(tmp_path/label,role,rid,label) for role,rid,label,_ in RUNS]
     candidates=[c for f,c in pairs]
     host=SimpleNamespace(app=SimpleNamespace(root=root,palette={},show_assistant_message=Mock()),frame=root,
                          _build_mobile_model_export_path=lambda *_:tmp_path/'unused.alprmodel')
     def walk(w):
         yield w
-        for child in w.winfo_children():yield from walk(child)
+        for child in w.winfo_children(): yield from walk(child)
     with patch.object(export,"_collect_mobile_export_candidates",return_value=candidates), \
          patch.object(export,"open_int8_calibration_dialog") as open_dialog, \
          patch.object(export.MobileModelExporter,"export",side_effect=AssertionError("export forbidden")):
         center=export._open_mobile_model_export_center(host);center.deiconify();root.update()
         tree=next(w for w in walk(center) if isinstance(w,ttk.Treeview) and len(w.get_children())==4)
-        button=next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Kalibracja INT8 — wskazany model')
-        def highlight(index):
-            tree.selection_set(candidates[index]["iid"]);tree.event_generate('<<TreeviewSelect>>');root.update()
-        for index in (0,2):
-            highlight(index);button.invoke()
-            ctx=open_dialog.call_args.kwargs['context']
-            assert ctx.run_id==RUNS[index][1] and ctx.image_size==RUNS[index][3]
-        # Select export checkboxes of DAY pair, then point at the other MT.
         for index in (0,2):
             iid=candidates[index]["iid"];tree.see(iid);root.update()
-            box=tree.bbox(iid,'#1'); assert box
+            box=tree.bbox(iid,'#1');assert box
             tree.event_generate('<Button-1>',x=box[0]+5,y=box[1]+box[3]//2);root.update()
-        for index in (0,2,1):
-            highlight(index);button.invoke()
-            ctx=open_dialog.call_args.kwargs['context']
-            assert ctx.run_id==RUNS[index][1] and ctx.role==RUNS[index][0] and ctx.image_size==RUNS[index][3]
+        # Different highlight must not change the export slots.
+        tree.selection_set(candidates[1]['iid']);tree.event_generate('<<TreeviewSelect>>');root.update()
         next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Eksportuj zaznaczone').invoke();root.update()
+        controls=[w for w in walk(center) if isinstance(w,ui.CalibrationModeControl)]
+        assert len(controls)==2
         for marker,index in [('MT',0),('MZ',2)]:
-            next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Przygotuj kalibrację dla '+marker).invoke()
+            slot=next(c for c in controls if c.variables['marker']==marker)
+            slot.variables['litert'].set(False)
+            slot.variables['int8'].set(True)
+            button=next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Przygotuj manifest INT8 — '+marker)
+            button.invoke()
             ctx=open_dialog.call_args.kwargs['context']
-            assert ctx.run_id==RUNS[index][1] and ctx.source=='Slot eksportu '+marker
+            assert ctx.run_id==RUNS[index][1] and ctx.image_size==RUNS[index][3]
+            assert ctx.role==RUNS[index][0] and ctx.source=='Slot eksportu '+marker
         center.destroy()
 
 
@@ -249,7 +246,7 @@ def test_save_cancelled_by_input_change_before_write(root,tmp_path):
     d.destroy()
 
 
-def test_center_saved_manifest_returns_to_exact_future_export_slot(root,tmp_path):
+def test_manifest_prepared_in_mt_slot_does_not_leak_to_mz(root,tmp_path):
     f,mt=candidate_fixture(tmp_path/'mt')
     _,mz=candidate_fixture(tmp_path/'mz','character','20261007_215302','MZ-DAY')
     host=SimpleNamespace(app=SimpleNamespace(root=root,palette={},show_assistant_message=Mock()),frame=root,
@@ -261,8 +258,15 @@ def test_center_saved_manifest_returns_to_exact_future_export_slot(root,tmp_path
          patch.object(export.MobileModelExporter,'export',side_effect=AssertionError('export forbidden')):
         center=export._open_mobile_model_export_center(host);center.deiconify();root.update()
         tree=next(w for w in walk(center) if isinstance(w,ttk.Treeview) and len(w.get_children())==2)
-        tree.selection_set(mt['iid']);tree.event_generate('<<TreeviewSelect>>');root.update()
-        next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Kalibracja INT8 — wskazany model').invoke()
+        for c in (mt,mz):
+            tree.see(c['iid']);root.update();box=tree.bbox(c['iid'],'#1');assert box
+            tree.event_generate('<Button-1>',x=box[0]+5,y=box[1]+box[3]//2);root.update()
+        next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Eksportuj zaznaczone').invoke();root.update()
+        controls=[w for w in walk(center) if isinstance(w,ui.CalibrationModeControl)]
+        assert len(controls)==2
+        mt_slot=next(c for c in controls if c.variables['marker']=='MT')
+        mt_slot.variables['litert'].set(False);mt_slot.variables['int8'].set(True)
+        next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Przygotuj manifest INT8 — MT').invoke()
         d=next(w for w in walk(center) if isinstance(w,ui.Int8CalibrationDialog))
         d.mode.set(exp.LABEL);bind_inputs(d,f)
         d.values['limit'].set('2')
@@ -272,18 +276,12 @@ def test_center_saved_manifest_returns_to_exact_future_export_slot(root,tmp_path
             d.save();pump(d,lambda:not d._busy)
         fingerprint=d.result['input_fingerprint'];assert d._saved_path==p
         d.destroy();root.update()
-        for c in (mt,mz):
-            tree.see(c['iid']);root.update();box=tree.bbox(c['iid'],'#1');assert box
-            tree.event_generate('<Button-1>',x=box[0]+5,y=box[1]+box[3]//2);root.update()
-        next(w for w in walk(center) if isinstance(w,ttk.Button) and w['text']=='Eksportuj zaznaczone').invoke();root.update()
-        controls=[w for w in walk(center) if isinstance(w,ui.CalibrationModeControl)]
-        assert len(controls)==2
         for control in controls:
             s=control.variables
             if s['marker']=='MT':
                 assert s['calibration'].get()==str(p) and s['calibration_fingerprint'].get()==fingerprint
                 assert s['calibration_mode'].get()=='exploratory'
-            else:assert not s['calibration'].get()
+            else: assert not s['calibration'].get()
             assert 'exploratory_confirmation' not in s and not hasattr(control, 'check')
         center.destroy()
 

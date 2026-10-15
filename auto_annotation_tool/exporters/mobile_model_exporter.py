@@ -948,6 +948,33 @@ def _resolve_ncnn_output_spec(
 def _validate_variant_output_contract(runtime: str, output: dict, *, task: str, class_count: int) -> None:
     """Validate the runtime's complete output contract."""
     output_format = output.get("output_format")
+    if output_format == "raw_split_ltrb_scores_v1":
+        # T2-I-10: only the SHA-pinned research MZ-CLEAN split contract.
+        # This is a static-package validation path, NOT conversion/export approval.
+        fixed = {
+            "decoder": "ultralytics_detect_split_ltrb_scores_int8_v1",
+            "output_format": "raw_split_ltrb_scores_v1", "box_format": "ltrb",
+            "tensor_layout": "channels_first", "class_count": 36,
+            "keypoint_count": 0, "keypoint_dimensions": 0,
+            "has_objectness": False, "normalized_coordinates": True,
+            "nms_in_graph": False, "nms_required": False,
+        }
+        if runtime != "tflite" or task != "detect" or class_count != 36:
+            raise MobileExportError("MZ_SPLIT_RUNTIME_ROLE_CLASS_NOT_ALLOWED")
+        for key, required in fixed.items():
+            actual = output.get(key)
+            if type(actual) is not type(required) or actual != required:
+                raise MobileExportError(f"MZ_SPLIT_OUTPUT_CONTRACT_MISMATCH: {key}")
+        if output.get("end2end_output", False) is not False:
+            raise MobileExportError("MZ_SPLIT_END2END_FORBIDDEN")
+        for key in ("confidence_threshold", "iou_threshold"):
+            try:
+                raw_value = output[key]
+                if type(raw_value) not in (float, int) or not (0 <= raw_value <= 1):
+                    raise ValueError(key)
+            except (KeyError, ValueError, TypeError) as exc:
+                raise MobileExportError(f"MZ_SPLIT_INVALID_THRESHOLD: {key}") from exc
+        return
     if output_format not in {"raw_yolo", "end2end_detections"}:
         raise MobileExportError(f"Wariant {runtime}: nieprawidłowy output_format={output_format!r}.")
     end2end = output_format == "end2end_detections"
@@ -1387,8 +1414,136 @@ def validate_checkpoint_metadata(checkpoint: Path, metadata: dict | None) -> Non
         raise MobileExportError("Profil kandydata i manifest wskazują różne najlepsze epoki. Odśwież listę modeli.")
 
 
+# Z4_MZ_RAW_INT8_PRECONVERSION_SAFETY_GATE_20261012_V1
+# This is a preconversion safety barrier, NOT a claim that RAW MZ is deployment-ready.
+_MZ_DAY_YOLO26S_KNOWN_MIXED_CHECKPOINT_SHA256 = (
+    "631bb1453554cdb6b15eca724baa392e2acffb350899107f892dc11f937dbbf8"
+)
+
+
+def _mz_raw_int8_export_block_reason(request: MobileExportRequest) -> str:
+    """Block a known mixed MZ-DAY export or an unimplemented exploratory MZ path.
+
+    Structural verification belongs to the resulting TFLite bytes, and a
+    two-output RAW model requires a client decoder not provided by v1.
+    Never silently select FP32 or rerun the known-costly conversion.
+    """
+    try:
+        if _normalize_role(request.role) != "character":
+            return ""
+        if "int8" not in _request_format_quantization_map(request).get("litert", ()):
+            return ""
+    except (MobileExportError, ValueError, TypeError, AttributeError):
+        # Existing preflight independently reports unsupported roles/options.
+        return ""
+
+    known_mixed_model = False
+    try:
+        path = Path(request.checkpoint)
+        if path.is_file():
+            known_mixed_model = (
+                sha256_file(path).lower() == _MZ_DAY_YOLO26S_KNOWN_MIXED_CHECKPOINT_SHA256
+            )
+    except (OSError, ValueError, TypeError):
+        # Existing preflight independently reports the missing/broken checkpoint.
+        pass
+
+    exploratory_mz = str(getattr(request, "calibration_mode", "") or "").strip().lower() == exploratory.MODE
+    if not known_mixed_model and not exploratory_mz:
+        return ""
+    source = "znany checkpoint MZ-DAY (MIXED)" if known_mixed_model else "badawczy tor MZ INT8"
+    return (
+        "MZ_RAW_INT8_CONTRACT_NOT_READY: " + source + ". "
+        "Standardowa konwersja nie ma potwierdzonego pelnego grafu signed INT8; "
+        "odzyskany RAW z 2 wyjsciami wymaga jeszcze pelnej walidacji grafu "
+        "i osobnego dekodera Android. "
+        "Wstrzymano eksport przed konwersja, bez cichego fallbacku FP32. "
+        "Badania: EXPLORATORY_ONLY, FINAL_TEST_NOT_VERIFIED."
+    )
+
+
+def _validate_mz_split_research_archive(archive, manifest: dict) -> None:
+    """Verify embedded TRAIN evidence refs; NEVER infer actual calibration usage."""
+    research = manifest["research_mz_int8"]
+    if manifest.get("calibration_evidence") is not None:
+        raise MobileExportError("MZ_SPLIT_REUSE_CANNOT_ASSERT_CALIBRATION_LOADER_USAGE")
+    required = {
+        "staged_contract": ("research/staged_contract.json", "610775c88d60e0c6798f49b9575ce75e320b02f48a2e34b8e2d23af5003cef56"),
+        "clean_evidence": ("research/clean_evidence.json", "bdf93990c1f971f571b281b73c02882ebf84adf680050ec31278ef66130678c3"),
+        "train_parity": ("research/train_parity.json", "f2f1b89ec18fd9d71c40c1dbd280bfcef9ea32f3c78d7faa4be9ba8d53976b45"),
+    }
+    refs = research.get("evidence")
+    if not isinstance(refs, dict) or set(refs) != set(required) | {"train_calibration"}:
+        raise MobileExportError("MZ_SPLIT_RESEARCH_EVIDENCE_SET_MISMATCH")
+    for key, (path, digest) in required.items():
+        if refs.get(key) != {"file": path, "sha256": digest}:
+            raise MobileExportError(f"MZ_SPLIT_EVIDENCE_REFERENCE_MISMATCH: {key}")
+        try:
+            blob = archive.read(path)
+        except KeyError as exc:
+            raise MobileExportError(f"MZ_SPLIT_RESEARCH_EVIDENCE_MISSING: {key}") from exc
+        if hashlib.sha256(blob).hexdigest() != digest:
+            raise MobileExportError(f"MZ_SPLIT_RESEARCH_EVIDENCE_SHA_MISMATCH: {key}")
+    calibration = refs["train_calibration"]
+    if (not isinstance(calibration, dict) or calibration.get("file") != "research/calibration_manifest.json"
+            or not re.fullmatch(r"[a-f0-9]{64}", str(calibration.get("sha256") or ""))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(calibration.get("input_fingerprint") or ""))):
+        raise MobileExportError("MZ_SPLIT_CALIBRATION_REFERENCE_INVALID")
+    try:
+        data = archive.read(calibration["file"])
+    except KeyError as exc:
+        raise MobileExportError("MZ_SPLIT_CALIBRATION_MISSING") from exc
+    if hashlib.sha256(data).hexdigest() != calibration["sha256"]:
+        raise MobileExportError("MZ_SPLIT_CALIBRATION_SHA_MISMATCH")
+    try:
+        cal = json.loads(data)
+        exploratory.validate_embedded_manifest(cal, role="character")
+        if (cal["input_fingerprint"] != calibration["input_fingerprint"]
+                or cal["checkpoint"]["sha256"] != manifest["source"]["checkpoint_sha256"]
+                or cal["config"]["confidence_threshold"] != manifest["output"]["confidence_threshold"]
+                or cal["config"]["iou_threshold"] != manifest["output"]["iou_threshold"]
+                or cal["preprocessing"]["width"] != 320 or cal["preprocessing"]["height"] != 320):
+            raise MobileExportError("MZ_SPLIT_CALIBRATION_METADATA_MISMATCH")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise MobileExportError(f"MZ_SPLIT_CALIBRATION_PAYLOAD_INVALID: {exc}") from exc
+
+
 class MobileModelExporter:
     """Export trained YOLO weights into the Android ALPR model-package contract."""
+
+    def inspect_existing_mz_raw_int8_research(
+        self, *, model: Path, evidence: Path, train_parity: Path, checkpoint: Path
+    ) -> dict:
+        """Audit the preconverted MZ-DAY artifact without packing or exporting it.
+
+        Does not bypass MZ_RAW_INT8_CONTRACT_NOT_READY, modify the GUI, call
+        Ultralytics or certify any Android/final_test result. Returns only
+        a provisional machine-readable research contract for later engineering.
+        """
+        from .mz_raw_int8_reuse import inspect_mz_day_research_candidate
+        return inspect_mz_day_research_candidate(
+            model=model, evidence=evidence, train_parity=train_parity,
+            checkpoint=checkpoint,
+        )
+
+    def assess_existing_mz_day_int8_packaging(
+        self,
+        *,
+        repo_root: Path,
+        calibration_manifest: Path | None = None,
+        verify_checkpoint_labels: bool = False,
+    ) -> dict:
+        """Read-only MZ CLEAN packaging readiness. Does NOT authorize .alprmodel.
+
+        The ordinary MZ_RAW_INT8_CONTRACT_NOT_READY block remains active;
+        static signed-INT8 evidence alone does not prove Android import or F4.
+        """
+        from .mz_raw_int8_package_readiness import assess_research_mz_int8
+        return assess_research_mz_int8(
+            repo_root,
+            calibration_manifest=calibration_manifest,
+            verify_checkpoint_labels=verify_checkpoint_labels,
+        )
 
     def _calibration_for_request(self, request: MobileExportRequest) -> dict:
         if request.calibration_mode == "strict":
@@ -1427,7 +1582,28 @@ class MobileModelExporter:
         report = analyze_tflite_file(full)
         io = [tensor for graph in report.get("subgraphs", []) for key in ("inputs", "outputs") for tensor in graph[key]]
         if report["classification"] != "INT8" or not io or any(t["dtype"] != "INT8" for t in io):
+            # F4_RESEARCH_INT8_RECOVERY_GUI_HOOK_V1
+            # Strict export policy and the original diagnostics remain unchanged.
+            # Only the explicit exploratory single-class plate workflow may try this.
+            recovery_failure = ""
+            if (report["classification"] == "MIXED" and request is not None
+                    and request.calibration_mode == exploratory.MODE and request.role == "plate"):
+                try:
+                    from .research_int8_recovery import recover_research_int8
+                    fixed = recover_research_int8(
+                        full, report=report,
+                        diagnostics_root=MobileModelExporter._precision_diagnostics_root(),
+                    )
+                except Exception as exc:
+                    recovery_failure = f" RESEARCH_INT8_RECOVERY_FAILED={type(exc).__name__}: {exc}"
+                    logging.warning("Badawcza korekta TopK/Concat INT8 odrzucona: %s", recovery_failure)
+                else:
+                    logging.info("Badawcza korekta TopK/Concat INT8 przeszla statyczny i CPU parity gate: %s", fixed)
+                    return fixed
             reason = f"FULL_INT8_OUTPUT_NOT_PROVEN: graf={report['classification']}; wymagane signed INT8 I/O."
+
+            if recovery_failure:
+                reason += recovery_failure[:600]
             try:
                 from .rejected_precision import write_rejected_precision
                 diagnostic = write_rejected_precision(full, report,
@@ -1476,6 +1652,10 @@ class MobileModelExporter:
             _normalize_role(request.role)
         except Exception as exc:
             problems.append(str(exc))
+
+        mz_raw_guard = _mz_raw_int8_export_block_reason(request)
+        if mz_raw_guard:
+            problems.append(mz_raw_guard)
 
         formats = _normalized_export_formats(request.formats)
         if not formats:
@@ -1784,6 +1964,13 @@ class MobileModelExporter:
                 validate_archive_inventory(archive, manifest)
             except (ValueError, KeyError, TypeError) as exc:
                 raise MobileExportError(f"Nieprawidłowe inventory SHA źródeł: {exc}") from exc
+            # A reused research MZ did NOT rerun the calibration loader.
+            # Validate SHA-bound research sources without fabricating a
+            # CONSUMED_BY_VERIFIED_LOADER calibration_usage artifact.
+            if any(isinstance(variant, dict) and
+                   (variant.get("output") or manifest.get("output") or {}).get("output_format")
+                   == "raw_split_ltrb_scores_v1" for variant in manifest.get("variants", [])):
+                _validate_mz_split_research_archive(archive, manifest)
             evidence = manifest.get("calibration_evidence")
             if evidence is not None:
                 try:
@@ -2132,6 +2319,10 @@ class MobileModelExporter:
         return variant
 
     def _run_ultralytics_export(self, model, *, runtime: str, precision: str, request: MobileExportRequest):
+        if runtime == "tflite" and precision == "int8":
+            mz_raw_guard = _mz_raw_int8_export_block_reason(request)
+            if mz_raw_guard:
+                raise MobileExportError(mz_raw_guard)
         imgsz = _ultralytics_imgsz(request.image_size)
         common = {
             "imgsz": imgsz,
@@ -2536,6 +2727,39 @@ class MobileModelExporter:
         variants = list(manifest.get("variants") or [])
         if not variants:
             raise MobileExportError("Manifest nie zawiera wariantów.")
+        if any(isinstance(item, dict) and (
+            (item.get("output") or output).get("output_format") == "raw_split_ltrb_scores_v1"
+        ) for item in variants):
+            # Legacy single-output formats are unaffected. Research split is
+            # bound to ONE known immutable TFLite and exact ordered labels.
+            research = manifest.get("research_mz_int8") or {}
+            expected_labels = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+            expected_sha = "a2f715399bdcb574da899e202388b5324d66f574b8519626cb611bf0e263e792"
+            source_sha = "631bb1453554cdb6b15eca724baa392e2acffb350899107f892dc11f937dbbf8"
+            path = "variants/tflite_int8/model.tflite"
+            profile = manifest.get("input") or {}
+            selected = variants[0]
+            if (role != "character" or task != "detect" or len(variants) != 1
+                    or labels != expected_labels or selected.get("runtime") != "tflite"
+                    or selected.get("precision") != "int8"
+                    or selected.get("file") != path or selected.get("files") is not None
+                    or selected.get("sha256") != {path: expected_sha}
+                    or selected.get("input") is not None or selected.get("output") is not None
+                    or (manifest.get("source") or {}).get("checkpoint_sha256") != source_sha
+                    or [profile.get(key) for key in ("width", "height", "channels", "layout", "color", "data_type")]
+                       != [320, 320, 3, "NHWC", "RGB", "INT8"]
+                    or (profile.get("quantization") or {}).get("zero_point") != -128
+                    or abs(float((profile.get("quantization") or {}).get("scale", 0)) - 0.003921568859368563) > 1e-8
+                    or not isinstance(research, dict)
+                    or research.get("schema") != "alpr.mz_clean_int8_research_package.v1"
+                    or research.get("status") != "EXPLORATORY_ONLY"
+                    or research.get("android_import_approved") is not False
+                    or research.get("production_deployment_approved") is not False
+                    or research.get("final_test") != "NOT_VERIFIED"
+                    or research.get("calibration_usage") != "NOT_ATTESTED_DURING_REUSE"):
+                raise MobileExportError("MZ_SPLIT_RESEARCH_PACKAGE_PINNED_CONTRACT_MISMATCH")
+            if (manifest.get("output") or {}).get("output_format") != "raw_split_ltrb_scores_v1":
+                raise MobileExportError("MZ_SPLIT_ROOT_OUTPUT_REQUIRED")
         for variant in variants:
             runtime = str(variant.get("runtime") or "").strip().lower()
             precision = str(variant.get("precision") or "").strip().lower()

@@ -13,14 +13,19 @@ from .mobile_human_review import align_plate_text
 READING_ORDER_POLICY = "alpr.reading_order.geometry.v1"
 
 
-def evaluate_plate_records(ground_truth: str, predictions: list[dict]) -> dict:
+def read_plate_records(predictions: list[dict]) -> dict:
     # Prediction reading order uses only predicted geometry, never GT text,
     # expected character count or the old GT pack.
     ordered = annotate_records_reading_order(predictions)
     prediction = normalize_registration("".join(str(row.get("character") or "") for row in ordered))
-    result = asdict(align_plate_text(ground_truth, prediction))
-    result.update(no_read=not prediction, reading_order_policy=READING_ORDER_POLICY,
-        ordered_predictions=ordered)
+    return {"prediction": prediction, "no_read": not prediction,
+            "reading_order_policy": READING_ORDER_POLICY, "ordered_predictions": ordered}
+
+
+def evaluate_plate_records(ground_truth: str, predictions: list[dict]) -> dict:
+    reading = read_plate_records(predictions)
+    result = asdict(align_plate_text(ground_truth, reading["prediction"]))
+    result.update(reading)
     return result
 
 

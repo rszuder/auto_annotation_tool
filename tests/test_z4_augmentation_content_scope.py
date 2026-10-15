@@ -32,7 +32,9 @@ def test_mt_profile_forces_crop_only_controls_off():
 
 def test_backend_sanitizes_old_presets_for_mt_full_scene():
     source = read("auto_annotation_tool/training/dataset_augmentation.py")
-    assert 'if _profile_task_target(profile) == "plate":' in source
+    start = source.index("def _apply_image_postprocess")
+    guard = source[start:source.index("rng = rng or random.Random", start)]
+    assert 'if _profile_task_target(profile) == "plate":' in guard
     required = (
         "scene_plate_texture_enabled=False",
         "dark_relief_strength=0.0",
@@ -40,8 +42,8 @@ def test_backend_sanitizes_old_presets_for_mt_full_scene():
         "wet_reflection_strength=0.0",
         "plate_reflect_glare_strength=0.0",
         "dirt_flow_points=0",
-        "rain_edge_mist_strength=0.0",
         "traffic_headlight_strength=0.0",
     )
     for token in required:
-        assert token in source
+        assert token in guard
+    assert "rain_edge_mist_strength=0.0" not in guard
