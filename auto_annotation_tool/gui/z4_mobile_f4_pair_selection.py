@@ -49,17 +49,17 @@ def validate_f4_pair_choice(
     must revalidate graph and source checkpoint regardless of these results.
     """
     if not isinstance(report, dict) or report.get('schema') != 'alpr.desktop.f4_candidate_inventory.v1':
-        raise F4PairBindingError('F4: brak wiarygodnego wyniku macierzy; ponów skan.')
+        raise F4PairBindingError('Wybór gotowych modeli: brak wiarygodnego wyniku macierzy; ponów skan.')
     if report.get('scan_truncated'):
-        raise F4PairBindingError('F4: skan był niekompletny — nie wolno wybierać pary automatycznie.')
+        raise F4PairBindingError('Wybór gotowych modeli: skan był niekompletny — nie wolno wybierać pary automatycznie.')
     fmt = str(precision or '').strip().lower()
     if fmt not in {'fp32', 'int8'}:
-        raise F4PairBindingError('F4: wybierz FP32 albo INT8.')
+        raise F4PairBindingError('Wybór gotowych modeli: wybierz FP32 albo INT8.')
     pair = (report.get('pairs') or {}).get(fmt) or {}
     if pair.get('state') != 'MANIFEST_CANDIDATES_REQUIRE_FULL_VALIDATION':
-        raise F4PairBindingError(f'F4 {fmt.upper()}: nie znaleziono kompletnej pary zgodnej z checkpointami.')
+        raise F4PairBindingError(f'Nie znaleziono obu modeli {fmt.upper()} pasujących do wybranych treningów.')
     if not callable(read_archive) or not callable(sha256_file):
-        raise F4PairBindingError('F4: brak funkcji odczytu manifestów lub SHA-256.')
+        raise F4PairBindingError('Wybór gotowych modeli: brak funkcji odczytu manifestów lub SHA-256.')
 
     by_role = {}
     chosen = []
@@ -69,9 +69,9 @@ def validate_f4_pair_choice(
                     for item in ((pair.get('candidates') or {}).get(role) or [])
                     if isinstance(item, dict) and item.get('path')}
         if str(path) not in selected:
-            raise F4PairBindingError(f'{role}: paczka nie pochodzi z aktualnej macierzy F4.')
+            raise F4PairBindingError(f'{role}: paczka nie pochodzi z aktualnego przeglądu modeli.')
         if path in chosen:
-            raise F4PairBindingError('F4: MT i MZ muszą być dwoma odrębnymi paczkami.')
+            raise F4PairBindingError('Wybór gotowych modeli: MT i MZ muszą być dwoma odrębnymi paczkami.')
         chosen.append(path)
 
         checkpoint = _require_file((checkpoint_paths or {}).get(role), role+' checkpoint', '.pt')

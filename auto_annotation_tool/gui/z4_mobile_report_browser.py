@@ -9,6 +9,7 @@ import hashlib
 import statistics
 import threading
 from dataclasses import replace
+from tkinter import filedialog
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,8 +24,15 @@ from ..ranking import (
     MobileReportBundle,
     read_mobile_report_bundles,
     score_mobile_report,
+    read_mobile_sample_image,
 )
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .z4_mobile_report_browser_ux import (desktop_status, matches_report_filter, report_identity, selected_report_caption)
+from .mobile_report_source_recovery import (restore_source, stored_source, relinked_report, crop_entry_for_row)
+from .z4_mobile_report_cards_ux import (HoverCardHelp, cards_for_report, device_details, summary_measure_rows, verified_frame_snapshot)
+# Z4MOBREP014_ANDROID_GATE_PERSISTENT_COUNTERS_20261017
+# Z4MOBREP013_EXPLAINED_METRIC_CARDS_20261017
+# Z4MOBREP012_READABLE_MOBILE_REPORTS_20261017
 
 MOBILE_REPORT_RAW_PREVIEW_LIST_LIMIT = 24
 MOBILE_REPORT_RAW_STORAGE_LIST_LIMIT = 8
@@ -290,13 +298,20 @@ def _summarize_mobile_report_heavy_value(
     return {"_kind": type(value).__name__, "_value": _compact_mobile_report_payload(value, list_limit=list_limit, text_limit=text_limit, depth=depth + 1)}
 
 
-def _compact_mobile_report_for_store(report: MobileBenchmarkReport) -> MobileBenchmarkReport:
+def _compact_mobile_report_for_store(report: MobileBenchmarkReport, bundle: MobileReportBundle | None = None) -> MobileBenchmarkReport:
     try:
         compact_raw = _compact_mobile_report_payload(
             report.raw,
             list_limit=MOBILE_REPORT_RAW_STORAGE_LIST_LIMIT,
             text_limit=MOBILE_REPORT_RAW_STORAGE_TEXT_LIMIT,
         )
+        # Cache tylko z bieżącej, zweryfikowanej paczki, z przypiętym SHA.
+        # Nie zapisujemy do oryginalnego archiwum ani do weryfikacji GT.
+        if bundle is not None:
+            snapshot = verified_frame_snapshot(report, bundle)
+            if snapshot and isinstance(compact_raw, dict):
+                compact_raw = dict(compact_raw)
+                compact_raw['_desktop_frame_flow_totals_v1'] = snapshot
         return replace(report, raw=compact_raw)
     except Exception:
         return report
@@ -465,13 +480,14 @@ class _TreeTable:
                 background=palette.get("panel", "#252526"),
                 fieldbackground=palette.get("panel", "#252526"),
                 foreground=palette.get("fg", "#f3f3f3"),
-                rowheight=25,
+                rowheight=30,
+                font=("Segoe UI", 9),
                 borderwidth=0,
             )
             style.map(
                 style_name,
                 background=[("selected", blend_hex_colors(palette.get("accent", "#4f8de3"), palette.get("panel", "#252526"), 0.25))],
-                foreground=[("selected", "#ffffff")],
+                foreground=[("selected", palette.get("fg", "#f3f3f3"))],
             )
         except Exception:
             pass
@@ -566,7 +582,7 @@ class _WrappedLabelTable:
                 text=headings[index] if index < len(headings) else column,
                 bg=header_bg,
                 fg=self._fg,
-                font=("Segoe UI", 8, "bold"),
+                font=("Segoe UI", 9, "bold"),
                 padx=8,
                 pady=6,
                 anchor=tk.W,
@@ -687,7 +703,7 @@ class _WrappedLabelTable:
                     text=str(value if value not in (None, "") else "-"),
                     bg=row_bg,
                     fg=fg,
-                    font=("Segoe UI", 8),
+                    font=("Segoe UI", 9),
                     padx=8,
                     pady=7,
                     anchor=tk.NW,
@@ -721,6 +737,12 @@ class MobileReportBrowser:
         self.report_by_iid: dict[str, MobileBenchmarkReport] = {}
         self.bundle_by_report_id: dict[str, MobileReportBundle] = {}
         self.current_bundle: MobileReportBundle | None = None
+        self._source_load_tokens: dict[str, int] = {}
+        self._source_attempts: set[tuple[str, str, str]] = set()
+        self._source_sequence = 0
+        self._source_failures: dict[str, str] = {}
+        self._crop_entry_rows: list[str] = []
+        self._crop_photo = None
         self._closing = False
         self._import_in_progress = False
         self._import_cancel_requested = False
@@ -757,8 +779,8 @@ class MobileReportBrowser:
             screen_h = int(self.window.winfo_screenheight() or 840)
         except Exception:
             screen_w, screen_h = 1360, 840
-        width = min(1240, max(1040, screen_w - 130))
-        height = min(760, max(620, screen_h - 130))
+        width = min(1480, max(950, screen_w - 72))
+        height = min(860, max(630, screen_h - 90))
         x = max(24, int((screen_w - width) / 2))
         y = max(24, int((screen_h - height) / 2))
         try:
@@ -1214,17 +1236,16 @@ class MobileReportBrowser:
         header.grid_columnconfigure(0, weight=1)
         tk.Label(
             header,
-            text="Przeglądarka raportów mobilnego ALPR",
+            text="Raporty z telefonu  /  ALPR",
             bg=self.bg,
             fg=self.fg,
-            font=("Segoe UI", 13, "bold"),
+            font=("Segoe UI", 16, "bold"),
             anchor=tk.W,
         ).grid(row=0, column=0, sticky="ew")
         tk.Label(
             header,
             text=(
-                "Importuj jeden lub wiele plików `.alprsession` albo ZIP z Androida. Metryki zbiorcze pochodzą z report.json, "
-                "a wykresy klatkowe z traces.csv."
+                "Wybierz sesję, przejrzyj wyniki i przejdź do oceny próbek. Dane źródłowe pozostają niezmienione."
             ),
             bg=self.bg,
             fg=self.muted,
@@ -1236,18 +1257,20 @@ class MobileReportBrowser:
 
         actions = tk.Frame(root, bg=self.bg)
         actions.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        actions.grid_columnconfigure(3, weight=1)
+        actions.grid_columnconfigure(4, weight=1)
         self.btn_import_reports = ttk.Button(actions, text="Importuj raporty z Androida", command=self.import_report)
         self.btn_import_reports.grid(
             row=0, column=0, sticky="w", padx=(0, 8), ipadx=10, ipady=2
         )
-        self.btn_refresh_reports = ttk.Button(actions, text="Odśwież zapisane", command=self._refresh_report_list)
+        self.btn_refresh_reports = ttk.Button(actions, text="Odśwież raporty", command=self._refresh_report_list)
         self.btn_refresh_reports.grid(
             row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2
         )
-        self.btn_review_samples = ttk.Button(actions, text="Weryfikacja próbek", command=self.open_sample_review, state="disabled")
+        self.btn_review_samples = ttk.Button(actions, text="Weryfikuj próbki", command=self.open_sample_review, state="disabled")
         self.btn_review_samples.grid(row=0, column=2, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-        ttk.Button(actions, text="Zamknij", command=self._request_close).grid(row=0, column=4, sticky="e", ipadx=8, ipady=2)
+        self.btn_link_archive = ttk.Button(actions, text="Podłącz archiwum", command=self.link_source_archive, state="disabled")
+        self.btn_link_archive.grid(row=0, column=3, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
+        ttk.Button(actions, text="Zamknij", command=self._request_close).grid(row=0, column=5, sticky="e", ipadx=8, ipady=2)
 
         self.status_var = tk.StringVar(value="Gotowe. Wskaż raport lub kilka raportów z telefonu albo wybierz zapisany raport z listy.")
         self.progress = ttk.Progressbar(actions, mode="indeterminate", length=150)
@@ -1259,13 +1282,16 @@ class MobileReportBrowser:
             font=("Segoe UI", 9),
             anchor=tk.W,
         )
-        self.status_label.grid(row=1, column=0, columnspan=5, sticky="ew", pady=(8, 0))
+        self.status_label.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 0))
+        self.source_status_var = tk.StringVar(value="Wybierz sesję, aby sprawdzić dostępność oryginalnego archiwum.")
+        tk.Label(actions, textvariable=self.source_status_var, bg=self.bg, fg=self.muted,
+                 font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W).grid(
+                     row=2, column=0, columnspan=6, sticky="ew", pady=(3, 0))
 
-        workspace = tk.Frame(root, bg=self.bg)
+        workspace = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=self.bg, bd=0, relief=tk.FLAT,
+                                   sashwidth=9, sashrelief=tk.FLAT, opaqueresize=True)
         workspace.grid(row=2, column=0, sticky="nsew")
-        workspace.grid_columnconfigure(0, weight=1, minsize=360)
-        workspace.grid_columnconfigure(1, weight=2, minsize=560)
-        workspace.grid_rowconfigure(0, weight=1)
+        self.report_split = workspace
 
         left = tk.Frame(
             workspace,
@@ -1275,12 +1301,12 @@ class MobileReportBrowser:
             highlightthickness=1,
             highlightbackground=self.border,
         )
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        workspace.add(left, width=420, minsize=390, padx=0, pady=0, stretch="never")
         left.grid_columnconfigure(0, weight=1)
-        left.grid_rowconfigure(2, weight=1)
+        left.grid_rowconfigure(4, weight=1)
         tk.Label(
             left,
-            text="Raporty pomiarów",
+            text="Sesje i pomiary",
             bg=self.card_bg,
             fg=self.fg,
             font=("Segoe UI", 10, "bold"),
@@ -1288,7 +1314,7 @@ class MobileReportBrowser:
         ).grid(row=0, column=0, sticky="ew")
         tk.Label(
             left,
-            text="Lista pokazuje zapisane raporty. Import nie uruchamia modeli i nie rozpakowuje paczki do projektu.",
+            text="Wybierz sesję. Pełne identyfikatory zobaczysz pod listą i w szczegółach.",
             bg=self.card_bg,
             fg=self.muted,
             font=("Segoe UI", 8),
@@ -1297,24 +1323,66 @@ class MobileReportBrowser:
             wraplength=330,
         ).grid(row=1, column=0, sticky="ew", pady=(2, 7))
 
+        search_area = tk.Frame(left, bg=self.card_bg)
+        search_area.grid(row=2, column=0, sticky="ew", pady=(2, 6))
+        search_area.grid_columnconfigure(0, weight=1)
+        tk.Label(search_area, text="Wyszukaj sesję", bg=self.card_bg, fg=self.fg,
+                 font=("Segoe UI", 9, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="ew")
+        self.search_var = tk.StringVar(value="")
+        self.search_entry = tk.Entry(search_area, textvariable=self.search_var, bg=self.panel,
+                                     fg=self.fg, insertbackground=self.fg, relief=tk.FLAT,
+                                     highlightthickness=1, highlightbackground=self.border,
+                                     highlightcolor=self.accent, font=("Segoe UI", 10))
+        self.search_entry.grid(row=1, column=0, sticky="ew", ipady=7, pady=(4, 0))
+        self.search_entry.bind("<Escape>", lambda _event: self.search_var.set(""), add="+")
+        self.search_var.trace_add("write", lambda *_args: self._apply_report_filter(auto_select=True))
+        self.report_count_var = tk.StringVar(value="Brak zapisanych raportów")
+        tk.Label(left, textvariable=self.report_count_var, bg=self.card_bg, fg=self.muted,
+                 font=("Segoe UI", 9), anchor=tk.W).grid(row=3, column=0, sticky="ew", pady=(0, 4))
+
         self.report_table = _TreeTable(
             left,
-            ("Data", "Pakiet", "Wariant", "Telefon", "p95", "Jakość", "Score"),
-            ("Data", "Pakiet", "Wariant", "Telefon", "p95", "Jakość", "Score"),
-            (92, 120, 90, 100, 70, 70, 58),
+            ("Data", "Wariant", "p95"),
+            ("Data", "Wariant / seria", "p95 E2E"),
+            (108, 170, 84),
             palette={**self.palette, "panel": self.card_bg},
             height=18,
         )
-        self.report_table.shell.grid(row=2, column=0, sticky="nsew")
+        self.report_table.shell.grid(row=4, column=0, sticky="nsew")
+        self.selected_report_info_var = tk.StringVar(value="Wybierz raport, aby zobaczyć pełne dane sesji.")
+        self.selected_report_info = tk.Label(left, textvariable=self.selected_report_info_var,
+                       bg=self.card_bg, fg=self.muted, font=("Segoe UI", 9), anchor=tk.NW,
+                       justify=tk.LEFT, wraplength=352, padx=6, pady=9)
+        self.selected_report_info.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        left.bind("<Configure>", lambda event: self.selected_report_info.configure(
+            wraplength=max(220, int(event.width) - 36)), add="+")
         self.report_table.tree.bind("<<TreeviewSelect>>", self._on_report_selected, add="+")
 
         right = tk.Frame(workspace, bg=self.bg)
-        right.grid(row=0, column=1, sticky="nsew")
+        workspace.add(right, minsize=510, padx=8, pady=0, stretch="always")
         right.grid_columnconfigure(0, weight=1)
-        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+        identity = tk.Frame(right, bg=self.bg)
+        identity.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        identity.grid_columnconfigure(0, weight=1)
+        self.hero_title_var = tk.StringVar(value="Wybierz raport z listy")
+        self.hero_meta_var = tk.StringVar(value="Najważniejsze informacje o sesji pojawią się tutaj.")
+        self.hero_title_label = tk.Label(identity, textvariable=self.hero_title_var, bg=self.bg, fg=self.fg,
+                         font=("Segoe UI", 13, "bold"), anchor=tk.W, justify=tk.LEFT, wraplength=650)
+        self.hero_title_label.grid(row=0, column=0, sticky="ew")
+        self.hero_meta_label = tk.Label(identity, textvariable=self.hero_meta_var, bg=self.bg, fg=self.muted,
+                        font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT, wraplength=650)
+        self.hero_meta_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        hero_actions = tk.Frame(identity, bg=self.bg)
+        hero_actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
+        ttk.Button(hero_actions, text="Przegląd", command=lambda: self.notebook.select(0)).pack(side=tk.LEFT, padx=(0, 6))
+        self.btn_report_warnings = ttk.Button(hero_actions, text="Ostrzeżenia",
+                            command=self._show_validation_details, state="disabled")
+        self.btn_report_warnings.pack(side=tk.LEFT)
+        right.bind("<Configure>", self._resize_report_details, add="+")
 
         self.card_shell = tk.Frame(right, bg=self.bg)
-        self.card_shell.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        self.card_shell.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         for column in range(4):
             self.card_shell.grid_columnconfigure(column, weight=1, uniform="report_cards")
         self.card_vars = {
@@ -1324,42 +1392,61 @@ class MobileReportBrowser:
             "latency": tk.StringVar(value="p95: -"),
         }
         self.card_labels: dict[str, tk.Label] = {}
+        self.card_hint_vars: dict[str, tk.StringVar] = {}
+        self.metric_card_frames: dict[str, tk.Frame] = {}
+        self._metric_cards = {}
+        self._metric_help = HoverCardHelp(self.window, lambda key: (
+            self._metric_cards[key].explanation if key in self._metric_cards else ''))
         for index, (key, title, color) in enumerate(
             (
-                ("integrity", "Integralność", self.accent),
-                ("frames", "Przebieg", self.warning),
-                ("quality", "Jakość", self.success),
-                ("latency", "Opóźnienia", self.accent),
+                ("integrity", "Źródło", self.accent),
+                ("frames", "Klatki ALPR", self.accent),
+                ("quality", "GT i weryfikacja", self.accent),
+                ("latency", "E2E p95", self.accent),
             )
         ):
             card = tk.Frame(
                 self.card_shell,
-                bg=blend_hex_colors(self.card_bg, color, 0.055),
-                padx=9,
-                pady=7,
+                bg=self.card_bg,
+                padx=11,
+                pady=10,
                 highlightthickness=1,
-                highlightbackground=blend_hex_colors(color, self.bg, 0.45),
+                highlightbackground=self.border,
             )
-            card.grid(row=0, column=index, sticky="ew", padx=(0 if index == 0 else 6, 0))
-            tk.Label(card, text=title, bg=card["bg"], fg=self.muted, font=("Segoe UI", 8, "bold"), anchor=tk.W).pack(
-                fill=tk.X
-            )
+            card.grid(row=0, column=index, sticky="nsew", padx=(0 if index == 0 else 6, 0))
+            self.metric_card_frames[key] = card
+            title_label = tk.Label(card, text=title, bg=card["bg"], fg=self.muted,
+                                   font=("Segoe UI", 9, "bold"), anchor=tk.W, justify=tk.LEFT)
+            title_label.pack(fill=tk.X)
             label = tk.Label(
                 card,
                 textvariable=self.card_vars[key],
                 bg=card["bg"],
-                fg=color,
-                font=("Segoe UI", 10, "bold"),
+                fg=self.fg,
+                font=("Segoe UI", 11, "bold"),
                 anchor=tk.W,
                 justify=tk.LEFT,
                 wraplength=180,
             )
-            label.pack(fill=tk.X, pady=(2, 0))
+            label.pack(fill=tk.X, pady=(5, 0))
             self.card_labels[key] = label
+            hint_var = tk.StringVar(value="")
+            self.card_hint_vars[key] = hint_var
+            hint = tk.Label(card, textvariable=hint_var, bg=card["bg"], fg=self.muted,
+                            font=("Segoe UI", 8), anchor=tk.W, justify=tk.LEFT,
+                            wraplength=180)
+            hint.pack(fill=tk.X, pady=(3, 0))
+            for widget in (card, title_label, label, hint):
+                self._metric_help.bind(widget, key)
 
         self.notebook = ttk.Notebook(right)
-        self.notebook.grid(row=1, column=0, sticky="nsew")
+        self.notebook.grid(row=2, column=0, sticky="nsew")
         self._build_tabs()
+        self.review_status_var = tk.StringVar(value="Weryfikacja Desktop: wybierz sesję")
+        self.review_status_label = tk.Label(right, textvariable=self.review_status_var,
+               bg=self.card_bg, fg=self.fg, font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT,
+               wraplength=700, padx=10, pady=7)
+        self.review_status_label.grid(row=3, column=0, sticky="ew", pady=(7, 0))
 
     def _build_tabs(self) -> None:
         def tab_frame() -> tk.Frame:
@@ -1475,6 +1562,8 @@ class MobileReportBrowser:
         self.notebook.add(diagnostics, text="Diagnostyka")
 
         crops = tab_frame()
+        crops.grid_rowconfigure(0, weight=1)
+        crops.grid_rowconfigure(1, weight=0)
         self.crops_table = _TreeTable(
             crops,
             ("ID", "Track", "Status", "Predykcja", "GT", "Czas", "Crop"),
@@ -1484,7 +1573,17 @@ class MobileReportBrowser:
             height=17,
         )
         self.crops_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(crops, text="Cropy")
+        self.crops_table.tree.bind("<<TreeviewSelect>>", self._on_crop_selected, add="+")
+        crop_preview_frame = tk.Frame(crops, bg=self.panel)
+        crop_preview_frame.grid(row=1, column=0, sticky="ew", pady=(7, 0))
+        self.crop_preview_var = tk.StringVar(value="Wybierz wyciętą tablicę na liście, aby zobaczyć jej obraz.")
+        self.crop_preview_info = tk.Label(crop_preview_frame, textvariable=self.crop_preview_var,
+                                          fg=self.muted, bg=self.panel, anchor=tk.W, justify=tk.LEFT,
+                                          font=("Segoe UI", 9))
+        self.crop_preview_info.pack(fill=tk.X)
+        self.crop_image_label = tk.Label(crop_preview_frame, bg=self.panel)
+        self.crop_image_label.pack(anchor=tk.W)
+        self.notebook.add(crops, text="Wycięte tablice")
 
         raw = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
         raw.grid_columnconfigure(0, weight=1)
@@ -1505,6 +1604,10 @@ class MobileReportBrowser:
         raw_scroll_y.grid(row=0, column=1, sticky="ns")
         raw_scroll_x.grid(row=1, column=0, sticky="ew")
         self.notebook.add(raw, text="Surowe dane")
+        for tab_index, title in enumerate(("Przegląd", "Porównaj", "Parametry", "Czasy",
+                                          "Pliki", "Jakość", "Diagnostyka", "Cropy", "Dane JSON")):
+            self.notebook.tab(tab_index, text=title)
+        self.notebook.select(0)
 
     def _set_status(self, text: str, tone: str = "info") -> None:
         colors = {"info": self.muted, "success": self.success, "warning": self.warning, "error": self.error}
@@ -1541,6 +1644,7 @@ class MobileReportBrowser:
             pass
 
     def _refresh_report_list(self, select_report_id: str = "", *, auto_select: bool = True) -> None:
+        """Read store once; filtering afterward uses only compact report metadata."""
         try:
             self.store._load()
         except Exception:
@@ -1549,44 +1653,116 @@ class MobileReportBrowser:
             self.store.reports = [_compact_mobile_report_for_store(report) for report in self.store.reports]
         except Exception:
             pass
-        self.report_by_iid = {}
-        rows: list[tuple[Any, ...]] = []
-        selected_iid = ""
-        for index, report in enumerate(sorted(self.store.reports, key=lambda item: str(item.measured_at or ""), reverse=True)):
-            iid = f"report_{index}_{report.report_id}"
-            self.report_by_iid[iid] = report
-            rows.append(_report_list_values(report))
-            if select_report_id and report.report_id == select_report_id:
-                selected_iid = iid
-        self.report_table.set_rows(rows)
-        # TreeTable generates row_ indexes, so map them back to report objects.
-        ordered_reports = sorted(self.store.reports, key=lambda item: str(item.measured_at or ""), reverse=True)
-        self.report_by_iid = {f"row_{index}": report for index, report in enumerate(ordered_reports)}
-        if ordered_reports and (auto_select or select_report_id):
-            if select_report_id:
-                selected_iid = next(
-                    (iid for iid, report in self.report_by_iid.items() if report.report_id == select_report_id),
-                    "row_0",
-                )
+        self._ordered_reports = sorted(self.store.reports, key=lambda row: str(row.measured_at or ""), reverse=True)
+        self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select)
+
+    def _apply_report_filter(self, select_report_id: str = "", *, auto_select: bool = True) -> None:
+        """Filter without rescanning archives; keep selection when possible."""
+        all_reports = getattr(self, "_ordered_reports", [])
+        query = self.search_var.get().strip() if hasattr(self, "search_var") else ""
+        if select_report_id and query and not any(
+            r.report_id == select_report_id and matches_report_filter(r, query, self._matching_cached_bundle(r))
+            for r in all_reports
+        ):
+            self.search_var.set("")
+            query = ""
+        filtered = [r for r in all_reports if matches_report_filter(r, query, self._matching_cached_bundle(r))]
+        self.report_table.set_rows([
+            (report_identity(r, self._matching_cached_bundle(r))["date"],
+             report_identity(r, self._matching_cached_bundle(r))["variant_short"],
+             _format_ms(_pipeline_p95(r))) for r in filtered
+        ])
+        self.report_by_iid = {f"row_{i}": r for i, r in enumerate(filtered)}
+        self.report_count_var.set(f"{len(filtered)} z {len(all_reports)} raportów" if query else f"{len(all_reports)} zapisanych raportów")
+        if not filtered:
+            if all_reports:
+                self._show_report_hint(len(all_reports))
+                self.summary_table.set_rows([("Brak dopasowań", query or "—", "Wyczyść filtr, aby wrócić do pełnej listy.")])
             else:
-                selected_iid = "row_0"
-            self._suppress_report_select = True
-            try:
-                self.report_table.tree.selection_set(selected_iid)
-                self.report_table.tree.focus(selected_iid)
-                self.report_table.tree.see(selected_iid)
-            except Exception:
-                pass
-            finally:
-                self._suppress_report_select = False
-            selected_report = self.report_by_iid.get(selected_iid)
-            selected_bundle = self.bundle_by_report_id.get(selected_report.report_id) if selected_report else None
-            self._show_report(selected_report, selected_bundle)
-        elif ordered_reports:
-            self._show_report_hint(len(ordered_reports))
+                self._show_empty()
+            return
+        if not (auto_select or select_report_id):
+            self._show_report_hint(len(all_reports))
+            return
+        old_id = str(getattr(getattr(self, "current_report", None), "report_id", "") or "")
+        selected = next((i for i, r in enumerate(filtered) if r.report_id == select_report_id), None)
+        if selected is None:
+            selected = next((i for i, r in enumerate(filtered) if r.report_id == old_id), 0)
+        selected_iid = f"row_{selected}"
+        self._suppress_report_select = True
+        try:
+            self.report_table.tree.selection_set(selected_iid)
+            self.report_table.tree.focus(selected_iid)
+            self.report_table.tree.see(selected_iid)
+        except Exception:
+            pass
+        finally:
+            self._suppress_report_select = False
+        selected_report = filtered[selected]
+        self._show_report(selected_report, self._matching_cached_bundle(selected_report))
+
+    def _ux_reset_selection(self) -> None:
+        for name, text in (("hero_title_var", "Wybierz raport z listy"),
+                           ("hero_meta_var", ""), ("selected_report_info_var", "Wybierz sesję, aby zobaczyć jej identyfikatory."),
+                           ("review_status_var", "Weryfikacja Desktop: brak wybranej sesji")):
+            var = getattr(self, name, None)
+            if var is not None:
+                var.set(text)
+        self._ux_review_snapshot = {}
+        self._metric_cards = {}
+        for var in getattr(self, 'card_hint_vars', {}).values():
+            var.set('')
+        if hasattr(self, '_metric_help'):
+            self._metric_help.hide()
+        try:
+            self.btn_report_warnings.configure(state="disabled", text="Ostrzeżenia")
+        except Exception:
+            pass
+
+    def _resize_report_details(self, event) -> None:
+        try:
+            width = max(400, int(event.width))
+            self.hero_title_label.configure(wraplength=max(260, width - 235))
+            self.hero_meta_label.configure(wraplength=max(260, width - 235))
+            self.review_status_label.configure(wraplength=max(260, width - 30))
+            # Two rows when the right panel is narrow; four cards in one row otherwise.
+            narrow = width < 830
+            for index, key in enumerate(("integrity", "frames", "quality", "latency")):
+                frame = getattr(self, "metric_card_frames", {}).get(key)
+                if frame is None:
+                    continue
+                column = index % 2 if narrow else index
+                row = index // 2 if narrow else 0
+                frame.grid_configure(row=row, column=column,
+                                     sticky="nsew", padx=(0 if column == 0 else 6, 0),
+                                     pady=(0 if row == 0 else 6, 0))
+                wrap = max(110, int(width / (2 if narrow else 4)) - 44)
+                label = self.card_labels.get(key)
+                if label is not None:
+                    label.configure(wraplength=wrap)
+                for child in frame.winfo_children():
+                    if isinstance(child, tk.Label):
+                        child.configure(wraplength=wrap)
+            for col in range(4):
+                self.card_shell.grid_columnconfigure(
+                    col, weight=1 if (col < 2 or not narrow) else 0,
+                    uniform='report_cards' if (col < 2 or not narrow) else '')
+        except Exception:
+            pass
+
+    def _show_validation_details(self) -> None:
+        bundle = getattr(self, "current_bundle", None)
+        if not bundle:
+            messagebox.showinfo("Integralność źródła", "Aby odczytać ostrzeżenia, otwórz oryginalne archiwum z telefonu.", parent=self.window)
+            return
+        validation = bundle.validation
+        errors = [str(message) for message in validation.errors]
+        warnings = [str(message) for message in validation.warnings]
+        if not errors and not warnings:
+            body = "Brak ostrzeżeń i błędów walidacji archiwum."
         else:
-            self._show_empty()
-        self._set_status(f"Zapisane raporty: {len(ordered_reports)}.", "info")
+            body = "\n\n".join([*("BŁĄD: " + m for m in errors[:8]), *("UWAGA: " + m for m in warnings[:12])])
+        messagebox.showinfo("Kontrola integralności archiwum", body, parent=self.window)
 
     def _on_report_selected(self, _event=None) -> None:
         if self._suppress_report_select:
@@ -1599,7 +1775,7 @@ class MobileReportBrowser:
             return
         report = self.report_by_iid.get(str(selected[0]))
         if report:
-            self._show_report(report, self.bundle_by_report_id.get(report.report_id))
+            self._show_report(report, self._matching_cached_bundle(report))
 
     def import_report(self) -> None:
         if self._import_in_progress:
@@ -1659,7 +1835,7 @@ class MobileReportBrowser:
                                         _compact_mobile_report_for_store(report)
                                         for report in self.store.reports
                                     ]
-                                    self.store.add_report(_compact_mobile_report_for_store(bundle.report), save=False)
+                                    self.store.add_report(_compact_mobile_report_for_store(bundle.report, bundle=bundle), save=False)
                                 except Exception as exc:
                                     failures.append((report_path, f"Raport odczytany, ale nie udało się go przygotować do zapisu: {exc}"))
                                     continue
@@ -1753,7 +1929,12 @@ class MobileReportBrowser:
         threading.Thread(target=worker, name="mobile-report-import", daemon=True).start()
 
     def _show_empty(self) -> None:
+        self._ux_reset_selection()
         self.current_bundle = None
+        if hasattr(self, "btn_link_archive"):
+            self.btn_link_archive.configure(state="disabled")
+        if hasattr(self, "source_status_var"):
+            self.source_status_var.set("Wybierz sesję, aby sprawdzić dostępność archiwum.")
         self.current_report = None
         if hasattr(self, "btn_review_samples"):
             self.btn_review_samples.configure(state="disabled")
@@ -1772,7 +1953,12 @@ class MobileReportBrowser:
         self._draw_latency_chart()
 
     def _show_report_hint(self, report_count: int) -> None:
+        self._ux_reset_selection()
         self.current_bundle = None
+        if hasattr(self, "btn_link_archive"):
+            self.btn_link_archive.configure(state="disabled")
+        if hasattr(self, "source_status_var"):
+            self.source_status_var.set("Wybierz sesję, aby sprawdzić dostępność archiwum.")
         self.current_report = None
         if hasattr(self, "btn_review_samples"):
             self.btn_review_samples.configure(state="disabled")
@@ -1798,12 +1984,115 @@ class MobileReportBrowser:
         self._replace_text(self.raw_text, "")
         self._draw_latency_chart()
 
+    def _matching_cached_bundle(self, report):
+        """Do not show old details for another archive with a reused report ID."""
+        cached = self.bundle_by_report_id.get(report.report_id)
+        return cached if (cached is not None and
+                          str(cached.source_archive_sha256).lower() == str(report.source_archive_sha256).lower() and
+                          str(cached.report.report_id) == str(report.report_id)) else None
+
+    def link_source_archive(self) -> None:
+        """Let the operator relocate a missing archive; never silently match names."""
+        report = getattr(self, "current_report", None)
+        if report is None:
+            return
+        original = stored_source(report)
+        initial = Path(original).parent if original else Path.home()
+        if not initial.is_dir():
+            initial = Path.home()
+        filename = filedialog.askopenfilename(
+            parent=self.window, title="Wskaż oryginalne archiwum tej sesji ALPR",
+            initialdir=str(initial),
+            filetypes=[("Sesje ALPR", "*.alprsession *.zip"), ("Wszystkie pliki", "*.*")],
+        )
+        if filename:
+            self._begin_source_recovery(report, filename, manual=True)
+
+    def _begin_source_recovery(self, report: MobileBenchmarkReport, path: str, *, manual: bool = False) -> None:
+        """SHA/manifest verification can be expensive; never block the Tk thread."""
+        if self._closing:
+            return
+        report_id = str(report.report_id)
+        key = (report_id, str(report.source_archive_sha256 or ""), str(path))
+        if not manual and key in self._source_attempts:
+            return
+        self._source_attempts.add(key)
+        self._source_sequence += 1
+        token = self._source_sequence
+        self._source_load_tokens[report_id] = token
+        if getattr(getattr(self, "current_report", None), "report_id", None) == report_id:
+            self.source_status_var.set("Sprawdzam SHA-256 oraz tożsamość archiwum…")
+        def worker() -> None:
+            result = restore_source(report, path)
+            self._run_on_ui(lambda result=result: self._finish_source_recovery(report, result, token, manual=manual))
+        threading.Thread(target=worker, daemon=True, name="alpr-source-verify").start()
+
+    def _finish_source_recovery(self, report, result, token: int, *, manual: bool) -> None:
+        report_id = str(report.report_id)
+        if self._source_load_tokens.get(report_id) != token:
+            return  # A newer, explicitly selected source takes precedence.
+        selected_report = getattr(self, "current_report", None)
+        active = (selected_report is not None and selected_report.report_id == report_id
+                  and selected_report.source_archive_sha256 == report.source_archive_sha256)
+        if not result.ok:
+            self._source_failures[report_id] = result.detail
+            if active:
+                self.source_status_var.set(result.detail + "  Użyj «Podłącz archiwum».")
+            if manual and active:
+                messagebox.showwarning("Nie połączono archiwum", result.detail, parent=self.window)
+            return
+        self._source_failures.pop(report_id, None)
+        self.bundle_by_report_id[report_id] = result.bundle
+        linked_report = report
+        if manual and str(report.source_path or "") != result.path:
+            linked_report = relinked_report(report, result.path)
+            try:
+                self.store.reports = [
+                    linked_report if row.report_id == report_id and row.source_archive_sha256 == report.source_archive_sha256
+                    else row for row in self.store.reports
+                ]
+                self.store.save()  # Only report locator metadata, not research artifacts.
+                self._ordered_reports = [
+                    linked_report if row.report_id == report_id and row.source_archive_sha256 == report.source_archive_sha256
+                    else row for row in getattr(self, "_ordered_reports", [])
+                ]
+                self.report_by_iid = {
+                    key: linked_report if row.report_id == report_id and row.source_archive_sha256 == report.source_archive_sha256
+                    else row for key, row in self.report_by_iid.items()
+                }
+            except Exception as exc:
+                # Verified details remain usable, but do not pretend the new location was saved.
+                self._source_failures[report_id] = "Archiwum zweryfikowano, lecz nie zapisano nowej ścieżki: " + str(exc)[:140]
+        if active:
+            self._show_report(linked_report, result.bundle)
+            n = len(result.bundle.trace_rows)
+            crops = sum(entry.name.startswith("samples/crops/") for entry in result.bundle.entries)
+            if report_id in self._source_failures:
+                self.source_status_var.set(self._source_failures[report_id])
+            else:
+                self.source_status_var.set(
+                    f"Oryginalne archiwum zweryfikowane · pomiary czasu: {n} · wycięte tablice: {crops}.")
+
     def _show_report(self, report: MobileBenchmarkReport | None, bundle: MobileReportBundle | None = None) -> None:
         if report is None:
             self._show_empty()
             return
+        if bundle is not None and (
+            str(bundle.source_archive_sha256).lower() != str(report.source_archive_sha256).lower()
+            or bundle.report.report_id != report.report_id
+        ):
+            bundle = None  # Legacy report-id cache must not cross archive identities.
         self.current_bundle = bundle
         self.current_report = report
+        if bundle is not None:
+            n = len(bundle.trace_rows)
+            c = sum(e.name.startswith("samples/crops/") for e in bundle.entries)
+            self.source_status_var.set(f"Archiwum źródłowe zweryfikowane · pomiary: {n} · obrazy tablic: {c}.")
+        if hasattr(self, "btn_link_archive"):
+            self.btn_link_archive.configure(state="normal")
+        if bundle is None:
+            self.source_status_var.set(self._source_failures.get(report.report_id,
+                "Dane zbiorcze są dostępne. Do wykresów i zdjęć potrzebne jest oryginalne archiwum."))
         if hasattr(self, "btn_review_samples"):
             self.btn_review_samples.configure(state="normal" if (bundle or report.source_path) else "disabled")
         self._update_cards(report, bundle)
@@ -1816,6 +2105,12 @@ class MobileReportBrowser:
         self._populate_diagnostics(report, bundle)
         self._populate_crops(report, bundle)
         self._populate_raw(report, bundle)
+        if bundle is None:
+            original = stored_source(report)
+            if original:
+                self._begin_source_recovery(report, original)
+            else:
+                self.source_status_var.set("Nie zapisano ścieżki źródła. Użyj «Podłącz archiwum».")
 
     def open_sample_review(self) -> None:
         report = getattr(self, "current_report", None)
@@ -1842,12 +2137,36 @@ class MobileReportBrowser:
         trace_total = bundle.trace_total if bundle else _safe_int(_nested_value(report.raw, "summary.processed_frames"), 0)
         if not trace_total:
             trace_total = _safe_int(_nested_value(report.raw, "summary.processed_frames"), 0)
+        info = report_identity(report, bundle)
+        self.hero_title_var.set(f"{info['variant']}  •  {info['date']}")
+        self.hero_meta_var.set(f"{info['device']}  •  {info['scenario'] or info['technical_variant'] or 'Pomiar mobilny'}")
+        self.selected_report_info_var.set(selected_report_caption(report, bundle))
+        review_root = Path(getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS / "mobile_packages"))
+        snapshot = desktop_status(report, bundle, review_root)
+        self._ux_review_snapshot = snapshot
+        self.review_status_var.set(f"{snapshot['title']}  •  {snapshot['detail']}")
+        if bundle:
+            warnings_count = len(bundle.validation.warnings) + len(bundle.validation.errors)
+            self.btn_report_warnings.configure(state="normal" if warnings_count else "disabled",
+                                               text=f"Ostrzeżenia ({warnings_count})" if warnings_count else "Bez ostrzeżeń")
+        else:
+            self.btn_report_warnings.configure(state="disabled", text="Brak walidacji")
         self.card_vars["integrity"].set(integrity)
         self.card_vars["frames"].set(f"{trace_total or '-'} klatek")
         self.card_vars["quality"].set(_quality_value(report))
         self.card_vars["latency"].set(_format_ms(_pipeline_p95(report)))
         try:
             self.card_labels["integrity"].configure(fg=tone)
+        except Exception:
+            pass
+
+        self._metric_cards = cards_for_report(
+            report, bundle, getattr(self, '_ux_review_snapshot', {}))
+        for key, metric in self._metric_cards.items():
+            self.card_vars[key].set(metric.value)
+            self.card_hint_vars[key].set(metric.subtitle)
+        try:
+            self._resize_report_details(type('_Width', (), {'width': self.card_shell.winfo_width()})())
         except Exception:
             pass
 
@@ -1875,9 +2194,9 @@ class MobileReportBrowser:
                 "Deduplikacja identycznego archiwum/pliku i ślad odtwarzalności.",
             ),
             ("Pakiet", report.package_id, "Model/pakiet badany w telefonie."),
-            ("Wariant", report.variant_id, "Runtime, precyzja lub wariant wykonawczy."),
+            ("Profil techniczny", report.variant_id, "Nazwa profilu runtime/kwantyzacji, inna niż wariant eksperymentu."),
             ("Pomiar", _format_datetime(report.measured_at), "Data i czas zapisane przez klienta mobilnego."),
-            ("Urządzenie", _device_label(report), _short_text(report.device, 180)),
+            ("Urządzenie", _device_label(report), device_details(report)),
             (
                 "Klatki",
                 str(bundle.trace_total if bundle else _nested_value(report.raw, "summary.processed_frames") or "-"),
@@ -1895,11 +2214,21 @@ class MobileReportBrowser:
                 [
                     ("Seria", str(index.get("series_id") or "-"), "Identyfikator kampanii porównawczej."),
                     ("Scenariusz", str(index.get("scenario_id") or "-"), "Materiał albo warunki sceny eksperymentalnej."),
-                    ("Zmienna/wariant", str(index.get("experiment_variant") or "-"), "Badany wariant w ramach serii."),
+                    ("Wariant eksperymentu", str(index.get("experiment_variant") or "-"), "Wariant A/B/C/D w kampanii, nie techniczny profil runtime."),
                     ("Replika", str(index.get("replicate_index") or "-"), "Numer powtórzenia tego samego wariantu."),
                 ]
             )
-        self.summary_table.set_rows(validation_rows + rows)
+        review = getattr(self, "_ux_review_snapshot", {}) or {}
+        q = dict(report.quality or {})
+        phone_status = ("Nieustalone (raport obejmuje dane Desktop)"
+                        if q.get("quality_source") == "human_review" else
+                        "Brak GT w archiwum" if q.get("available") is False else
+                        "Obecne w raporcie" if q.get("available") is True else "Nieustalone")
+        rows = [
+            ("GT z telefonu", phone_status, "Dotyczy tylko jakości zapisanej w źródłowym archiwum Androida."),
+            ("Oceny Desktop", review.get("title", "Nieustalone"), review.get("detail", "Brak odczytu sidecara.")),
+        ] + rows
+        self.summary_table.set_rows(validation_rows + rows[:2] + summary_measure_rows(report, bundle) + rows[2:])
 
     def _report_experiment_index(
         self,
@@ -2320,11 +2649,16 @@ class MobileReportBrowser:
 
     def _populate_quality(self, report: MobileBenchmarkReport) -> None:
         quality = dict(report.quality or {})
+        desktop = getattr(self, "_ux_review_snapshot", {}) or {}
+        desktop_rows = [
+            ("Weryfikacja Desktop", desktop.get("title", "Nieustalone"),
+             desktop.get("detail", "Stan weryfikacji jest niezależny od GT w archiwum.")),
+        ]
         if quality.get("quality_source") == "human_review":
             def ratio(key):
                 value = quality.get(key)
                 return "—" if value is None else f"{float(value) * 100:.2f}%"
-            self.quality_table.set_rows([
+            self.quality_table.set_rows(desktop_rows + [
                 ("Źródło jakości", "Weryfikacja człowieka", "Ukończona weryfikacja; surowe pomiary czasu i pamięci zachowane."),
                 ("Tryb weryfikacji", "Zaślepiona GT" if quality.get("review_mode") == "blinded_gt_v1" else "Asystowana", "Tryb zapisany w sidecarze weryfikacji."),
                 ("Poprawne odczyty MZ", ratio("exact_read_rate"), "Jednostka: oceniany crop."),
@@ -2336,7 +2670,7 @@ class MobileReportBrowser:
             ])
             return
         if not quality:
-            self.quality_table.set_rows([("Brak jakości", "-", "Raport nie zawiera sekcji quality.")])
+            self.quality_table.set_rows(desktop_rows + [("Brak jakości", "-", "Raport nie zawiera sekcji quality.")])
             return
         available = quality.get("available")
         rows: list[tuple[Any, ...]] = [
@@ -2372,7 +2706,7 @@ class MobileReportBrowser:
                         {"tag": "success" if sample.get("exact_match") else "error"},
                     )
                 )
-        self.quality_table.set_rows(rows)
+        self.quality_table.set_rows(desktop_rows + rows)
 
     def _populate_diagnostics(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
         rows: list[tuple[str, str, str]] = []
@@ -2393,40 +2727,69 @@ class MobileReportBrowser:
         )
 
     def _populate_crops(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
+        """List real samples and resolve only image entries present in verified ZIP."""
         rows: list[tuple[str, str, str, str, str, str, str]] = []
-        if bundle and bundle.sample_rows:
+        self._crop_entry_rows = []
+        self._crop_photo = None
+        self.crop_image_label.configure(image="")
+        if bundle is None:
+            self.crop_preview_var.set("Połącz oryginalne archiwum, aby zobaczyć wycięte tablice.")
+            rows.append(("—", "—", "—", "—", "—", "—", "Podłącz oryginalne archiwum"))
+        else:
+            entry_names = {str(e.name) for e in bundle.entries}
             for row in bundle.sample_rows[:500]:
-                rows.append(
-                    (
-                        row.get("capture_id") or row.get("id") or "-",
-                        row.get("track_id") or "-",
-                        row.get("verification_status") or row.get("status") or "-",
-                        row.get("prediction") or row.get("text") or "-",
-                        row.get("ground_truth") or row.get("ground_truth_text") or "-",
-                        row.get("captured_at_ms") or row.get("timestamp_ms") or "-",
-                        row.get("crop") or row.get("path") or "-",
-                    )
-                )
-        records = _nested_value(report.raw, "crop_session.records")
-        if not rows and isinstance(records, list):
-            for record in records[:500]:
-                if not isinstance(record, dict):
-                    continue
-                verification = record.get("human_verification") if isinstance(record.get("human_verification"), dict) else {}
-                rows.append(
-                    (
-                        str(record.get("capture_id") or "-"),
-                        str(record.get("track_id") or "-"),
-                        str(verification.get("status") or record.get("verification_status") or "-"),
-                        str(record.get("text") or verification.get("original_prediction") or "-"),
-                        str(verification.get("ground_truth_text") or "-"),
-                        str(record.get("captured_at_ms") or "-"),
-                        str(record.get("image") or "-"),
-                    )
-                )
-        if not rows:
-            rows = [("-", "-", "-", "-", "-", "-", "Brak indeksu cropów w raporcie.")]
+                entry = crop_entry_for_row(row, entry_names)
+                rows.append((
+                    row.get("capture_id") or row.get("id") or "—",
+                    row.get("track_id") or "—",
+                    row.get("verification_status") or row.get("status") or "—",
+                    row.get("prediction") or row.get("text") or "—",
+                    row.get("ground_truth") or row.get("ground_truth_text") or "—",
+                    row.get("captured_at_ms") or row.get("timestamp_ms") or "—",
+                    "Obraz dostępny" if entry else "Brak obrazu",
+                ))
+                self._crop_entry_rows.append(entry)
+            if not rows:
+                for entry in sorted(e for e in entry_names if e.startswith("samples/crops/") and e.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))[:500]:
+                    rows.append((Path(entry).stem, "—", "—", "—", "—", "—", "Obraz dostępny"))
+                    self._crop_entry_rows.append(entry)
+            if rows:
+                self.crop_preview_var.set("Wybierz wyciętą tablicę na liście, aby zobaczyć jej obraz.")
+            else:
+                self.crop_preview_var.set("W zweryfikowanym archiwum nie znaleziono wyciętych tablic.")
+                rows.append(("—", "—", "—", "—", "—", "—", "Brak wyciętych tablic"))
         self.crops_table.set_rows(rows)
+
+    def _on_crop_selected(self, _event=None) -> None:
+        """Render selected image from the archive, bounded by the shared reader."""
+        try:
+            selected = self.crops_table.tree.selection()
+            if not selected or self.current_bundle is None:
+                return
+            index = int(str(selected[0]).removeprefix("row_"))
+            if index < 0 or index >= len(self._crop_entry_rows):
+                return
+            entry = self._crop_entry_rows[index]
+            if not entry:
+                self.crop_preview_var.set("W tej próbie nie zapisano obrazu wyciętej tablicy.")
+                self._crop_photo = None
+                self.crop_image_label.configure(image="")
+                return
+            from PIL import ImageTk
+            image = read_mobile_sample_image(self.current_bundle, entry, max_entry_bytes=5 * 1024 * 1024,
+                                              max_dimension=8000, max_pixels=24_000_000)
+            scale = min(560 / max(1, image.width), 142 / max(1, image.height), 3.0)
+            if scale != 1.0:
+                from PIL import Image
+                image = image.resize((max(1, round(image.width * scale)), max(1, round(image.height * scale))),
+                                     Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS)
+            self._crop_photo = ImageTk.PhotoImage(image, master=self.window)
+            self.crop_image_label.configure(image=self._crop_photo)
+            self.crop_preview_var.set(f"Wycięta tablica · {Path(entry).name} · oryginał w zweryfikowanym archiwum")
+        except Exception as exc:
+            self._crop_photo = None
+            self.crop_image_label.configure(image="")
+            self.crop_preview_var.set("Nie można wyświetlić obrazu: " + str(exc)[:180])
 
     def _populate_raw(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
         payload = {
@@ -2468,7 +2831,8 @@ class MobileReportBrowser:
                 canvas.create_text(
                     width / 2,
                     height / 2,
-                    text="Brak śladu klatkowego traces.csv do wykresu.",
+                    text=("Połącz oryginalne archiwum, aby zobaczyć czasy kolejnych klatek."
+                          if bundle is None else "Archiwum nie zawiera szczegółowych pomiarów czasu."),
                     fill=self.muted,
                     font=("Segoe UI", 10, "bold"),
                 )

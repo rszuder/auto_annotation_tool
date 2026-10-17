@@ -22,24 +22,24 @@ def require_f4_selection(*, has_vehicle: bool, use_mt: bool, use_mz: bool,
     """Reject any choice that could dispatch a checkpoint conversion."""
     if has_vehicle:
         raise F4NoConversionError(
-            'F4 bez konwersji: wybierz zestaw MT+MZ bez MP; brak gotowego MP w tej ścieżce.'
+            'Wybór gotowych modeli: wybierz zestaw MT+MZ bez MP; brak gotowego MP w tej ścieżce.'
         )
     if not use_mt:
         raise F4NoConversionError(
-            'F4 bez konwersji: MT wymaga opcji Użyj gotowego MT i wyboru .alprmodel z biblioteki.'
+            'Wybór gotowych modeli: MT wymaga opcji Użyj gotowego MT i wyboru .alprmodel z biblioteki.'
         )
     if not use_mz:
         raise F4NoConversionError(
-            'F4 bez konwersji: MZ wymaga opcji Użyj gotowego MZ i wyboru .alprmodel z biblioteki. '
+            'Wybór gotowych modeli: MZ wymaga opcji Użyj gotowego MZ i wyboru .alprmodel z biblioteki. '
             'Surowy MZ-DAY CLEAN .tflite nie jest zatwierdzoną paczką.'
         )
     mt = str(mt_precision or '').strip().lower()
     mz = str(mz_precision or '').strip().lower()
     if mt not in {'int8', 'fp32'} or mz not in {'int8', 'fp32'}:
-        raise F4NoConversionError('F4 bez konwersji: wybierz jawnie INT8 albo FP32 w obu modelach.')
+        raise F4NoConversionError('Wybór gotowych modeli: wybierz jawnie INT8 albo FP32 w obu modelach.')
     if mt != mz:
         raise F4NoConversionError(
-            f'F4 bez konwersji: para ma różne precyzje MT={mt.upper()} i MZ={mz.upper()}. '
+            f'Wybór gotowych modeli: para ma różne precyzje MT={mt.upper()} i MZ={mz.upper()}. '
             'Do porównania wybierz dwie paczki tej samej precyzji.'
         )
     return mt
@@ -62,21 +62,21 @@ def require_f4_no_conversion_request(request, *, require_fresh_destination: bool
     if any(getattr(request, key, None) is not None for key in
            ('plate_request', 'character_request', 'vehicle_request', 'vehicle_package')):
         raise F4NoConversionError(
-            'F4 bez konwersji: żądanie zawiera nowy eksport checkpointu albo MP; operacja zablokowana.'
+            'Wybór gotowych modeli: żądanie zawiera nowy eksport checkpointu albo MP; operacja zablokowana.'
         )
     metadata = getattr(request, 'metadata', None)
     if not isinstance(metadata, dict):
-        raise F4NoConversionError('F4 bez konwersji: brak metadanych zatwierdzonego źródła MT/MZ.')
+        raise F4NoConversionError('Wybór gotowych modeli: brak metadanych zatwierdzonego źródła MT/MZ.')
     output_raw = str(getattr(request, 'destination', '') or '').strip()
     if not output_raw or Path(output_raw).suffix.lower() != '.alprmodel':
-        raise F4NoConversionError('F4 bez konwersji: wynik musi być plikiem .alprmodel.')
+        raise F4NoConversionError('Wybór gotowych modeli: wynik musi być plikiem .alprmodel.')
     selected_output = Path(output_raw)
     # The preview/preflight uses the suggested filename, which can already exist.
     # Enforce no-clobber ONLY after the operator chooses the real output path.
     # Check the symlink itself too: Path.exists() is false for broken links.
     if require_fresh_destination and (selected_output.exists() or selected_output.is_symlink()):
         raise F4NoConversionError(
-            'F4 bez konwersji: docelowy plik już istnieje. Wybierz NOWĄ nazwę; '
+            'Wybór gotowych modeli: docelowy plik już istnieje. Wybierz NOWĄ nazwę; '
             'nadpisanie wcześniejszego pakietu ALPR jest zablokowane.'
         )
     output = selected_output.resolve()
@@ -89,26 +89,26 @@ def require_f4_no_conversion_request(request, *, require_fresh_destination: bool
     ):
         raw = str(getattr(request, field, '') or '').strip()
         if not raw or Path(raw).suffix.lower() != '.alprmodel':
-            raise F4NoConversionError(f'F4 bez konwersji: {marker} wymaga gotowej paczki .alprmodel.')
+            raise F4NoConversionError(f'Wybór gotowych modeli: {marker} wymaga gotowej paczki .alprmodel.')
         source = Path(raw)
         if source.is_symlink() or not source.is_file():
-            raise F4NoConversionError(f'F4 bez konwersji: {marker} nie jest zwykłym, istniejącym plikiem.')
+            raise F4NoConversionError(f'Wybór gotowych modeli: {marker} nie jest zwykłym, istniejącym plikiem.')
         source = source.resolve()
         if output == source:
             raise F4NoConversionError(
-                f'F4 bez konwersji: plik docelowy jest źródłem {marker}; nadpisanie modelu zablokowane.'
+                f'Wybór gotowych modeli: plik docelowy jest źródłem {marker}; nadpisanie modelu zablokowane.'
             )
         proof = metadata.get(proof_field)
         if not isinstance(proof, dict):
-            raise F4NoConversionError(f'F4 bez konwersji: brak pełnej weryfikacji źródła {marker}.')
+            raise F4NoConversionError(f'Wybór gotowych modeli: brak pełnej weryfikacji źródła {marker}.')
         proof_path = str(proof.get('path') or '').strip()
         if not proof_path or Path(proof_path).resolve() != source:
-            raise F4NoConversionError(f'F4 bez konwersji: {marker} wskazuje inną paczkę niż zweryfikowana.')
+            raise F4NoConversionError(f'Wybór gotowych modeli: {marker} wskazuje inną paczkę niż zweryfikowana.')
         expected_sha = str(proof.get('package_sha256') or '').strip().lower()
         if not re.fullmatch(r'[0-9a-f]{64}', expected_sha):
-            raise F4NoConversionError(f'F4 bez konwersji: brak zweryfikowanego SHA pakietu {marker}.')
+            raise F4NoConversionError(f'Wybór gotowych modeli: brak zweryfikowanego SHA pakietu {marker}.')
         if _file_digest(source) != expected_sha:
-            raise F4NoConversionError(f'F4 bez konwersji: zmieniono paczkę {marker} od ostatniej kontroli SHA.')
+            raise F4NoConversionError(f'Wybór gotowych modeli: zmieniono paczkę {marker} od ostatniej kontroli SHA.')
         checked[marker] = {'path': str(source), 'sha256': expected_sha}
         precisions[marker] = str(proof.get('precision') or '').strip().lower()
     precise = require_f4_selection(

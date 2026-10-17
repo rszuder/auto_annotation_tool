@@ -120,7 +120,7 @@ class PairChoiceTests(unittest.TestCase):
 
     def test_reject_different_model_from_outside_inventory(self):
         outside=self.write_package('MT','int8',path=self.root/'outside.alprmodel')
-        with self.assertRaisesRegex(pairs.F4PairBindingError,'aktualnej macierzy'):
+        with self.assertRaisesRegex(pairs.F4PairBindingError,'paczka nie pochodzi z aktualnego przeglądu modeli'):
             self.run_choice(paths={**self.packages['int8'],'MT':outside})
 
     def test_reject_checkpoint_changed_after_scan(self):
@@ -153,7 +153,7 @@ class PairChoiceTests(unittest.TestCase):
 
     def test_reject_wrong_package_role_swapped(self):
         paths={'MT':self.packages['int8']['MZ'],'MZ':self.packages['int8']['MT']}
-        with self.assertRaisesRegex(pairs.F4PairBindingError,'aktualnej macierzy'):
+        with self.assertRaisesRegex(pairs.F4PairBindingError,'paczka nie pochodzi z aktualnego przeglądu modeli'):
             self.run_choice(paths=paths)
 
     def test_missing_graph_evidence_blocks_before_graph_validation(self):
@@ -170,7 +170,7 @@ class PairChoiceTests(unittest.TestCase):
     def test_reject_missing_role_candidate(self):
         report=copy.deepcopy(self.report)
         report['pairs']['int8']['state']='BLOCKED_NO_MATCHING_PACKAGE'
-        with self.assertRaisesRegex(pairs.F4PairBindingError,'nie znaleziono kompletnej pary'):
+        with self.assertRaisesRegex(pairs.F4PairBindingError,'Nie znaleziono obu modeli'):
             self.run_choice(report=report)
 
     def test_reject_unknown_precision(self):

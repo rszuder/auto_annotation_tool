@@ -13,6 +13,19 @@ from tkinter import messagebox, ttk
 
 from .z4_mobile_artifact_registry import library_snapshot, sha256_file
 from .z4_mobile_operation_summary import summarize_operations
+from .z4_mobile_artifact_status_ui import artifact_status_label, validation_result_text
+from .z4_mobile_artifact_validation_history import (
+    record_desktop_check, observe_last_checks, history_key,
+    historical_status_label,
+)
+# Z4LIB035_HISTORY_UI_20261015
+from .z4_mobile_artifact_transfer_ui import transfer_guidance
+# Z4LIB036_COPY_READY_UI_20261016
+# Z4LIB034_OPERATOR_STATE_GUIDANCE_20261015
+from .z4_mobile_artifact_details import (
+    artifact_search_text, checkpoint_sha_by_role, format_artifact_card, format_event_card,
+)
+# Z4LIB027_READABLE_ARTIFACT_LIBRARY_UI_20261015
 
 
 def verify_unchanged_mobile_package(
@@ -77,6 +90,8 @@ class MobileArtifactLibrary:
         self._verification_seq = 0
         self._verification_active = None
         self._verified_selection_path = None
+        self._verification_error = None  # only while THIS selection is active
+        self._previous_desktop_checks = {}  # observations from separate history ledger
         self.window = tk.Toplevel(parent)
         self.show_raw_events = tk.BooleanVar(master=self.window, value=False)
         self.event_view_status = tk.StringVar(
@@ -92,8 +107,10 @@ class MobileArtifactLibrary:
         shell = ttk.Frame(self.window, padding=14)
         shell.pack(fill="both", expand=True)
         ttk.Label(shell, text="Biblioteka modeli mobilnych", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        ttk.Label(shell, text="Wykryte paczki ≠ zatwierdzona konwersja. Badawcze TFLite nie są paczkami .alprmodel.",
-                  wraplength=1000).pack(anchor="w", pady=(1, 8))
+        ttk.Label(shell, text=(
+            "Kolumna «Stan» pokazuje, czy paczka jest gotowa do ręcznego skopiowania na telefon po kontroli PC. "
+            "To nie jest potwierdzenie działania na Androidzie. Zaznacz pakiet, aby zobaczyć następny krok."
+        ), wraplength=1200).pack(anchor="w", pady=(1, 8))
 
         controls = ttk.Frame(shell)
         controls.pack(fill="x", pady=(0, 9))
@@ -106,8 +123,11 @@ class MobileArtifactLibrary:
         self.refresh_button.pack(side="left")
         ttk.Label(controls, text=str(self.packages_root)).pack(side="right")
 
-        notebook = ttk.Notebook(shell)
-        notebook.pack(fill="both", expand=True)
+        # Z4LIB027: movable divider between list and summary; keeps native Win32 chrome.
+        split = ttk.PanedWindow(shell, orient=tk.VERTICAL)
+        split.pack(fill="both", expand=True)
+        notebook = ttk.Notebook(split)
+        split.add(notebook, weight=3)
         self.packages_tab = ttk.Frame(notebook, padding=(0, 9, 0, 0))
         self.events_tab = ttk.Frame(notebook, padding=(0, 9, 0, 0))
         notebook.add(self.packages_tab, text="Pakiety i modele")
@@ -134,17 +154,38 @@ class MobileArtifactLibrary:
             on_sort=lambda column: self.sort_column("events", column))
         self.event_tree.bind("<<TreeviewSelect>>", self.event_selected)
 
-        details = ttk.LabelFrame(shell, text="Szczegóły i proweniencja", padding=9)
-        details.pack(fill="both", pady=(9, 3))
-        self.detail = tk.Text(details, height=10, wrap="word", state="disabled", font=("Consolas", 9))
-        scroll = ttk.Scrollbar(details, command=self.detail.yview)
+        details = ttk.LabelFrame(split, text="Szczegóły i proweniencja", padding=9)
+        split.add(details, weight=2)
+        detail_actions = ttk.Frame(details)
+        detail_actions.pack(fill="x", pady=(0, 5))
+        ttk.Label(detail_actions, text="Zestawienie z manifestu (odczyt, bez zatwierdzenia)").pack(side="left")
+        ttk.Button(detail_actions, text="Kopiuj SHA checkpointu", command=self.copy_checkpoint_sha).pack(side="right")
+        self.detail_tabs = ttk.Notebook(details)
+        self.detail_tabs.pack(fill="both", expand=True)
+        summary_tab = ttk.Frame(self.detail_tabs)
+        raw_tab = ttk.Frame(self.detail_tabs)
+        self.detail_tabs.add(summary_tab, text="Opis modelu")
+        self.detail_tabs.add(raw_tab, text="Manifest JSON")
+
+        self.detail = tk.Text(summary_tab, height=9, wrap="word", state="disabled", font=("Segoe UI", 10))
+        scroll = ttk.Scrollbar(summary_tab, command=self.detail.yview)
         self.detail.configure(yscrollcommand=scroll.set)
         self.detail.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
+        self.raw_detail = tk.Text(raw_tab, height=9, wrap="none", state="disabled", font=("Consolas", 10))
+        raw_y = ttk.Scrollbar(raw_tab, command=self.raw_detail.yview)
+        raw_x = ttk.Scrollbar(raw_tab, command=self.raw_detail.xview, orient="horizontal")
+        self.raw_detail.configure(yscrollcommand=raw_y.set, xscrollcommand=raw_x.set)
+        self.raw_detail.grid(row=0, column=0, sticky="nsew")
+        raw_y.grid(row=0, column=1, sticky="ns")
+        raw_x.grid(row=1, column=0, sticky="ew")
+        raw_tab.grid_columnconfigure(0, weight=1)
+        raw_tab.grid_rowconfigure(0, weight=1)
+
         actions = ttk.Frame(shell)
         actions.pack(fill="x", pady=(5, 1))
-        ttk.Button(actions, text="Otwórz lokalizację", command=self.open_location).pack(side="left", padx=(0, 7))
+        ttk.Button(actions, text="Pokaż wybrany plik w folderze", command=self.open_location).pack(side="left", padx=(0, 7))
         ttk.Button(actions, text="Kopiuj ścieżkę", command=self.copy_path).pack(side="left", padx=(0, 7))
         ttk.Button(actions, text="Sprawdź paczkę (pełna kontrola)", command=self.validate_selected).pack(side="left")
         if self.on_choose is not None:
@@ -240,12 +281,17 @@ class MobileArtifactLibrary:
     def refresh(self):
         if self.busy:
             return
+        # Re-reading the directory is not a new full graph check.
+        self._verified_selection_path = None
+        self._verification_error = None
         self.busy = True
         self.refresh_button.configure(state="disabled")
-        self.status.set("Czytam manifesty paczek i historię eksportów (bez konwersji)...")
+        self.status.set("Odczytuję listę paczek i ich opisy. Nie sprawdzam jeszcze modeli ani nie zmieniam plików...")
         def work():
             try:
-                self.pipe.put(("scan", library_snapshot(self.packages_root, self.repo_root)))
+                scan_result = library_snapshot(self.packages_root, self.repo_root)
+                previous_checks = observe_last_checks(self.packages_root, scan_result[0])
+                self.pipe.put(("scan", (scan_result, previous_checks)))
             except Exception as exc:
                 self.pipe.put(("error", str(exc)))
         threading.Thread(target=work, daemon=True, name="z4-artifact-library-readonly-scan").start()
@@ -255,7 +301,8 @@ class MobileArtifactLibrary:
             while True:
                 kind, value = self.pipe.get_nowait()
                 if kind == "scan":
-                    self.rows, self.history, note = value
+                    self.rows, self.history, note = value[0]
+                    self._previous_desktop_checks = value[1]
                     self.busy = False
                     self.refresh_button.configure(state="normal")
                     self.refresh_views()
@@ -263,6 +310,12 @@ class MobileArtifactLibrary:
                 elif kind == "verified":
                     # The background result may arrive after a tab/row/filter change.
                     ticket = value if isinstance(value, dict) else {}
+                    stored = ticket.get("history_record")
+                    if isinstance(stored, dict) and stored.get("path"):
+                        self._previous_desktop_checks[history_key(stored["path"])] = {
+                            "record": stored,
+                            "comparison": ("MATCH" if stored.get("sha256") else "UNCONFIRMED"),
+                        }
                     active = self._verification_active
                     if not isinstance(active, dict) or any(
                         ticket.get(key) != active.get(key) for key in ("token", "path", "kind")
@@ -280,22 +333,36 @@ class MobileArtifactLibrary:
                     self.refresh_button.configure(state="normal")
                     if not still_selected:
                         self._verified_selection_path = None
+                        self._verification_error = None
                         self.status.set(
-                            "Kontrola zakończona dla innego zaznaczenia — nie zmieniono szczegółów "
-                            "ani nie przypisano wyniku do bieżącej paczki."
+                            "Kontrola dotyczyła innego zaznaczenia. Wybierz ponownie paczkę, "
+                            "którą chcesz sprawdzić."
                         )
                     elif ticket.get("ok"):
                         self._verified_selection_path = ticket["path"]
-                        self.status.set("WALIDACJA PASS (Desktop): " + Path(ticket["path"]).name)
-                        self.show_text(
-                            f"PEŁNA KONTROLA DESKTOP: PASS\n"
-                            f"Plik: {ticket['path']}\nSHA-256: {ticket['sha256']}\n"
-                            "Zakres: ZIP, warianty i graf według walidatora eksportera.\n"
-                            "NIE POTWIERDZA zgodności z Androidem ani wyników F4/final_test."
+                        self._verification_error = None
+                        self.status.set(
+                            "Kontrola na komputerze zaliczona. To nie jest jeszcze test na telefonie. "
+                            "Teraz porównaj modele z planem eksperymentu."
                         )
+                        self.show_text(validation_result_text(
+                            ok=True, path=ticket["path"], sha256=str(ticket.get("sha256") or ""),
+                        ))
                     else:
                         self._verified_selection_path = None
-                        self.status.set("WALIDACJA FAILED: " + str(ticket.get("detail") or "brak szczegółów"))
+                        self._verification_error = {
+                            "path": str(ticket.get("path") or ""),
+                            "detail": str(ticket.get("detail") or "brak szczegółów"),
+                        }
+                        self.status.set("Kontrola na komputerze niezaliczona. Odczytaj przyczynę w szczegółach.")
+                        self.show_text(validation_result_text(
+                            ok=False, path=str(ticket.get("path") or ""),
+                            problem=str(ticket.get("detail") or "brak szczegółów"),
+                        ))
+                    if ticket.get("history_warning"):
+                        self.status.set(self.status.get() + " Nie udało się zapisać historii kontroli: "
+                                        + str(ticket["history_warning"])[:240])
+                    self._refresh_artifact_status_cells()
                 else:
                     self.busy = False
                     self.refresh_button.configure(state="normal")
@@ -354,13 +421,14 @@ class MobileArtifactLibrary:
         for item in self.art_tree.get_children():
             self.art_tree.delete(item)
         for index, row in enumerate(self.rows):
-            if phrase not in (row.role + " " + row.name + " " + row.model_id + " " + row.variants + " " + row.state + " " + row.path).casefold():
+            if phrase not in (artifact_search_text(row) + " " + artifact_status_label(row)
+                              + " " + self._transfer_status_label(row)).casefold():
                 continue
             iid = f"a{index}"
             self.by_iid[iid] = row
             size = f"{row.size_bytes / 1024 / 1024:.2f} MB"
             self.art_tree.insert("", "end", iid=iid, values=(row.role, row.name, row.variants,
-                                size, row.modified_utc[:19], row.state))
+                                size, row.modified_utc[:19], self._transfer_status_label(row)))
         self.events_by_iid.clear()
         for item in self.event_tree.get_children():
             self.event_tree.delete(item)
@@ -407,8 +475,53 @@ class MobileArtifactLibrary:
                                       lambda row: row.path)
         self._restore_row_by_identity(self.event_tree, self.events_by_iid, event_key,
                                       lambda row: self._history_selection_key(row, raw=raw_view))
+        self._refresh_artifact_status_cells()
         if getattr(self, "detail", None) is not None:
             self._on_tab_changed()
+
+    def _previous_record(self, row):
+        if row is None:
+            return None
+        return getattr(self, "_previous_desktop_checks", {}).get(history_key(row.path))
+
+    def _transfer_status_label(self, row, *, is_pass=False, is_fail=False, in_progress=False):
+        """UI status only: copying file, not Android/experiment approval."""
+        return transfer_guidance(
+            row, desktop_validated=is_pass, validation_failed=is_fail,
+            validation_running=in_progress, history_entry=self._previous_record(row),
+        ).label
+
+    def _refresh_artifact_status_cells(self) -> None:
+        """Present a check result only for the active selection, never a stored approval."""
+        tree = getattr(self, "art_tree", None)
+        if tree is None or not callable(getattr(tree, "set", None)):
+            return
+        chosen = self.selected_artifact()
+        path = str(chosen.path) if chosen is not None else None
+        failure = getattr(self, "_verification_error", None)
+        active = getattr(self, "_verification_active", None)
+        for iid, row in getattr(self, "by_iid", {}).items():
+            is_current = str(row.path) == path
+            is_pass = (is_current and str(row.path) == getattr(self, "_verified_selection_path", None))
+            is_fail = (is_current and isinstance(failure, dict)
+                       and str(row.path) == failure.get("path"))
+            in_progress = (is_current and isinstance(active, dict)
+                           and str(row.path) == active.get("path")
+                           and bool(getattr(self, "busy", False)))
+            label = artifact_status_label(
+                row, desktop_validated=is_pass, validation_failed=is_fail,
+                validation_running=in_progress,
+            )
+            if not (is_pass or is_fail or in_progress):
+                label = historical_status_label(row, self._previous_record(row), fallback=label)
+            label = self._transfer_status_label(
+                row, is_pass=is_pass, is_fail=is_fail, in_progress=in_progress,
+            )
+            try:
+                if tree.set(iid, "state") != label:
+                    tree.set(iid, "state", label)
+            except (AttributeError, KeyError, tk.TclError):
+                pass
 
     def selected_artifact(self):
         return self._selection_row(self.art_tree, self.by_iid)
@@ -524,6 +637,30 @@ class MobileArtifactLibrary:
         self.detail.insert("1.0", value)
         self.detail.configure(state="disabled")
 
+    def show_raw(self, value: str):
+        """Keep full manifest available, without overwhelming the readable summary."""
+        self.raw_detail.configure(state="normal")
+        self.raw_detail.delete("1.0", "end")
+        self.raw_detail.insert("1.0", value)
+        self.raw_detail.configure(state="disabled")
+
+    def copy_checkpoint_sha(self):
+        """Copy source SHA(s) only, never confuse with package or file SHA."""
+        if self._active_tab_source() != "artifact":
+            return messagebox.showinfo("Biblioteka", "Przejdź do zakładki Pakiety i modele.", parent=self.window)
+        row = self.selected_artifact()
+        if row is None:
+            return messagebox.showinfo("Biblioteka", "Najpierw wskaż paczkę.", parent=self.window)
+        hashes = checkpoint_sha_by_role(row)
+        if not hashes:
+            return messagebox.showinfo("Biblioteka", "Brak wiarygodnego checkpoint_sha256 w manifeście.", parent=self.window)
+        payload = hashes[0][1] if len(hashes) == 1 else "\n".join(
+            f"{role}: {sha}" for role, sha in hashes
+        )
+        self.window.clipboard_clear()
+        self.window.clipboard_append(payload)
+        self.status.set(f"Skopiowano SHA checkpointu: {len(hashes)} pozycji (tylko deklaracje manifestu).")
+
     def artifact_selected(self, _event=None):
         if self._active_tab_source() != "artifact":
             return
@@ -533,7 +670,11 @@ class MobileArtifactLibrary:
         if previous and (row is None or str(row.path) != previous):
             self._verified_selection_path = None
             if getattr(self, "status", None) is not None:
-                self.status.set("Zmieniono wybór. Nowa paczka nie przeszła jeszcze pełnej kontroli.")
+                self.status.set("Wybrano inną paczkę. Jej model nie został jeszcze sprawdzony w tej sesji.")
+        failure = getattr(self, "_verification_error", None)
+        if isinstance(failure, dict) and (row is None or str(row.path) != failure.get("path")):
+            self._verification_error = None
+        self._refresh_artifact_status_cells()
         if row:
             data = {
                 "UWAGA": "ODCZYT Z MANIFESTU — NIE JEST CERTYFIKATEM PRECISION ANI ANDROID",
@@ -544,7 +685,18 @@ class MobileArtifactLibrary:
                 "child_metadata": row.child_metadata,
                 "child_metadata_authority": "SHA manifestu potomnego, nie pełna walidacja TFLite",
             }
-            self.show_text(json.dumps(data, ensure_ascii=False, indent=2)[:160000])
+            self.show_text(format_artifact_card(
+                row, desktop_validated_this_selection=(
+                    str(row.path) == str(getattr(self, "_verified_selection_path", None))
+                ),
+                validation_failure=(
+                    str(getattr(self, "_verification_error", {}).get("detail") or "")
+                    if isinstance(getattr(self, "_verification_error", None), dict)
+                    and str(row.path) == self._verification_error.get("path") else ""
+                ),
+                history_entry=self._previous_record(row),
+            ))
+            self.show_raw(json.dumps(data, ensure_ascii=False, indent=2)[:160000])
 
     def event_selected(self, _event=None):
         if self._active_tab_source() != "event":
@@ -552,7 +704,8 @@ class MobileArtifactLibrary:
         self.active_source = "event"
         event = self.selected_event()
         if event:
-            self.show_text(json.dumps(event, ensure_ascii=False, indent=2))
+            self.show_text(format_event_card(event))
+            self.show_raw(json.dumps(event, ensure_ascii=False, indent=2))
 
     def active_path(self) -> Path | None:
         if self._active_tab_source() == "event":
@@ -599,6 +752,8 @@ class MobileArtifactLibrary:
         path, selected_kind = str(row.path), row.kind
         self._verification_active = {"token": token, "path": path, "kind": selected_kind}
         self._verified_selection_path = None
+        self._verification_error = None
+        self._refresh_artifact_status_cells()
 
         def work():
             try:
@@ -608,14 +763,38 @@ class MobileArtifactLibrary:
                     model_validator=MobileModelExporter().validate_package,
                     bundle_validator=MobileAlprPackageExporter().validate_package,
                 )
+                # History is only an observation. Validation before reuse is unchanged.
+                history_record, history_warning = None, ""
+                try:
+                    history_record = record_desktop_check(
+                        self.packages_root, path=path, kind=selected_kind,
+                        passed=True, sha256=proof["sha256"],
+                        detail="Kontrola techniczna na komputerze: PASS")
+                except (OSError, ValueError, RuntimeError) as write_exc:
+                    history_warning = str(write_exc)
                 self.pipe.put(("verified", {
                     "token": token, "path": path, "kind": selected_kind, "ok": True,
                     "sha256": proof["sha256"], "detail": "Weryfikator Desktop: PASS",
+                    "history_record": history_record, "history_warning": history_warning,
                 }))
             except Exception as exc:
+                # A failed graph check is recorded as FAILED, never as permission.
+                history_record, history_warning = None, ""
+                try:
+                    try:
+                        failed_sha = sha256_file(Path(path))
+                    except (OSError, ValueError, RuntimeError):
+                        failed_sha = ""
+                    history_record = record_desktop_check(
+                        self.packages_root, path=path, kind=selected_kind,
+                        passed=False, sha256=failed_sha,
+                        detail=f"{type(exc).__name__}: {exc}")
+                except (OSError, ValueError, RuntimeError) as write_exc:
+                    history_warning = str(write_exc)
                 self.pipe.put(("verified", {
                     "token": token, "path": path, "kind": selected_kind, "ok": False,
                     "detail": f"{type(exc).__name__}: {exc}",
+                    "history_record": history_record, "history_warning": history_warning,
                 }))
         threading.Thread(target=work, daemon=True, name="z4-artifact-full-verifier").start()
 

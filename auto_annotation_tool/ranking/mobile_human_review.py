@@ -1,3 +1,4 @@
+# Z4MOBREV001_SIMPLE_REVIEW_20261016
 """Human annotations and reproducible mobile quality metrics; independent of Tk."""
 from __future__ import annotations
 
@@ -130,6 +131,7 @@ class MobileHumanReview:
     review_revision: int = 0
     review_mode: str = "blinded_gt_v1"
     review_mode_locked: bool = False
+    review_mode_origin: str = ""  # Przy jawnym przejsciu na ocene asystowana.
     mt_review_policy: str = "invocation_v1"
     normalization_policy: str = NORMALIZATION_POLICY
     subjects: dict[str, dict] = field(default_factory=dict)
@@ -322,11 +324,14 @@ class MobileReviewSession:
             if subject.get("evaluable") is True and not normalize_registration(subject.get("ground_truth")):
                 raise ValueError("Oceniana tablica wymaga niepustego GT.")
 
-    def _save_change(self, changed: MobileHumanReview) -> None:
+    def _save_change(self, changed: MobileHumanReview, *, allow_assisted_reveal: bool = False) -> None:
         self.verify_source()
         self._validate_decisions(changed)
         if self.review.review_mode_locked and changed.review_mode != self.review.review_mode:
-            raise ValueError("Tryb weryfikacji jest stały po pierwszej zapisanej decyzji.")
+            allowed = (allow_assisted_reveal and self.review.review_mode == "blinded_gt_v1"
+                       and changed.review_mode == "assisted")
+            if not allowed:
+                raise ValueError("Tryb weryfikacji jest stały po pierwszej zapisanej decyzji.")
         changed.review_mode_locked = self.review.review_mode_locked or any((changed.subjects, changed.attempt_annotations,
                                                                           changed.sample_annotations, changed.invocation_annotations))
         if self.sidecar_path.exists():
@@ -385,6 +390,20 @@ class MobileReviewSession:
         changed = copy.deepcopy(self.review)
         changed.review_mode = mode
         self._save_change(changed)
+
+    def reveal_predictions_for_review(self) -> None:
+        """Jawne, jednostronne przejscie na ocene asystowana.
+        Zachowuje decyzje i oryginalne archiwum, ale dalszej oceny nie
+        wolno nazywac zaslepiona. Powrot do blinded jest zabroniony.
+        """
+        if self.review.review_mode == "assisted":
+            return
+        if self.review.review_mode != "blinded_gt_v1":
+            raise ValueError("Nieobsługiwany tryb weryfikacji")
+        changed = copy.deepcopy(self.review)
+        changed.review_mode = "assisted"
+        changed.review_mode_origin = self.review.review_mode_origin or "blinded_gt_v1"
+        self._save_change(changed, allow_assisted_reveal=True)
 
     def annotate_invocation(self, key: str, *, visible_plate_count: str, evaluable: bool = True) -> None:
         changed = copy.deepcopy(self.review)

@@ -151,8 +151,8 @@ def build_f4_inventory(rows, *, checkpoint_sha_by_role: dict, scan_truncated: bo
 
 def describe_f4_inventory(report: dict) -> str:
     """Human-readable, honest Polish readiness summary, safe for a GUI text box."""
-    lines = ['F4 — inwentarz gotowych MT/MZ względem wybranych best.pt',
-             'TYLKO MANIFESTY: bez walidacji grafu, zgody na import Android i bez wykonania F4.', '']
+    lines = ['Które modele mobilne już mamy dla wybranych treningów?',
+             'Co sprawdzamy: opisy paczek i powiązania z treningami. Sama lista nie oznacza jeszcze poprawnego działania na telefonie.', '']
     pins = report.get('selected_checkpoint_sha256') or {}
     for role in ROLE_SPEC:
         pin = str(pins.get(role) or '')
@@ -171,18 +171,18 @@ def describe_f4_inventory(report: dict) -> str:
                 lines.append(f'  ...i {len(entries) - 8} innych.')
         state = view.get('state')
         if state == 'MANIFEST_CANDIDATES_REQUIRE_FULL_VALIDATION':
-            lines.append('KANDYDACI ZNALEZIENI — nadal wymagają pełnej walidacji obu .alprmodel w preflight.')
+            lines.append('Znaleziono pasujące paczki dla obu modeli. Przed użyciem aplikacja sprawdzi ich zawartość i pochodzenie.')
         elif state == 'SCAN_INCOMPLETE_NO_READINESS_CLAIM':
-            lines.append('NIEKOMPLETNY SKAN — brak rozstrzygnięcia gotowości pary.')
+            lines.append('Nie udało się sprawdzić wszystkich paczek. Ponów przegląd, zanim wybierzesz modele.')
         elif state == 'BLOCKED_NO_SELECTED_CHECKPOINT_SHA':
-            lines.append('BLOKADA — nie można potwierdzić obu checkpointów źródłowych.')
+            lines.append('Nie można potwierdzić, że paczki pochodzą z wybranych treningów. Sprawdź wybór modeli w Centrum.')
         else:
             missing = ', '.join(view.get('missing_roles') or [])
-            lines.append(f'BLOKADA — brak paczki z pasującym SHA: {missing or "MT/MZ"}.')
+            lines.append(f'Brakuje gotowego modelu pasującego do wybranego treningu: {missing or "MT/MZ"}. Można go przygotować w oknie eksportu.')
     research = report.get('research_mz_tflite') or []
     if research:
         lines.extend(['', f'Wykryto {len(research)} badawczy plik MZ TFLite (nie .alprmodel).',
                       'Nie zaliczono go do wariantu INT8; nie ma zatwierdzenia eksportu/importu.'])
-    lines.extend(['', 'F4 można rozpocząć dopiero po pełnej walidacji właściwych paczek i teście ALPR Mobile.',
+    lines.extend(['', 'Co dalej: przed pomiarami na telefonie sprawdzimy zawartość każdej wybranej paczki, a potem uruchomimy próbę w ALPR Mobile.',
                   'Zestawienie nie modyfikuje modeli ani historii eksperymentów.'])
     return '\n'.join(lines)

@@ -6957,7 +6957,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 pass
         else:
             export_selection_var.set(
-                "Do eksportu nie wybrano jeszcze modelu. Zaznacz pojedynczy MP, MT lub MZ albo komplet MT+MZ / MP+MT+MZ."
+                "Zaznacz model tablic MT i model znaków MZ, aby przygotować pełne rozpoznawanie. Możesz też wybrać pojedynczy model. Nic nie zostanie teraz zapisane."
             )
             try:
                 export_selection_label.configure(fg=muted)
@@ -7825,13 +7825,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
     run_value_var = tk.StringVar(value="Nie wybrano modeli")
     role_value_var = tk.StringVar(value="Łączna waga modeli: -")
     checkpoint_value_var = tk.StringVar(value="Zaznacz modele po lewej stronie.")
-    status_var = tk.StringVar(value="Wybierz kandydata do podglądu i zaznacz modele, które mają trafić do eksportu.")
+    status_var = tk.StringVar(value="Zaznacz wytrenowane modele. Przycisk „Eksportuj zaznaczone” otworzy ich ustawienia — nie uruchamia eksportu.")
     dependency_tool_status_var = tk.StringVar(
         value="Sprawdzenie gotowości obejmuje model, formaty i biblioteki potrzebne do eksportu."
     )
     dependency_tool_eta_var = tk.StringVar(value="ETA: -")
     export_selection_var = tk.StringVar(
-        value="Do eksportu nie wybrano jeszcze modelu. Zaznacz pojedynczy MP, MT lub MZ albo komplet MT+MZ / MP+MT+MZ."
+        value="Zaznacz model tablic MT i model znaków MZ, aby przygotować pełne rozpoznawanie. Możesz też wybrać pojedynczy model. Nic nie zostanie teraz zapisane."
     )
     selected_state = {"candidate": None}
     prepared_calibrations = {}
@@ -7960,7 +7960,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
     export_selection_shell.grid_columnconfigure(0, weight=1)
     tk.Label(
         export_selection_shell,
-        text="Modele w paczce",
+        text="Wybrane modele treningowe",
         bg=export_selection_shell["bg"],
         fg=fg,
         font=("Segoe UI", 9, "bold"),
@@ -10923,16 +10923,17 @@ def _open_mobile_model_export_center(self, initial_run=None):
             font=("Segoe UI", 14, "bold"),
             anchor=tk.W,
         ).grid(row=0, column=0, sticky="ew")
-        f4_no_conversion = tk.BooleanVar(value=(set(selected_by_marker) == {"MT", "MZ"}))
+        f4_no_conversion = tk.BooleanVar(value=False)
         intro_shell = tk.Frame(exec_root, bg=bg)
         intro_shell.grid(row=1, column=0, sticky="ew", pady=(3, 10))
         tk.Label(
             intro_shell,
             text=(
                 artifact.message + "\n"
-                "Zaznacz gotowe modele w kartach poniżej, a potem sprawdź gotowość. "
-                "W trybie F4 bez konwersji wymagane są dwa pakiety .alprmodel tej samej precyzji. "
-                "To kontrola techniczna Desktop, nie potwierdzenie uruchomienia na Androidzie."
+                "Po co to okno? Tutaj przygotujesz modele, które później uruchomisz na telefonie. "
+                "Wybrane wcześniej modele treningowe (.pt) są już przypisane. "
+                "Dla każdego możesz utworzyć nową paczkę albo użyć gotowej z biblioteki. "
+                "Najpierw sprawdzimy ustawienia — nic nie zapisujemy bez uruchomienia eksportu."
             ),
             bg=bg,
             fg=muted,
@@ -10941,12 +10942,28 @@ def _open_mobile_model_export_center(self, initial_run=None):
             justify=tk.LEFT,
             wraplength=980,
         ).pack(fill=tk.X)
-        if "MT" in selected_by_marker and "MZ" in selected_by_marker:
-            ttk.Checkbutton(
+        export_plan_var = tk.StringVar(value="Plan przygotowania zostanie pokazany poniżej.")
+        if set(selected_by_marker) == {"MT", "MZ"}:
+            selected_source_text = "  |  ".join(
+                f"{role}: {selected_by_marker[role].get('model_label') or selected_by_marker[role].get('run_label') or 'best.pt'} (model treningowy)"
+                for role in ("MT", "MZ")
+            )
+            ttk.Label(
                 intro_shell,
-                text="F4: tylko istniejące MT+MZ, bez ponownej konwersji (zabezpieczenie)",
-                variable=f4_no_conversion,
-            ).pack(anchor=tk.W, pady=(6, 0))
+                text="Wybrane modele z Centrum: " + selected_source_text,
+                wraplength=980,
+            ).pack(anchor="w", fill="x", pady=(5, 3))
+            ttk.Label(
+                intro_shell,
+                text="Zdecyduj osobno dla MT i MZ: MT znajduje tablice, a MZ odczytuje znaki. „Nowy” tworzy model z .pt, „z biblioteki” używa gotowej paczki .alprmodel.",
+                wraplength=980,
+            ).pack(anchor="w", fill="x", pady=(3, 2))
+            ttk.Label(
+                intro_shell,
+                textvariable=export_plan_var,
+                wraplength=980,
+                justify="left",
+            ).pack(anchor="w", fill="x", pady=(2, 4))
 
         model_grid = tk.Frame(exec_root, bg=bg)
         model_grid.grid(row=2, column=0, sticky="nsew")
@@ -10972,7 +10989,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         model_cards_scroll.grid(row=0, column=1, sticky="ns", padx=(6, 0))
         model_cards_content = tk.Frame(model_cards_canvas, bg=bg)
         model_cards_window_id = model_cards_canvas.create_window((0, 0), window=model_cards_content, anchor=tk.NW)
-        model_card_columns = 1 if single_model_layout else min(2, selected_count)
+        model_card_columns = 1  # Z4LIB029: wide, vertically scrolling MT/MZ cards
         for grid_index in range(model_card_columns):
             model_cards_content.grid_columnconfigure(grid_index, weight=1, uniform="mobile_export_model_cards")
 
@@ -11019,7 +11036,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 _bind_model_cards_mousewheel(child)
 
         model_states: list[dict] = []
-        exec_status_var = tk.StringVar(value="Gotowe do sprawdzenia. Eksport sam poprosi o nazwę i miejsce zapisu pliku.")
+        exec_status_var = tk.StringVar(value="Najpierw sprawdzimy ustawienia i wymagane narzędzia. To sprawdzenie nie utworzy żadnego modelu.")
         exec_progress_var = tk.DoubleVar(value=0.0)
         exec_progress_percent_var = tk.StringVar(value="0%")
         exec_install_control = {
@@ -11123,18 +11140,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
         f4_no_conversion.trace_add("write", _mark_executor_dirty)
 
         def _executor_panel_wraplength() -> int:
-            if single_model_layout:
-                return 510
-            if selected_count > 2:
-                return 330
-            return 470
+            return 610 if model_card_columns == 1 else 350
 
         def _format_card_wraplength() -> int:
-            if single_model_layout:
-                return 230
-            if selected_count > 2:
-                return 135
-            return 190
+            return 310 if model_card_columns == 1 else 170
 
         def _create_format_hint_card(
             parent,
@@ -11223,28 +11232,33 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 )
                 mt_source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
                 mt_source.grid_columnconfigure(0, weight=1)
-                ttk.Checkbutton(
-                    mt_source,
-                    text="Użyj gotowego MT (.alprmodel), bez ponownej konwersji",
-                    variable=state["reuse_mt"],
-                ).grid(row=0, column=0, sticky="w")
+                ttk.Label(mt_source, text="MT — co chcesz zrobić?").grid(
+                    row=0, column=0, sticky="w", pady=(0, 3))
+                ttk.Radiobutton(
+                    mt_source, text="Przygotuj nowy MT z wybranego best.pt",
+                    value=False, variable=state["reuse_mt"],
+                ).grid(row=1, column=0, sticky="w")
+                ttk.Radiobutton(
+                    mt_source, text="Wykorzystaj gotowy MT z biblioteki",
+                    value=True, variable=state["reuse_mt"],
+                ).grid(row=2, column=0, sticky="w", pady=(2, 0))
                 mt_precision_row = ttk.Frame(mt_source)
-                mt_precision_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
+                mt_precision_row.grid(row=3, column=0, sticky="w", pady=(4, 0))
                 ttk.Label(mt_precision_row, text="Wariant gotowego MT:").pack(side=tk.LEFT, padx=(0, 8))
                 ttk.Radiobutton(mt_precision_row, text="INT8", value="int8",
                                 variable=state["reuse_mt_precision"]).pack(side=tk.LEFT, padx=(0, 9))
                 ttk.Radiobutton(mt_precision_row, text="FP32", value="fp32",
                                 variable=state["reuse_mt_precision"]).pack(side=tk.LEFT)
                 mt_source_controls = tk.Frame(mt_source, bg=mt_source["bg"])
-                mt_source_controls.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+                mt_source_controls.grid(row=4, column=0, sticky="ew", pady=(5, 0))
                 mt_source_controls.grid_columnconfigure(0, weight=1)
                 mt_path_entry = ttk.Entry(mt_source_controls, textvariable=state["reuse_mt_path"])
                 mt_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-                mt_filename_var = tk.StringVar(value="Plik MT: nie wybrano")
+                mt_filename_var = tk.StringVar(value="Paczka MT: wybierz plik .alprmodel z biblioteki")
 
                 def _update_mt_filename(*_args):
                     current = str(state["reuse_mt_path"].get() or "").strip()
-                    mt_filename_var.set("Plik MT: " + Path(current).name if current else "Plik MT: nie wybrano")
+                    mt_filename_var.set("Paczka MT: " + Path(current).name if current else "Paczka MT: wybierz .alprmodel z biblioteki")
                     try:
                         mt_path_entry.xview_moveto(1.0)
                     except Exception:
@@ -11298,6 +11312,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength(),
                 ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
                 state["_reuse_mt_source_controls"] = mt_source_controls
+                state["_reuse_mt_precision_row"] = mt_precision_row
 
             if marker == "MZ" and "MT" in selected_by_marker:
                 mz_source = tk.Frame(
@@ -11307,28 +11322,33 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 )
                 mz_source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
                 mz_source.grid_columnconfigure(0, weight=1)
-                ttk.Checkbutton(
-                    mz_source,
-                    text="Użyj gotowego MZ (.alprmodel), bez ponownej konwersji",
-                    variable=state["reuse_mz"],
-                ).grid(row=0, column=0, sticky="w")
+                ttk.Label(mz_source, text="MZ — co chcesz zrobić?").grid(
+                    row=0, column=0, sticky="w", pady=(0, 3))
+                ttk.Radiobutton(
+                    mz_source, text="Przygotuj nowy MZ z wybranego best.pt",
+                    value=False, variable=state["reuse_mz"],
+                ).grid(row=1, column=0, sticky="w")
+                ttk.Radiobutton(
+                    mz_source, text="Wykorzystaj gotowy MZ z biblioteki",
+                    value=True, variable=state["reuse_mz"],
+                ).grid(row=2, column=0, sticky="w", pady=(2, 0))
                 mz_precision_row = ttk.Frame(mz_source)
-                mz_precision_row.grid(row=1, column=0, sticky="w", pady=(4, 0))
+                mz_precision_row.grid(row=3, column=0, sticky="w", pady=(4, 0))
                 ttk.Label(mz_precision_row, text="Wariant gotowego MZ:").pack(side=tk.LEFT, padx=(0, 8))
                 ttk.Radiobutton(mz_precision_row, text="INT8", value="int8",
                                 variable=state["reuse_mz_precision"]).pack(side=tk.LEFT, padx=(0, 9))
                 ttk.Radiobutton(mz_precision_row, text="FP32", value="fp32",
                                 variable=state["reuse_mz_precision"]).pack(side=tk.LEFT)
                 controls_mz = tk.Frame(mz_source, bg=mz_source["bg"])
-                controls_mz.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+                controls_mz.grid(row=4, column=0, sticky="ew", pady=(5, 0))
                 controls_mz.grid_columnconfigure(0, weight=1)
                 mz_path_entry = ttk.Entry(controls_mz, textvariable=state["reuse_mz_path"])
                 mz_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-                mz_filename = tk.StringVar(value="Plik MZ: nie wybrano")
+                mz_filename = tk.StringVar(value="Paczka MZ: wybierz plik .alprmodel z biblioteki")
 
                 def update_mz_filename(*_args):
                     current = str(state["reuse_mz_path"].get() or "").strip()
-                    mz_filename.set("Plik MZ: " + Path(current).name if current else "Plik MZ: nie wybrano")
+                    mz_filename.set("Paczka MZ: " + Path(current).name if current else "Paczka MZ: wybierz .alprmodel z biblioteki")
                     try:
                         mz_path_entry.xview_moveto(1.0)
                     except Exception:
@@ -11357,14 +11377,15 @@ def _open_mobile_model_export_center(self, initial_run=None):
                          anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
                     row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
                 tk.Label(
-                    mz_source,
+                    controls_mz,
                     text="Gotowy MZ musi odpowiadać best.pt (SHA), mieć zgodne imgsz i dokładnie "
                          "jeden zweryfikowany wariant TFLite wybranej precyzji INT8 albo FP32. "
                          "Surowy MZ-DAY CLEAN .tflite pozostaje wyłącznie artefaktem badawczym.",
-                    bg=mz_source["bg"], fg=muted, font=("Segoe UI", 7),
+                    bg=mz_source["bg"], fg=muted, font=("Segoe UI", 8),
                     anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength(),
-                ).grid(row=2, column=0, sticky="ew", pady=(4, 0))
+                ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
                 state["_reuse_mz_source_controls"] = controls_mz
+                state["_reuse_mz_precision_row"] = mz_precision_row
 
             formats = tk.Frame(panel, bg=blend_hex_colors(panel_bg, accent, 0.045), padx=9, pady=7)
             formats.grid(row=3, column=0, sticky="ew", pady=(0, 8))
@@ -11873,11 +11894,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 def sync_reused_mt_ui(*_args):
                     use_existing = _state_reuses_existing_mt(state)
                     fields = state["_reuse_mt_source_controls"]
+                    precision_row = state["_reuse_mt_precision_row"]
                     if use_existing:
+                        precision_row.grid()
                         fields.grid()
                         for widget in (formats, params_title, params, calibration):
                             widget.grid_remove()
                     else:
+                        precision_row.grid_remove()
                         fields.grid_remove()
                         for widget in (formats, params_title, params):
                             widget.grid()
@@ -11892,11 +11916,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 def sync_reused_mz_ui(*_args):
                     use_existing = _state_reuses_existing_mz(state)
                     fields = state["_reuse_mz_source_controls"]
+                    precision_row = state["_reuse_mz_precision_row"]
                     if use_existing:
+                        precision_row.grid()
                         fields.grid()
                         for widget in (formats, params_title, params, calibration):
                             widget.grid_remove()
                     else:
+                        precision_row.grid_remove()
                         fields.grid_remove()
                         for widget in (formats, params_title, params):
                             widget.grid()
@@ -11920,6 +11947,44 @@ def _open_mobile_model_export_center(self, initial_run=None):
             _create_model_panel(model_cards_content, state, idx)
         _bind_model_cards_mousewheel(model_cards_content)
 
+        if set(selected_by_marker) == {"MT", "MZ"}:
+            from .z4_mobile_export_plan import summarize_export_plan
+
+            def _sync_f4_reuse_plan(*_args) -> None:
+                specs = []
+                for current_state in model_states:
+                    role = str(current_state.get("marker") or "")
+                    if role not in {"MT", "MZ"}:
+                        continue
+                    key = "reuse_" + role.lower()
+                    specs.append({
+                        "role": role,
+                        "reuse": bool(current_state[key].get()),
+                        "path": str(current_state[key + "_path"].get() or ""),
+                        "precision": str(current_state[key + "_precision"].get() or ""),
+                        "image_size": int(current_state["imgsz"].get() or 0),
+                        "formats": {name: bool(current_state[name].get())
+                                    for name in ("litert", "int8", "onnx", "onnx_int8", "ncnn")},
+                    })
+                try:
+                    plan_text, reuse_only = summarize_export_plan(specs)
+                except (TypeError, ValueError, tk.TclError) as exc:
+                    export_plan_var.set("Nie mogę jeszcze ustalić planu: " + str(exc))
+                    return
+                export_plan_var.set("Plan działania (bez uruchamiania eksportu):\n" + plan_text)
+                if bool(f4_no_conversion.get()) != reuse_only:
+                    f4_no_conversion.set(reuse_only)
+
+            for current_state in model_states:
+                role = str(current_state.get("marker") or "")
+                if role not in {"MT", "MZ"}:
+                    continue
+                key = "reuse_" + role.lower()
+                for field in (key, key + "_path", key + "_precision", "imgsz",
+                              "litert", "int8", "onnx", "onnx_int8", "ncnn"):
+                    current_state[field].trace_add("write", _sync_f4_reuse_plan)
+            _sync_f4_reuse_plan()
+
         def show_f4_inventory() -> None:
             """Read-only checkpoint-SHA-anchored FP32/INT8 matrix; no exporters."""
             if worker_state.get("running"):
@@ -11930,20 +11995,21 @@ def _open_mobile_model_export_center(self, initial_run=None):
             from .z4_mobile_f4_inventory import build_f4_inventory, describe_f4_inventory
             from .z4_mobile_f4_comparability import compare_f4_cross_precision, describe_f4_cross_precision
             view = tk.Toplevel(executor_modal)
-            view.title("F4 — macierz gotowych paczek FP32 / INT8")
+            view.title("Dostępne paczki mobilne — FP32 / INT8")
             view.geometry("1030x700")
             view.minsize(760, 460)
             view.resizable(True, True)
-            ttk.Label(view, text="Inwentarz F4 — manifesty (bez walidacji grafu i bez konwersji).",
+            ttk.Label(view, text="Po co ta kontrola? Sprawdzamy, które paczki pasują do wybranych treningów. Nie tworzymy modeli ani nie potwierdzamy jeszcze działania na telefonie.",
                       padding=(14, 12, 14, 4)).pack(anchor="w")
             from .z4_mobile_f4_pair_selection import validate_f4_pair_choice, F4PairBindingError
             from .z4_mobile_artifact_registry import read_archive
 
-            pair_frame = ttk.LabelFrame(view, text="Wybierz istniejącą parę F4 — bez konwersji", padding=(10, 7))
+            pair_frame = ttk.LabelFrame(view, text="Które gotowe modele można wykorzystać?", padding=(10, 7))
             pair_frame.pack(fill=tk.X, padx=12, pady=(0, 6))
-            fmt_var = tk.StringVar(value="INT8")
+            fmt_var = tk.StringVar(value="FP32")
             choice_var = {role: tk.StringVar(value="") for role in ("MT", "MZ")}
             dropdowns = {}
+            role_labels = {}
             options_by_role = {role: {} for role in ("MT", "MZ")}
             inventory_context = {"report": None}
             ttk.Label(pair_frame, text="Precyzja").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
@@ -11951,9 +12017,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
                                         state="readonly", width=9)
             fmt_dropdown.grid(row=0, column=1, sticky="w", padx=(0, 15), pady=3)
             for index, role in enumerate(("MT", "MZ"), start=1):
-                ttk.Label(pair_frame, text=f"Paczka {role}").grid(row=index, column=0, sticky="w", padx=(0, 6), pady=3)
+                label = ttk.Label(pair_frame, text=f"Paczka {role}")
+                label.grid(row=index, column=0, sticky="w", padx=(0, 6), pady=3)
                 field = ttk.Combobox(pair_frame, textvariable=choice_var[role], state="disabled", width=90)
                 field.grid(row=index, column=1, columnspan=3, sticky="ew", pady=3)
+                label.grid_remove()  # No empty selectors while the scan is pending.
+                field.grid_remove()
+                role_labels[role] = label
                 dropdowns[role] = field
             pair_frame.grid_columnconfigure(1, weight=1)
             selection_notice = tk.StringVar(value="Najpierw poczekaj na wynik skanowania.")
@@ -11970,27 +12040,58 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 choose_button.configure(state=tk.NORMAL if complete else tk.DISABLED)
 
             def _populate_pair_choices(_event=None):
+                """Only show selectors when both roles have matching packages.
+
+                Otherwise present a useful inventory result, not empty fields.
+                Does not change a package, selected checkpoint, or export request.
+                """
                 report = inventory_context.get("report")
                 fmt = str(fmt_var.get() or "").lower()
                 pair = ((report or {}).get("pairs") or {}).get(fmt) or {}
+                candidates = pair.get("candidates") or {}
+                mt_count = len(candidates.get("MT") or [])
+                mz_count = len(candidates.get("MZ") or [])
                 allowed = (report is not None and not report.get("scan_truncated")
-                           and pair.get("state") == "MANIFEST_CANDIDATES_REQUIRE_FULL_VALIDATION")
+                           and pair.get("state") == "MANIFEST_CANDIDATES_REQUIRE_FULL_VALIDATION"
+                           and mt_count > 0 and mz_count > 0)
                 for role in ("MT", "MZ"):
                     role_options = options_by_role[role]
                     role_options.clear()
                     values = []
                     if allowed:
-                        for i, item in enumerate(((pair.get("candidates") or {}).get(role) or []), start=1):
+                        for i, item in enumerate(candidates.get(role) or [], start=1):
                             path = str(item.get("path") or "")
                             label = f"{i}. {Path(path).name}  |  {path}"
                             role_options[label] = path
                             values.append(label)
                     choice_var[role].set("")
                     dropdowns[role].configure(values=values, state="readonly" if values else "disabled")
+                    if allowed:
+                        role_labels[role].grid()
+                        dropdowns[role].grid()
+                    else:
+                        role_labels[role].grid_remove()
+                        dropdowns[role].grid_remove()
                 if allowed:
-                    selection_notice.set("Wskaż osobno MT i MZ; przycisk przypisze paczki do kart eksportu. Pełna kontrola grafu pozostaje w preflight.")
+                    choose_button.grid()
+                    selection_notice.set(
+                        f"{fmt.upper()}: znaleziono zgodne paczki MT i MZ. "
+                        "Wybierz obie, aby je wykorzystać. W następnym kroku walidacja grafu i SHA sprawdzi zgodność. Ten wybór nie uruchamia eksportu."
+                    )
                 else:
-                    selection_notice.set("Brak kompletnej pary w tej precyzji lub niekompletny skan. Przypisanie zablokowane.")
+                    choose_button.grid_remove()
+                    if report is None:
+                        message = "Nie udało się odczytać macierzy. Nie przypisano żadnych paczek."
+                    elif report.get("scan_truncated"):
+                        message = "Skan biblioteki niekompletny. Nie można bezpiecznie wybrać paczek."
+                    else:
+                        mt_label = f"{mt_count} kandydat(ów)" if mt_count else "brak zgodnej paczki"
+                        mz_label = f"{mz_count} kandydat(ów)" if mz_count else "brak zgodnej paczki"
+                        message = (f"{fmt.upper()}: MT — {mt_label}; MZ — {mz_label}. "
+                                   "Brakuje co najmniej jednej paczki, dlatego wybór kompletnej pary jest niedostępny. "
+                                   "Wróć do kart MT i MZ i przygotuj brakujące modele; "
+                                   "gotowe modele można wskazać osobno w bibliotece.")
+                    selection_notice.set(message)
                 _sync_pair_action()
 
             def _bind_selected_pair() -> None:
@@ -12039,12 +12140,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     return
                 exec_preflight_state.update({"ready": False, "problems": [], "installable": False})
                 _sync_executor_buttons()
-                exec_status_var.set(f"F4 {fmt.upper()}: przypisano dwa istniejące pakiety z macierzy; preflight zweryfikuje graf i SHA ponownie. NIE uruchomiono eksportu.")
+                exec_status_var.set(f"Wybrano gotowe paczki {fmt.upper()}. Kolejne sprawdzenie zweryfikuje ich zawartość i SHA. Nie uruchomiono eksportu.")
                 view.destroy()
 
             choose_button = ttk.Button(pair_frame, text="Przypisz MT + MZ do eksportu (bez konwersji)",
                                        command=_bind_selected_pair, state=tk.DISABLED)
             choose_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+            choose_button.grid_remove()  # Shown only after a complete pair is found.
             fmt_dropdown.bind("<<ComboboxSelected>>", _populate_pair_choices, add="+")
             for role in ("MT", "MZ"):
                 dropdowns[role].bind("<<ComboboxSelected>>", _sync_pair_action, add="+")
@@ -12076,7 +12178,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     matrix_text = describe_f4_inventory(report) + "\n\n" + describe_f4_cross_precision(comparison)
                     results.put((True, matrix_text, report))
                 except Exception as exc:
-                    results.put((False, f"Nie udało się zbudować macierzy F4: {type(exc).__name__}: {exc}", None))
+                    results.put((False, f"Nie udało się sprawdzić dostępnych paczek: {type(exc).__name__}: {exc}", None))
 
             def collect():
                 if not view.winfo_exists():
@@ -12100,7 +12202,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
         if set(selected_by_marker) == {"MT", "MZ"}:
             ttk.Button(
-                intro_shell, text="Sprawdź warianty F4 na dysku (bez konwersji)",
+                intro_shell, text="Sprawdź gotowe paczki (FP32 / INT8)",
                 command=show_f4_inventory,
             ).pack(anchor=tk.W, pady=(3, 0))
 
@@ -12117,10 +12219,10 @@ def _open_mobile_model_export_center(self, initial_run=None):
         # The requirements tables are scrollable. Do not reserve 520 px
         # here: on common Windows DPI scaling that pushes the status/CTA
         # footer below the visible work area in the default window.
-        checks_shell.grid_rowconfigure(1, weight=1, minsize=340)
+        checks_shell.grid_rowconfigure(2, weight=1, minsize=250)
         tk.Label(
             checks_shell,
-            text="4. Gotowość eksportu i zależności",
+            text="4. Sprawdzenie ustawień przed eksportem",
             bg=checks_shell["bg"],
             fg=fg,
             font=("Segoe UI", 10, "bold"),
@@ -12136,9 +12238,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ],
             bg_color=checks_shell["bg"],
             header_bg=blend_hex_colors(checks_shell["bg"], accent, 0.10),
-            height=340,
+            height=260,
         )
-        executor_requirements_table["shell"].grid(row=1, column=0, sticky="nsew")
+        executor_requirements_table["shell"].grid(row=2, column=0, sticky="nsew")
         executor_install_table = _build_wrapped_info_table(
             checks_shell,
             [
@@ -12150,9 +12252,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ],
             bg_color=checks_shell["bg"],
             header_bg=blend_hex_colors(checks_shell["bg"], accent, 0.10),
-            height=340,
+            height=260,
         )
-        executor_install_table["shell"].grid(row=1, column=0, sticky="nsew")
+        executor_install_table["shell"].grid(row=2, column=0, sticky="nsew")
         executor_install_table["shell"].grid_remove()
         executor_table_state = {"mode": "preflight"}
 
@@ -12173,7 +12275,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
         # Narzędzia kontroli są w modalu EKSPORTU, nie w Centrum wyboru kandydatów.
         verify_section = tk.Frame(checks_shell, bg=checks_shell["bg"])
-        verify_section.grid(row=2, column=0, sticky="ew", pady=(9, 0))
+        verify_section.grid(row=1, column=0, sticky="ew", pady=(3, 7))
         verify_section.grid_columnconfigure(0, weight=1)
         verify_section.grid_columnconfigure(1, weight=1)
         tk.Label(verify_section, text="Kontrola gotowego pakietu / wyniki z telefonu",
@@ -12908,7 +13010,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 _sync_executor_buttons()
                 return False
             _set_executor_status(
-                "F4: pakiety źródłowe MT+MZ zweryfikowane — składanie bez konwersji. "
+                "Gotowe paczki MT i MZ sprawdzone — po potwierdzeniu zostaną połączone bez ponownego przygotowywania modeli. "
                 "Wykonanie ALPR Mobile nadal wymaga osobnego testu na telefonie."
                 if f4_no_conversion.get() else
                 "Kontrola wstępna PASS. Warianty świeżego eksportu wymagają weryfikacji po konwersji.",
@@ -13853,7 +13955,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
     ttk.Button(
         actions, text="Biblioteka modeli mobilnych", command=_open_z4_mobile_artifact_library
-    ).grid(row=1, column=0, columnspan=3, sticky="w", padx=(0, 8), pady=(5, 0), ipadx=8, ipady=2)
+    ).grid(row=0, column=0, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
 
     export_button = ttk.Button(
         actions,

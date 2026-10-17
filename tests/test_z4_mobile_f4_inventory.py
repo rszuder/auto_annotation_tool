@@ -110,7 +110,7 @@ class InventoryTests(unittest.TestCase):
 
     def test_gui_exposes_read_only_inventory_button(self):
         code=GUI.read_text(encoding='utf-8-sig')
-        self.assertIn('Sprawdź warianty F4 na dysku (bez konwersji)',code)
+        self.assertIn('Sprawdź gotowe paczki (FP32 / INT8)',code)
         self.assertIn('from .z4_mobile_f4_inventory import build_f4_inventory, describe_f4_inventory',code)
         self.assertIn('threading.Thread(target=scan, name="z4-f4-readonly-inventory", daemon=True)',code)
         self.assertIn('scan_truncated=truncated',code)

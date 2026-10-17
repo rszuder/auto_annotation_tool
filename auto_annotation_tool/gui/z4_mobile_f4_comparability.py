@@ -199,9 +199,9 @@ def compare_f4_cross_precision(rows, inventory: dict, *, max_combinations_per_ro
 
 def describe_f4_cross_precision(report: dict) -> str:
     lines = [
-        'F4 — zgodność porównania FP32 ↔ INT8 (na podstawie manifestów)',
-        'NIE JEST TO: walidacja grafu, identyczność dekoderów, zatwierdzenie Android ani wykonanie F4.',
-        f'Stan: {report.get("status") or "INCONCLUSIVE"}.',
+        'Czy gotowe paczki FP32 i INT8 pochodzą z tych samych treningów?',
+        'Ta kontrola porównuje wyłącznie informacje w paczkach. Nie sprawdza jeszcze działania modeli ani dokładności odczytu na telefonie.',
+        f'Kod wyniku (dla diagnostyki): {report.get("status") or "INCONCLUSIVE"}.',
     ]
     if report.get('status') == 'RUNTIME_PARITY_REVIEW_REQUIRED':
         lines.append('ROŻNE DEKODERY / FORMATY WYJŚĆ: wymagany jawny test parytetu w ALPR Mobile. '
@@ -224,5 +224,5 @@ def describe_f4_cross_precision(report: dict) -> str:
                 lines.append('    Wymaga testu dekodowania: '+', '.join(pair['decoder_review']))
         if len(item.get('checked_pairs') or []) > 6:
             lines.append('    Pozostałe kombinacje pominięto w podglądzie; wynik analizy obejmuje je wszystkie.')
-    lines.append('Wynik informacyjny — wybrana para nadal wymaga pełnego preflight oraz sprawdzenia w ALPR Mobile.')
+    lines.append('Następny krok: sprawdź pełną zawartość wybranych paczek, a potem działanie w ALPR Mobile.')
     return '\n'.join(lines)

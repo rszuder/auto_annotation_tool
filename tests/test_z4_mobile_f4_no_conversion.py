@@ -159,8 +159,11 @@ class F4BundleTests(unittest.TestCase):
 class F4UiGateTests(unittest.TestCase):
     def test_gui_has_opt_in_to_fresh_conversion_and_preflight_gate(self):
         text = GUI.read_text(encoding='utf-8-sig')
-        for token in ('F4: tylko istniejące MT+MZ',
-                      'f4_no_conversion = tk.BooleanVar(value=(set(selected_by_marker) == {"MT", "MZ"}))',
+        for token in ('Przygotuj nowy MT z wybranego best.pt',
+                      'Wykorzystaj gotowy MT z biblioteki',
+                      'Przygotuj nowy MZ z wybranego best.pt',
+                      'Wykorzystaj gotowy MZ z biblioteki',
+                      'f4_no_conversion = tk.BooleanVar(value=False)',
                       'f4_no_conversion.trace_add("write", _mark_executor_dirty)',
                       'require_f4_selection(',
                       'require_f4_no_conversion_request(bundle_request)',
