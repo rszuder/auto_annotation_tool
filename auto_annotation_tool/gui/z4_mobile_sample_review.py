@@ -16,23 +16,42 @@ import queue
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, ttk, messagebox
 
 from PIL import Image, ImageTk
+
+from .mobile_science_summary_ui import MobileScienceSummaryPanel
 
 from ..rectification.polygon_validator import PolygonValidator
 
 from ..ranking.mobile_human_review import MobileReviewSession, align_plate_text, normalize_registration
 from ..ranking.mobile_mt_invocations import DETECTION_STATUSES, detection_box_on_mt_input
 from ..ranking.mobile_pose_metrics import POSE_GT_SCHEMA, compare_mt_pose_to_gt, validate_mt_quad
+from ..ranking.mobile_pose_correction import (
+    CORRECTION_SCHEMA, correction_for_attempt, make_correction,
+    hit_target, move_polygon, moved,
+)
 from ..ranking.mobile_package_experiments import MobilePackageExperimentStore, read_mobile_report_bundle
+from ..ranking.mobile_source_frame_roi import (
+    source_invocation_context, verified_invocation_detections,
+    quad_contains_point, read_mobile_source_frame,
+)
 from ..ranking.mobile_thesis_report import export_thesis_bundle
+from ..ranking.mobile_verification_policy import (
+    selected_visual_state, visual_decision, verification_progress,
+    subject_verification_issues, observation_verification_cells,
+)
+from ..ranking.mobile_multi_plate_verification import (
+    is_multi, inventory, group_issues, set_count, assign_attempt,
+    set_plate_text, set_missed_bbox, clear_missed_bbox, multi_scientific_summary,
+    _records as multi_detection_records,
+)
 from ..ranking.mobile_scientific_review import (
     make_scientific_summary, display_scientific_summary,
     session_conditions_text, write_scientific_companion,
 )
 
-REVIEW_LABELS = {"NOT_STARTED": "Nie rozpoczęto", "IN_PROGRESS": "W toku", "COMPLETED": "Zakończona"}
+REVIEW_LABELS = {"NOT_STARTED": "Nie rozpoczęto", "IN_PROGRESS": "W toku", "COMPLETED": "Zatwierdzona"}
 MODE_LABELS = {"blinded_gt_v1": "Zaślepiona GT", "assisted": "Asystowana (diagnostyczna)"}
 VISIBILITY_LABELS = {"none": "0 — brak tablic", "one": "1 — jedna tablica",
                      "multiple": "2+ — kilka tablic", "uncertain": "? — nie wiem, ile tablic"}
@@ -41,26 +60,23 @@ STAGE_LABELS = {"VALID_QUAD": "Poprawny obszar", "NO_DETECTION": "Brak detekcji"
                 "NOT_RUN": "Nie uruchomiono", "NO_CHARACTERS": "Brak znaków", "READ": "Odczyt"}
 
 
-def _observation_list_label(number, state, *, cancelled=False, execution_failed=False):
-    """One readable row with a text/shape marker, independently of row colour.
 
-    This is display-only: no sidecar GT or scientific denominator is changed.
-    """
+def _observation_list_label(number, state, *, cancelled=False, execution_failed=False):
+    """Transparent stage status; do not hide a verified MT decision."""
     prefix = f"{int(number):02d}"
-    if state in {"MT ocenione", "Ocenione MT i MZ", "Gotowa"}:
-        label = "MT i MZ ocenione" if state == "Ocenione MT i MZ" else "MT ocenione"
-        return f"✓  {prefix}   {label}", "review_done"
-    if state == "Poza pomiarem MT":
-        if cancelled:
-            label = "Próba przerwana"
-        elif execution_failed:
-            label = "Błąd wykonania"
-        else:
-            label = "Poza oceną MT"
-        return f"—  {prefix}   {label}", "review_excluded"
+    if state in {"MT zweryfikowane", "MT i MZ zweryfikowane"}:
+        return (f"✓  {prefix}   {state}", "review_done")
+    if state == "MT zweryfikowane · MZ w toku":
+        return (f"◐  {prefix}   MT zweryfikowane • MZ w toku", "review_pending")
+    if state in {"Poza weryfikacją MT", "Poza weryfikacją MT"}:
+        label = ("Próba przerwana" if cancelled else "Błąd wykonania"
+                 if execution_failed else "Poza weryfikacją MT")
+        return (f"—  {prefix}   {label}", "review_excluded")
     if state.startswith("Decyzje:"):
-        return f"○  {prefix}   Dokończ ocenę", "review_pending"
-    return f"○  {prefix}   Do oceny MT", "review_pending"
+        return (f"○  {prefix}   Dokończ weryfikację", "review_pending")
+    if state == "Wykrycie zweryfikowane · obrys w toku":
+        return (f"◐  {prefix}   Wykrycie OK • obrys w toku", "review_pending")
+    return (f"○  {prefix}   Weryfikacja MT w toku", "review_pending")
 
 
 def _cancelled_mt_explanation(group):
@@ -81,7 +97,7 @@ def _cancelled_mt_explanation(group):
     else:
         observed = "Próba nie dostarcza ukończonego wyniku wykrywania."
     return (f"{reason} {observed} Dane można obejrzeć, ale nie wliczamy "
-            "tej próby do skuteczności MT ani do oceny OCR.")
+            "tej próby do skuteczności MT ani do weryfikacji OCR.")
 
 
 def _display(value, *, rate=False):
@@ -105,6 +121,17 @@ def _review_image_sources(kind, row, attempt, group, samples, available_names):
         seen.add(entry)
         rows.append((label, payload))
 
+
+    # Android P1: a pipeline Bitmap before ROI belongs to the entire MT
+    # invocation, not just the currently chosen detection. Historic archives
+    # without this evidence continue using their original MT-input images.
+    invocation_id = str(attempt.get("mt_invocation_id") or "")
+    source = source_invocation_context(
+        getattr(group, "records", ()) or (), invocation_id, available)
+    if source is not None:
+        add("Pełna klatka + obszar ROI (podgląd)", source["entry"],
+            {"image_entry": source["entry"], "source_frame_view": True,
+             "source_invocation_id": invocation_id})
     full = [] if group is None else sorted(group.evidence_entries)
     preferred = attempt.get("mt_input_evidence_entry")
     ordered_full = ([preferred] if preferred in full else []) + [item for item in full if item != preferred]
@@ -317,7 +344,7 @@ def _pose_source_status(session, attempt):
         return "no_attempt", "Brak powiązanej detekcji MT."
     status = str(attempt.get("mt_status") or "").upper()
     if status not in DETECTION_STATUSES:
-        return "no_detection", "Ten rekord nie zawiera detekcji MT do oceny geometrii."
+        return "no_detection", "Ten rekord nie zawiera detekcji MT do weryfikacji geometrii."
     if _mt_pose_contract_declared(session, attempt):
         if _pose_quad_from_mt_attempt(attempt) is not None:
             return "mt_record_pose", "Dostępne są cztery rogi zapisane bezpośrednio z MT."
@@ -502,6 +529,14 @@ class MobileSampleReviewWindow:
         self.current_invocation = ""
         self._subject_ids = {}
         self._record_ids = {}
+        self._multi_child_targets = {}
+        self._multi_active_gt = ""
+        self._multi_active_group = ""
+        self._multi_ui_group = ""
+        self._multi_drag_start = None
+        self._multi_drag_point = None
+        self._multi_bbox_edit = False
+        self._multi_requested_attempt = ""
         self._closed = False
         self._saving = False
         self._close_requested = False
@@ -524,6 +559,19 @@ class MobileSampleReviewWindow:
         self._pose_gt_points = []
         self._pose_gt_drag_index = None
         self._pose_gt_before_drag = None
+        self._mt_corr_active = False
+        self._mt_corr_attempt = ""
+        self._mt_corr_points = []
+        self._mt_corr_drag = None
+        self._mt_corr_last_saved = []
+        # Freehand 4-click redraw is a separate, explicitly assisted annotation.
+        # Nothing is written until four valid points have been supplied.
+        self._mt_redraw_active = False
+        self._mt_redraw_attempt = ""
+        self._mt_redraw_points = []
+        self._status_pills = {}
+        self._status_paint_scheduled = False
+        self._mt_correction_ux_v026 = True
         # One guided entry per selected MT image. Cancelling must not reopen
         # the editor on the next asynchronous refresh/autosave.
         self._pose_auto_token = None
@@ -545,6 +593,7 @@ class MobileSampleReviewWindow:
         self.window.minsize(min(1050, self.window.winfo_screenwidth() - 60), 670)
         self.window.configure(bg=self.bg)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
+        self.window.bind("<Escape>", self._cancel_mt_correction, add="+")
         self.window.bind("<Destroy>", self._destroyed, add="+")
         self.actions = []
         self._build()
@@ -624,6 +673,9 @@ class MobileSampleReviewWindow:
             style.configure("MobileReview.TRadiobutton", background=self.review_card_bg,
                             foreground=self.fg, font=("Segoe UI", 10))
             style.map("MobileReview.TRadiobutton", background=[("active", self.review_card_bg)])
+            style.configure("MobileReview.TCheckbutton", background=self.review_card_bg,
+                            foreground=self.fg, font=("Segoe UI", 10))
+            style.map("MobileReview.TCheckbutton", background=[("active", self.review_card_bg)])
         except tk.TclError:
             pass
         self.window.columnconfigure(0, weight=1)
@@ -635,15 +687,17 @@ class MobileSampleReviewWindow:
         self.session_label.grid(row=0, column=0, sticky="ew")
         self.progress_label = self._label(header, font=("Segoe UI", 9))
         self.progress_label.grid(row=1, column=0, sticky="ew")
+        self.form_status_label = self._label(header, "Formularz: wczytywanie…", font=("Segoe UI", 9))
+        self.form_status_label.grid(row=2, column=0, sticky="ew", pady=(2, 0))
         self._button(header, "Eksport wyników", self.export, row=0, column=1)
-        self._button(header, "Zakończ pełną ocenę", self.complete, row=0, column=2)
+        self.complete_button = self._button(header, "Zatwierdź weryfikację", self.complete, row=0, column=2)
         self.notice_label = self._label(self.window, wraplength=1150, font=("Segoe UI", 9))
         self.notice_label.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
 
         tabs = ttk.Notebook(self.window)
         tabs.grid(row=2, column=0, sticky="nsew", padx=10)
         review = tk.Frame(tabs, bg=self.bg)
-        review.columnconfigure(0, weight=0, minsize=225)
+        review.columnconfigure(0, weight=0, minsize=440)
         review.columnconfigure(1, weight=1, minsize=360)
         review.columnconfigure(2, weight=0, minsize=415)
         review.rowconfigure(0, weight=1)
@@ -654,27 +708,55 @@ class MobileSampleReviewWindow:
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
         left.columnconfigure(0, weight=1)
         left.rowconfigure(2, weight=1)
-        self._label(left, "OBSERWACJE", font=("Segoe UI", 10, "bold")).grid(
+        self._label(left, "STATUS WERYFIKACJI", font=("Segoe UI", 10, "bold")).grid(
             row=0, column=0, sticky="w", pady=(3, 3))
-        self._label(left, "✓ Oceniona   ○ Do oceny   — Wyłączona",
-                    font=("Segoe UI", 8), fg=self.muted, wraplength=245).grid(
+        self._label(left, "✓ decyzja/GT zapisane  ·  ○ brak  ·  — nie dotyczy\n"
+                   "MT: liczba tablic · Wsk.: wskazanie modelu\n"
+                   "GT: numer · Rogi: ręczny GT (opc.) · Form.: komplet",
+                    font=("Segoe UI", 8), fg=self.muted, wraplength=280).grid(
                         row=1, column=0, sticky="ew", pady=(0, 8))
-        # GT text is assessed in its own panel. A redundant, mostly empty GT
-        # column made the short state labels unreadable on ordinary screens.
-        frame, self.subject_tree = self._table(
-            left, ("Obserwacja · ocena",), (246,), height=18)
+        cols = ("Nr", "MT", "Wsk.", "GT", "Rogi", "Form.")
+        widths = (36, 42, 49, 39, 46, 49)
+        frame, self.subject_tree = self._table(left, cols, widths, height=18)
         frame.grid(row=2, column=0, sticky="nsew")
+        for key, width in zip(cols, widths):
+            self.subject_tree.heading(key, text=key, anchor="center")
+            self.subject_tree.column(key, width=width, minwidth=max(32, width - 3),
+                                     stretch=(key != "Nr"), anchor="center")
         try:
             if style is not None:
-                style.configure("MobileReview.Observations.Treeview", rowheight=32,
+                style.configure("MobileReview.Observations.Treeview", rowheight=30,
                                 font=("Segoe UI", 10))
                 style.configure("MobileReview.Observations.Treeview.Heading",
                                 font=("Segoe UI", 9, "bold"))
+                style.map("MobileReview.Observations.Treeview",
+                          background=[("selected", "#DDF2FF")],
+                          foreground=[("selected", "#15364B")])
                 self.subject_tree.configure(style="MobileReview.Observations.Treeview")
         except tk.TclError:
             pass
+        self.subject_tree.configure(show="tree headings")
+        self.subject_tree.heading("#0", text="Obserwacja / tablica GT", anchor="w")
+        self.subject_tree.column("#0", width=124, minwidth=100, stretch=True, anchor="w")
+        self.subject_tree.tag_configure("review_done", background="#EDF5EC", foreground="#223A2D")
+        self.subject_tree.tag_configure("review_pending", background="#F6F8F8", foreground="#253942")
+        self.subject_tree.tag_configure("review_excluded", background="#F0F2F3", foreground="#5B6B70")
         self.subject_tree.bind("<<TreeviewSelect>>", self._select_subject)
-        self._button(left, "Następna do oceny", self.next_pending, row=3, column=0, sticky="ew")
+        self.subject_tree.bind("<<TreeviewSelect>>", lambda _e: self._schedule_status_pills(), add="+")
+        self.subject_tree.bind("<Configure>", lambda _e: self._schedule_status_pills(), add="+")
+        self.subject_tree.bind("<<TreeviewOpen>>", lambda _e: self._schedule_status_pills(), add="+")
+        self.subject_tree.bind("<<TreeviewClose>>", lambda _e: self._schedule_status_pills(), add="+")
+        self.subject_tree.bind("<MouseWheel>", lambda _e: self._schedule_status_pills(), add="+")
+        self.subject_tree.bind("<MouseWheel>", self._route_image_wheel, add="+")
+        self.subject_tree.bind("<Button-4>", lambda _e: self._schedule_status_pills(), add="+")
+        self.subject_tree.bind("<Button-5>", lambda _e: self._schedule_status_pills(), add="+")
+        # Treeview itself cannot color individual cells. Render lightweight
+        # visible-only status chips, retaining the native keyboard/scroll tree.
+        self._status_scrollbar = next((w for w in frame.winfo_children()
+                                       if isinstance(w, ttk.Scrollbar)), None)
+        if self._status_scrollbar is not None:
+            self.subject_tree.configure(yscrollcommand=self._status_yscroll)
+        self._button(left, "Następna do weryfikacji", self.next_pending, row=3, column=0, sticky="ew")
 
         viewer = tk.Frame(review, bg=self.bg)
         viewer.grid(row=0, column=1, sticky="nsew", padx=(0, 9))
@@ -700,7 +782,7 @@ class MobileSampleReviewWindow:
         self.target_next.pack(side="left")
         self.target_nav.grid_remove()
         self.image_help = self._label(viewer,
-            "Zdjęcie przypisane do ocenianego obszaru. Niebieski obrys wskazał telefon.",
+            "Zdjęcie przypisane do weryfikowanego wskazania MT. Niebieski obrys pochodzi z telefonu.",
             font=("Segoe UI", 9), wraplength=700)
         self.image_help.grid(row=1, column=0, sticky="ew", pady=(1, 3))
         zoom_bar = tk.Frame(viewer, bg=self.bg)
@@ -709,23 +791,47 @@ class MobileSampleReviewWindow:
         ttk.Button(zoom_bar, text="+", width=4, command=lambda: self.zoom_image(1.5)).pack(side="left", padx=2)
         ttk.Button(zoom_bar, text="Dopasuj", command=self.fit_image).pack(side="left", padx=(5, 3))
         ttk.Button(zoom_bar, text="Zbliż do tablicy", command=self.zoom_to_mt_detection).pack(side="left", padx=(4, 8))
+
+        # Source frame is a read-only inspection surface. Do not use its
+        # coordinates in the MT-input/GT editing paths (separate Desktop P2B).
+        self.source_frame_button = ttk.Button(
+            zoom_bar, text="Cała klatka + ROI", command=self._toggle_source_frame_view)
+        self.source_frame_button.pack(side="left", padx=(2, 8))
+        self.source_frame_button.pack_forget()
         self.zoom_value = self._label(zoom_bar, "×1.0", font=("Segoe UI", 9, "bold"))
         self.zoom_value.pack(side="left")
+        # Z2-style in-canvas editing: no mode CTA. Selected MT polygon is
+        # directly draggable. D/Shift+click starts a replacement, Delete
+        # removes only the operator correction. The original MT stays read-only.
+        self.mt_quad_mode_bar = None  # deprecated widget name for older probes
         self.canvas = tk.Canvas(viewer, height=520, bg="#101820", highlightthickness=0, cursor="hand2")
         self.canvas.grid(row=4, column=0, sticky="nsew", pady=3)
         self.canvas.bind("<Configure>", lambda event: self._paint_image())
         self.canvas.bind("<MouseWheel>", self._wheel_zoom)
         self.canvas.bind("<Button-4>", self._wheel_zoom)
         self.canvas.bind("<Button-5>", self._wheel_zoom)
+        # Windows może kierować rolkę do widżetu z fokusem zamiast do obrazu.
+        # Przechwycenie wyłącznie na Toplevel weryfikatora, nie bind_all:
+        # położenie kursora rozstrzyga, czy zdarzenie dotyczy canvasu.
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.window.bind(sequence, self._route_image_wheel, add="+")
+        self.canvas.bind("<Motion>", self._update_mt_edit_cursor, add="+")
+        self.canvas.bind("<Enter>", self._focus_image_for_wheel, add="+")
         self.canvas.bind("<ButtonPress-1>", self._pan_begin)
         self.canvas.bind("<B1-Motion>", self._pan_move)
         self.canvas.bind("<ButtonRelease-1>", self._pan_end)
-        self.canvas.bind("<Double-Button-1>", lambda event: "break" if self.pose_edit_var.get() else self.fit_image())
+        self.canvas.bind("<Double-Button-1>", lambda event: "break" if self.pose_edit_var.get() or self._mt_corr_active or self._mt_redraw_active else self.fit_image())
+        # Only on the photo canvas: never intercept Delete or D in a GT field.
+        for sequence in ("<KeyPress-d>", "<KeyPress-D>"):
+            self.canvas.bind(sequence, self._start_mt_redraw)
+        for sequence in ("<Delete>", "<BackSpace>"):
+            self.canvas.bind(sequence, self._delete_mt_operator_correction)
         self.canvas.bind("<ButtonPress-3>", lambda event: self._pan_begin(event, force_pan=True))
+        self.canvas.bind("<Control-ButtonPress-3>", self._delete_mt_operator_correction, add="+")
         self.canvas.bind("<B3-Motion>", self._pan_move)
         self.canvas.bind("<ButtonRelease-3>", self._pan_end)
-        self._label(viewer, "Kółko: powiększ  •  prawy przycisk: przesuń  •  podwójne kliknięcie: dopasuj",
-                    font=("Segoe UI", 9), fg=self.muted).grid(row=5, column=0, sticky="w", pady=(1, 3))
+        self._label(viewer, "Rolka: zoom  •  przeciągnij róg/obrys: popraw  •  D / Shift+klik: nowy obrys  •  Delete / Ctrl+PPM: usuń korektę  •  Esc: anuluj  •  PPM: przesuń",
+                    font=("Segoe UI", 9), fg=self.muted, wraplength=750).grid(row=5, column=0, sticky="w", pady=(1, 3))
 
         right_host = tk.Frame(review, bg=self.bg)
         right_host.grid(row=0, column=2, sticky="nsew")
@@ -785,7 +891,7 @@ class MobileSampleReviewWindow:
             "Czy zaznaczony obszar jest tablicą?",
             font=("Segoe UI", 10, "bold"), wraplength=370)
         self.detection_question.grid(row=8, column=0, sticky="ew", pady=(2, 2))
-        self.detection_context = self._label(mt, "Oceń niebieskie zaznaczenie na zdjęciu.",
+        self.detection_context = self._label(mt, "Zweryfikuj niebieski obrys na zdjęciu.",
                                               font=("Segoe UI", 9), fg=self.muted,
                                               wraplength=370)
         self.detection_context.grid(row=9, column=0, sticky="ew")
@@ -801,10 +907,55 @@ class MobileSampleReviewWindow:
                                      style="MobileReview.TRadiobutton")
             radio.grid(row=index, column=0, sticky="w", pady=1)
             self.detection_radios.append(radio)
+        # Source-backed visual MT verification. Both surfaces share one variable;
+        # this NEVER copies a predicted quad into quantitative Ground Truth.
+        self.mt_visual_choice = tk.StringVar(value="")
+        self.mt_visual_host = tk.Frame(mt, bg=self.review_card_bg)
+        self.mt_visual_host.grid(row=11, column=0, sticky="ew", pady=(8, 2))
+        self._label(self.mt_visual_host, "Szybka weryfikacja wskazania MT",
+                    font=("Segoe UI", 9, "bold"), fg=self.fg).pack(anchor="w", pady=(0, 4))
+        self.mt_visual_radios = []
+        for value, label in (("not_plate", "Nie tablica"),
+                ("imprecise", "Tablica — obrys niedokładny"),
+                ("accurate", "Tablica — obrys dopasowany"),
+                ("uncertain", "Nie mogę zweryfikować")):
+            radio = tk.Checkbutton(self.mt_visual_host, variable=self.mt_visual_choice,
+                onvalue=value, offvalue="", text=label,
+                bg=self.review_card_bg, fg=self.fg, activebackground=self.review_card_bg,
+                selectcolor=self.review_card_bg, anchor="w", command=self.save_mt_visual_choice)
+            radio.pack(anchor="w")
+            self.mt_visual_radios.append(radio)
+        self.mt_visual_overlay = tk.Frame(self.canvas, bg="#10212b", padx=5, pady=4)
+        self.mt_visual_overlay_buttons = []
+        for value, label in (("not_plate", "✕ Nie tablica"),
+                ("imprecise", "≈ Niedokładny"),
+                ("accurate", "✓ Dobry"), ("uncertain", "? Nie wiem")):
+            control = tk.Radiobutton(self.mt_visual_overlay, variable=self.mt_visual_choice,
+                value=value, text=label, command=self.save_mt_visual_choice,
+                indicatoron=False, relief=tk.FLAT, borderwidth=1,
+                bg="#10212b", fg="#ffffff", activebackground="#24475E",
+                activeforeground="#ffffff", selectcolor="#1686BD",
+                font=("Segoe UI", 9, "bold"), padx=7, pady=4)
+            control.pack(side="left", padx=(0, 4))
+            # Canvas-mounted radios can keep keyboard focus after a choice;
+            # the same Z2-style edit shortcuts must still work from them.
+            for shortcut in ("<KeyPress-d>", "<KeyPress-D>"):
+                control.bind(shortcut, self._start_mt_redraw, add="+")
+            for shortcut in ("<Delete>", "<BackSpace>"):
+                control.bind(shortcut, self._delete_mt_operator_correction, add="+")
+            self.mt_visual_overlay_buttons.append(control)
+        self.mt_visual_host.grid_remove()  # Decyzja tylko na obrazie.
+        self.detection_question.grid_remove()
+        self.detection_context.grid_remove()
+        self.mt_detection_group.grid_remove()
+        self.mt_section_separator.grid_remove()
+        self.mt_visual_status = self._label(mt,
+            "Wskazanie MT: wybierz odpowiedź na zdjęciu.",
+            font=("Segoe UI", 9), fg=self.muted, wraplength=360)
+        self.mt_visual_status.grid(row=8, column=0, sticky="ew", pady=(9, 3))
         self._mt_scored_controls = (
             self.mt_count_question, self.mt_count_hint, self.mt_count_group,
-            self.mt_section_separator, self.detection_question,
-            self.detection_context, self.mt_detection_group)
+            self.mt_visual_status)
 
         # The second question is answered independently from the first.
         # Only an explicit positive answer here starts the one-shot drawing.
@@ -813,15 +964,15 @@ class MobileSampleReviewWindow:
         self.pose_gt_host.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         self.pose_gt_host.columnconfigure(0, weight=1)
         self.pose_gt_title = self._label(self.pose_gt_host,
-            "02  ·  OBRYS TABLICY", font=("Segoe UI", 10, "bold"),
+            "02  ·  POMIAR OBRYSU (OPCJONALNIE)", font=("Segoe UI", 10, "bold"),
             fg=self.accent, wraplength=370)
         self.pose_gt_title.grid(row=0, column=0, sticky="ew")
         self.pose_gt_question = self._label(self.pose_gt_host,
-            "Czy możesz wskazać cztery rogi tablicy?",
+            "Chcesz wyznaczyć cztery rogi GT do pomiaru IoU/NMCE?",
             font=("Segoe UI", 10, "bold"), wraplength=370)
         self.pose_gt_question.grid(row=1, column=0, sticky="ew", pady=(8, 3))
         self.pose_gt_hint = self._label(self.pose_gt_host,
-            "Zaznacz własny obrys, aby sprawdzić wskazanie modelu.",
+            "Opcjonalny pomiar ilościowy: zaznacz niezależny GT czterech narożników.",
             font=("Segoe UI", 9), fg=self.muted, wraplength=370)
         self.pose_gt_hint.grid(row=2, column=0, sticky="ew", pady=(0, 3))
         self.pose_edit_var = tk.BooleanVar(value=False)
@@ -832,7 +983,7 @@ class MobileSampleReviewWindow:
         answer_group.grid(row=3, column=0, sticky="ew", pady=(2, 4))
         for value, label in (
                 ("mark", "Tak, zaznaczę cztery rogi"),
-                ("unavailable", "Nie mam pewności — pomiń ocenę obrysu")):
+                ("unavailable", "Nie mogę oznaczyć GT narożników")):
             radio = ttk.Radiobutton(answer_group, text=label,
                 variable=self.pose_gt_answer, value=value, command=self._choose_pose_gt_answer,
                 style="MobileReview.TRadiobutton")
@@ -861,14 +1012,16 @@ class MobileSampleReviewWindow:
             font=("Segoe UI", 9), fg=self.muted, wraplength=370)
         self.pose_gt_instruction.grid(row=8, column=0, sticky="ew", pady=(4, 0))
         self.pose_gt_instruction.grid_remove()
+        self.pose_gt_host.grid_remove()  # 026: korekta jest bezpośrednio na zdjęciu.
 
         # MZ: zawsze widoczna predykcja (o ile mozna), GT i wyjasnienie.
         mz = self._review_section(right)
-        mz.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        mz.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         mz.columnconfigure(0, weight=1)
-        self._label(mz, "03  ·  ODCZYT NUMERU", font=("Segoe UI", 10, "bold"),
-                    fg=self.accent).grid(row=0, column=0, sticky="ew")
-        self.result_context = self._label(mz, "Telefon odczytał:", font=("Segoe UI", 9), fg=self.muted)
+        self.mz_title = self._label(mz, "02 · SPRAWDZENIE NUMERU TABLICY",
+                    font=("Segoe UI", 10, "bold"), fg=self.accent)
+        self.mz_title.grid(row=0, column=0, sticky="ew")
+        self.result_context = self._label(mz, "Numer odczytany przez aplikację:", font=("Segoe UI", 9), fg=self.muted)
         self.result_context.grid(row=1, column=0, sticky="ew")
         self.prediction_label = self._label(mz, "—", font=("Segoe UI", 16, "bold"))
         self.prediction_label.grid(row=2, column=0, sticky="ew", pady=(1, 5))
@@ -879,7 +1032,7 @@ class MobileSampleReviewWindow:
         self._crop_preview_row = None
         self._crop_preview_window = None
         self.gt_prompt_label = self._label(mz,
-            "Numer tablicy — GT operatora (nie wynik MZ)", font=("Segoe UI", 10, "bold"))
+            "Jaki numer widzisz na zdjęciu?", font=("Segoe UI", 10, "bold"))
         self.gt_prompt_label.grid(row=4, column=0, sticky="ew")
         self.gt_var = tk.StringVar()
         self.gt_entry = ttk.Entry(mz, textvariable=self.gt_var, font=("Segoe UI", 14), width=15)
@@ -888,27 +1041,98 @@ class MobileSampleReviewWindow:
         # Wynik MZ nie staje się GT bez niezależnego odczytania tablicy.
         self.gt_entry.bind("<Return>", lambda event: self.save_gt())
         self.gt_entry.bind("<FocusOut>", lambda event: self.save_gt())
+        # One human-readable decision instead of two technical OCR radio modes.
+        # Legacy 'assess' / 'exclude' persists unchanged in the review sidecar.
         self.subject_eval_choice = tk.StringVar(value="assess")
-        self.subject_eval_radios = []
+        self.subject_eval_radios = []  # compatibility with older lifecycle probes
+        self.subject_unreadable_var = tk.BooleanVar(value=False)
         evaluable_group = tk.Frame(mz, bg=self.review_card_bg)
-        evaluable_group.grid(row=6, column=0, sticky="ew", pady=(3, 5))
-        for label, value in (("Oceń odczyt numeru", "assess"),
-                             ("Pomiń ocenę odczytu numeru", "exclude")):
-            radio = ttk.Radiobutton(evaluable_group, text=label,
-                    variable=self.subject_eval_choice, value=value,
-                    command=self.save_subject_eval_choice,
-                    style="MobileReview.TRadiobutton")
-            radio.pack(anchor="w", pady=1)
-            self.subject_eval_radios.append(radio)
-        self._label(mz, "Pominięcie odczytu nie zmienia oceny wykrycia i obrysu.",
-                    font=("Segoe UI", 9), fg=self.muted,
-                    wraplength=370).grid(row=7, column=0, sticky="ew", pady=(2, 6))
-        self._label(mz, "Notatka (opcjonalna)").grid(row=8, column=0, sticky="w")
+        self.mz_evaluable_group = evaluable_group
+        evaluable_group.grid(row=6, column=0, sticky="ew", pady=(5, 3))
+        self.subject_unreadable_button = ttk.Checkbutton(
+            evaluable_group, text="Nie mogę odczytać numeru ze zdjęcia",
+            variable=self.subject_unreadable_var,
+            command=self._on_subject_unreadable_toggle,
+            style="MobileReview.TCheckbutton")
+        self.subject_unreadable_button.pack(anchor="w", pady=1)
+        self.mz_exclusion_caption = self._label(mz,
+                    "Przepisz numer ze zdjęcia, nie z wyniku aplikacji. Program porówna je automatycznie.",
+                    font=("Segoe UI", 9), fg=self.muted, wraplength=370)
+        self.mz_exclusion_caption.grid(row=7, column=0, sticky="ew", pady=(2, 6))
+        self.mz_note_caption = self._label(mz,
+                    "Dlaczego numer jest nieczytelny? (opcjonalnie)")
+        self.mz_note_caption.grid(row=8, column=0, sticky="w")
+        self.mz_note_caption.grid_remove()
         self.note_var = tk.StringVar()
         self.note_entry = ttk.Entry(mz, textvariable=self.note_var)
         self.note_entry.grid(row=9, column=0, sticky="ew", pady=(0, 3))
+        self.note_entry.grid_remove()
+        # This displays an older reference WITHOUT proposing to verify an
+        # aborted or otherwise unexecuted inference. The stored GT stays intact.
+        self.mz_archived_gt = self._label(mz, "", font=("Segoe UI", 10),
+                                         fg=self.muted, wraplength=370)
+        self.mz_archived_gt.grid(row=4, column=0, sticky="ew", pady=(3, 3))
+        self.mz_archived_gt.grid_remove()
         self.gt_var.trace_add("write", self._schedule_autosave)
         self.note_var.trace_add("write", self._schedule_autosave)
+
+        # Exact, operator-owned plate inventory for multi-plate MT invocations.
+        # This replaces the *single-plate* GT fields only for that invocation.
+        self._single_mz_host = mz
+        multi = self._review_section(right)
+        self._multi_host = multi
+        multi.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        multi.columnconfigure(0, weight=1)
+        self._label(multi, "02 · TABLICE GT NA ZDJĘCIU (KILKA)",
+                    font=("Segoe UI",10,"bold"),fg=self.accent).grid(row=0,column=0,sticky="w")
+        self._label(multi,"Podaj dokładną liczbę prawdziwych tablic. Każda ma własne GT, "
+                    "powiązanie z MT i wynik MZ. Niewykrytą tablicę oznacz ręcznie na zdjęciu.",
+                    font=("Segoe UI",9),fg=self.muted,wraplength=370).grid(row=1,column=0,sticky="ew")
+        count_row = tk.Frame(multi,bg=self.review_card_bg)
+        count_row.grid(row=2,column=0,sticky="ew",pady=(6,8))
+        self._multi_count_var = tk.StringVar(value="")
+        self._multi_count_spin = ttk.Spinbox(count_row, from_=2, to=32,
+                  width=4, textvariable=self._multi_count_var)
+        self._multi_count_spin.pack(side="left",padx=(0,6))
+        ttk.Button(count_row,text="Zapisz liczbę tablic",command=self._multi_save_count).pack(side="left")
+        self._multi_summary_var = tk.StringVar(value="Wymagany dokładny wykaz GT")
+        self._label(multi, textvariable=self._multi_summary_var,
+                    font=("Segoe UI",9,"bold"),wraplength=370).grid(row=3,column=0,sticky="ew",pady=(0,4))
+        self._multi_plate_list = ttk.Treeview(multi,columns=("GT","MT","Numer"),
+                  show="headings",height=4,selectmode="browse",style="MobileReview.Treeview")
+        for col,width in (("GT",70),("MT",115),("Numer",120)):
+            self._multi_plate_list.heading(col,text=col)
+            self._multi_plate_list.column(col,width=width,stretch=True)
+        self._multi_plate_list.grid(row=4,column=0,sticky="ew",pady=(0,6))
+        self._multi_plate_list.bind("<<TreeviewSelect>>",self._multi_choose_plate)
+        self._multi_selected_var = tk.StringVar(value="Wybierz tablicę GT")
+        self._label(multi,textvariable=self._multi_selected_var,
+                    font=("Segoe UI",9,"bold")).grid(row=5,column=0,sticky="ew",pady=(3,3))
+        self._multi_match_values = {}
+        self._multi_match_choice = ttk.Combobox(multi,state="readonly",width=32)
+        self._multi_match_choice.grid(row=6,column=0,sticky="ew")
+        ttk.Button(multi,text="Zapisz powiązanie GT ↔ MT",command=self._multi_save_match).grid(
+            row=7,column=0,sticky="ew",pady=(3,9))
+        self._label(multi,"Jaki numer jest na tej tablicy?",
+                    font=("Segoe UI",9,"bold")).grid(row=8,column=0,sticky="w")
+        self._multi_text_var=tk.StringVar(value="")
+        ttk.Entry(multi,textvariable=self._multi_text_var).grid(row=9,column=0,sticky="ew")
+        self._label(multi,"Jeśli numer jest nieczytelny, dlaczego?",
+                    font=("Segoe UI",9)).grid(row=10,column=0,sticky="w")
+        self._multi_reason_var=tk.StringVar(value="")
+        ttk.Entry(multi,textvariable=self._multi_reason_var).grid(row=11,column=0,sticky="ew")
+        ttk.Button(multi,text="Zapisz numer lub przyczynę nieczytelności",
+                   command=self._multi_save_text).grid(row=12,column=0,sticky="ew",pady=(4,8))
+        self._multi_bbox_button=ttk.Button(multi,text="Wskaż pominiętą tablicę na zdjęciu (GT)",
+                                         command=self._multi_start_bbox)
+        self._multi_bbox_button.grid(row=13,column=0,sticky="ew")
+        self._multi_bbox_clear=ttk.Button(multi,text="Usuń ręczną ramkę GT (tylko tej tablicy)",
+                                         command=self._multi_clear_bbox)
+        self._multi_bbox_clear.grid(row=14,column=0,sticky="ew",pady=(3,2))
+        self._label(multi,"Oznaczenie dwóch przeciwległych rogów tworzy ręczny bbox GT. "
+                    "Nie zastępuje GT Pose i nie daje IoU/NMCE.",
+                    fg=self.muted,font=("Segoe UI",9),wraplength=370).grid(row=15,column=0,sticky="ew",pady=4)
+        multi.grid_remove()
 
         comparison = tk.Frame(right, bg=self.bg)
         comparison.grid(row=4, column=0, sticky="ew", pady=(1, 4))
@@ -929,10 +1153,11 @@ class MobileSampleReviewWindow:
         self.record_detail_host = tk.Frame(right, bg=self.bg)
         self.record_detail_host.grid(row=6, column=0, sticky="ew", pady=(0, 3))
         frame, self.record_tree = self._table(self.record_detail_host,
-            ("Rodzaj", "Id", "MT / MZ", "Predykcja", "Ocena"), (55, 62, 85, 98, 81), height=3)
+            ("Rodzaj", "Id", "MT / MZ", "Predykcja", "Weryfikacja"), (55, 62, 85, 98, 81), height=3)
         frame.grid(row=0, column=0, sticky="ew")
         self.record_detail_host.grid_remove()
         self.record_tree.bind("<<TreeviewSelect>>", self._select_record)
+        self.record_tree.bind("<MouseWheel>", self._route_image_wheel, add="+")
 
         # Kazda kontrolka panelu odbiera rolke, niezaleznie od focusu; zoom obrazu osobno.
         self._bind_sidebar_wheel(sidebar_scroll)
@@ -943,33 +1168,25 @@ class MobileSampleReviewWindow:
         summary.rowconfigure(1, weight=1)
         summary.rowconfigure(2, weight=1)
         summary.columnconfigure(0, weight=1)
-        tabs.add(summary, text="Wyniki naukowe")
+        tabs.add(summary, text="Analiza wyników")
         science_top = tk.Frame(summary, bg=self.bg)
         science_top.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
         science_top.columnconfigure(0, weight=1)
-        self.science_caption = self._label(science_top, "Podsumowanie pomiaru i jego ograniczenia",
+        self.science_caption = self._label(science_top, "Podsumowanie wyników sesji",
                                            font=("Segoe UI", 11, "bold"))
         self.science_caption.grid(row=0, column=0, sticky="ew")
         self.science_toggle = ttk.Button(science_top, text="Pokaż tabelę techniczną",
                                          command=self._toggle_scientific_details)
         self.science_toggle.grid(row=0, column=1, sticky="e")
-        self.science_view = tk.Text(summary, wrap="word", font=("Segoe UI", 10),
-                                    relief="flat", padx=22, pady=12, bg=self.review_card_bg,
-                                    fg=self.fg, insertbackground=self.fg, state="disabled",
-                                    highlightthickness=1, highlightbackground=self.review_border,
-                                    selectbackground=self.accent)
-        self.science_view.grid(row=1, column=0, rowspan=2, sticky="nsew", padx=(12, 0), pady=(3, 12))
-        self.science_scrollbar = ttk.Scrollbar(summary, orient="vertical", command=self.science_view.yview)
-        self.science_scrollbar.grid(row=1, column=1, rowspan=2, sticky="ns", padx=(0, 12), pady=(3, 12))
-        self.science_view.configure(yscrollcommand=self.science_scrollbar.set)
-        self.science_view.tag_configure("title", font=("Segoe UI", 15, "bold"), spacing3=8)
-        self.science_view.tag_configure("heading", font=("Segoe UI", 11, "bold"),
-                                         foreground=self.accent, spacing1=10, spacing3=4)
-        self.science_view.tag_configure("metric", font=("Segoe UI", 11, "bold"), spacing3=2)
-        self.science_view.tag_configure("normal", spacing3=3)
-        self.science_view.tag_configure("caption", foreground=self.muted, spacing3=7)
-        self.science_view.tag_configure("warning", foreground=self.fg, spacing3=4)
-        self.science_view.tag_configure("subtitle", foreground=self.accent, spacing3=5)
+        # The canonical calculation stays in make_scientific_summary. This
+        # dashboard is only a typed, read-only visualization of its result.
+        summary.rowconfigure(2, weight=0)
+        self.science_dashboard = MobileScienceSummaryPanel(
+            summary, background=self.bg, surface=self.review_card_bg,
+            foreground=self.fg, muted=self.muted, accent=self.accent,
+            border=self.review_border, on_review=lambda: tabs.select(review))
+        self.science_dashboard.frame.grid(row=1, column=0, rowspan=2,
+                                          sticky="nsew", padx=(12, 12), pady=(3, 12))
         frame, self.stats_tree = self._table(summary, ("Zakres", "Miara", "Wynik"), (150, 480, 150), height=20)
         self._science_raw_host = frame
         self._science_raw_open = False
@@ -1074,6 +1291,9 @@ class MobileSampleReviewWindow:
                         button.configure(state="normal")
                 if error:
                     self.status_var.set(error)
+                    if self._mt_corr_active and self._mt_corr_drag is None:
+                        self._mt_corr_points = [list(p) for p in self._mt_corr_last_saved]
+                        self._paint_image()
                     self._close_requested = False
                 else:
                     done(result)
@@ -1111,49 +1331,346 @@ class MobileSampleReviewWindow:
         self._refresh_stats()
         self._populate_details()
         self._sync_review_controls()
-        self.status_var.set("Ocena asystowana: GT zapisuje się automatycznie. MT i MZ oceniaj na wybranym obrazie."
-                            + (" Zmieniono tryb historycznej oceny na asystowaną; GT zachowano." if self._review_was_converted else ""))
+        self.status_var.set("Weryfikacja asystowana: GT zapisuje się automatycznie. MT i MZ weryfikuj na wybranym obrazie."
+                            + (" Przełączono wcześniejszą weryfikację na tryb asystowany; GT zachowano." if self._review_was_converted else ""))
         if self._subject_ids:
             first = next(iter(self._subject_ids))
             self.subject_tree.selection_set(first)
             self.subject_tree.focus(first)
 
+    def _multi_group(self):
+        if not self.session or not self.current_invocation:
+            return None
+        return self.session.mt_invocations.get(self.current_invocation) if is_multi(self.session,self.current_invocation) else None
+
+    def _sync_multi_controls(self):
+        if not hasattr(self,"_multi_host") or not self.session:
+            return
+        group=self._multi_group()
+        if group is None:
+            self._multi_host.grid_remove()
+            self._single_mz_host.grid()
+            self._multi_ui_group=""
+            self._multi_active_gt=""
+            self._multi_bbox_edit=False
+            return
+        self._single_mz_host.grid_remove()
+        self._multi_host.grid()
+        gid=self.current_invocation
+        inv=inventory(self.session,gid)
+        if self._multi_ui_group!=gid:
+            self._multi_ui_group=gid
+            if self._multi_active_group!=gid:
+                self._multi_active_gt=""
+            self._multi_bbox_edit=False
+        if inv is not None:
+            self._multi_count_var.set(str(inv["plate_count"]))
+        elif not self._multi_count_var.get().strip().isdigit():
+            self._multi_count_var.set("2")
+        issues=group_issues(self.session,gid)
+        n=inv["plate_count"] if inv else 0
+        paired=sum(bool(p.get("attempt_id")) for p in inv["plates"]) if inv else 0
+        self._multi_summary_var.set(f"GT: {n} • powiązania MT: {paired} • brakujące decyzje: {len(issues)}"
+                                     if inv else "Podaj dokładną liczbę tablic GT (2–32)")
+        selected=self._multi_active_gt
+        self._multi_plate_list.delete(*self._multi_plate_list.get_children())
+        if inv:
+            for p in inv["plates"]:
+                aid=p.get("attempt_id") or ""
+                row=self.session.attempts.get(aid,{})
+                index=row.get("mt_detection_index")
+                target=f"MT {int(index)+1}" if aid and index not in (None,"") else "Pominięta"
+                status=p.get("gt_text") or ("Nieczytelna" if p.get("text_exclusion_reason") else "—")
+                self._multi_plate_list.insert("","end",iid=p["plate_id"],values=(p["plate_id"],target,status))
+            selected=selected if selected and self._multi_plate_list.exists(selected) else inv["plates"][0]["plate_id"]
+            self._multi_active_gt=selected
+            self._multi_plate_list.selection_set(selected)
+            self._multi_plate_list.focus(selected)
+            self._multi_choose_plate()
+        else:
+            self._multi_selected_var.set("Utwórz wykaz tablic, następnie powiąż wskazania MT")
+            self._multi_match_choice.configure(values=())
+            self._multi_match_choice.set("")
+
+    def _multi_choose_plate(self,event=None):
+        group=self._multi_group()
+        if group is None:
+            return
+        inv=inventory(self.session,self.current_invocation)
+        selection=self._multi_plate_list.selection()
+        if not inv or not selection:
+            return
+        pid=selection[0]
+        plate=next((p for p in inv["plates"] if p["plate_id"]==pid),None)
+        if plate is None:
+            return
+        self._multi_active_gt=pid
+        self._multi_selected_var.set(f"Wybrana tablica: {pid} • jej własny numer GT i przypisanie")
+        self._multi_text_var.set(str(plate.get("gt_text") or ""))
+        self._multi_reason_var.set(str(plate.get("text_exclusion_reason") or ""))
+        pairs={"Brak detekcji MT — pominięta tablica": ""}
+        for aid,row in sorted(multi_detection_records(group).items(),key=lambda a:int(a[1].get("mt_detection_index") or 0)):
+            index=int(row.get("mt_detection_index") or 0)+1
+            pairs[f"Wskazanie MT #{index} ({aid[-8:]})"]=aid
+        self._multi_match_values=pairs
+        self._multi_match_choice.configure(values=tuple(pairs))
+        current=str(plate.get("attempt_id") or "")
+        self._multi_match_choice.set(next((name for name,aid in pairs.items() if aid==current),next(iter(pairs))))
+        self._multi_bbox_button.configure(state="normal" if not current else "disabled")
+        self._multi_bbox_clear.configure(state="normal" if plate.get("bbox_mt_px") else "disabled")
+        if self._multi_bbox_edit and (not self._multi_active_gt or current):
+            self._multi_bbox_edit=False
+
+    def _multi_save_count(self):
+        group=self._multi_group()
+        if group is None or self._saving:
+            return
+        try:
+            n=int(self._multi_count_var.get())
+        except ValueError:
+            self.status_var.set("Podaj liczbę całkowitą 2–32")
+            return
+        self._change(lambda:set_count(self.session,self.current_invocation,n),save_draft=False)
+
+    def _multi_save_match(self):
+        if self._multi_group() is None or self._saving or not self._multi_active_gt:
+            return
+        gid,pid=self.current_invocation,self._multi_active_gt
+        aid=self._multi_match_values.get(self._multi_match_choice.get())
+        if aid is None:
+            self.status_var.set("Wybierz rzeczywiste wskazanie MT z listy")
+            return
+        self._change(lambda:assign_attempt(self.session,gid,pid,aid),save_draft=False)
+
+    def _multi_save_text(self):
+        if self._multi_group() is None or self._saving or not self._multi_active_gt:
+            return
+        gid,pid=self.current_invocation,self._multi_active_gt
+        gt,reason=self._multi_text_var.get(),self._multi_reason_var.get()
+        self._change(lambda:set_plate_text(self.session,gid,pid,gt,reason),save_draft=False)
+
+    def _multi_start_bbox(self):
+        group=self._multi_group()
+        inv=inventory(self.session,self.current_invocation) if group else None
+        plate=next((p for p in inv["plates"] if p["plate_id"]==self._multi_active_gt),None) if inv else None
+        if not plate or plate.get("attempt_id") or self._saving:
+            return
+        row=self._current_mt_attempt()
+        size=tuple(float(row[k]) for k in ("input_width","input_height")) if row else ()
+        if (self._image is None or self._image_entry not in group.evidence_entries or
+                self._image_entry != row.get("mt_input_evidence_entry") or self._image_source_size != size):
+            self.status_var.set("Przed ręcznym zaznaczeniem pominiętej tablicy wybierz pełne wejście MT")
+            self.show_invocation_input()
+            return
+        self._cancel_mt_correction()
+        self._multi_bbox_edit=True
+        self._leave_pose_gt_edit_on_navigation()
+        self.canvas.configure(cursor="crosshair")
+        self.status_var.set("Przeciągnij lewym przyciskiem od jednego rogu pominiętej tablicy do przeciwległego")
+
+    def _multi_clear_bbox(self):
+        if self._multi_group() is None or self._saving or not self._multi_active_gt:
+            return
+        gid,pid=self.current_invocation,self._multi_active_gt
+        self._change(lambda:clear_missed_bbox(self.session,gid,pid),save_draft=False)
+
+    def _multi_focus_attempt(self,attempt_id):
+        if not attempt_id or not self.session:
+            return
+        row=self.session.attempts.get(attempt_id,{})
+        if not row:
+            return
+        owning=row.get("subject_key")
+        if owning!=self.subject_key:
+            self.subject_key=owning
+            self._multi_requested_attempt=attempt_id
+            self._render_subject()
+            return
+        iid=next((iid for iid,r in self._record_ids.items() if r==("attempt",attempt_id)),None)
+        if iid:
+            self.record_tree.selection_set(iid)
+            self.record_tree.focus(iid)
+            self._select_record()
+
+    def _multi_choose_child(self, child):
+        subject_key,gid,pid,aid=child
+        self._multi_active_group=gid
+        self._multi_active_gt=pid
+        self._multi_ui_group=gid
+        if not aid:
+            group=self.session.mt_invocations.get(gid)
+            aid=str(group.records[0].get("id") or "") if group and group.records else ""
+        if aid:
+            self._multi_focus_attempt(aid)
+        if self._multi_group() is not None:
+            self._sync_multi_controls()
+
+    def _focus_multi_gt(self, pid):
+        if not self.session or not self.current_invocation:
+            return
+        cid = next((iid for iid, data in self._multi_child_targets.items()
+                    if data[1] == self.current_invocation and data[2] == pid), None)
+        if cid and self.subject_tree.exists(cid):
+            self.subject_tree.selection_set(cid)
+            self.subject_tree.focus(cid)
+            self.subject_tree.see(cid)
+            self._select_subject()
+
+    def _status_yscroll(self, first, last):
+        if getattr(self,"_status_scrollbar",None) is not None:
+            self._status_scrollbar.set(first,last)
+        self._schedule_status_pills()
+
+    def _schedule_status_pills(self):
+        if getattr(self,"_status_paint_scheduled",False):
+            return
+        self._status_paint_scheduled=True
+        self.subject_tree.after_idle(self._render_status_pills)
+
+    def _render_status_pills(self):
+        self._status_paint_scheduled=False
+        if not self.subject_tree.winfo_exists():
+            return
+        columns=("MT", "Wsk.", "GT", "Rogi", "Form.")
+        selected=set(self.subject_tree.selection())
+        visible=[]
+        def visit(parent):
+            for iid in self.subject_tree.get_children(parent):
+                if self.subject_tree.bbox(iid, "MT"):
+                    visible.append(iid)
+                if self.subject_tree.item(iid,"open"):
+                    visit(iid)
+        visit("")
+        wanted={}
+        for iid in visible:
+            values=self.subject_tree.item(iid,"values")
+            if len(values)<6:continue
+            for col, value in zip(columns,values[1:6]):
+                box=self.subject_tree.bbox(iid,col)
+                if not box or box[2]<20:continue
+                wanted[(iid,col)]=(str(value),box,iid in selected)
+        spare=[]
+        for key, widget in list(self._status_pills.items()):
+            if key not in wanted:
+                widget.place_forget()
+                spare.append(widget)
+                del self._status_pills[key]
+        palette={"✓":("#E1F3E6","#206C41"),
+                 "○":("#FFF1D4","#8C5C0C"),
+                 "◐":("#FFF1D4","#8C5C0C"),
+                 "—":("#E9EDF0","#657781")}
+        for key,(value,box,is_selected) in wanted.items():
+            x,y,w,h=box
+            bg,fg=palette.get(value,("#E9EDF0","#657781"))
+            if is_selected:
+                bg,fg="#C2E9FD","#07557D"
+            if key not in self._status_pills:
+                widget = spare.pop() if spare else tk.Label(
+                    self.subject_tree,font=("Segoe UI",11,"bold"),bd=0,relief="flat")
+                # Rebinding is essential when a pooled badge serves another row.
+                widget.bind("<Button-1>",lambda e, iid=key[0]: self._choose_status_row(iid))
+                self._status_pills[key]=widget
+            widget=self._status_pills[key]
+            widget.configure(text=value,bg=bg,fg=fg)
+            bw=min(26,max(18,w-6)); bh=max(16,min(22,h-5))
+            widget.place(x=x+(w-bw)//2,y=y+(h-bh)//2,width=bw,height=bh)
+        for widget in spare:
+            widget.destroy()  # bounded by visible table rows, not session length
+
+    def _choose_status_row(self,iid):
+        if self.subject_tree.exists(iid):
+            self.subject_tree.selection_set(iid)
+            self.subject_tree.focus(iid)
+            self._select_subject()
+
     def _refresh_subject_rows(self):
         self._subject_stats = {row["subject_key"]: row for row in self.stats["subjects"]}
-        self._science_data = make_scientific_summary(self.session, self.stats, _pose_geometry_rows(self.session))
+        geometry = _pose_geometry_rows(self.session)
+        self._science_data = make_scientific_summary(self.session, self.stats, geometry)
+        pose_map = {row["attempt_id"]: row for row in geometry}
+        previous=self.subject_tree.selection()
+        self._multi_child_targets={}
         for index, (iid, key) in enumerate(self._subject_ids.items(), 1):
-            decision = self.session.review.subjects.get(key, {})
-            state = "Odczyt pominięty" if decision.get("evaluable") is False else "Gotowa" if decision.get("ground_truth") else "Oczekuje"
-            if decision.get("draft_ground_truth") and not self.session.predictions_visible(key):
-                state = "Szkic GT"
-            pending = self._subject_stats.get(key, {}).get("pending_decisions", 0)
-            stage = self._science_data["subjects"].get(key, {})
-            if stage.get("mt_complete"):
-                state = stage["label"]
-            elif stage.get("mt_status") == "Poza pomiarem MT":
-                state = "Poza pomiarem MT"
-            elif stage.get("mt_pending"):
-                state = "MT do oceny"
-            elif pending and decision.get("ground_truth"):
-                state = f"Decyzje: {pending}"
-            # A single full-width row: explicit marker + observation number +
-            # meaningful status, not colour or the unrelated OCR draft.
-            groups = [self.session.mt_invocations.get(self.session.invocation_by_attempt.get(aid))
+            statuses = observation_verification_cells(self.session, key, pose_map)
+            # The check marks mean that a decision/document exists, NOT that
+            # the model recognized the number correctly. Human GT/corners are
+            # separate columns and optional corners never block Form.
+            active = [self.session.mt_invocations.get(self.session.invocation_by_attempt.get(aid))
                       for aid in self.session.subjects[key].get("attempts", ())]
-            groups = [group for group in groups if group is not None]
-            cancelled = bool(groups) and all(group.cancelled for group in groups)
-            failed = bool(groups) and all(group.execution_failed for group in groups)
-            label, tag = _observation_list_label(index, state, cancelled=cancelled,
-                                                  execution_failed=failed)
+            excluded = bool(active) and all(group is None or group.cancelled or
+                                            not group.executed or group.execution_failed
+                                            for group in active)
+            # Cancelled and technically failed attempts are outside quality
+            # denominators. A historical GT can exist, but do not present it
+            # as a freshly verified MZ result in the status matrix.
+            if excluded:
+                statuses = tuple("—" if idx == 2 else cell for idx, cell in enumerate(statuses))
+            values = (f"{index:02d}",) + statuses
+            tag = ("review_excluded" if excluded else
+                   "review_done" if statuses[-1] == "✓" else "review_pending")
             if self.subject_tree.exists(iid):
-                self.subject_tree.item(iid, values=(label,), tags=(tag,))
+                self.subject_tree.item(iid, text=f"Obserwacja {index:02d}" +
+                                       (" · przerwana" if excluded else ""),
+                                       values=values,tags=(tag,))
             else:
-                self.subject_tree.insert("", "end", iid=iid, values=(label,), tags=(tag,))
+                self.subject_tree.insert("", "end", iid=iid,
+                    text=f"Obserwacja {index:02d}" + (" · przerwana" if excluded else ""),
+                    values=values,tags=(tag,),open=True)
+            # One GT plate = one child, even when multiple GT plates share one image.
+            # For a shared invocation only its first subject owns the subrows.
+            for child_iid in self.subject_tree.get_children(iid):
+                self.subject_tree.delete(child_iid)
+            groups=sorted({self.session.invocation_by_attempt.get(aid) for aid in self.session.subjects[key].get("attempts",())
+                           if aid in self.session.invocation_by_attempt})
+            for gid in groups:
+                if not gid or not is_multi(self.session,gid):
+                    continue
+                group=self.session.mt_invocations[gid]
+                if key!=sorted(group.subject_keys)[0]:
+                    continue
+                inv=inventory(self.session,gid)
+                if inv is None:
+                    cid=f"multi::{iid}::{gid}::setup"
+                    self.subject_tree.insert(iid,"end",iid=cid,text="GT: podaj liczbę",values=("","○","○","—","○","○"))
+                    self._multi_child_targets[cid]=(key,gid,"","")
+                    continue
+                linked=set()
+                for plate in inv["plates"]:
+                    pid=plate["plate_id"]
+                    aid=plate.get("attempt_id") or ""
+                    linked.add(aid)
+                    verified=bool(aid or plate.get("bbox_mt_px"))
+                    text_done=bool(plate.get("gt_text") or plate.get("text_exclusion_reason"))
+                    idx=self.session.attempts.get(aid,{}).get("mt_detection_index")
+                    name=f"{pid} ↔ MT {int(idx)+1}" if aid and idx not in (None,"") else f"{pid} · pominięta"
+                    cid=f"multi::{iid}::{gid}::{pid}"
+                    self.subject_tree.insert(iid,"end",iid=cid,text=name,
+                           values=("", "✓", "✓" if verified else "○", "✓" if text_done else "—", "—", "✓" if verified else "○"))
+                    self._multi_child_targets[cid]=(key,gid,pid,aid)
+                for aid,row in sorted(multi_detection_records(group).items(),key=lambda z:int(z[1].get("mt_detection_index") or 0)):
+                    if aid in linked:continue
+                    from ..ranking.mobile_verification_policy import selected_visual_state
+                    state=selected_visual_state(self.session.review.attempt_annotations.get(aid,{}))
+                    idx=int(row.get("mt_detection_index") or 0)+1
+                    cid=f"multi::{iid}::{gid}::mt{idx}"
+                    self.subject_tree.insert(iid,"end",iid=cid,text=f"MT {idx} · {'fałszywe' if state=='not_plate' else 'bez GT'}",
+                         values=("","✓","✓" if state=="not_plate" else "○","—","—","✓" if state=="not_plate" else "○"))
+                    self._multi_child_targets[cid]=(key,gid,"",aid)
+            self.subject_tree.item(iid,open=True)
+        if previous and self.subject_tree.exists(previous[0]):
+            self.subject_tree.selection_set(previous[0])
+        self._schedule_status_pills()
 
     def _select_subject(self, event=None):
         selected = self.subject_tree.selection()
-        key = self._subject_ids.get(selected[0]) if selected else None
-        if not key or key == self.subject_key:
+        clicked = selected[0] if selected else ""
+        child = self._multi_child_targets.get(clicked)
+        key = self._subject_ids.get(clicked) or (child[0] if child else None)
+        if not key:
+            return
+        if key == self.subject_key:
+            if child:
+                self._multi_choose_child(child)
             return
         if self._saving:
             self._pending_subject = key
@@ -1162,11 +1679,19 @@ class MobileSampleReviewWindow:
         if self._saving:
             self._pending_subject = key
             return
+        self._cancel_mt_correction()
         self._leave_pose_gt_edit_on_navigation()
+        self._multi_bbox_edit=False
+        self._multi_drag_start=None
         self._close_crop_preview()
         self._pose_auto_token = None
         self.subject_key = key
+        if child:
+            self._multi_active_gt=child[2]
+            self._multi_requested_attempt=child[3]
         self._render_subject()
+        if child:
+            self._multi_choose_child(child)
         # Selecting a DIFFERENT observation starts a new questionnaire at the
         # first question. Autosave/refresh of the same record keeps scroll.
         try:
@@ -1189,11 +1714,11 @@ class MobileSampleReviewWindow:
         stats = self._subject_stats.get(key, {})
         invocations = {self.session.invocation_by_attempt[item] for item in subject["attempts"]}
         invocation_count = sum(self.session.mt_invocations[item].executed for item in invocations) if self.session.attempts_available else None
-        self.subject_label.configure(text=f"Obserwacja {number} z {len(self.session.subjects)}")
+        self.subject_label.configure(text=f"Obserwacja {number} z {len(self.session.subjects)} — wybrana tablica na zdjęciu")
         visible = self.session.predictions_visible(key)
         self._sync_review_controls()
         if not visible:
-            self.alignment_label.configure(text="Ocena zaślepiona: wynik MZ pozostaje ukryty. Aby przejść na prostą ocenę z predykcjami, użyj przycisku u góry.")
+            self.alignment_label.configure(text="Weryfikacja zaślepiona: wynik MZ pozostaje ukryty. Aby przejść na prostą ocenę z predykcjami, użyj przycisku u góry.")
             self.alignment_text.configure(state="normal")
             self.alignment_text.delete("1.0", "end")
             self.alignment_text.configure(state="disabled")
@@ -1209,7 +1734,7 @@ class MobileSampleReviewWindow:
                 iid = f"record-{len(self._record_ids)}"
                 self._record_ids[iid] = (kind, record_id)
                 annotation = (self.session.review.attempt_annotations if kind == "attempt" else self.session.review.sample_annotations).get(record_id, {})
-                state = "Nie tablica" if annotation.get("is_plate") is False else "Pominięta" if annotation.get("evaluable") is False else annotation.get("plate_visibility", "GT zapisane" if kind == "sample" and decision.get("ground_truth") else "Do oceny")
+                state = "Nie tablica" if annotation.get("is_plate") is False else "Pominięta" if annotation.get("evaluable") is False else annotation.get("plate_visibility", "GT zapisane" if kind == "sample" and decision.get("ground_truth") else "Do weryfikacji")
                 state = {"visible": "Widoczna", "invisible": "Niewidoczna", "uncertain": "Niejednoznaczna"}.get(state, state)
                 if self.session.cancelled(row):
                     state = "Próba przerwana"
@@ -1228,6 +1753,11 @@ class MobileSampleReviewWindow:
             if self._record_ids[iid] != old:
                 self._retained_image_on_refresh = None
             self.current_record = None
+            requested=getattr(self,"_multi_requested_attempt","")
+            if requested:
+                iid=next((candidate for candidate, data in self._record_ids.items()
+                          if data==("attempt",requested)),iid)
+                self._multi_requested_attempt=""
             self.record_tree.selection_set(iid)
             self.record_tree.focus(iid)
         else:
@@ -1248,11 +1778,19 @@ class MobileSampleReviewWindow:
         record = self._record_ids.get(selected[0]) if selected else None
         if not record or record == self.current_record:
             return
+        # Selecting another MT detection on a full source frame must not
+        # unexpectedly leave the source image or reset its zoom/pan position.
+        keep_source = str(getattr(self, "_source_frame_keep_on_selection", "") or "")
+        self._source_frame_keep_on_selection = ""
+        if (self._mt_corr_active and str(self.session.attempts.get(record[1] if record[0] == "attempt" else
+                self.session.samples.get(record[1], {}).get("attempt_id"), {}).get("id") or "") != self._mt_corr_attempt):
+            self._cancel_mt_correction()
         retained = self._retained_image_on_refresh
         self._retained_image_on_refresh = None
         # A real record change ends GT editing. A refresh of the SAME record
         # (after autosave) must preserve the edit state and Zoom/Pan.
         if not retained or retained[0] != record:
+            self._cancel_mt_correction()
             self._leave_pose_gt_edit_on_navigation()
             self._close_crop_preview()
             self._pose_auto_token = None
@@ -1269,14 +1807,20 @@ class MobileSampleReviewWindow:
             self.session.entry_names,
         )
         self.image_choice.configure(values=[title for title, _ in self._image_rows])
+        self._sync_source_frame_button()
         source_index = _primary_review_image_index(self._image_rows, attempt, group)
+        if keep_source:
+            saved_index = next((i for i, (_, item) in enumerate(self._image_rows)
+                if item.get("source_frame_view") and item.get("image_entry") == keep_source), None)
+            if saved_index is not None:
+                source_index = saved_index
         if source_index is not None:
             self.image_choice.current(source_index)
         else:
             self.image_choice.set("Brak zdjęcia powiązanego z obszarem")
         self._sync_detected_area_navigation()
         self._sync_crop_preview_source(attempt, row if kind == "sample" else None)
-        self.record_label.configure(text="Zdjęcie do oceny")
+        self.record_label.configure(text="Zdjęcie do weryfikacji")
         # Ocena odczytu MZ nie znika tylko dlatego, ze operator wybral rekord MT.
         # Przy probie MT pokazujemy powiazany crop, jesli istnieje.
         result_row = row
@@ -1292,7 +1836,7 @@ class MobileSampleReviewWindow:
         mz_status = str(result_row.get("mz_status", "")).upper()
         self._result_prediction = prediction if mz_status != "NOT_RUN" else ""
         if not self.session.predictions_visible(self.subject_key):
-            self.prediction_label.configure(text="Ukryta — ocena zaślepiona")
+            self.prediction_label.configure(text="Ukryta — weryfikacja zaślepiona")
         elif self.session.cancelled(result_row):
             self.prediction_label.configure(text="Próba przerwana")
         elif mz_status == "NOT_RUN":
@@ -1313,14 +1857,14 @@ class MobileSampleReviewWindow:
             self.alignment_label.configure(text="Wpisz GT z obrazu — zapis jest automatyczny.")
         elif self.session.cancelled(result_row):
             self.alignment_label.configure(text=(
-                "Próba przerwana. Wyniku OCR nie oceniamy (CER/Exact nie dotyczy); "
+                "Próba przerwana. Nie weryfikujemy tu wyniku OCR (CER/Exact nie dotyczy); "
                 "ewentualny GT służy tylko dokumentacji."))
         elif mz_status == "NOT_RUN":
             self.alignment_label.configure(text="MZ nie został uruchomiony w tej próbie. Oceń widoczność tablicy dla MT.")
         elif self.session.review.subjects.get(self.subject_key, {}).get("evaluable") is False:
             self.alignment_label.configure(text=(
                 "Znaki nieczytelne — odczyt MZ/CER i skuteczność ALPR poza oceną. "
-                "Detekcja i polygon MT pozostają do osobnej oceny."))
+                "Wykrycie i obrys MT wymagają osobnej weryfikacji."))
         elif gt:
             match = align_plate_text(gt, prediction)
             outcome = "Brak odczytu" if not match.prediction else "Poprawny odczyt" if match.exact_match else "Niepoprawny odczyt"
@@ -1346,13 +1890,31 @@ class MobileSampleReviewWindow:
                     self._set_image_help()
                     self._paint_image()
                     return
+        if (keep_source and self._image is not None and
+                keep_source == self._image_entry and
+                self._image_rows and 0 <= self.image_choice.current() < len(self._image_rows) and
+                self._image_rows[self.image_choice.current()][1].get("source_frame_view")):
+            self._paint_image()  # keep zoom/pan on this same immutable Bitmap
+            self._sync_source_frame_button()
+            return
         self._load_image()
 
     def _sync_review_controls(self):
         if not self.session:
             return
-        intro = ("Sprawdź, czy telefon znalazł tablicę. Jeśli możesz rozpoznać jej rogi, "
-                 "wskaż je, aby ocenić dokładność obrysu. Na końcu sprawdź odczyt numeru.")
+        state = self._mz_review_state()
+        if state == "cancelled":
+            intro = ("Próba przerwana. Obejrzyj zapisane zdjęcie i dane, ale nie "
+                     "weryfikuj wyniku MT ani MZ: przetwarzanie nie zostało ukończone.")
+        elif state == "technical":
+            intro = ("Brak ukończonego wykonania modelu. Dostępne dowody służą "
+                     "diagnostyce, nie ocenie skuteczności MT lub MZ.")
+        elif state == "not_run":
+            intro = ("Zweryfikuj wynik MT. Model MZ nie uruchomił się dla tej próby; "
+                     "GT tekstu można zapisać osobno, ale nie weryfikujemy OCR.")
+        else:
+            intro = ("Zweryfikuj wskazanie MT i odczyt MZ. GT narożników służy "
+                     "wyłącznie do opcjonalnego pomiaru IoU/NMCE.")
         warnings = getattr(self, "_source_notices", [])
         self.notice_label.configure(text=intro + ("\n" + "\n".join(warnings) if warnings else ""),
                                     fg=self.browser.warning if warnings else self.fg)
@@ -1386,11 +1948,11 @@ class MobileSampleReviewWindow:
                     text=f"Wynik MT: {group.detection_count} "
                          f"{'wykryta tablica' if group.detection_count == 1 else 'wykrytych tablic'}")
             annotation = self.session.invocation_annotation(self.current_invocation)
-            self.invocation_choice.set("Brak dawnej oceny liczby tablic" if annotation.get("decision_source") == "legacy_cardinality_unknown"
+            self.invocation_choice.set("Brak wcześniejszej weryfikacji liczby tablic" if annotation.get("decision_source") == "legacy_cardinality_unknown"
                                        else VISIBILITY_LABELS.get(annotation.get("visible_plate_count"), "Oceń całe wejście MT"))
             self.invocation_count_value.set(annotation.get("visible_plate_count", ""))
             if group.execution_failed:
-                self.invocation_choice.set("Nie wymaga oceny MT")
+                self.invocation_choice.set("Poza weryfikacją MT")
             allowed = not (self._saving or group.cancelled or not group.executed or group.execution_failed)
             self.invocation_choice.configure(state="readonly" if allowed else "disabled")
             for radio in self.invocation_count_radios:
@@ -1412,7 +1974,552 @@ class MobileSampleReviewWindow:
             for widget in getattr(self, "_mt_scored_controls", ()):
                 widget.grid_remove()
         self._sync_detection_choice()
+        self._sync_mt_visual_choice()
         self._sync_pose_gt_controls()
+        self._sync_multi_controls()
+        self._sync_mz_panel_state()
+
+    def _mz_review_state(self):
+        """One source of truth for operator actions in the MZ section.
+
+        Cancelled/error/not-executed = read-only even if historical GT exists.
+        MZ NOT_RUN in an active MT attempt may retain *independent* GT for
+        diagnostics; that never becomes a measured OCR result.
+        """
+        if not self.session or not self.current_record:
+            return "empty"
+        attempt = self._current_mt_attempt()
+        group = self.session.mt_invocations.get(self.current_invocation)
+        row = getattr(self, "_result_row", {}) or attempt
+        if ((group and group.cancelled) or self.session.cancelled(attempt)
+                or self.session.cancelled(row)):
+            return "cancelled"
+        if group and (not group.executed or group.execution_failed):
+            return "technical"
+        mz_status = str(row.get("mz_status") or attempt.get("mz_status") or "").upper()
+        if mz_status in {"", "NOT_RUN", "UNKNOWN"}:
+            return "not_run"
+        return "measured"
+
+    def _sync_mz_panel_state(self):
+        """Render lifecycle and editable actions together, not separately.
+
+        This changes widgets only. Previously recorded GT and sidecars are
+        never rewritten or cleared when a cancelled attempt is selected.
+        """
+        if not self.session or not self.current_record or not hasattr(self, "mz_title"):
+            return
+        if self._multi_group() is not None:
+            return  # Per-plate GT panel owns the active multi-plate workflow.
+        state = self._mz_review_state()
+        offline = state in {"cancelled", "technical"}
+        controls = (self.gt_prompt_label, self.gt_entry, self.mz_evaluable_group,
+                    self.mz_exclusion_caption, self.mz_note_caption, self.note_entry)
+        if offline:
+            for widget in controls:
+                widget.grid_remove()
+            old = self.session.review.subjects.get(self.subject_key, {})
+            gt = str(old.get("ground_truth") or "").strip()
+            self.mz_archived_gt.configure(text=(
+                f"Wcześniej zapisany numer GT: {gt}. Zachowany tylko w dokumentacji; "
+                "nie jest wynikiem weryfikacji MZ tej próby." if gt else
+                "Brak numeru GT. Nie trzeba go uzupełniać w tej próbie."))
+            self.mz_archived_gt.grid()
+            self.gt_entry.configure(state="disabled")
+            self.note_entry.configure(state="disabled")
+            self.subject_unreadable_button.configure(state="disabled")
+            self.mz_title.configure(text="02 · MZ — POZA WERYFIKACJĄ")
+            if state == "cancelled":
+                self.result_context.configure(text="Aplikacja przerwała próbę przed ukończeniem odczytu.")
+                self.prediction_label.configure(text="Próba przerwana")
+            else:
+                self.result_context.configure(text="Model nie zakończył wykonania; brak wyniku do weryfikacji.")
+                self.prediction_label.configure(text="Brak wyniku MZ")
+            self.alignment_label.configure(text=(
+                "W tej próbie nie obliczamy poprawności OCR, Exact Match ani CER. "
+                "Nie należy traktować braku pomiaru jako błędnego odczytu."))
+            self.alignment_text.configure(state="normal")
+            self.alignment_text.delete("1.0", "end")
+            self.alignment_text.configure(state="disabled")
+            self.crop_preview_button.configure(text="Pokaż zachowany obraz (bez weryfikacji)")
+            return
+        self.mz_archived_gt.grid_remove()
+        for widget in controls:
+            widget.grid()
+        is_not_run = state in {"not_run", "empty"}
+        self.mz_title.configure(text=("02 · NUMER TABLICY — MZ NIE URUCHOMIONO" if is_not_run
+                                      else "02 · SPRAWDZENIE NUMERU TABLICY"))
+        self.gt_prompt_label.configure(text="Jaki numer widzisz na zdjęciu?")
+        self.subject_unreadable_button.configure(state="disabled" if self._saving else "normal")
+        self._sync_mz_readability_details(is_not_run=is_not_run)
+        if is_not_run:
+            self.result_context.configure(text=(
+                "MZ nie został uruchomiony. Nie ma odczytu znaków do weryfikacji."))
+            self.prediction_label.configure(text="MZ nie uruchomiono")
+            self.alignment_label.configure(text=(
+                "Możesz zapisać numer widocznej tablicy jako niezależny GT do analizy "
+                "pominięcia MT/ALPR. Nie powstaje przez to wynik MZ ani CER."))
+            self.crop_preview_button.configure(text="Pokaż zachowany obraz (bez odczytu MZ)")
+        else:
+            self.crop_preview_button.configure(text="Pokaż obraz tablicy użyty przez MZ")
+
+    def _visual_target(self):
+        if not self.session or not self.current_record:
+            return "", {}
+        attempt = self._current_mt_attempt()
+        aid = str(attempt.get("id") or "")
+        group = self.session.mt_invocations.get(self.current_invocation)
+        if not (aid and group and group.executed and not group.cancelled and
+                not group.execution_failed and not self.session.cancelled(attempt) and
+                str(attempt.get("mt_status") or "").upper() in DETECTION_STATUSES):
+            return "", {}
+        return aid, attempt
+
+    def _sync_mt_visual_choice(self):
+        if not hasattr(self, "mt_visual_choice"):
+            return
+        aid, attempt = self._visual_target()
+        annotation = self.session.review.attempt_annotations.get(aid, {}) if aid else {}
+        self.mt_visual_choice.set(selected_visual_state(annotation))
+        for control in getattr(self, "mt_visual_radios", ()):
+            control.configure(state="normal" if aid and not self._saving else "disabled")
+        if hasattr(self, "mt_visual_host"):
+            self.mt_visual_host.grid_remove()
+        if hasattr(self, "mt_visual_status"):
+            statuses = {"not_plate": "Fałszywe wskazanie MT — obszar nie jest tablicą.",
+                        "imprecise": "Tablica potwierdzona — korekta obrysu wspomagana predykcją MT.",
+                        "accurate": "Tablica potwierdzona — obrys MT zaakceptowany wizualnie.",
+                        "uncertain": "Brak możliwości weryfikacji tego obrysu."}
+            self.mt_visual_status.configure(text=(statuses.get(self.mt_visual_choice.get()) or
+                "Zweryfikuj wskazanie MT, wybierając opcję nad zdjęciem."))
+        for control in getattr(self, "mt_visual_overlay_buttons", ()):
+            try:
+                selected = control.cget("value") == self.mt_visual_choice.get()
+                control.configure(bg="#1686BD" if selected else "#10212b",
+                                  relief=tk.SUNKEN if selected else tk.FLAT)
+            except tk.TclError:
+                pass
+        # Direct manipulation is the default for an imprecise MT detection.
+        # Re-enter on record/image selection (but do not discard an active
+        # four-click draft, or restart while the asynchronous save is pending).
+        if (aid and selected_visual_state(annotation) == "imprecise"
+                and self._image is not None
+                and self._image_entry == attempt.get("mt_input_evidence_entry")
+                and not self._saving and not self._mt_redraw_active
+                and not self.pose_edit_var.get()
+                and (not self._mt_corr_active or self._mt_corr_attempt != aid)):
+            self._start_mt_correction(aid)
+        elif (selected_visual_state(annotation) != "imprecise"
+                and self._mt_corr_active and not self._mt_redraw_active):
+            self._cancel_mt_correction()
+
+    def save_mt_visual_choice(self):
+        aid, attempt = self._visual_target()
+        if not aid or self._saving:
+            self._sync_mt_visual_choice()
+            return
+        if self._image is None or self._image_entry != attempt.get("mt_input_evidence_entry"):
+            self.status_var.set("Wybierz pełne wejście MT przed weryfikacją tego wskazania.")
+            self._sync_mt_visual_choice()
+            return
+        state = self.mt_visual_choice.get()
+        if not state:
+            self._sync_mt_visual_choice()
+            return
+        original = _linked_pose_quad_on_mt_input(self.session, attempt)
+        if state in {"accurate", "imprecise"} and original is None:
+            self.status_var.set("MT nie zapisał poprawnych czterech rogów. Nie tworzymy obrysu z prostokąta bbox.")
+            self._sync_mt_visual_choice()
+            return
+        old = self.session.review.attempt_annotations.get(aid, {})
+        if state == "not_plate" and old.get("pose_gt_quad_mt_input_px"):
+            self.status_var.set("Istnieje wcześniejszy GT narożników. Wyjaśnij konflikt przed oznaczeniem «Nie tablica».")
+            self._sync_mt_visual_choice()
+            return
+        if (old.get("pose_mt_correction_v1") and state != "imprecise" and
+                selected_visual_state(old) == "imprecise"):
+            if not messagebox.askyesno("Zmiana weryfikacji wskazania MT",
+                    "To wskazanie ma zapisaną korektę obrysu. Po zmianie odpowiedzi "
+                    "korekta pozostanie w historii, ale nie będzie aktywnym wynikiem. "
+                    "Czy kontynuować?", parent=self.window):
+                self._sync_mt_visual_choice()
+                return
+        # An archived assisted correction is never erased by changing the choice.
+        # Only an explicitly requested new correction requires completion;
+        # legacy imprecise reviews remain historically valid.
+        if state != "imprecise":
+            self._cancel_mt_correction()
+        decision = visual_decision(state)
+        decision["pose_correction_required_v1"] = state == "imprecise"
+        should_write = any(old.get(key) != value for key, value in decision.items())
+        if should_write:
+            self._change(lambda: self.session.annotate("attempt", aid, **decision),
+                         save_draft=False,
+                         after=(lambda aid=aid: self._start_mt_correction(aid)) if state == "imprecise" else None)
+        elif state == "imprecise":
+            self._start_mt_correction(aid)
+        else:
+            self._sync_mt_visual_choice()
+
+    def _valid_mt_correction(self, aid, attempt, model):
+        decision = self.session.review.attempt_annotations.get(aid, {})
+        return correction_for_attempt(decision, attempt_id=aid,
+             source_sha=self.session.review.source_archive_sha256,
+             image_entry=attempt["mt_input_evidence_entry"],
+             size=(float(attempt["input_width"]), float(attempt["input_height"])),
+             prediction=model)
+
+    def _start_mt_correction(self, aid):
+        if getattr(self, "_mt_redraw_active", False):
+            self._cancel_mt_correction()
+        target, attempt = self._visual_target()
+        if target != aid or self._saving:
+            return
+        if self._image is None or self._image_entry != attempt.get("mt_input_evidence_entry"):
+            return
+        model = _linked_pose_quad_on_mt_input(self.session, attempt)
+        if model is None:
+            self.status_var.set("Brak poprawnego Pose MT — nie można korygować nieistniejącego obrysu.")
+            return
+        try:
+            saved = self._valid_mt_correction(aid, attempt, model)
+        except (ValueError, KeyError, TypeError) as exc:
+            self.status_var.set(f"Nie można otworzyć korekty: {exc}")
+            return
+        self._leave_pose_gt_edit_on_navigation()
+        self._multi_bbox_edit = False
+        self._mt_corr_active = True
+        self._mt_corr_attempt = aid
+        self._mt_corr_points = [list(p) for p in (saved or model)]
+        self._mt_corr_last_saved = [list(p) for p in (saved or model)]
+        self._mt_corr_drag = None
+        self.canvas.configure(cursor="crosshair")
+        self._paint_image()
+        self.status_var.set("Przeciągnij bursztynowe uchwyty narożników albo wnętrze obrysu. Zapis po puszczeniu myszy. Esc: anuluj szkic.")
+
+    def _resume_mt_correction(self):
+        """Explicitly re-enter drag editing for a previously verified detection."""
+        aid, _attempt = self._visual_target()
+        if aid:
+            self._start_mt_correction(aid)
+            self._sync_mt_visual_choice()
+
+    def _start_mt_redraw(self, event=None):
+        if str(getattr(self, "_image_entry", "")).startswith("samples/frames/"):
+            self.status_var.set("Pełna klatka jest na razie tylko do odczytu. Wróć do wejścia MT, aby korygować obrys.")
+            return "break"
+        """D or Shift+click begins replacement of the sole operator polygon.
+
+        The operator already saw the MT prediction in this assisted review;
+        the resulting annotation is NOT a blinded/independent scientific GT.
+        """
+        if self._mt_redraw_active:
+            self._cancel_mt_correction()
+            self.status_var.set("Anulowano niezapisany obrys. Weryfikacja modelu pozostała bez zmian.")
+            self._sync_mt_visual_choice()
+            return "break"
+        aid, attempt = self._visual_target()
+        if not aid or self._saving or self._image is None:
+            return
+        if (self._image_entry != attempt.get("mt_input_evidence_entry") or
+                self._image_source_size != (float(attempt["input_width"]),
+                                            float(attempt["input_height"]))):
+            self.status_var.set("Wybierz oryginalny obraz wejścia MT tej detekcji.")
+            return
+        decision = self.session.review.attempt_annotations.get(aid, {})
+        if selected_visual_state(decision) != "imprecise":
+            self.status_var.set("Najpierw wybierz «Niedokładny» na zdjęciu.")
+            return
+        if _linked_pose_quad_on_mt_input(self.session, attempt) is None:
+            self.status_var.set("MT nie zapisał czterech narożników; nie tworzymy ich z bbox.")
+            return
+        # Historical independent GT is immutable. This redraw creates a
+        # SEPARATE assisted correction of this same detection, and only the
+        # active operator polygon is rendered (no duplicate green GT frame).
+        if decision.get("pose_mt_correction_v1") and not messagebox.askyesno(
+                "Nowy obrys ręczny",
+                "Istnieje już zapisana korekta obrysu. Nowy obrys zastąpi aktywną korektę, "
+                "ale poprzednia zostanie zachowana w historii tej detekcji. Kontynuować?",
+                parent=self.window):
+            return
+        self._cancel_mt_correction()  # cancel only unsaved drag, never stored review
+        self._leave_pose_gt_edit_on_navigation()
+        self._multi_bbox_edit = False
+        self._mt_redraw_active = True
+        self._mt_redraw_attempt = aid
+        self._mt_redraw_points = []
+        self.canvas.configure(cursor="crosshair")
+        self._sync_mt_visual_choice()
+        self._paint_image()
+        self.status_var.set("Nowy obrys operatora: kliknij cztery rogi tablicy (0/4). "
+                            "Po czwartej poprawnej pozycji zastąpi on poprzednią korektę; Esc anuluje szkic.")
+        return "break"
+
+    def _add_mt_redraw_point(self, event):
+        """A click records one source-MT-space point; the fourth commits atomically."""
+        if not self._mt_redraw_active or self._saving:
+            return False
+        aid, attempt = self._visual_target()
+        if (not aid or aid != self._mt_redraw_attempt or self._image is None
+                or self._image_entry != attempt.get("mt_input_evidence_entry")):
+            self._cancel_mt_correction()
+            return False
+        point = self._pose_canvas_to_mt_input(event, aid)
+        if point is None:
+            self.status_var.set("Kliknij wewnątrz rzeczywistego obrazu wejścia MT.")
+            return True
+        # Avoid adding two corners when a double-click repeats the same point.
+        previous = [self._pose_mt_to_canvas(p, aid) for p in self._mt_redraw_points]
+        if any(math.dist(v, (event.x, event.y)) < 8 for v in previous):
+            self.status_var.set("Róg jest zbyt blisko poprzedniego. Kliknij następny róg tablicy.")
+            return True
+        candidate = self._mt_redraw_points + [[float(point[0]), float(point[1])]]
+        if len(candidate) < 4:
+            self._mt_redraw_points = candidate
+            self._paint_image()
+            self.status_var.set(f"Nowy obrys: {len(candidate)}/4 rogów. Kliknij następny róg.")
+            return True
+        try:
+            size = (float(attempt["input_width"]), float(attempt["input_height"]))
+            quad = _ordered_operator_gt_quad(candidate, *size)
+            model = _linked_pose_quad_on_mt_input(self.session, attempt)
+            correction = make_correction(
+                attempt_id=aid, source_sha=self.session.review.source_archive_sha256,
+                image_entry=attempt["mt_input_evidence_entry"], size=size,
+                prediction=model, corrected=quad)
+            correction["drawing_method"] = "four_manual_corner_clicks_v1"
+            old = self.session.review.attempt_annotations.get(aid, {})
+            # No automatic promotion of a traced MT prediction to independent GT.
+            # Existing independent and historic GT are never replaced here.
+        except (ValueError, TypeError, KeyError) as exc:
+            self.status_var.set(f"Nie zapisano obrysu: {exc}. Wskaż ponownie czwarty róg.")
+            return True  # keep the first three valid clicks for correction
+        payload = dict(pose_mt_correction_v1=correction,
+                       pose_correction_required_v1=True)
+        # Compatibility with 027/028: historical assisted GT was also stored
+        # in the Pose GT slot. Keep its single historical representation in
+        # sync; NEVER touch a GT whose provenance is independent/unknown.
+        if old.get("pose_gt_review_mode") == "assisted_manual_redraw_from_mt_v1":
+            previous_gt = old.get("pose_gt_quad_mt_input_px")
+            previous_record = old.get("pose_mt_correction_v1")
+            if previous_gt and isinstance(previous_record, dict):
+                saved_polygon = previous_record.get("operator_quad_mt_input_px")
+                if saved_polygon != previous_gt:
+                    self.status_var.set("Konflikt historii GT: nie zastępujemy obrysu. Odśwież sesję.")
+                    return True
+            payload["pose_gt_quad_mt_input_px"] = [
+                [round(float(x), 4), round(float(y), 4)] for x, y in quad]
+        if old.get("pose_mt_correction_v1"):
+            history = old.get("pose_mt_correction_history_v1")
+            history = list(history) if isinstance(history, list) else []
+            previous = old["pose_mt_correction_v1"]
+            if previous not in history:
+                history.append(previous)
+            payload["pose_mt_correction_history_v1"] = history
+        # One review revision, one exact attempt; never alter source MT or OCR.
+        self._mt_redraw_active = False
+        self._mt_redraw_attempt = ""
+        self._mt_redraw_points = []
+        self.canvas.configure(cursor="hand2")
+        self._sync_mt_visual_choice()
+        self._paint_image()
+        self._change(lambda: self.session.annotate("attempt", aid, **payload),
+                     save_draft=False,
+                     after=self._resume_mt_correction)
+        return True
+
+    def _cancel_mt_correction(self, event=None):
+        if getattr(self, "_mt_redraw_active", False):
+            self._mt_redraw_active = False
+            self._mt_redraw_attempt = ""
+            self._mt_redraw_points = []
+            if getattr(self, "canvas", None) is not None:
+                self.canvas.configure(cursor="hand2")
+                self._paint_image()
+            # Cancel only the unsaved draft; direct editing resumes without
+            # requiring the old artificial CTA.
+            self._sync_mt_visual_choice()
+            return "break"
+        if not getattr(self, "_mt_corr_active", False):
+            return None
+        self._mt_corr_active = False
+        self._mt_corr_attempt = ""
+        self._mt_corr_points = []
+        self._mt_corr_drag = None
+        self._mt_corr_last_saved = []
+        if getattr(self,"canvas",None) is not None:
+            self.canvas.configure(cursor="hand2")
+            self._paint_image()
+        return "break"
+
+    def _delete_mt_operator_correction(self, event=None):
+        """Delete only the selected operator correction, never MT predictions/GT.
+
+        Like Z2's delete action this targets only the selected object. The
+        previous correction stays in audit history, and the form becomes
+        incomplete until the imprecise outline is re-verified.
+        """
+        aid, attempt = self._visual_target()
+        if (not aid or self._saving or self._image is None
+                or self._image_entry != attempt.get("mt_input_evidence_entry")
+                or selected_visual_state(self.session.review.attempt_annotations.get(aid, {})) != "imprecise"):
+            return "break"
+        current = self.session.review.attempt_annotations.get(aid, {})
+        record = current.get("pose_mt_correction_v1")
+        if not isinstance(record, dict):
+            self.status_var.set("Nie ma zapisanej korekty do usunięcia. Obrys MT pozostaje bez zmian.")
+            return "break"
+        if not messagebox.askyesno("Usuń korektę operatora",
+                "Usunąć wyłącznie aktywną korektę tej tablicy? "
+                "Predykcja MT i niezależny GT pozostaną niezmienione; "
+                "poprzednia korekta zostanie zachowana w historii.", parent=self.window):
+            return "break"
+        history = list(current.get("pose_mt_correction_history_v1") or [])
+        if record not in history:
+            history.append(record)
+        payload = dict(pose_mt_correction_v1=None,
+                       pose_mt_correction_history_v1=history,
+                       pose_correction_required_v1=True)
+        # Revisions 027/028 could mirror an assisted redraw into Pose GT.
+        # Clear ONLY this mirror, never an independent/older ground truth.
+        if current.get("pose_gt_review_mode") == "assisted_manual_redraw_from_mt_v1":
+            mirror = current.get("pose_gt_quad_mt_input_px")
+            if mirror is not None and mirror != record.get("operator_quad_mt_input_px"):
+                self.status_var.set("Niezgodna geometria historycznego GT. Nie usunięto korekty.")
+                return "break"
+            payload.update(pose_gt_schema=None, pose_gt_image_entry=None,
+                           pose_gt_input_size_px=None, pose_gt_quad_mt_input_px=None,
+                           pose_gt_review_mode=None)
+        self._cancel_mt_correction()
+        self._change(lambda: self.session.annotate("attempt", aid, **payload),
+                     save_draft=False)
+        return "break"
+
+    def _mt_corr_canvas_points(self, attempt):
+        if not self._mt_corr_points or not self._image or not self._view_center:
+            return []
+        w, h = float(attempt["input_width"]), float(attempt["input_height"])
+        cx, cy = self._view_center
+        scale=self._view_pixel_scale
+        cw,ch=self.canvas.winfo_width(),self.canvas.winfo_height()
+        return [((x*self._image.width/w-cx)*scale+cw/2,
+                 (y*self._image.height/h-cy)*scale+ch/2) for x,y in self._mt_corr_points]
+
+    def _update_mt_edit_cursor(self, event):
+        """Z2-like direct manipulation: hover handle vs whole-quad movement."""
+        if not getattr(self, "_mt_corr_active", False) or self._saving:
+            return
+        if self._mt_corr_drag is not None:
+            return
+        aid, attempt = self._visual_target()
+        if aid != self._mt_corr_attempt:
+            return
+        points = self._mt_corr_canvas_points(attempt)
+        target = hit_target((event.x, event.y), points, radius=17)
+        cursor = "hand2" if target and target[0] == "corner" else (
+            "fleur" if target and target[0] == "body" else "crosshair")
+        self.canvas.configure(cursor=cursor)
+
+    def _mt_corr_begin_drag(self, event):
+        aid, attempt = self._visual_target()
+        if not (self._mt_corr_active and aid == self._mt_corr_attempt and not self._saving):
+            return False
+        xy = self._pose_canvas_to_mt_input(event, aid)
+        if xy is None:
+            return False
+        target = hit_target((event.x,event.y), self._mt_corr_canvas_points(attempt), radius=17)
+        if target is None:
+            return False
+        self._mt_corr_drag = (target, xy, [list(p) for p in self._mt_corr_points])
+        self.canvas.configure(cursor="fleur")
+        return True
+
+    def _mt_corr_move_drag(self, event):
+        if not self._mt_corr_drag:
+            return False
+        aid, attempt = self._visual_target()
+        if aid != self._mt_corr_attempt:
+            return False
+        target, start, initial = self._mt_corr_drag
+        end = self._pose_canvas_to_mt_input(event, aid)
+        if end is None:
+            return True
+        try:
+            self._mt_corr_points = move_polygon(initial, target, start, end,
+                        (float(attempt["input_width"]), float(attempt["input_height"])))
+        except (ValueError, TypeError):
+            # Preserve last valid draft until cursor returns to valid geometry.
+            return True
+        self._paint_image()
+        return True
+
+    def _mt_corr_finish_drag(self):
+        if not self._mt_corr_drag:
+            return False
+        target, start, initial = self._mt_corr_drag
+        self._mt_corr_drag = None
+        aid, attempt = self._visual_target()
+        if aid != self._mt_corr_attempt or self._saving:
+            return True
+        if not moved(initial, self._mt_corr_points):
+            self._paint_image()
+            return True
+        model = _linked_pose_quad_on_mt_input(self.session, attempt)
+        try:
+            record = make_correction(attempt_id=aid,
+                source_sha=self.session.review.source_archive_sha256,
+                image_entry=attempt["mt_input_evidence_entry"],
+                size=(float(attempt["input_width"]),float(attempt["input_height"])),
+                prediction=model,corrected=self._mt_corr_points)
+        except (ValueError, TypeError, KeyError) as exc:
+            self._mt_corr_points = [list(p) for p in self._mt_corr_last_saved]
+            self.status_var.set(f"Nie zapisano nieprawidłowej korekty: {exc}")
+            self._paint_image()
+            return True
+        committed = [list(p) for p in self._mt_corr_points]
+        decision = self.session.review.attempt_annotations.get(aid, {})
+        payload = dict(pose_mt_correction_v1=record, pose_correction_required_v1=True)
+        previous = decision.get("pose_mt_correction_v1")
+        if isinstance(previous, dict):
+            history = list(decision.get("pose_mt_correction_history_v1") or [])
+            if previous not in history:
+                history.append(previous)
+            payload["pose_mt_correction_history_v1"] = history
+            if previous.get("drawing_method") in {
+                    "four_manual_corner_clicks_v1", "four_manual_corner_clicks_then_drag_v1"}:
+                record["drawing_method"] = "four_manual_corner_clicks_then_drag_v1"
+        # W wersji 027 obrys narysowany czterema kliknięciami zapisano też
+        # jako GT asystowany. Dalsze przeciąganie musi zachować ich tożsamość.
+        # Niezależny lub starszy GT NIGDY nie jest tutaj modyfikowany.
+        if decision.get("pose_gt_review_mode") == "assisted_manual_redraw_from_mt_v1":
+            existing_gt = decision.get("pose_gt_quad_mt_input_px")
+            expected = self._mt_corr_last_saved
+            if (not isinstance(existing_gt, (list, tuple)) or
+                    len(existing_gt) != 4 or
+                    any(math.dist([float(v) for v in a], [float(v) for v in b]) > 0.0006
+                        for a, b in zip(existing_gt, expected))):
+                self._mt_corr_points = [list(p) for p in self._mt_corr_last_saved]
+                self.status_var.set("Konflikt z zapisanym obrysem operatora: odśwież weryfikację przed edycją.")
+                self._paint_image()
+                return True
+            payload["pose_gt_quad_mt_input_px"] = [
+                [round(float(x), 4), round(float(y), 4)] for x, y in committed]
+        self._change(lambda: self.session.annotate("attempt", aid, **payload),
+                     save_draft=False,
+                     after=lambda: setattr(self, "_mt_corr_last_saved", committed))
+        self._paint_image()
+        return True
+
+    def _paint_mt_visual_overlay(self):
+        if not hasattr(self, "mt_visual_overlay") or not self.session or self._image is None:
+            return
+        aid, attempt = self._visual_target()
+        if (not aid or self._image_entry != attempt.get("mt_input_evidence_entry") or
+                self.pose_edit_var.get()):
+            return
+        width = max(1, self.canvas.winfo_width())
+        self.canvas.create_window(max(30, width - 12), 9, window=self.mt_visual_overlay,
+                                  anchor="ne", tags=("mt_visual_quick_verify",))
 
     def save_detection_choice(self):
         """Zapis jednej czytelnej oceny operatora dla detekcji/cropa.
@@ -1438,11 +2545,18 @@ class MobileSampleReviewWindow:
         # answered that the corners are identifiable on this image.
         def after_save():
             if answer == "yes" and kind == "attempt":
-                self.status_var.set("Tablica potwierdzona. Odpowiedz teraz na pytanie 2 o jej rogi.")
+                self.status_var.set("Tablica potwierdzona. Zweryfikuj dopasowanie obrysu; ręczny GT narożników jest opcjonalny.")
         if answer != "yes":
             self._leave_pose_gt_edit_on_navigation()
         saved = (self.session.review.attempt_annotations if kind == "attempt"
                  else self.session.review.sample_annotations).get(record_id, {})
+        if kind == "attempt":
+            if answer == "no" and saved.get("pose_gt_quad_mt_input_px"):
+                self.status_var.set("Zapisany GT narożników jest sprzeczny z decyzją «Nie tablica». Wyjaśnij rozbieżność przed zmianą.")
+                self._sync_review_controls()
+                return
+            if answer in {"no", "skip"} or (answer == "yes" and saved.get("is_plate") is not True):
+                decision = dict(decision, pose_quality=None)
         if all(saved.get(name) == value for name, value in decision.items()):
             after_save()
             self._sync_review_controls()
@@ -1581,6 +2695,9 @@ class MobileSampleReviewWindow:
             self._pose_gt_points = []
 
     def _sync_pose_gt_controls(self):
+        if getattr(self, "_mt_correction_ux_v026", False):
+            self.pose_gt_host.grid_remove()
+            return
         if not self.session:
             return
         attempt_id = self._pose_gt_attempt_context()
@@ -1600,10 +2717,10 @@ class MobileSampleReviewWindow:
             # This panel is informational only; cancellation is NOT a negative
             # model prediction or an invitation to fabricate matching GT.
             self.pose_gt_host.grid()
-            self.pose_gt_title.configure(text="02  ·  OBRYS TABLICY")
+            self.pose_gt_title.configure(text="02  ·  POMIAR OBRYSU (OPCJONALNIE)")
             group = self.session.mt_invocations.get(self.current_invocation)
             if group and group.cancelled:
-                question = "Nie oceniamy obrysu w przerwanej próbie"
+                question = "Obrys poza weryfikacją — próba przerwana"
                 hint = ("Obrys zapisany przez MT możesz obejrzeć na zdjęciu. "
                         "Próba nie weszła do pomiaru jakości; GT, IoU i NMCE "
                         "nie są wymagane.")
@@ -1627,10 +2744,10 @@ class MobileSampleReviewWindow:
         missed = (str(self.session.attempts[attempt_id].get("mt_status") or "").upper()
                   == "NO_DETECTION")
         self.pose_gt_title.configure(text=("02  ·  OBRYS POMINIĘTEJ TABLICY" if missed
-                                      else "02  ·  OBRYS TABLICY"))
+                                      else "02  ·  POMIAR OBRYSU (OPCJONALNIE)"))
         self.pose_gt_question.configure(text=(
             "Czy możesz zaznaczyć cztery rogi tablicy pominiętej przez MT?" if missed
-            else "Czy możesz wskazać cztery rogi tablicy?"))
+            else "Chcesz wyznaczyć cztery rogi GT do pomiaru IoU/NMCE?"))
         unavailable = bool(decision.get("pose_gt_unavailable_reason"))
         can_edit = bool(attempt_id and self._image is not None and not self._saving and not unavailable)
         if self.pose_edit_var.get() and not can_edit:
@@ -1667,18 +2784,18 @@ class MobileSampleReviewWindow:
             if source_row and self._image_entry == source_row.get("mt_input_evidence_entry"):
                 _, reason = _pose_source_status(self.session, source_row)
                 self.pose_gt_hint.configure(text=("Porównanie obrysów jest niedostępne dla tego zapisu. "
-                    "Nadal możesz ocenić wykrycie i odczyt numeru."))
+                    "Nadal możesz zweryfikować wykrycie i odczyt numeru."))
             else:
                 self.pose_gt_hint.configure(text=(
-                    "Obrys ocenisz na pełnym zdjęciu. Wybierz «Wejście MT — bieżąca próba»."))
-            self.pose_gt_progress.configure(text="Brak danych do oceny obrysu")
+                    "Obrys zweryfikujesz na pełnym zdjęciu. Wybierz «Wejście MT — bieżąca próba»."))
+            self.pose_gt_progress.configure(text="Brak danych do pomiaru obrysu")
             self.pose_gt_metric.configure(text="Porównanie obrysów niedostępne")
             return
         attempt = self.session.attempts[attempt_id]
         has_pose = _linked_pose_quad_on_mt_input(self.session, attempt) is not None
         if unavailable:
             self.pose_gt_hint.configure(text=(
-                "Pominięto ręczne oznaczanie narożników. Ocena wykrycia MT pozostaje niezależna."))
+                "Nie wykonano ręcznego GT narożników. Weryfikacja wykrycia MT pozostaje niezależna."))
         elif missed:
             self.pose_gt_hint.configure(text=(
                 "Rzeczywisty obrys GT został zapisany. MT nie wykrył tej tablicy." if count == 4 else
@@ -1698,7 +2815,7 @@ class MobileSampleReviewWindow:
             self.pose_gt_hint.configure(text=(
                 "Możesz zapisać prawdziwe rogi GT również bez obrysu modelu MT."))
         self.pose_gt_progress.configure(text=(
-            "Obrys: bez oceny (wybór operatora)" if unavailable else
+            "GT obrysu: niewyznaczony (decyzja operatora)" if unavailable else
             f"Zaznaczone rogi: {count}/4" + (
                 " • przeciągnij punkt, aby poprawić" if count == 4 and self.pose_edit_var.get() else
                 " • zapisano" if count == 4 else
@@ -1911,11 +3028,11 @@ class MobileSampleReviewWindow:
         pts = [to_canvas(*xy) for xy in points]
         if valid_polygon:
             flat = [v for xy in pts for v in xy]
-            self.canvas.create_polygon(*flat, fill="", outline="#40e7aa", width=2.5,
+            self.canvas.create_polygon(*flat, fill="", outline="#40e7aa", width=1.8,
                                        tags=("pose_gt_overlay", "pose_gt_polygon"))
         for index, (x, y) in enumerate(pts):
-            self.canvas.create_oval(x - 6, y - 6, x + 6, y + 6, fill="#40e7aa",
-                                    outline="#103d32", width=2,
+            self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, fill="#40e7aa",
+                                    outline="#103d32", width=1,
                                     tags=("pose_gt_overlay", "pose_gt_corner"))
             label = ("TL", "TR", "BR", "BL")[index] if canonical_labels else str(index + 1)
             self.canvas.create_text(x + 10, y - 10, text=label,
@@ -2020,7 +3137,7 @@ class MobileSampleReviewWindow:
             else:
                 question = "Oceń zaznaczenie na zdjęciu."
         else:
-            question = "Ocena operatora: wybierz detekcję / crop."
+            question = "Weryfikacja operatora: wybierz wskazanie MT lub obraz tablicy."
         self.detection_context.configure(text=question)
         if annotation.get("is_plate") is True and annotation.get("evaluable") is not False:
             selected = "yes"
@@ -2060,6 +3177,13 @@ class MobileSampleReviewWindow:
             return
         value = next((key for key, label in VISIBILITY_LABELS.items() if label == self.invocation_choice.get()), None)
         if key and value:
+            old=self.session.invocation_annotation(key)
+            if old.get("visible_plate_count")==value:
+                return  # reselect does not destroy the multi-plate inventory
+            if old.get("multi_plate_v1") is not None:
+                self.status_var.set("Najpierw zakończ lub skoryguj wykaz GT; zmiana liczby tablic usunęłaby zapisane powiązania.")
+                self._sync_review_controls()
+                return
             self._change(lambda: self.session.annotate_invocation(key, visible_plate_count=value, evaluable=value != "uncertain"))
 
     def reveal_predictions(self):
@@ -2067,7 +3191,7 @@ class MobileSampleReviewWindow:
         if not self.session or self._saving or self.session.review.review_mode == "assisted":
             return
         self._change(self.session.reveal_predictions_for_review,
-                     after=lambda: self.status_var.set("Predykcje widoczne. Istniejące GT zachowane. Odtąd ocena jest asystowana, nie zaślepiona."))
+                     after=lambda: self.status_var.set("Predykcje widoczne. Istniejące GT zachowane. Odtąd weryfikacja jest asystowana, nie zaślepiona."))
 
     def change_review_mode(self, event=None):
         mode = next((key for key, label in MODE_LABELS.items() if label == self.mode_choice.get()), None)
@@ -2200,11 +3324,153 @@ class MobileSampleReviewWindow:
         # The standard background worker reports errors through the status bar.
         self._submit(work, done)
 
+
+    def _source_frame_context(self):
+        """Require one coherent source Bitmap for the selected MT invocation."""
+        if not self.session or not self.current_invocation:
+            return None
+        group = self.session.mt_invocations.get(self.current_invocation)
+        if group is None:
+            return None
+        return source_invocation_context(
+            getattr(group, "records", ()) or (), self.current_invocation,
+            self.session.entry_names,
+            self._image_source_size if self._is_source_frame_view() and self._image is not None else None)
+
+    def _is_source_frame_view(self):
+        return bool(self._image_entry and self._image_entry.startswith("samples/frames/"))
+
+    def _sync_source_frame_button(self):
+        button = getattr(self, "source_frame_button", None)
+        if button is None:
+            return
+        context = self._source_frame_context()
+        if context is None:
+            button.pack_forget()
+            return
+        button.configure(text="← Wejście MT" if self._is_source_frame_view()
+                         else "Cała klatka + ROI")
+        if not button.winfo_manager():
+            button.pack(side="left", padx=(2, 8))
+
+    def _toggle_source_frame_view(self):
+        context = self._source_frame_context()
+        if context is None:
+            self.status_var.set("Brak spójnego zdjęcia źródłowego dla tego wywołania MT.")
+            return
+        if self._is_source_frame_view():
+            self.show_invocation_input()
+            return
+        if self._saving:
+            return
+        index = next((i for i, (_, row) in enumerate(self._image_rows)
+                      if row.get("source_frame_view") and
+                      row.get("image_entry") == context["entry"]), None)
+        if index is None:
+            self.status_var.set("Brak pełnej klatki w archiwum sesji.")
+            return
+        self.image_choice.current(index)
+        self._load_image()
+
+    def _paint_source_frame_overlays(self, width, height):
+        """Read-only full-frame ROI and *every* original Pose detection.
+
+        Do not paint assisted GT/corrections from MT-input coordinates; those
+        have their own distinct review and provenance in the legacy view.
+        """
+        if not self._is_source_frame_view() or self._image is None:
+            return
+        context = self._source_frame_context()
+        if context is None or self._image_entry != context["entry"]:
+            self.image_help.configure(text=(
+                "Brak zgodnego źródła/ROI dla wybranego wywołania. "
+                "Nie rysujemy obrysów na podstawie niepewnych współrzędnych."))
+            return
+        iw, ih = context["size"]
+        cx, cy = self._view_center
+        zoom = self._view_pixel_scale
+        def to_canvas(x, y):
+            return ((x * self._image.width / iw - cx) * zoom + width / 2,
+                    (y * self._image.height / ih - cy) * zoom + height / 2)
+        left, top, right, bottom = context["roi"]
+        x1, y1 = to_canvas(left, top)
+        x2, y2 = to_canvas(right, bottom)
+        bx1, by1 = to_canvas(0, 0)
+        bx2, by2 = to_canvas(iw, ih)
+        # Only obscure regions genuinely outside the analyzed ROI. No inferred
+        # missing targets, FN or GT are displayed here.
+        if (left, top, right, bottom) != (0, 0, iw, ih):
+            for a, b, c, d in ((bx1, by1, bx2, y1), (bx1, y2, bx2, by2),
+                               (bx1, y1, x1, y2), (x2, y1, bx2, y2)):
+                if c > a and d > b:
+                    self.canvas.create_rectangle(a, b, c, d, fill="#07111B",
+                        outline="", stipple="gray50", tags=("source_outside_roi",))
+        self.canvas.create_rectangle(x1, y1, x2, y2, outline="#FFD16C",
+            width=2, dash=(7, 4), tags=("mt_source_roi",))
+        label = self.canvas.create_text(max(6, min(width - 150, x1 + 5)),
+            max(6, min(height - 28, y1 + 5)), anchor="nw",
+            text=f"ROI MT • {int(left)},{int(top)}–{int(right)},{int(bottom)}",
+            fill="#FFF1CC", font=("Segoe UI", 9, "bold"), tags=("mt_source_roi",))
+        self._canvas_text_background(label, "mt_source_roi")
+        found = verified_invocation_detections(context)
+        selected = str(self._current_mt_attempt().get("id") or "")
+        for item in found:
+            pts = [to_canvas(*p) for p in item["quad"]]
+            is_selected = item["attempt_id"] == selected
+            tag = "source_mt_det_" + str(item["detection_index"])
+            self.canvas.create_polygon(*[v for xy in pts for v in xy], fill="",
+                outline="#36DDFB" if is_selected else "#83C5D5",
+                width=2.4 if is_selected else 1.5,
+                tags=("source_mt_all_detections", tag))
+            xx, yy = min(pts, key=lambda p: (p[1], p[0]))
+            label = self.canvas.create_text(max(5, min(width-70, xx)),
+                max(6, min(height-20, yy-18)), anchor="nw",
+                text=f"MT {item['detection_index']+1}",
+                fill="#F5FCFF", font=("Segoe UI", 9, "bold"),
+                tags=("source_mt_all_detections", tag))
+            self._canvas_text_background(label, tag)
+        self._source_frame_detections = found
+        self.image_help.configure(text=(
+            f"Pełna klatka przed ROI • {len(found)} obrysów Pose MT z tego "
+            f"wywołania (spośród {len(context['records'])} zapisów). "
+            "Żółta linia: rzeczywisty ROI; błękit: oryginalne MT. "
+            "Kliknij tablicę, aby wybrać detekcję. Widok tylko do odczytu — "
+            "edycja GT pozostaje przy wejściu MT."))
+
+    def _select_source_frame_detection(self, event):
+        """Selection only; never change the original MT/GT or metrics."""
+        if not self._is_source_frame_view() or self._image is None:
+            return False
+        context = self._source_frame_context()
+        if context is None or self._image_entry != context["entry"]:
+            return False
+        cx, cy = self._view_center
+        zoom = max(self._view_pixel_scale, 1e-12)
+        source_x = (cx + (event.x - self.canvas.winfo_width()/2)/zoom) * (
+            context["size"][0] / self._image.width)
+        source_y = (cy + (event.y - self.canvas.winfo_height()/2)/zoom) * (
+            context["size"][1] / self._image.height)
+        candidates = verified_invocation_detections(context)
+        # Test selected geometry first to prevent oscillation in overlapping
+        # polygons; choosing another contour still navigates to its attempt.
+        current = str(self._current_mt_attempt().get("id") or "")
+        candidates.sort(key=lambda item: item["attempt_id"] != current)
+        for item in candidates:
+            if quad_contains_point(item["quad"], source_x, source_y):
+                if item["attempt_id"] != current:
+                    self._source_frame_keep_on_selection = context["entry"]
+                    self._multi_focus_attempt(item["attempt_id"])
+                return True
+        return False
+
     def _set_image_help(self):
         index = self.image_choice.current()
         if index < 0 or not getattr(self, "_image_rows", None):
             return
         label, _ = self._image_rows[index]
+        if self._is_source_frame_view():
+            self.image_help.configure(text="Klatka przed ROI — widok tylko do odczytu. Złota ramka oznacza wejście MT.")
+            return
         missing_mt = str(self._current_mt_attempt().get("mt_status") or "").upper() == "NO_DETECTION"
         self.image_help.configure(text=(
             "MT nie wykrył tablicy. Jeśli widzisz jedną, wybierz «1 — jedna tablica» "
@@ -2221,6 +3487,7 @@ class MobileSampleReviewWindow:
             next_row = self._image_rows[index][1]
             next_entry = next_row.get("image_entry") or next_row.get("evidence_entry") or ""
             if self._image_entry and next_entry != self._image_entry:
+                self._cancel_mt_correction()  # discard only local sketch on image change
                 self._leave_pose_gt_edit_on_navigation()
         self._image_token += 1
         self._view_zoom = 1.0
@@ -2241,7 +3508,12 @@ class MobileSampleReviewWindow:
         self._set_image_help()
         def work():
             try:
-                image = self.session.image(row)
+                if row.get("source_frame_view"):
+                    self.session.verify_source()
+                    image = read_mobile_source_frame(self.session.bundle, row["image_entry"])
+                    self.session.verify_source()
+                else:
+                    image = self.session.image(row)
                 source_size = image.size
                 image = image.convert("RGB")  # bezpieczny tryb transformacji viewportu
                 image.thumbnail((3200, 2400), Image.Resampling.LANCZOS)
@@ -2255,6 +3527,8 @@ class MobileSampleReviewWindow:
                 self._paint_image(error)
                 self._sync_detection_choice()
                 self._sync_pose_gt_controls()
+                self._sync_mt_visual_choice()
+                self._sync_source_frame_button()
                 # Never start drawing just because a saved positive decision was restored.
                 # The operator must explicitly choose that the corners can be marked.
                 if self._zoom_to_mt_pending and self._image is not None:
@@ -2297,7 +3571,17 @@ class MobileSampleReviewWindow:
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo, tags=("evidence_image",))
         if hasattr(self, "zoom_value"):
             self.zoom_value.configure(text=f"×{self._view_zoom:.1f}")
+        if hasattr(self, "image_help"):
+            self.image_help.configure(text=(
+                "Błękit: oryginalny obrys MT. Pomarańcz: obrys operatora. "
+                "Rolką przybliżaj obraz, narożniki przeciągaj myszą."))
+        if self._is_source_frame_view():
+            self._paint_source_frame_overlays(width, height)
+            return
         self._paint_detection_overlay(width, height, 0, 0)
+        # In the 4-click mode other detections must not obscure the truth image.
+        if not self._mt_redraw_active:
+            self._paint_multi_overlays(width, height)
 
     def _paint_detection_overlay(self, width, height, offset_x, offset_y):
         if not self.current_record or not self.current_invocation or self._image is None:
@@ -2364,20 +3648,87 @@ class MobileSampleReviewWindow:
             self._ensure_pose_gt_points(gt_attempt_id)
         editing_without_complete_gt = bool(gt_attempt_id and self.pose_edit_var.get() and
                                            len(self._pose_gt_points) < 4)
+        selected_aid = str(row.get("id") or "")
+        if self._mt_redraw_active and self._mt_redraw_attempt == selected_aid:
+            # Source MT stays visible (thin dashed blue) while the operator
+            # draws a separate, explicitly assisted contour in amber.
+            if quad is not None:
+                predicted = [to_canvas(*xy) for xy in quad]
+                self.canvas.create_polygon(*[v for xy in predicted for v in xy],
+                    fill="", outline="#40DCFF", width=1.5, dash=(5, 4),
+                    tags=("source_mt_quad", "detection_overlay"))
+            pts = [to_canvas(*xy) for xy in self._mt_redraw_points]
+            if len(pts) >= 2:
+                self.canvas.create_line(*[v for xy in pts for v in xy],
+                    fill="#FFBD59", width=2, dash=(5, 3),
+                    tags=("manual_gt_draft",))
+            for idx, (px, py) in enumerate(pts, 1):
+                self.canvas.create_oval(px-4, py-4, px+4, py+4,
+                    fill="#FFBD59", outline="#152835", width=1,
+                    tags=("manual_gt_draft",))
+                self.canvas.create_text(px+8, py-6, text=str(idx),
+                    fill="#FFE5A1", anchor="sw", tags=("manual_gt_draft",))
+            if hasattr(self, "image_help"):
+                self.image_help.configure(text=(
+                    f"MT = błękitna przerywana linia; nowy obrys = pomarańczowy • "
+                    f"{len(pts)}/4 rogów • Esc: anuluj szkic"))
+            self._paint_mt_visual_overlay()
+            return  # Both geometries are visualized; model data remain immutable.
+        correction_in_progress = bool(self._mt_corr_active and self._mt_corr_attempt == selected_aid)
+        corrected = None
+        if quad is not None and not correction_in_progress:
+            decision = self.session.review.attempt_annotations.get(selected_aid, {})
+            if selected_visual_state(decision) == "imprecise":
+                try:
+                    corrected = self._valid_mt_correction(selected_aid, row, quad)
+                except (ValueError, KeyError, TypeError):
+                    corrected = None  # Bad provenance never changes source MT geometry.
+        if correction_in_progress:
+            corrected = self._mt_corr_points
         if quad is not None and not editing_without_complete_gt:
-            pts = [to_canvas(x, y) for x, y in quad]
-            flat = [v for xy in pts for v in xy]
-            self.canvas.create_polygon(*flat, fill="", outline="#10212b", width=6,
-                tags=("detection_overlay",))
-            self.canvas.create_polygon(*flat, fill="", outline="#40dcff", width=3,
-                tags=("detection_overlay", "detection_polygon"))
-            for x, y in pts:
-                self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3,
-                    fill="#40dcff", outline="#10212b",
-                    tags=("detection_overlay", "pose_corner"))
+            model_pts = [to_canvas(x, y) for x, y in quad]
+            model_flat = [v for xy in model_pts for v in xy]
+            # Always preserve and show the untouched model result. Once a
+            # correction exists, MT becomes a thin dashed cyan reference.
+            self.canvas.create_polygon(*model_flat, fill="",
+                outline="#40DCFF", width=1.5 if corrected is not None else 2,
+                dash=(5, 4) if corrected is not None else (),
+                tags=("detection_overlay", "source_mt_quad"))
+            geometry = corrected if corrected is not None else quad
+            pts = [to_canvas(x, y) for x, y in geometry]
+            correction_has_moved = bool(corrected is not None and moved(quad, corrected))
+            if correction_has_moved:
+                self.canvas.create_polygon(*[v for xy in pts for v in xy],
+                    fill="", outline="#FFBD59", width=2,
+                    tags=("detection_overlay", "operator_quad"))
+            if corrected is not None or correction_in_progress:
+                for i, (x, y) in enumerate(pts):
+                    radius = 5 if correction_in_progress else 3
+                    self.canvas.create_oval(x-radius, y-radius, x+radius, y+radius,
+                        fill="#FFBD59" if correction_has_moved else "#40DCFF",
+                        outline="#172a34", width=1,
+                        tags=("detection_overlay", "operator_quad", "pose_corner"))
+            else:
+                for x, y in model_pts:
+                    self.canvas.create_oval(x-3, y-3, x+3, y+3,
+                        fill="#40DCFF", outline="#172a34", width=1,
+                        tags=("detection_overlay", "source_mt_quad"))
             anchor_x = min(x for x, _ in pts)
             anchor_y = min(y for _, y in pts)
-            prefix = "POSE 4 pkt"
+            prefix = "KOREKTA OPERATORA" if corrected is not None else "POSE MT"
+            if corrected is not None and hasattr(self, "image_help"):
+                if moved(quad, corrected):
+                    try:
+                        measured = compare_mt_pose_to_gt(quad, corrected, *input_size)
+                        note = (f"IoU MT ↔ korekta operatora: {measured['polygon_iou_pct']:.2f}%  •  "
+                                f"NMCE: {measured['nmce_pct']:.2f}%")
+                    except (ValueError, TypeError, KeyError):
+                        note = "IoU/NMCE: brak prawidłowego porównania obrysów"
+                else:
+                    note = "Korekta jeszcze niezmieniona — przesuń róg lub całą ramkę"
+                self.image_help.configure(text=(
+                    "MT: błękitny obrys przerywany • operator: pomarańczowy obrys ciągły. "
+                    + note + " (porównanie asystowane, nie niezależne GT)."))
         elif not editing_without_complete_gt:
             # BBOX is retained in the source for diagnostics/zoom, never drawn
             # as a substitute for MT Pose in the scientific review.
@@ -2388,6 +3739,7 @@ class MobileSampleReviewWindow:
             self._canvas_text_background(text_id, "detection_geometry_notice")
             if gt_attempt_id:
                 self._draw_pose_gt_overlay(gt_attempt_id, to_canvas)
+            self._paint_mt_visual_overlay()
             return
         if not editing_without_complete_gt:
             ordinal = row.get("mt_detection_index")
@@ -2405,8 +3757,15 @@ class MobileSampleReviewWindow:
             if bounds is not None:
                 self.canvas.move(text_id, min(0, width - 8 - bounds[2]), 0)
             self._canvas_text_background(text_id, "detection_overlay")
-        if gt_attempt_id:
-            self._draw_pose_gt_overlay(gt_attempt_id, to_canvas)
+        if gt_attempt_id and corrected is None and not correction_in_progress:
+            # Only one visible operator polygon per MT detection. Independent
+            # GT remains in sidecar for audit/science, never a third overlaid
+            # frame during a correction. Legacy assisted GT is mirrored in
+            # 027/028 data and must not be redrawn as a separate green quad.
+            decision = self.session.review.attempt_annotations.get(selected_aid, {})
+            if decision.get("pose_gt_review_mode") != "assisted_manual_redraw_from_mt_v1":
+                self._draw_pose_gt_overlay(gt_attempt_id, to_canvas)
+        self._paint_mt_visual_overlay()
 
     def fit_image(self):
         """Przywroc caly obraz. Dziala rowniez po zmianie rozmiaru okna."""
@@ -2441,14 +3800,167 @@ class MobileSampleReviewWindow:
             return "break"
         delta = getattr(event, "delta", 0)
         if delta == 0:
-            delta = 120 if getattr(event, "num", 0) == 4 else -120
+            num = getattr(event, "num", 0)
+            if num not in (4, 5):
+                return "break"
+            delta = 120 if num == 4 else -120
         self.zoom_image(1.25 if delta > 0 else 1.0 / 1.25,
                         (event.x, event.y))
         return "break"
 
+    def _focus_image_for_wheel(self, _event=None):
+        """Recover Canvas wheel focus from Treeview without blurring a GT entry."""
+        try:
+            focused = self.window.focus_get()
+            if isinstance(focused, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
+                return
+            self.canvas.focus_set()
+        except (AttributeError, tk.TclError):
+            return
+
+    def _route_image_wheel(self, event):
+        """Roll zoom also when focus is in another widget of this review window.
+
+        Event.x/y refer to the focused widget, NOT necessarily the canvas.
+        Recalculate with the cursor's screen coordinates and limit to the
+        image canvas. All other areas retain their ordinary scrolling.
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is None or self._image is None or event.widget is canvas:
+            return None  # canvas binding already handles its own event
+        try:
+            x, y = canvas.winfo_pointerxy()
+            ix, iy = x - canvas.winfo_rootx(), y - canvas.winfo_rooty()
+            if not (0 <= ix < canvas.winfo_width() and
+                    0 <= iy < canvas.winfo_height()):
+                return None
+        except (AttributeError, TypeError):
+            return None
+        return self._wheel_zoom(type("CanvasWheelEvent", (), {
+            "x": ix, "y": iy,
+            "delta": getattr(event, "delta", 0),
+            "num": getattr(event, "num", 0),
+        })())
+
+    def _multi_map_canvas(self, x, y):
+        row=self._current_mt_attempt()
+        if not row or self._image is None or self._image_source_size is None:
+            return None
+        try:
+            iw,ih=float(row["input_width"]),float(row["input_height"])
+        except (KeyError,TypeError,ValueError):
+            return None
+        if self._image_source_size!=(iw,ih) or self._image_entry!=row.get("mt_input_evidence_entry"):
+            return None
+        ww,hh=self.canvas.winfo_width(),self.canvas.winfo_height()
+        scale=max(1e-9,self._view_pixel_scale)
+        centerx,centery=self._view_center
+        ix=centerx+(x-ww/2)/scale
+        iy=centery+(y-hh/2)/scale
+        return (ix*iw/self._image.width,iy*ih/self._image.height)
+
+    def _paint_multi_overlays(self,width,height):
+        group=self._multi_group()
+        if group is None or self._image is None:
+            return
+        row=self._current_mt_attempt()
+        if not row or self._image_entry!=row.get("mt_input_evidence_entry") or self._image_entry not in group.evidence_entries:
+            return
+        try:
+            iw,ih=float(row["input_width"]),float(row["input_height"])
+        except (KeyError,TypeError,ValueError):
+            return
+        if self._image_source_size!=(iw,ih):
+            return
+        cx,cy=self._view_center;scale=self._view_pixel_scale
+        def pt(x,y):
+            return ((x*self._image.width/iw-cx)*scale+width/2,
+                    (y*self._image.height/ih-cy)*scale+height/2)
+        chosen=str(row.get("id") or "")
+        for aid,other in multi_detection_records(group).items():
+            if aid==chosen or other.get("mt_input_evidence_entry")!=self._image_entry:
+                continue
+            corners=_linked_pose_quad_on_mt_input(self.session,other)
+            if corners is None:
+                bbox=detection_box_on_mt_input(other)
+                if bbox is None:continue
+                a,b,c,d=bbox
+                corners=[(a,b),(c,b),(c,d),(a,d)]
+            points=[pt(*corner) for corner in corners]
+            tag="mtplate_"+aid.replace("-","_")
+            self.canvas.create_polygon(*[v for xy in points for v in xy],fill="",outline="#7993A1",width=2,
+                              tags=("multi_region",tag))
+            label_pos=min(points,key=lambda x:x[1])
+            label=self.canvas.create_text(label_pos[0],max(4,label_pos[1]-10),text=f"MT {int(other.get('mt_detection_index') or 0)+1}",
+                                          fill="#ffffff",font=("Segoe UI",10,"bold"),tags=("multi_region",tag))
+            self._canvas_text_background(label,"multi_region")
+            # The label background is a separate canvas item; clicking it must
+            # choose the same numbered detection instead of swallowing input.
+            backgrounds=self.canvas.find_withtag("multi_region")
+            if backgrounds:
+                self.canvas.addtag_withtag(tag,backgrounds[-1])
+            self.canvas.tag_bind(tag,"<ButtonPress-1>",lambda e,item=aid:(self._multi_focus_attempt(item),"break")[-1])
+        inv=inventory(self.session,self.current_invocation)
+        if inv:
+            for plate in inv["plates"]:
+                bbox=plate.get("bbox_mt_px")
+                if not bbox or plate.get("bbox_image_entry")!=self._image_entry:
+                    continue
+                a,b,c,d=bbox;x1,y1=pt(a,b);x2,y2=pt(c,d)
+                tag="multi_gt_"+str(plate["plate_id"])
+                self.canvas.create_rectangle(x1,y1,x2,y2,outline="#f0d578",width=2,dash=(5,3),tags=("multi_gt",tag))
+                self.canvas.create_text(x1,y1-12,text=plate["plate_id"]+" GT",fill="#ffef92",
+                                        anchor="w",tags=("multi_gt",tag))
+                self.canvas.tag_bind(tag,"<ButtonPress-1>",
+                    lambda e,pid=plate["plate_id"]:(self._focus_multi_gt(pid),"break")[-1])
+        if self._multi_bbox_edit and self._multi_drag_start and self._multi_drag_point:
+            a,b=self._multi_drag_start;c,d=self._multi_drag_point
+            x1,y1=pt(a,b);x2,y2=pt(c,d)
+            self.canvas.create_rectangle(x1,y1,x2,y2,outline="#ffcc33",width=2,dash=(4,2),tags=("multi_bbox_draft",))
+
     def _pan_begin(self, event, *, force_pan=False):
         if self._image is None:
             return
+        if not force_pan:
+            try:
+                self.canvas.focus_set()
+            except (AttributeError, tk.TclError):
+                pass
+        if (not force_pan and not self._mt_redraw_active and
+                bool(int(getattr(event, "state", 0) or 0) & 0x0001) and
+                self._mt_corr_active and not self._saving):
+            # Shift+click starts a four-corner replacement; the first click
+            # is already corner 1, so the operator makes exactly four clicks.
+            aid, attempt = self._visual_target()
+            if (aid == self._mt_corr_attempt and
+                    self._image_entry == attempt.get("mt_input_evidence_entry")):
+                self._start_mt_redraw()
+                if self._mt_redraw_active:
+                    self._add_mt_redraw_point(event)
+                return "break"
+        if not force_pan and str(getattr(self, "_image_entry", "")).startswith("samples/frames/"):
+            if self._select_source_frame_detection(event):
+                return "break"
+            # A source frame can be panned normally, but must never enter
+            # an MT-input corner-editing, manual GT, or missed-plate mode.
+            self._multi_bbox_edit = False
+            self._leave_pose_gt_edit_on_navigation()
+            self._cancel_mt_correction()
+        if not force_pan and self._mt_redraw_active:
+            self._add_mt_redraw_point(event)
+            return "break"
+        if not force_pan and self._multi_bbox_edit:
+            point=self._multi_map_canvas(event.x,event.y)
+            if point is None:
+                self.status_var.set("Wybierz zweryfikowany obraz wejścia MT do oznaczenia ramki GT")
+                return "break"
+            self._multi_drag_start=point
+            self._multi_drag_point=point
+            return "break"
+        if not force_pan and self._mt_corr_active:
+            if self._mt_corr_begin_drag(event):
+                return "break"
+            # Left mouse outside editable outline remains normal image pan.
         if not force_pan and self.pose_edit_var.get():
             attempt_id = self._pose_gt_attempt_context()
             if not attempt_id or self._saving:
@@ -2483,8 +3995,15 @@ class MobileSampleReviewWindow:
         self.canvas.configure(cursor="fleur")
 
     def _pan_move(self, event):
+        if self._multi_bbox_edit and self._multi_drag_start:
+            self._multi_drag_point=self._multi_map_canvas(event.x,event.y)
+            self._paint_image()
+            return "break"
         if self._image is None:
             return
+        if self._mt_corr_drag is not None:
+            self._mt_corr_move_drag(event)
+            return "break"
         if self._pose_gt_drag_index is not None:
             attempt_id = self._pose_gt_attempt_context()
             if attempt_id:
@@ -2503,11 +4022,35 @@ class MobileSampleReviewWindow:
         self._paint_image()
 
     def _pan_end(self, event=None):
+        if self._mt_redraw_active and (event is None or getattr(event, "num", 1) == 1):
+            return "break"  # right-button pan still works while drawing
+        if self._multi_bbox_edit:
+            start=self._multi_drag_start
+            end=self._multi_drag_point
+            self._multi_drag_start=None
+            self._multi_drag_point=None
+            self._multi_bbox_edit=False
+            self.canvas.configure(cursor="hand2")
+            if start and end and self._multi_group() is not None:
+                a,b=start;c,d=end
+                box=(min(a,c),min(b,d),max(a,c),max(b,d))
+                row=self._current_mt_attempt()
+                gid,pid=self.current_invocation,self._multi_active_gt
+                entry=self._image_entry
+                size=(float(row["input_width"]),float(row["input_height"]))
+                self._change(lambda:set_missed_bbox(self.session,gid,pid,box,entry,size),save_draft=False)
+            self._paint_image()
+            return "break"
+        if self._mt_corr_drag is not None:
+            self._mt_corr_finish_drag()
+            self._view_drag_at = None
+            self.canvas.configure(cursor="crosshair" if self._mt_corr_active else "hand2")
+            return "break"
         if self._pose_gt_drag_index is not None:
             self._finish_pose_gt_drag()
             self._paint_image()
         self._view_drag_at = None
-        self.canvas.configure(cursor=("crosshair" if self.pose_edit_var.get() else "hand2")
+        self.canvas.configure(cursor=("crosshair" if self._mt_corr_active or self.pose_edit_var.get() else "hand2")
                               if self._image is not None else "")
 
     def zoom_to_mt_detection(self):
@@ -2573,12 +4116,54 @@ class MobileSampleReviewWindow:
         if not self.session or not self.subject_key:
             return
         decision = self.session.review.subjects.get(self.subject_key, {})
-        self.subject_eval_choice.set("exclude" if decision.get("evaluable") is False else "assess")
-        for radio in self.subject_eval_radios:
-            radio.configure(state="disabled" if self._saving else "normal")
+        excluded = decision.get("evaluable") is False
+        self.subject_eval_choice.set("exclude" if excluded else "assess")
+        self.subject_unreadable_var.set(excluded)
+        self.subject_unreadable_button.configure(state="disabled" if self._saving else "normal")
+
+    def _sync_mz_readability_details(self, *, is_not_run=False):
+        """Only the operator decides readability; the program decides OCR eligibility."""
+        unreadable = bool(self.subject_unreadable_var.get())
+        if unreadable:
+            self.mz_exclusion_caption.configure(text=(
+                "Zaznacz tylko wtedy, gdy numer jest nieczytelny nawet po powiększeniu. "
+                "Nie porównamy wtedy odczytu aplikacji z GT. Wykrycie tablicy "
+                "i jej obrys sprawdzamy osobno."
+                if not is_not_run else
+                "Zapisujemy, że numeru nie da się odczytać. MZ nie uruchomiono w tej próbie."))
+            self.mz_note_caption.grid()
+            self.note_entry.grid()
+        else:
+            self.mz_exclusion_caption.configure(text=(
+                "Wpisany numer służy do opisu tablicy; MZ nie uruchomiono."
+                if is_not_run else
+                "Przepisz numer ze zdjęcia, nie z wyniku aplikacji. Program porówna je automatycznie."))
+            self.mz_note_caption.grid_remove()
+            self.note_entry.grid_remove()
+        self.gt_entry.configure(state="disabled" if unreadable or self._saving else "normal")
+        self.note_entry.configure(state="disabled" if self._saving else "normal")
+
+    def _on_subject_unreadable_toggle(self):
+        """Prevent an accidental exclusion while readable GT is present."""
+        if not self.session or not self.subject_key or self._saving or (
+                self._mz_review_state() in {"cancelled", "technical"}):
+            self._sync_subject_eval_choice()
+            return
+        unreadable = bool(self.subject_unreadable_var.get())
+        if unreadable and normalize_registration(self.gt_var.get()):
+            self.subject_unreadable_var.set(False)
+            messagebox.showwarning("Numer tablicy",
+                "Dla tej tablicy wpisano już numer. Jeżeli nie możesz go odczytać "
+                "ze zdjęcia, najpierw usuń wpisany numer, a następnie zaznacz tę opcję.",
+                parent=self.window)
+            return
+        self.subject_eval_choice.set("exclude" if unreadable else "assess")
+        self._sync_mz_readability_details(is_not_run=self._mz_review_state() in {"not_run", "empty"})
+        self.save_subject_eval_choice()
 
     def save_subject_eval_choice(self):
-        if not self.session or not self.subject_key or self._saving:
+        if (not self.session or not self.subject_key or self._saving
+                or self._mz_review_state() in {"cancelled", "technical"}):
             return
         key, gt, note = self.subject_key, self.gt_var.get(), self.note_var.get()
         choice = self.subject_eval_choice.get()
@@ -2594,7 +4179,8 @@ class MobileSampleReviewWindow:
                        evaluable=evaluable, note=note), save_draft=False)
 
     def _schedule_autosave(self, *args):
-        if self._rendering or not self.subject_key:
+        if (self._rendering or not self.subject_key
+                or self._mz_review_state() in {"cancelled", "technical"}):
             return
         self.mode_choice.configure(state="disabled")
         if self._autosave_id:
@@ -2602,8 +4188,8 @@ class MobileSampleReviewWindow:
         self._autosave_id = self.window.after(750, self.save_gt)
 
     def _persist_subject_fields(self, key, gt, note):
-        """Zapisz GT bez przycisku, ale nie anuluj przypadkowo wykluczenia."""
-        if not key:
+        """Write only when this record is eligible for operator GT entry."""
+        if (not key or self._mz_review_state() in {"cancelled", "technical"}):
             return
         old = self.session.review.subjects.get(key, {})
         normalized = normalize_registration(gt)
@@ -2663,6 +4249,12 @@ class MobileSampleReviewWindow:
                 self.browser._show_report(updated_report, self.browser.current_bundle)
 
     def save_gt(self, *, explicit=False):
+        # No writing to a cancelled/technical evidence record; the old GT stays.
+        if self._mz_review_state() in {"cancelled", "technical"}:
+            if self._autosave_id:
+                self.window.after_cancel(self._autosave_id)
+                self._autosave_id = None
+            return
         # explicit pozostaje dla istniejących wywołań, ale GT nie wymaga CTA.
         if self._autosave_id:
             self.window.after_cancel(self._autosave_id)
@@ -2693,20 +4285,31 @@ class MobileSampleReviewWindow:
         value = self.reviewer_var.get()
         self._change(lambda: self.session.set_reviewer(value))
 
+
     def complete(self):
-        if self.session and hasattr(self, "_science_data"):
-            science = self._science_data
-            if (science["scientific_state"] == "MT_STAGE_COMPLETE_REVIEW_OPEN" and
-                    science["mz"]["evaluable_reads"] == 0):
-                self.status_var.set("Ocena MT może być zakończona niezależnie od MZ. Pełna ocena ALPR "
-                                    "wymaga także rozpoznania znaków; możesz już wyeksportować wstępny raport MT.")
-                return
-        pending = _pose_geometry_summary(self.session)["pose_pending"] if self.session else 0
-        if pending:
-            self.status_var.set(f"Pozostało {pending} tablic bez oceny obrysu. "
-                                "Wskaż ich rogi albo zaznacz, że nie da się tego zrobić.")
+        if not self.session or self._saving:
             return
-        self._change(self.session.complete)
+        state = verification_progress(self.session)
+        if state["status"] == "READY_FOR_EVALUATION":
+            self.status_var.set("Formularz jest już zatwierdzony — materiał READY_FOR_EVALUATION.")
+            return
+        if state["issues"]:
+            self.status_var.set(f"Weryfikacja niekompletna: {len(state['issues'])} brakujących decyzji. "
+                                + state["issues"][0])
+            return
+        # A separate operator confirmation is necessary even if all statuses
+        # are green. Completeness is not a scientifically validated result.
+        from tkinter import messagebox
+        if not messagebox.askyesno("Zatwierdzenie weryfikacji",
+                "Wszystkie wymagane decyzje są zapisane. Zatwierdzić formularz jako "
+                "materiał gotowy do późniejszej ewaluacji? Pomiar ilościowy GT narożników "
+                "pozostaje osobny. Utworzona wersja dokumentu będzie niezmienna.",
+                parent=self.window):
+            return
+        self._change(self.session.complete,
+                     after=lambda: self.status_var.set(
+                         "Weryfikacja zatwierdzona • READY_FOR_EVALUATION • zapisano niezmienny dokument źródłowy"))
+
 
     def next_pending(self):
         # Stage MT takes priority; never send operator back to an already assessed
@@ -2724,8 +4327,8 @@ class MobileSampleReviewWindow:
                 self.subject_tree.see(iid)
                 self._select_subject()
                 return
-        self.status_var.set("Nie ma brakujących decyzji MT ani ocenianych odczytów MZ. "
-                            "Zobacz «Wyniki naukowe»; pominięte MZ nie blokuje oceny MT.")
+        self.status_var.set("Nie ma brakujących decyzji MT ani odczytów MZ do weryfikacji. "
+                            "Zobacz «Analiza wyników»; brak uruchomienia MZ nie blokuje weryfikacji MT.")
 
     def export(self):
         directory = filedialog.askdirectory(parent=self.window, title="Katalog wyników weryfikacji")
@@ -2755,23 +4358,40 @@ class MobileSampleReviewWindow:
                 # Human-readable methodological companion; it never changes native reports.
                 scientific = make_scientific_summary(self.session, self.session.statistics(), rows)
                 paths.extend(write_scientific_companion(scientific, Path(directory)))
+                multi = multi_scientific_summary(self.session)
+                multi_path = Path(directory) / "mt_multi_plate_verified.json"
+                temp_multi = multi_path.with_name(multi_path.name + ".tmp")
+                temp_multi.write_text(json.dumps(multi,ensure_ascii=False,indent=2),encoding="utf-8")
+                os.replace(temp_multi,multi_path)
+                paths.append(multi_path)
             self._change(export_all,
                          after=lambda: self.status_var.set(
                              f"Wyeksportowano {len(paths)} plików (w tym raport do pracy) do {directory}"))
 
     def _refresh_stats(self):
+        form = verification_progress(self.session)
+        if hasattr(self, "form_status_label"):
+            titles = {"IN_PROGRESS": "Weryfikacja w toku", "READY_TO_APPROVE": "Formularz kompletny — zatwierdź weryfikację",
+                      "READY_FOR_EVALUATION": "Formularz zatwierdzony — gotowy do ewaluacji",
+                      "APPROVED_PENDING_SNAPSHOT": "Zatwierdzone decyzje — pakiet do weryfikacji",
+                      "NOT_STARTED": "Weryfikacja nierozpoczęta"}
+            self.form_status_label.configure(text=(
+                f"{titles.get(form['status'], 'Weryfikacja w toku')} • "
+                f"obserwacje z wymaganymi decyzjami: {form['verified']}/{form['total']} • "
+                f"pozostałe decyzje: {len(form['issues'])} • GT narożników: pomiar opcjonalny"))
         summary = self.stats["summary"]
         progress = self._science_data["progress"]
         self.progress_label.configure(text=(
-            f"Obserwacje: {progress['subjects_total']} • MT ocenione: {progress['subjects_mt_done']}/{progress['subjects_total']} • "
-            f"wywołania MT z ocenioną liczbą tablic: {progress['mt_invocations_cardinality_reviewed']}/{progress['mt_executed_active']} • "
-            f"pełna weryfikacja: {REVIEW_LABELS[self.session.review.review_status]}"))
+            f"Obserwacje: {progress['subjects_total']} • "
+            f"Liczba tablic MT: {progress['mt_invocations_cardinality_reviewed']}/{progress['mt_executed_active']} "
+            f"wywołań z decyzją operatora • "
+            f"Weryfikacja: {REVIEW_LABELS[self.session.review.review_status]}"))
         self.stats_tree.delete(*self.stats_tree.get_children())
         sections = {
-            "Tablice / ALPR": {"evaluable_subjects": "Tablice do oceny", "subjects_with_exact_read": "Z poprawnym odczytem", "subjects_without_exact_read": "Bez poprawnego odczytu", "subject_success_rate": "Skuteczność systemu dla tablic"},
-            "Odczyty MZ": {"evaluable_reads": "Oceniane cropy", "exact_reads": "Poprawne odczyty", "incorrect_reads": "Niepoprawne odczyty", "no_reads": "Brak odczytu", "exact_read_rate": "Udział poprawnych odczytów", "no_read_rate": "Udział braku odczytu"},
+            "Tablice / ALPR": {"evaluable_subjects": "Tablice do weryfikacji", "subjects_with_exact_read": "Z poprawnym odczytem", "subjects_without_exact_read": "Bez poprawnego odczytu", "subject_success_rate": "Skuteczność systemu dla tablic"},
+            "Odczyty MZ": {"evaluable_reads": "Zweryfikowane obrazy tablic", "exact_reads": "Poprawne odczyty", "incorrect_reads": "Niepoprawne odczyty", "no_reads": "Brak odczytu", "exact_read_rate": "Udział poprawnych odczytów", "no_read_rate": "Udział braku odczytu"},
             "Znaki MZ": {"gt_characters": "Znaki GT", "correct_characters": "Poprawnie rozpoznane znaki", "incorrect_characters": "Błędnie rozpoznane znaki", "missing_characters": "Brakujące znaki", "extra_characters": "Znaki nadmiarowe", "cer": "CER — suma błędów / suma znaków GT"},
-            "Lokalizacja MT": {"evaluable_mt_invocations": "Oceniane wywołania z jedną widoczną tablicą", "mt_successful_invocations": "Wywołania z poprawną lokalizacją", "mt_no_detection_invocations": "Wywołania bez detekcji", "mt_execution_error_invocations": "Wywołania z błędem wykonania", "mt_invalid_quad_invocations": "Wywołania z błędną geometrią", "mt_multi_plate_invocations": "Wywołania z wieloma tablicami", "mt_uncertain_invocations": "Wywołania niejednoznaczne", "mt_false_detections": "Fałszywe detekcje", "mt_localization_success_rate": "Skuteczność lokalizacji MT w wywołaniach z jedną tablicą"},
+            "Lokalizacja MT": {"evaluable_mt_invocations": "Zweryfikowane wywołania z jedną widoczną tablicą", "mt_successful_invocations": "Wywołania z poprawną lokalizacją", "mt_no_detection_invocations": "Wywołania bez detekcji", "mt_execution_error_invocations": "Wywołania z błędem wykonania", "mt_invalid_quad_invocations": "Wywołania z błędną geometrią", "mt_multi_plate_invocations": "Wywołania z wieloma tablicami", "mt_uncertain_invocations": "Wywołania niejednoznaczne", "mt_false_detections": "Fałszywe detekcje", "mt_localization_success_rate": "Skuteczność lokalizacji MT w wywołaniach z jedną tablicą"},
             "Czas i próby": {"median_time_to_first_exact_ms": "Mediana czasu do próby z poprawnym odczytem [ms]", "p90_time_to_first_exact_ms": "P90 czasu do próby z poprawnym odczytem [ms]", "median_attempts_to_first_exact": "Mediana liczby prób do poprawnego odczytu"},
         }
         for section, fields in sections.items():
@@ -2793,15 +4413,21 @@ class MobileSampleReviewWindow:
             self.stats_tree.insert("", "end", values=("Geometria MT Pose / GT", label, shown))
         for row in self.stats["character_confusion"]:
             self.stats_tree.insert("", "end", values=("Pomyłki znaków", f"{row['ground_truth']} → {row['prediction']}", row["count"]))
-        if hasattr(self, "science_view"):
-            self.science_view.configure(state="normal")
-            self.science_view.delete("1.0", "end")
-            for tag, content in display_scientific_summary(self._science_data):
-                self.science_view.insert("end", content + "\n", tag)
-            self.science_view.configure(state="disabled")
-            self.science_caption.configure(text=("Wyniki naukowe • pełna weryfikacja" if
-                self._science_data["scientific_state"] == "FINAL_FULL_REVIEW" else
-                "Wyniki naukowe • raport wstępny, z jawnymi mianownikami"))
+        if hasattr(self, "science_dashboard"):
+            source_sha = str(getattr(self.session.review, "source_archive_sha256", "") or "").lower()
+            bundle_sha = str(getattr(self.session.bundle, "source_archive_sha256", "") or "").lower()
+            summary_sha = str(self._science_data.get("source_archive_sha256") or "").lower()
+            source_valid = bool(
+                getattr(getattr(self.session.bundle, "validation", None), "ok", False)
+                and source_sha and source_sha == bundle_sha == summary_sha
+                and str(self.session.session_id) == str(self._science_data.get("session_id")))
+            if source_valid:
+                try:
+                    self.session.verify_source()
+                except (OSError, ValueError, RuntimeError):
+                    source_valid = False
+            self.science_dashboard.render(self._science_data, form, source_verified=source_valid)
+            self.science_caption.configure(text="Podsumowanie wyników sesji")
         if hasattr(self, "conditions_view"):
             self.conditions_view.configure(state="normal")
             self.conditions_view.delete("1.0", "end")
@@ -2811,14 +4437,13 @@ class MobileSampleReviewWindow:
     def _toggle_scientific_details(self):
         self._science_raw_open = not self._science_raw_open
         if self._science_raw_open:
-            self.science_view.grid_remove()
-            self.science_scrollbar.grid_remove()
+            self.science_dashboard.frame.grid_remove()
             self._science_raw_host.grid(row=1, column=0, rowspan=2, sticky="nsew", padx=12, pady=(3, 12))
-            self.science_toggle.configure(text="Wróć do wyników naukowych")
+            self.science_toggle.configure(text="Wróć do podsumowania")
         else:
             self._science_raw_host.grid_remove()
-            self.science_view.grid(row=1, column=0, rowspan=2, sticky="nsew", padx=(12, 0), pady=(3, 12))
-            self.science_scrollbar.grid(row=1, column=1, rowspan=2, sticky="ns", padx=(0, 12), pady=(3, 12))
+            self.science_dashboard.frame.grid(row=1, column=0, rowspan=2,
+                                              sticky="nsew", padx=(12, 12), pady=(3, 12))
             self.science_toggle.configure(text="Pokaż tabelę techniczną")
 
     def _toggle_provenance_details(self):

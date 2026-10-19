@@ -12,6 +12,8 @@ from pathlib import Path
 import re
 from statistics import median
 
+from .mobile_verification_policy import subject_verification_issues
+
 SCIENCE_SCHEMA = "alpr.mobile.scientific_summary.v1"
 
 
@@ -49,88 +51,70 @@ def _id_row(session, key):
     return session.review.subjects.get(key, {})
 
 
-def subject_stage(session, subject_key, geometry_rows):
-    """Stage-specific *workflow* completeness; never changes native review_status.
 
-    A missed plate can be finished for MT while OCR has not run.  This is not
-    equivalent to full, source-verified ALPR ground-truth completion.
+def subject_stage(session, subject_key, geometry_rows):
+    """Independent MT, MZ and optional Pose-GT workflow states.
+
+    Quantitative Pose metrics stay separate from mandatory human verification;
+    absence of manual four-point GT does not undo a visual MT decision.
     """
     subject = session.subjects.get(subject_key, {})
     ids = [i for i in subject.get("attempts", ()) if i in session.attempts]
     groups = {session.invocation_by_attempt[i] for i in ids if i in session.invocation_by_attempt}
-    live = []
-    excluded = 0
-    for group_id in groups:
-        group = session.mt_invocations[group_id]
-        if not group.executed or group.cancelled or group.execution_failed:
-            excluded += 1
-            continue
-        decision = session.invocation_annotation(group_id)
-        count = decision.get("visible_plate_count")
-        if decision.get("evaluable") is False or count == "uncertain":
-            excluded += 1
-            continue
-        if count not in {"none", "one", "multiple"}:
-            live.append((group_id, "liczba tablic nieoceniona"))
-            continue
-        if session.invocation_completion_issues(group_id):
-            live.append((group_id, "ocena detekcji nieukończona"))
-            continue
-        if count == "one":
-            for record in group.records:
-                rid = record["id"]
-                status = str(record.get("mt_status") or "").upper()
-                annot = session.review.attempt_annotations.get(rid, {})
-                geometry = geometry_rows.get(rid, {})
-                geom_status = geometry.get("metric_status")
-                if status == "NO_DETECTION":
-                    if not (geom_status == "missed_detection_gt_saved" or
-                            annot.get("pose_gt_unavailable_reason")):
-                        live.append((group_id, "brakuje GT pominiętej tablicy"))
-                elif status in {"VALID_QUAD", "DETECTION_INVALID_QUAD"} and annot.get("is_plate") is True:
-                    if geom_status in {"missing_manual_gt", "gt_provenance_mismatch",
-                                       "invalid_manual_gt", "gt_exclusion_conflict"}:
-                        live.append((group_id, "obrys GT wymaga oceny lub poprawy"))
-        # "none" and "multiple" are deliberate cardinality decisions.
-    active_groups = len(groups) - excluded
-    mt_complete = active_groups > 0 and not live
-    if not groups or active_groups == 0:
-        mt_status = "Poza pomiarem MT"
-    elif live:
-        mt_status = "MT: do oceny"
+    active = [gid for gid in groups if session.mt_invocations[gid].executed and
+              not session.mt_invocations[gid].cancelled and
+              not session.mt_invocations[gid].execution_failed and
+              session.invocation_annotation(gid).get("evaluable") is not False and
+              session.invocation_annotation(gid).get("visible_plate_count") != "uncertain"]
+    all_issues = subject_verification_issues(session, subject_key)
+    mt_issues = [reason for reason in all_issues if not (reason.startswith("Brak GT numeru")
+                 or reason.startswith("Brak uzasadnienia wyłączenia GT")
+                 or reason.startswith("GT numeru wymaga")
+                 or "brak niezależnego GT numeru lub przyczyny wykluczenia OCR" in reason
+                 or "nie można jednocześnie wykluczyć i oceniać tego samego numeru" in reason)]
+    mt_complete = bool(active) and not mt_issues
+    if not groups or not active:
+        mt_status = "Poza weryfikacją MT"
+    elif mt_issues:
+        mt_status = "MT: weryfikacja w toku"
     else:
-        mt_status = "MT ocenione"
+        mt_status = "MT zweryfikowane"
 
-    sample_ids = subject.get("samples", ())
     mz_runs = []
-    for sample_id in sample_ids:
-        if sample_id not in session.samples:
-            continue
-        sample = session.samples[sample_id]
+    for sid in subject.get("samples", ()):
+        sample = session.samples.get(sid, {})
         attempt = session.attempts.get(sample.get("attempt_id"), {})
-        mz_state = str(attempt.get("mz_status") or sample.get("mz_status") or "").upper()
-        if mz_state not in {"", "NOT_RUN", "UNKNOWN"}:
+        if session.cancelled(sample):
+            continue
+        state = str(attempt.get("mz_status") or sample.get("mz_status") or "").upper()
+        if state not in {"", "NOT_RUN", "UNKNOWN"}:
             mz_runs.append(sample)
     gt = _id_row(session, subject_key)
-    if not mz_runs:
+    from .mobile_multi_plate_verification import is_multi,group_issues
+    exclusively_multi = bool(groups) and all(is_multi(session,gid) for gid in groups)
+    if exclusively_multi and mz_runs:
+        pending = any(group_issues(session,gid) for gid in groups)
+        mz_status, mz_pending = ("MZ: weryfikacja w toku",True) if pending else ("MZ zweryfikowane",False)
+    elif not mz_runs:
         mz_status, mz_pending = "MZ nie uruchomiono", False
     elif gt.get("evaluable") is False:
-        mz_status, mz_pending = "MZ wyłączone z oceny", False
+        mz_status, mz_pending = "MZ wyłączone z weryfikacji", not bool(str(gt.get("note") or "").strip())
     elif not str(gt.get("ground_truth") or "").strip() or gt.get("evaluable") is not True:
         mz_status, mz_pending = "MZ: brak numeru GT", True
     else:
-        mz_status, mz_pending = "MZ ocenione", False
-    if mt_status == "MT ocenione" and mz_status == "MZ nie uruchomiono":
-        label = "MT ocenione"
-    elif mt_status == "MT ocenione" and mz_status == "MZ ocenione":
-        label = "Ocenione MT i MZ"
-    elif mt_status == "Poza pomiarem MT":
-        label = "Poza pomiarem MT"
+        mz_status, mz_pending = "MZ zweryfikowane", False
+    if mt_complete and mz_status == "MZ zweryfikowane":
+        label = "MT i MZ zweryfikowane"
+    elif mt_complete:
+        label = "MT zweryfikowane" if not mz_pending else "MT zweryfikowane · MZ w toku"
+    elif mt_status == "Poza weryfikacją MT":
+        label = mt_status
     else:
         label = mt_status
     return {"label": label, "mt_status": mt_status, "mt_complete": mt_complete,
-            "mt_pending": bool(live), "mt_excluded_groups": excluded,
-            "mz_status": mz_status, "mz_pending": mz_pending}
+            "mt_pending": bool(mt_issues), "mt_excluded_groups": len(groups) - len(active),
+            "mz_status": mz_status, "mz_pending": mz_pending,
+            "pose_quantitative_optional": True}
 
 
 def make_scientific_summary(session, statistics, pose_rows):
@@ -147,9 +131,15 @@ def make_scientific_summary(session, statistics, pose_rows):
     n_singles = _integer(summary.get("evaluable_mt_invocations"))
     n_success = _integer(summary.get("mt_successful_invocations"))
     n_missed = _integer(summary.get("mt_no_detection_invocations"))
-    pose_measured = [r for r in pose_rows if r.get("metric_status") == "measured"
-                     and _numeric(r.get("nmce_pct")) is not None
-                     and _numeric(r.get("polygon_iou_pct")) is not None]
+    all_pose_measured = [r for r in pose_rows if r.get("metric_status") == "measured"
+                         and _numeric(r.get("nmce_pct")) is not None
+                         and _numeric(r.get("polygon_iou_pct")) is not None]
+    # Never mix independent, blinded GT with polygons drawn while looking
+    # at MT predictions or with historical GT whose provenance is unknown.
+    pose_measured = [r for r in all_pose_measured if str(r.get("pose_gt_review_mode") or "")
+                     in {"independent_manual_v1", "blinded_manual_v1", "manual_blinded_v1"}]
+    pose_older_assisted = [r for r in all_pose_measured if str(r.get("pose_gt_review_mode") or "")
+                           not in {"independent_manual_v1", "blinded_manual_v1", "manual_blinded_v1"}]
     missed_gt = [r for r in pose_rows if r.get("metric_status") == "missed_detection_gt_saved"]
     eligible_pose = [r for r in pose_rows if r.get("eligible")]
     n_reads = _integer(summary.get("evaluable_reads"))
@@ -162,31 +152,33 @@ def make_scientific_summary(session, statistics, pose_rows):
     done_mt = sum(1 for s in subjects.values() if s["mt_complete"])
     mz_not_run = sum(1 for s in subjects.values() if s["mz_status"] == "MZ nie uruchomiono")
     full = str(session.review.review_status).upper() == "COMPLETED"
-    complete_sample = bool(active) and all(s["mt_complete"] or s["mt_status"] == "Poza pomiarem MT"
+    complete_sample = bool(active) and all(s["mt_complete"] or s["mt_status"] == "Poza weryfikacją MT"
                                        for s in subjects.values())
     complete_for_mt = done_mt > 0 and complete_sample and len(rated) == len(active)
     mode = str(session.review.review_mode)
     caveats = []
     if len(rated) < len(active):
         caveats.append(f"Niezweryfikowane wywołania MT: {len(active)-len(rated)} z {len(active)} aktywnych.")
-    if any(not s["mt_complete"] and s["mt_status"] != "Poza pomiarem MT" for s in subjects.values()):
+    if any(not s["mt_complete"] and s["mt_status"] != "Poza weryfikacją MT" for s in subjects.values()):
         caveats.append("Część GT i decyzji MT/Pose pozostaje nieukończona.")
     if mode == "assisted":
-        caveats.append("Ocena asystowana: operator widział predykcje; nie jest to ślepa anotacja GT.")
+        caveats.append("Weryfikacja asystowana: operator widział predykcje; nie jest to ślepa anotacja GT.")
     if n_singles is not None and n_singles < 30:
-        caveats.append("Mała liczba ocenionych wywołań z jedną tablicą: wynik MT jest opisowy, bez uogólnienia.")
+        caveats.append("Mała liczba zweryfikowanych wywołań z jedną tablicą: wynik MT jest opisowy, bez uogólnienia.")
     if n_singles is None or not n_singles:
         caveats.append("Brak mianownika dla skuteczności lokalizacji MT.")
     if len(pose_measured) == 0:
-        caveats.append("Nie ma sparowanych predykcji Pose z ręcznym GT: IoU i NMCE nieobliczalne.")
+        caveats.append("Brak niezależnych/parowanych GT Pose: główny IoU i NMCE są nieobliczalne.")
+    if pose_older_assisted:
+        caveats.append("Historyczny GT Pose był rysowany przy widocznej predykcji lub bez potwierdzonej proweniencji; raportujemy go oddzielnie.")
     if not n_reads:
-        caveats.append("Brak ocenionych odczytów MZ: nie podawaj Exact/CER jako 0%.")
+        caveats.append("Brak zweryfikowanych odczytów MZ: nie podawaj Exact/CER jako 0%.")
     if n_alpr is None or not n_alpr:
         caveats.append("Brak pełnych par wynik ALPR–numer GT: nie obliczaj skuteczności całego ALPR.")
     if mz_not_run:
         caveats.append(f"W {mz_not_run} obserwacjach MZ nie został uruchomiony; nie jest to błąd OCR.")
     if not full:
-        caveats.append("Weryfikacja pełnej sesji trwa; wszystkie agregaty traktuj jako wstępne.")
+        caveats.append("Weryfikacja formularza trwa; agregaty są wstępne i nie stanowią zatwierdzonego wyniku naukowego.")
     payload = getattr(session.bundle, "report_payload", {}) or {}
     if not isinstance(payload, dict):
         payload = {}
@@ -215,7 +207,22 @@ def make_scientific_summary(session, statistics, pose_rows):
     build_info = (session.bundle.experiment_session or {}).get("app_build") or {}
     if build_info.get("git_dirty") is True:
         caveats.append("APK zbudowano z lokalnymi zmianami (git_dirty=true); zachowaj kod/diff dla odtwarzalności.")
+    from .mobile_multi_plate_verification import multi_scientific_summary
+    multi_results = multi_scientific_summary(session)
+    from .mobile_pose_correction import correction_report
+    assisted = correction_report(session)
+    if assisted["assisted_correction_n"]:
+        caveats.append("Pomiary odchyleń od ręcznych korekt Pose są asystowane predykcją; nie są niezależnym GT.")
+    if assisted["assisted_correction_invalid_n"]:
+        caveats.append("Niektóre zapisane korekty Pose mają niespójną proweniencję i nie są liczone.")
+    if multi_results["total_multi_invocations"]:
+        caveats.append("Sceny wielotablicowe są liczone osobno per tablica GT; starsze liczniki MT/ALPR z jedną tablicą nie są ich sumą.")
+        caveats.append("Weryfikacja wielu tablic: ukończone przypisania operatora nie są formalnymi TP/FP/FN. "
+                       "Brak niezależnego pełnoklatkowego GT, udowodnionego pokrycia ROI i zamrożonego dopasowania IoU.")
+        if multi_results["verified_multi_invocations"] < multi_results["total_multi_invocations"]:
+            caveats.append("Nieukończona weryfikacja części scen wielotablicowych: nie obliczamy dla nich formalnych TP/FP/FN.")
     return {
+        "multi_plate": multi_results,
         "schema": SCIENCE_SCHEMA,
         "session_id": session.session_id,
         "source_archive_sha256": session.review.source_archive_sha256,
@@ -223,8 +230,11 @@ def make_scientific_summary(session, statistics, pose_rows):
         "review_status": session.review.review_status,
         "review_mode": mode,
         "conditions": session_conditions(session),
-        "scientific_state": "FINAL_FULL_REVIEW" if full and complete_for_mt else
-                            "MT_STAGE_COMPLETE_REVIEW_OPEN" if complete_for_mt else "PRELIMINARY",
+        "scientific_state": ("FORM_COMPLETE_SCIENCE_PENDING" if full and complete_for_mt
+                             and multi_results["total_multi_invocations"] and
+                             multi_results["formal_status"] != "MEASURED" else
+                             "FINAL_FULL_REVIEW" if full and complete_for_mt else
+                             "MT_STAGE_COMPLETE_REVIEW_OPEN" if complete_for_mt else "PRELIMINARY"),
         "subjects": subjects,
         "progress": {"subjects_total": len(session.subjects), "subjects_mt_done": done_mt,
                      "mt_executed_active": len(active), "mt_invocations_cardinality_reviewed": len(rated),
@@ -243,8 +253,13 @@ def make_scientific_summary(session, statistics, pose_rows):
                  "polygon_iou_mean_pct": _mean(r["polygon_iou_pct"] for r in pose_measured),
                  "nmce_mean_pct": _mean(r["nmce_pct"] for r in pose_measured),
                  "polygon_iou_median_pct": median(float(r["polygon_iou_pct"]) for r in pose_measured) if pose_measured else None,
-                 "nmce_median_pct": median(float(r["nmce_pct"]) for r in pose_measured) if pose_measured else None},
-        "mz": {"unit": "oceniony crop z numerem GT i uruchomionym MZ",
+                 "nmce_median_pct": median(float(r["nmce_pct"]) for r in pose_measured) if pose_measured else None,
+                 "manual_assisted_gt_n": len(pose_older_assisted),
+                 "manual_assisted_iou_mean_pct": _mean(r["polygon_iou_pct"] for r in pose_older_assisted),
+                 "manual_assisted_nmce_mean_pct": _mean(r["nmce_pct"] for r in pose_older_assisted),
+                 "independent_gt_n": len(pose_measured),
+                 "assisted_corrections": assisted},
+        "mz": {"unit": "zweryfikowany obraz tablicy z GT i uruchomionym MZ",
                "evaluable_reads": n_reads, "exact_n": n_exact,
                "exact_rate": _fraction(n_exact, n_reads),
                "gt_characters": gt_char, "error_characters": errors,
@@ -258,12 +273,12 @@ def make_scientific_summary(session, statistics, pose_rows):
                         "note": "Latency MT/MZ/pipeline to natywne miary czasu z telefonu. Czas do trafnego odczytu to osobna miara. Pipeline ≠ kamera→ekran."},
         "caveats": caveats,
         "methods": [
-            "Lokalizacja MT = poprawne wywołania / ocenione wywołania z dokładnie 1 tablicą; nie jest to pełny recall tablic ani precision.",
+            "Lokalizacja MT = poprawne wywołania / zweryfikowane wywołania z dokładnie 1 tablicą; nie jest to pełny recall tablic ani precision.",
             "Nieudane lokalizacje to mianownik 1-tablicowych wywołań minus prawidłowo zlokalizowane; samo NO_DETECTION jest węższą kategorią.",
             "Fałszywe detekcje MT: tylko jawnie odrzucone przez operatora; bez kompletnego mianownika nie podajemy precision.",
             "Pose IoU = pole przecięcia polygonów / pole ich sumy; średnia po sparowanych GT.",
             "NMCE = średnia odległość odpowiadających rogów / przekątna obwiedni GT × 100%; niżej = lepiej.",
-            "Pominięta przez MT tablica z własnym GT należy do oceny wykrywania, nigdy do mianownika IoU/NMCE.",
+            "Pominięta przez MT tablica z własnym GT należy do weryfikacji wykrywania, nigdy do mianownika IoU/NMCE.",
             "Exact = identyczny odczyt i numer GT po regule normalizacji zapisanej w review; CER = S+D+I / znaki GT.",
             "MZ NOT_RUN nie jest mylone z błędnym odczytem ani z wartością CER=0.",
             "Wszystkie liczebności i mianowniki są z zatwierdzonego indeksu sesji i bieżącego sidecara; jednostka wywołanie ≠ klatka ≠ crop ≠ obserwacja.",
@@ -330,8 +345,8 @@ def display_scientific_summary(report):
         ("warning" if report["scientific_state"] != "FINAL_FULL_REVIEW" else "subtitle",
          "RAPORT WSTĘPNY • nie cytuj jako wyniku końcowego" if report["scientific_state"] != "FINAL_FULL_REVIEW"
          else "Pełna weryfikacja zakończona"),
-        ("caption", f"Wywołania MT ocenione co do liczby tablic: {pr['mt_invocations_cardinality_reviewed']}/{pr['mt_executed_active']}  •  "
-         f"obserwacje z ukończoną oceną MT: {pr['subjects_mt_done']}/{pr['subjects_total']}  •  ocena {mode}"),
+        ("caption", f"Wywołania MT zweryfikowane co do liczby tablic: {pr['mt_invocations_cardinality_reviewed']}/{pr['mt_executed_active']}  •  "
+         f"obserwacje ze zweryfikowanym MT: {pr['subjects_mt_done']}/{pr['subjects_total']}  •  weryfikacja {mode}"),
         ("heading", "1   Wykrywanie tablic — MT"),
         ("metric", f"Trafienia MT potwierdzone przez operatora: {_rate_text(mt['localized_n'], mt['single_plate_n'])}"),
         ("normal", f"Nieudane lokalizacje: {mt['failed_localization_n'] if mt['failed_localization_n'] is not None else '—'}  •  "
@@ -347,10 +362,13 @@ def display_scientific_summary(report):
          if pose['measured_n'] else "Medianowe IoU/NMCE: —"),
         ("caption", f"Sparowane predykcje i GT: {pose['measured_n']}  •  "
          f"GT tablic pominiętych przez MT: {pose['gt_missed_plate_n']} (bez IoU/NMCE)."),
+        ("caption", f"Korekty wspomagane predykcją MT: {pose['assisted_corrections']['assisted_correction_n']}; "
+         f"historyczny ręczny GT asystowany/bez udokumentowanego trybu: {pose['manual_assisted_gt_n']}. "
+         "Dwie osobne populacje — żadna nie jest niezależnym GT."),
         ("heading", "3   Rozpoznawanie znaków — MZ"),
         ("metric", f"Dokładne numery: {_rate_text(mz['exact_n'], mz['evaluable_reads'])}"),
         ("metric", f"CER: {mz['cer']*100:.2f}% ({mz['error_characters']}/{mz['gt_characters']} znaków)"
-         if mz['cer'] is not None else "CER: — (brak GT i ocenionego odczytu)"),
+         if mz['cer'] is not None else "CER: — (brak GT i zweryfikowanego odczytu)"),
         ("caption", "Próby bez uruchomionego MZ nie są błędnymi odczytami."),
         ("heading", "4   Cały proces ALPR"),
         ("metric", f"Poprawnie odczytane tablice GT: {_rate_text(alpr['exact_n'], alpr['evaluable_subjects'])}"),
@@ -373,6 +391,21 @@ def display_scientific_summary(report):
          "P95 wyliczony na próbkach zapisanych przez Androida."),
         ("heading", "OGRANICZENIA I WARUNKI ODCZYTU"),
     ]
+    multi = report.get("multi_plate") or {}
+    if multi.get("total_multi_invocations"):
+        lines.extend([
+            ("heading", "6   Weryfikacja scen z wieloma tablicami"),
+            ("metric", f"Przypisania operatora: {multi['verified_multi_invocations']}/{multi['total_multi_invocations']} wywołań"),
+            ("warning", "Formalne TP / FP / FN: NIEOBLICZALNE — brak wymaganego dowodu i niezależnego GT."),
+            ("normal", f"Diagnostyka (asystowana): {multi['operator_diagnostic']['plate_count']} oznaczonych tablic; "
+                       f"{multi['operator_diagnostic']['linked_predictions']} powiązanych wskazań MT; "
+                       f"{multi['operator_diagnostic']['unmatched_plate_annotations']} tablic bez powiązania."),
+            ("caption", "To decyzje operatora, nie modelowe TP/FP/FN. MZ poniżej również jest weryfikacją asystowaną."),
+        ])
+        if multi.get("text_gt_reads"):
+            lines.append(("normal", f"MZ na sparowanych GT: {multi['text_exact']}/{multi['text_gt_reads']} poprawnych numerów; "
+                          f"CER: {100*multi['text_errors']/multi['text_gt_characters']:.2f}%" if multi.get('text_gt_characters') else
+                          "MZ — brak mianownika dla CER"))
     lines.extend(("warning", "• " + v) for v in report["caveats"])
     lines.extend([("caption", "Pełna proweniencja, surowe dowody i eksport metryk pozostają dostępne."),
                   ("caption", "W raporcie do pracy: licznik, mianownik, jednostka, przypadki wyłączone i tryb GT.")])
@@ -384,8 +417,8 @@ def scientific_markdown(report):
     p, mt, pose, mz, alpr = (report[k] for k in ("progress", "mt", "pose", "mz", "alpr"))
     f = lambda n: "—" if n is None else f"{n:.2f}%"
     lines = [
-        "# Ocena naukowa sesji ALPR — raport roboczy" if report["scientific_state"] != "FINAL_FULL_REVIEW" else
-        "# Ocena naukowa sesji ALPR",
+        "# Analiza naukowa sesji ALPR — raport roboczy" if report["scientific_state"] != "FINAL_FULL_REVIEW" else
+        "# Analiza naukowa sesji ALPR",
         "", f"- Session ID: `{report['session_id']}`",
         f"- SHA-256 źródłowego archiwum: `{report['source_archive_sha256']}`",
         f"- Rewizja weryfikacji: `{report['review_revision']}`",
@@ -395,8 +428,8 @@ def scientific_markdown(report):
         f"- Telefon: {report['conditions']['device']}; Android: {report['conditions']['android']}",
         f"- Model MT: {report['conditions']['models']['MT']['name']} ({report['conditions']['models']['MT']['precision']})",
         f"- Model MZ: {report['conditions']['models']['MZ']['name']} ({report['conditions']['models']['MZ']['precision']})",
-        f"- Ocenione wywołania MT: {p['mt_invocations_cardinality_reviewed']}/{p['mt_executed_active']}",
-        f"- Obserwacje z zakończoną oceną MT: {p['subjects_mt_done']}/{p['subjects_total']}",
+        f"- Zweryfikowane wywołania MT: {p['mt_invocations_cardinality_reviewed']}/{p['mt_executed_active']}",
+        f"- Obserwacje ze zweryfikowanym MT: {p['subjects_mt_done']}/{p['subjects_total']}",
         "", "## Wyniki z jawnymi mianownikami", "",
         "| Moduł | Miara | Wynik | Jednostka i zakres |", "|---|---|---|---|",
         f"| MT | Potwierdzone trafienia modelu | {_rate_text(mt['localized_n'], mt['single_plate_n'])} | Wywołania z jedną tablicą GT |",
@@ -408,7 +441,13 @@ def scientific_markdown(report):
         f"| Pose | Mediana IoU | {f(pose['polygon_iou_median_pct'])} | N={pose['measured_n']} sparowanych GT |",
         f"| Pose | Mediana NMCE | {f(pose['nmce_median_pct'])} | N={pose['measured_n']} sparowanych GT |",
         f"| Pose | Pominięte tablice z GT | {pose['gt_missed_plate_n']} | Bez porównania IoU/NMCE |",
-        f"| MZ | Pełny poprawny numer | {_rate_text(mz['exact_n'], mz['evaluable_reads'])} | Ocenione odczyty MZ z GT |",
+        f"| Pose (asystowane) | Ręczne GT przy widocznej predykcji lub bez udokumentowanej niezależności | {pose['manual_assisted_gt_n']} | NIE jest niezależnym GT |",
+        f"| Pose (asystowane) | IoU z historycznym GT ręcznym | {f(pose['manual_assisted_iou_mean_pct'])} | N={pose['manual_assisted_gt_n']} osobno od niezależnego GT |",
+        f"| Pose (asystowane) | NMCE z historycznym GT ręcznym | {f(pose['manual_assisted_nmce_mean_pct'])} | N={pose['manual_assisted_gt_n']} osobno od niezależnego GT |",
+        f"| Pose (asystowane) | Ręczne korekty MT | {pose['assisted_corrections']['assisted_correction_n']} | Korekta po obejrzeniu predykcji, N osobne od GT niezależnego |",
+        f"| Pose (asystowane) | Odchylenie od korekty, IoU | {f(pose['assisted_corrections']['assisted_delta_iou_mean_pct'])} | Nie jest niezależnym Polygon IoU GT |",
+        f"| Pose (asystowane) | Odchylenie od korekty, NMCE | {f(pose['assisted_corrections']['assisted_delta_nmce_mean_pct'])} | Nie jest niezależnym NMCE GT |",
+        f"| MZ | Pełny poprawny numer | {_rate_text(mz['exact_n'], mz['evaluable_reads'])} | Zweryfikowane odczyty MZ z GT |",
         f"| MZ | CER | {f(mz['cer']*100 if mz['cer'] is not None else None)} | Znaki GT: {mz['gt_characters']}; błędy S+D+I: {mz['error_characters']} |",
         f"| ALPR | Pełny poprawny odczyt | {_rate_text(alpr['exact_n'], alpr['evaluable_subjects'])} | Kwalifikujące się obserwacje z numerem GT |",
         "", "## Wydajność na urządzeniu (natywny raport telefonu)", "",
@@ -428,6 +467,16 @@ def scientific_markdown(report):
     lines.extend(f"- {method}" for method in report["methods"])
     lines.extend(["", "## Ograniczenia i warunki ważności", ""])
     lines.extend(f"- {issue}" for issue in report["caveats"])
+    multi = report.get("multi_plate") or {}
+    if multi.get("total_multi_invocations"):
+        lines.extend(["", "## Sceny z wieloma tablicami — osobny protokół MT", "",
+                      f"- Przypisania operatora: {multi['verified_multi_invocations']}/{multi['total_multi_invocations']} wywołań.",
+                      "- Formalne TP / FP / FN: NIEOBLICZALNE (`NOT_EVALUABLE`), bez niezależnego GT i zamrożonej walidacji ROI/IoU.",
+                      f"- Diagnostyka: {multi['operator_diagnostic']['plate_count']} tablic, "
+                      f"{multi['operator_diagnostic']['linked_predictions']} powiązań MT, "
+                      f"{multi['operator_diagnostic']['unmatched_plate_annotations']} bez powiązania MT.",
+                      "- Te liczniki to ręczne przypisania operatora, nie pomiary trafień i pominięć detektora.",
+                      f"- Odczyty MZ na sparowanym GT: {multi['text_exact']}/{multi['text_gt_reads']} poprawnych numerów." if multi['text_gt_reads'] else "- MZ: brak zakończonych porównań z GT."])
     lines.extend(["", "## Zasada analizy", "",
                   "Dokument jest wyłącznie pochodną zapisanych pomiarów i decyzji operatora. "
                   "Nie modyfikuje pliku `.alprsession`, sidecara GT, wartości predykcji ani danych modeli. "

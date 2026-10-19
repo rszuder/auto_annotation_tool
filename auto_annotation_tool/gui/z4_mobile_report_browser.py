@@ -27,7 +27,26 @@ from ..ranking import (
     read_mobile_sample_image,
 )
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
+from .mobile_report_plot_axis import axis_ticks, pixel_column_extrema
+from .mobile_report_x_zoom import clamp_x_view, zoom_x_view, pan_x_view, visible_xy
+from .mobile_report_sparse_axis import (
+    display_positions, has_sparse_frame_gap, source_id_ticks, viewport_counts,
+)
+from .mobile_report_review_overlay import project_desktop_samples
+from .mobile_report_chart_styles import LATENCY_SERIES_STYLES, draw_chart_marker
 from .z4_mobile_report_browser_ux import (desktop_status, matches_report_filter, report_identity, selected_report_caption)
+from .mobile_report_science_dashboard import ScientificDashboard, build_overview, science_from_verified_bundle
+from .mobile_report_scientific_comparability import assess_cohort
+# Z4MOBREP019_NO_UNGROUNDED_SCIENTIFIC_COMPARABILITY_20261018
+from .mobile_report_measurement_integrity import (
+    timeline_stages, continuous_segments, stage_enabled, model_input_sizes,
+    local_measurement_time, crash_description,
+)
+from .mobile_report_session_timeline import (
+    session_time_context, session_elapsed_seconds, session_caption,
+    time_ticks, point_caption, STAGE_DESCRIPTIONS, STAGE_SHORT,
+)
+# Z4MOBREP018_EVIDENCE_FAITHFUL_DISPLAY_20261018
 from .mobile_report_source_recovery import (restore_source, stored_source, relinked_report, crop_entry_for_row)
 from .z4_mobile_report_cards_ux import (HoverCardHelp, cards_for_report, device_details, summary_measure_rows, verified_frame_snapshot)
 # Z4MOBREP014_ANDROID_GATE_PERSISTENT_COUNTERS_20261017
@@ -123,14 +142,8 @@ def _merge_model_fingerprint_aliases(target: dict[str, Any], value: Any) -> None
 
 
 def _format_datetime(value: Any) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "-"
-    text = text.replace("T", " ")
-    text = text.replace("+00:00", " UTC").replace("Z", " UTC")
-    if "." in text:
-        text = text.split(".", 1)[0]
-    return text
+    """Explicit local timestamp, never stripping the UTC offset by truncation."""
+    return local_measurement_time(value)
 
 
 def _format_number(value: Any, *, digits: int = 2) -> str:
@@ -172,7 +185,8 @@ def _short_text(value: Any, limit: int = 120) -> str:
         except Exception:
             text = str(value)
     else:
-        text = str(value or "")
+        # A measured zero/False must never become a missing-data dash.
+        text = "" if value is None else str(value)
     text = " ".join(text.split())
     if len(text) > limit:
         return text[: max(0, limit - 1)].rstrip() + "…"
@@ -455,6 +469,34 @@ def _report_list_values(report: MobileBenchmarkReport) -> tuple[str, str, str, s
         _quality_value(report),
         score_text,
     )
+
+
+
+def _report_wheel_scroll_units(event) -> int:
+    """One vertical wheel direction for Windows, Linux and small trackpad deltas.
+
+    This is a UI input normalization only. It never changes report measurements.
+    """
+    try:
+        if int(getattr(event, "state", 0) or 0) & 0x0004:  # Ctrl+wheel is not page scroll
+            return 0
+        try:
+            button = int(getattr(event, "num", 0) or 0)
+        except (TypeError, ValueError):  # Tk uses num="??" on MouseWheel
+            button = 0
+        if button == 4:
+            return -3
+        if button == 5:
+            return 3
+        delta = int(getattr(event, "delta", 0) or 0)
+        if not delta:
+            return 0
+        if abs(delta) < 120:
+            return -1 if delta > 0 else 1
+        ticks = max(1, min(6, abs(delta) // 120))
+        return (-3 if delta > 0 else 3) * ticks
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 class _TreeTable:
@@ -743,6 +785,19 @@ class MobileReportBrowser:
         self._source_failures: dict[str, str] = {}
         self._crop_entry_rows: list[str] = []
         self._crop_photo = None
+        self._science_sequence = 0
+        self._science_cache: dict[tuple, dict] = {}
+        self._science_error_by_key: dict[tuple, str] = {}
+        self._science_requested_key = None
+        self._latency_report_identity = None
+        self._latency_full_x = None
+        self._latency_x_view = None
+        self._latency_pan_origin = None
+        self._latency_effective_mode = None
+        self._latency_hit_points = []
+        self._latency_hover_baseline = ''
+        self._latency_time_seconds = None
+        self._latency_time_context = {}
         self._closing = False
         self._import_in_progress = False
         self._import_cancel_requested = False
@@ -761,7 +816,11 @@ class MobileReportBrowser:
         self.window.title("Raporty z telefonu")
         self._configure_window()
         self._build()
+        # Z4MOBREP029: on Windows the left Treeview can own keyboard focus;
+        # route wheel events by pointer location, before Treeview class bindings.
+        self._install_report_pointer_wheel()
         self._show_empty()
+        self.window.bind("<FocusIn>", self._refresh_review_on_focus, add="+")
         try:
             self.window.deiconify()
             self.window.lift()
@@ -809,6 +868,15 @@ class MobileReportBrowser:
     def _on_destroy(self, event=None) -> None:
         if getattr(event, "widget", None) is not self.window:
             return
+        # Remove the per-window wheel tag; do not leave a global Tk binding.
+        tag = getattr(self, "_report_wheel_tag", None)
+        if tag:
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                try:
+                    self.window.unbind_class(tag, sequence)
+                except tk.TclError:
+                    pass
+            self._report_wheel_tag = None
         self._closing = True
         self._import_cancel_requested = True
         self._import_in_progress = False
@@ -1229,68 +1297,31 @@ class MobileReportBrowser:
         root = tk.Frame(self.window, bg=self.bg, padx=12, pady=10)
         root.pack(fill=tk.BOTH, expand=True)
         root.grid_columnconfigure(0, weight=1)
-        root.grid_rowconfigure(2, weight=1)
-
+        # Z4MOBREP017: one quiet page heading, workspace and a compact status line.
+        root.grid_rowconfigure(1, weight=1)
         header = tk.Frame(root, bg=self.bg)
-        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 9))
         header.grid_columnconfigure(0, weight=1)
-        tk.Label(
-            header,
-            text="Raporty z telefonu  /  ALPR",
-            bg=self.bg,
-            fg=self.fg,
-            font=("Segoe UI", 16, "bold"),
-            anchor=tk.W,
-        ).grid(row=0, column=0, sticky="ew")
-        tk.Label(
-            header,
-            text=(
-                "Wybierz sesję, przejrzyj wyniki i przejdź do oceny próbek. Dane źródłowe pozostają niezmienione."
-            ),
-            bg=self.bg,
-            fg=self.muted,
-            font=("Segoe UI", 9),
-            anchor=tk.W,
-            justify=tk.LEFT,
-            wraplength=980,
-        ).grid(row=1, column=0, sticky="ew", pady=(3, 0))
-
-        actions = tk.Frame(root, bg=self.bg)
-        actions.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        actions.grid_columnconfigure(4, weight=1)
-        self.btn_import_reports = ttk.Button(actions, text="Importuj raporty z Androida", command=self.import_report)
-        self.btn_import_reports.grid(
-            row=0, column=0, sticky="w", padx=(0, 8), ipadx=10, ipady=2
-        )
-        self.btn_refresh_reports = ttk.Button(actions, text="Odśwież raporty", command=self._refresh_report_list)
-        self.btn_refresh_reports.grid(
-            row=0, column=1, sticky="w", padx=(0, 8), ipadx=8, ipady=2
-        )
-        self.btn_review_samples = ttk.Button(actions, text="Weryfikuj próbki", command=self.open_sample_review, state="disabled")
-        self.btn_review_samples.grid(row=0, column=2, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-        self.btn_link_archive = ttk.Button(actions, text="Podłącz archiwum", command=self.link_source_archive, state="disabled")
-        self.btn_link_archive.grid(row=0, column=3, sticky="w", padx=(0, 8), ipadx=8, ipady=2)
-        ttk.Button(actions, text="Zamknij", command=self._request_close).grid(row=0, column=5, sticky="e", ipadx=8, ipady=2)
-
-        self.status_var = tk.StringVar(value="Gotowe. Wskaż raport lub kilka raportów z telefonu albo wybierz zapisany raport z listy.")
-        self.progress = ttk.Progressbar(actions, mode="indeterminate", length=150)
-        self.status_label = tk.Label(
-            actions,
-            textvariable=self.status_var,
-            bg=self.bg,
-            fg=self.muted,
-            font=("Segoe UI", 9),
-            anchor=tk.W,
-        )
-        self.status_label.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 0))
-        self.source_status_var = tk.StringVar(value="Wybierz sesję, aby sprawdzić dostępność oryginalnego archiwum.")
-        tk.Label(actions, textvariable=self.source_status_var, bg=self.bg, fg=self.muted,
-                 font=("Segoe UI", 9), justify=tk.LEFT, anchor=tk.W).grid(
-                     row=2, column=0, columnspan=6, sticky="ew", pady=(3, 0))
+        tk.Label(header, text="Raporty ALPR", bg=self.bg, fg=self.fg,
+                 font=("Segoe UI", 16, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="w")
+        tk.Label(header, text="Wybierz sesję i sprawdź wyniki eksperymentu.",
+                 bg=self.bg, fg=self.muted, font=("Segoe UI", 9),
+                 anchor=tk.W).grid(row=1, column=0, sticky="w", pady=(2, 0))
+        # Instead of a row of competing buttons, show source evidence as quiet
+        # contextual information on the right. Recovery is the only conditional action.
+        self.source_status_var = tk.StringVar(value="")
+        self.source_status_label = tk.Label(header, textvariable=self.source_status_var,
+                 bg=self.bg, fg=self.muted, font=("Segoe UI", 9),
+                 justify=tk.RIGHT, anchor=tk.E, wraplength=460)
+        self.source_status_label.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
+        self.btn_link_archive = ttk.Button(header, text="Podłącz archiwum",
+                  command=self.link_source_archive, state="disabled")
+        self.btn_link_archive.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+        self.btn_link_archive.grid_remove()
 
         workspace = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=self.bg, bd=0, relief=tk.FLAT,
-                                   sashwidth=9, sashrelief=tk.FLAT, opaqueresize=True)
-        workspace.grid(row=2, column=0, sticky="nsew")
+                                   sashwidth=8, sashrelief=tk.FLAT, opaqueresize=True)
+        workspace.grid(row=1, column=0, sticky="nsew")
         self.report_split = workspace
 
         left = tk.Frame(
@@ -1301,69 +1332,53 @@ class MobileReportBrowser:
             highlightthickness=1,
             highlightbackground=self.border,
         )
-        workspace.add(left, width=420, minsize=390, padx=0, pady=0, stretch="never")
+        workspace.add(left, width=332, minsize=292, padx=0, pady=0, stretch="never")
         left.grid_columnconfigure(0, weight=1)
-        left.grid_rowconfigure(4, weight=1)
-        tk.Label(
-            left,
-            text="Sesje i pomiary",
-            bg=self.card_bg,
-            fg=self.fg,
-            font=("Segoe UI", 10, "bold"),
-            anchor=tk.W,
-        ).grid(row=0, column=0, sticky="ew")
-        tk.Label(
-            left,
-            text="Wybierz sesję. Pełne identyfikatory zobaczysz pod listą i w szczegółach.",
-            bg=self.card_bg,
-            fg=self.muted,
-            font=("Segoe UI", 8),
-            anchor=tk.W,
-            justify=tk.LEFT,
-            wraplength=330,
-        ).grid(row=1, column=0, sticky="ew", pady=(2, 7))
+        left.grid_rowconfigure(3, weight=1)
+        left_header = tk.Frame(left, bg=self.card_bg)
+        left_header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        left_header.grid_columnconfigure(0, weight=1)
+        tk.Label(left_header, text="Sesje", bg=self.card_bg, fg=self.fg,
+                 font=("Segoe UI", 11, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="w")
+        self.btn_refresh_reports = tk.Button(left_header, text="Odśwież", command=self._refresh_report_list,
+                relief=tk.FLAT, bd=0, highlightthickness=0, bg=self.card_bg, fg=self.accent,
+                activebackground=self.card_bg, activeforeground=self.fg, cursor="hand2",
+                font=("Segoe UI", 9, "underline"))
+        self.btn_refresh_reports.grid(row=0, column=1, sticky="e")
 
         search_area = tk.Frame(left, bg=self.card_bg)
-        search_area.grid(row=2, column=0, sticky="ew", pady=(2, 6))
+        search_area.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         search_area.grid_columnconfigure(0, weight=1)
-        tk.Label(search_area, text="Wyszukaj sesję", bg=self.card_bg, fg=self.fg,
-                 font=("Segoe UI", 9, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="ew")
+        tk.Label(search_area, text="Szukaj sesji", bg=self.card_bg, fg=self.muted,
+                 font=("Segoe UI", 9), anchor=tk.W).grid(row=0, column=0, sticky="ew")
         self.search_var = tk.StringVar(value="")
         self.search_entry = tk.Entry(search_area, textvariable=self.search_var, bg=self.panel,
                                      fg=self.fg, insertbackground=self.fg, relief=tk.FLAT,
                                      highlightthickness=1, highlightbackground=self.border,
                                      highlightcolor=self.accent, font=("Segoe UI", 10))
-        self.search_entry.grid(row=1, column=0, sticky="ew", ipady=7, pady=(4, 0))
+        self.search_entry.grid(row=1, column=0, sticky="ew", ipady=5, pady=(3, 0))
         self.search_entry.bind("<Escape>", lambda _event: self.search_var.set(""), add="+")
         self.search_var.trace_add("write", lambda *_args: self._apply_report_filter(auto_select=True))
         self.report_count_var = tk.StringVar(value="Brak zapisanych raportów")
         tk.Label(left, textvariable=self.report_count_var, bg=self.card_bg, fg=self.muted,
-                 font=("Segoe UI", 9), anchor=tk.W).grid(row=3, column=0, sticky="ew", pady=(0, 4))
-
+                 font=("Segoe UI", 9), anchor=tk.W).grid(row=2, column=0, sticky="ew", pady=(0, 5))
         self.report_table = _TreeTable(
-            left,
-            ("Data", "Wariant", "p95"),
-            ("Data", "Wariant / seria", "p95 E2E"),
-            (108, 170, 84),
-            palette={**self.palette, "panel": self.card_bg},
-            height=18,
-        )
-        self.report_table.shell.grid(row=4, column=0, sticky="nsew")
-        self.selected_report_info_var = tk.StringVar(value="Wybierz raport, aby zobaczyć pełne dane sesji.")
-        self.selected_report_info = tk.Label(left, textvariable=self.selected_report_info_var,
-                       bg=self.card_bg, fg=self.muted, font=("Segoe UI", 9), anchor=tk.NW,
-                       justify=tk.LEFT, wraplength=352, padx=6, pady=9)
-        self.selected_report_info.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-        left.bind("<Configure>", lambda event: self.selected_report_info.configure(
-            wraplength=max(220, int(event.width) - 36)), add="+")
+            left, ("Data", "Wariant", "p95"), ("Data (lok.)", "Wariant", "P95"),
+            (82, 137, 72), palette={**self.palette, "panel": self.card_bg}, height=18)
+        self.report_table.shell.grid(row=3, column=0, sticky="nsew")
         self.report_table.tree.bind("<<TreeviewSelect>>", self._on_report_selected, add="+")
+        self.btn_import_reports = ttk.Button(left, text="Importuj raport z telefonu", command=self.import_report)
+        self.btn_import_reports.grid(row=4, column=0, sticky="ew", pady=(9, 0), ipady=3)
+        # Full model paths and identifiers are in 'Szczegóły', not in the session list.
+        self.selected_report_info_var = tk.StringVar(value="")
+
 
         right = tk.Frame(workspace, bg=self.bg)
         workspace.add(right, minsize=510, padx=8, pady=0, stretch="always")
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(2, weight=1)
         identity = tk.Frame(right, bg=self.bg)
-        identity.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        identity.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         identity.grid_columnconfigure(0, weight=1)
         self.hero_title_var = tk.StringVar(value="Wybierz raport z listy")
         self.hero_meta_var = tk.StringVar(value="Najważniejsze informacje o sesji pojawią się tutaj.")
@@ -1373,12 +1388,8 @@ class MobileReportBrowser:
         self.hero_meta_label = tk.Label(identity, textvariable=self.hero_meta_var, bg=self.bg, fg=self.muted,
                         font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT, wraplength=650)
         self.hero_meta_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
-        hero_actions = tk.Frame(identity, bg=self.bg)
-        hero_actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(10, 0))
-        ttk.Button(hero_actions, text="Przegląd", command=lambda: self.notebook.select(0)).pack(side=tk.LEFT, padx=(0, 6))
-        self.btn_report_warnings = ttk.Button(hero_actions, text="Ostrzeżenia",
-                            command=self._show_validation_details, state="disabled")
-        self.btn_report_warnings.pack(side=tk.LEFT)
+        # No navigation buttons next to the title: tabs directly below already
+        # provide navigation, and warnings are contextual to the source details.
         right.bind("<Configure>", self._resize_report_details, add="+")
 
         self.card_shell = tk.Frame(right, bg=self.bg)
@@ -1447,167 +1458,405 @@ class MobileReportBrowser:
                bg=self.card_bg, fg=self.fg, font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT,
                wraplength=700, padx=10, pady=7)
         self.review_status_label.grid(row=3, column=0, sticky="ew", pady=(7, 0))
+        # Z4MOBREP016: technical KPI cards duplicated the scientific dashboard.
+        self.card_shell.grid_remove()
+        self.review_status_label.grid_remove()
+        # Keep the single status bar at the bottom; a log/progress message no
+        # longer consumes an extra toolbar row across the whole screen.
+        status_bar = tk.Frame(root, bg=self.bg)
+        status_bar.grid(row=2, column=0, sticky="ew", pady=(7, 0))
+        status_bar.grid_columnconfigure(0, weight=1)
+        self.status_var = tk.StringVar(value="Wybierz sesję z listy lub zaimportuj raport.")
+        self.status_label = tk.Label(status_bar, textvariable=self.status_var,
+                    bg=self.bg, fg=self.muted, font=("Segoe UI", 8), anchor=tk.W)
+        self.status_label.grid(row=0, column=0, sticky="ew")
+        self.progress = ttk.Progressbar(status_bar, mode="indeterminate", length=110)
+
+    @staticmethod
+    def _pointer_inside_widget(widget, x: int, y: int) -> bool:
+        """Check a visible target in desktop screen coordinates."""
+        try:
+            return (bool(widget.winfo_ismapped())
+                    and widget.winfo_rootx() <= x < widget.winfo_rootx() + widget.winfo_width()
+                    and widget.winfo_rooty() <= y < widget.winfo_rooty() + widget.winfo_height())
+        except tk.TclError:
+            return False
+
+    def _route_report_pointer_wheel(self, event):
+        """Scroll the pane UNDER THE POINTER, not the widget retaining focus.
+
+        A private front-of-bindtags handler intercepts the left Treeview before
+        its class binding, which otherwise consumes wheel events on Windows.
+        The dashboard and all of its cards scroll as one canvas. Unrelated
+        notebook tabs, the timeline zoom and the phone-review window remain
+        untouched by this handler.
+        """
+        units = _report_wheel_scroll_units(event)
+        if not units:
+            return None
+        try:
+            x, y = self.window.winfo_pointerxy()
+            # Do not scroll the browser behind a different top-level dialog.
+            below = self.window.winfo_containing(x, y)
+            if below is None or below.winfo_toplevel() is not self.window:
+                return None
+            dashboard = self.science_panel
+            if self._pointer_inside_widget(dashboard, x, y):
+                dashboard.canvas.yview_scroll(units, "units")
+                return "break"  # never scroll the still-focused session list
+            left = self.report_table
+            if self._pointer_inside_widget(left.shell, x, y):
+                left.tree.yview_scroll(units, "units")
+                return "break"  # never scroll the dashboard when pointer is left
+        except (tk.TclError, AttributeError, TypeError):
+            return None
+        return None
+
+    def _install_report_pointer_wheel(self) -> None:
+        """Register a window-local wheel tag before widget/class default tags.
+
+        Using bind_all here would affect other application windows. The unique
+        tag is limited to widgets in this report browser and removed on close.
+        """
+        tag = f"AATReportPointerWheel_{id(self)}"
+        self._report_wheel_tag = tag
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.window.bind_class(tag, sequence, self._route_report_pointer_wheel)
+
+        def attach(widget) -> None:
+            tags = widget.bindtags()
+            if tag not in tags:
+                widget.bindtags((tag,) + tags)
+            for child in widget.winfo_children():
+                attach(child)
+
+        attach(self.window)
 
     def _build_tabs(self) -> None:
-        def tab_frame() -> tk.Frame:
-            frame = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
+        """Four operator-facing destinations; complete legacy data stay reachable."""
+        def tab_frame(parent, *, row=0):
+            frame = tk.Frame(parent, bg=self.panel, padx=8, pady=8)
             frame.grid_columnconfigure(0, weight=1)
-            frame.grid_rowconfigure(0, weight=1)
+            frame.grid_rowconfigure(row, weight=1)
             return frame
 
-        summary = tab_frame()
-        self.summary_table = _WrappedLabelTable(
-            summary,
-            ("Pole", "Wartość", "Opis"),
-            ("Pole", "Wartość", "Opis"),
-            (190, 250, 330),
-            palette={**self.palette, "panel": self.panel},
-            height=17,
+        # 1: the main report uses canonical scientific metrics, not raw JSON.
+        dashboard_host = tab_frame(self.notebook)
+        self.science_panel = ScientificDashboard(
+            dashboard_host, palette=self.palette, on_review=self.open_sample_review,
+            on_refresh=self.refresh_scientific_dashboard,
+            on_details=lambda: self._open_technical_details(),
         )
-        self.summary_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(summary, text="Podsumowanie")
+        self.science_panel.grid(row=0, column=0, sticky="nsew")
+        self.notebook.add(dashboard_host, text="Wyniki sesji")
 
-        comparison = tab_frame()
+        # 2: maintain the existing comparison guard and its full metadata.
+        comparison = tab_frame(self.notebook, row=1)
+        tk.Label(comparison, text="Czy te sesje wolno porównać?", bg=self.panel, fg=self.fg,
+                 font=("Segoe UI", 11, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self.comparison_table = _WrappedLabelTable(
-            comparison,
-            ("Kryterium", "Wybrany raport", "Seria", "Status", "Znaczenie"),
-            ("Kryterium", "Wybrany raport", "Seria", "Status", "Znaczenie"),
-            (170, 220, 160, 120, 330),
-            palette={**self.palette, "panel": self.panel},
-            height=17,
-        )
-        self.comparison_table.shell.grid(row=0, column=0, sticky="nsew")
+            comparison, ("Warunek", "Ta sesja", "Seria", "Weryfikacja", "Znaczenie"),
+            ("Warunek", "Ta sesja", "Seria", "Weryfikacja", "Znaczenie"),
+            (170, 220, 160, 120, 330), palette={**self.palette, "panel": self.panel}, height=17)
+        self.comparison_table.shell.grid(row=1, column=0, sticky="nsew")
         self.notebook.add(comparison, text="Porównywalność")
 
-        config = tab_frame()
-        self.config_table = _WrappedLabelTable(
-            config,
-            ("Sekcja", "Wartość", "Opis"),
-            ("Sekcja", "Wartość", "Opis"),
-            (260, 360, 240),
-            palette={**self.palette, "panel": self.panel},
-            height=17,
-        )
-        self.config_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(config, text="Konfiguracja")
-
-        latency = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
-        latency.grid_columnconfigure(0, weight=1)
-        latency.grid_rowconfigure(1, weight=1)
-        self.latency_canvas = tk.Canvas(latency, bg=self.panel, highlightthickness=1, highlightbackground=self.border, height=180)
-        self.latency_canvas.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        self.latency_canvas.bind("<Configure>", lambda _event: self._draw_latency_chart(), add="+")
-        self.latency_table = _TreeTable(
-            latency,
-            ("Etap", "count", "mean", "p50", "p90", "p95", "p99", "min", "max", "std"),
-            ("Etap", "n", "mean", "p50", "p90", "p95", "p99", "min", "max", "std"),
-            (160, 48, 72, 72, 72, 72, 72, 72, 72, 72),
-            palette={**self.palette, "panel": self.panel},
-            height=11,
-        )
-        self.latency_table.shell.grid(row=1, column=0, sticky="nsew")
-        self.notebook.add(latency, text="Opóźnienia")
-
-        artifacts = tab_frame()
-        self.artifacts_table = _WrappedLabelTable(
-            artifacts,
-            ("Artefakt", "Źródło", "Preview", "Status", "Opis"),
-            ("Artefakt", "Źródło", "Preview", "Status", "Opis"),
-            (170, 90, 90, 110, 430),
-            palette={**self.palette, "panel": self.panel},
-            height=17,
-        )
-        self.artifacts_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(artifacts, text="Artefakty")
-
-        quality = tab_frame()
-        self.quality_table = _WrappedLabelTable(
-            quality,
-            ("Metryka", "Wartość", "Komentarz"),
-            ("Metryka", "Wartość", "Komentarz"),
-            (230, 160, 420),
-            palette={**self.palette, "panel": self.panel},
-            height=17,
-        )
-        self.quality_table.shell.grid(row=0, column=0, sticky="nsew")
-        self.notebook.add(quality, text="Jakość")
-
-        diagnostics = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
-        diagnostics.grid_columnconfigure(0, weight=1)
-        diagnostics.grid_rowconfigure(0, weight=1)
-        diagnostics.grid_rowconfigure(1, weight=1)
-        self.diagnostics_table = _WrappedLabelTable(
-            diagnostics,
-            ("Obszar", "Wartość", "Opis"),
-            ("Obszar", "Wartość", "Opis"),
-            (260, 240, 360),
-            palette={**self.palette, "panel": self.panel},
-            height=8,
-        )
-        self.diagnostics_table.shell.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
-        self.log_text = tk.Text(
-            diagnostics,
-            bg=blend_hex_colors(self.panel, self.bg, 0.35),
-            fg=self.fg,
-            insertbackground=self.fg,
-            height=8,
-            wrap=tk.WORD,
-            font=("Consolas", 9),
-            relief=tk.FLAT,
-        )
-        log_scroll = WebSlimScrollbar(diagnostics, orient=tk.VERTICAL, command=self.log_text.yview, track_color=self.panel)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.grid(row=1, column=0, sticky="nsew")
-        log_scroll.grid(row=1, column=1, sticky="ns")
-        self.notebook.add(diagnostics, text="Diagnostyka")
-
-        crops = tab_frame()
-        crops.grid_rowconfigure(0, weight=1)
-        crops.grid_rowconfigure(1, weight=0)
+        # 3: all original crop preview functionality, plus direct review action.
+        samples = tab_frame(self.notebook, row=1)
+        samples.grid_rowconfigure(2, weight=0)
+        head = tk.Frame(samples, bg=self.panel)
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        head.grid_columnconfigure(0, weight=1)
+        tk.Label(head, text="Zapisane obrazy tablic", fg=self.fg, bg=self.panel,
+                 font=("Segoe UI", 11, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="ew")
+        # Context link, not a second prominent CTA competing with the main review.
+        sample_review_link = tk.Button(head, text="Przejdź do weryfikacji zdjęć →", command=self.open_sample_review,
+                        bg=self.panel, fg=self.accent, activebackground=self.panel,
+                        activeforeground=self.fg, relief=tk.FLAT, bd=0,
+                        highlightthickness=0, cursor="hand2", font=("Segoe UI", 9, "underline"))
+        sample_review_link.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        tk.Label(head, text="Brak wyciętego obrazu nie oznacza braku tablicy — sprawdź pełne zdjęcie w weryfikatorze.",
+                 fg=self.muted, bg=self.panel, font=("Segoe UI", 9), anchor=tk.W).grid(
+                 row=1, column=0, columnspan=2, sticky="ew", pady=(3, 0))
         self.crops_table = _TreeTable(
-            crops,
-            ("ID", "Track", "Status", "Predykcja", "GT", "Czas", "Crop"),
-            ("ID", "Track", "Status", "Predykcja", "GT", "Czas", "Crop"),
-            (120, 70, 100, 120, 120, 100, 240),
-            palette={**self.palette, "panel": self.panel},
-            height=17,
-        )
-        self.crops_table.shell.grid(row=0, column=0, sticky="nsew")
+            samples, ("Próbka", "Seria", "Weryfikacja MT/MZ", "Odczyt", "GT Desktop", "Czas", "Obraz"),
+            ("Próbka", "Seria", "Weryfikacja MT/MZ", "Odczyt", "GT Desktop", "Czas", "Obraz"),
+            (120, 70, 185, 120, 130, 100, 180),
+            palette={**self.palette, "panel": self.panel}, height=12)
+        self.crops_table.shell.grid(row=1, column=0, sticky="nsew")
         self.crops_table.tree.bind("<<TreeviewSelect>>", self._on_crop_selected, add="+")
-        crop_preview_frame = tk.Frame(crops, bg=self.panel)
-        crop_preview_frame.grid(row=1, column=0, sticky="ew", pady=(7, 0))
-        self.crop_preview_var = tk.StringVar(value="Wybierz wyciętą tablicę na liście, aby zobaczyć jej obraz.")
+        crop_preview_frame = tk.Frame(samples, bg=self.panel)
+        crop_preview_frame.grid(row=2, column=0, sticky="ew", pady=(7, 0))
+        self.crop_preview_var = tk.StringVar(value="Wybierz tablicę z listy, aby zobaczyć jej obraz.")
         self.crop_preview_info = tk.Label(crop_preview_frame, textvariable=self.crop_preview_var,
                                           fg=self.muted, bg=self.panel, anchor=tk.W, justify=tk.LEFT,
                                           font=("Segoe UI", 9))
         self.crop_preview_info.pack(fill=tk.X)
         self.crop_image_label = tk.Label(crop_preview_frame, bg=self.panel)
         self.crop_image_label.pack(anchor=tk.W)
-        self.notebook.add(crops, text="Wycięte tablice")
+        self.notebook.add(samples, text="Próbki i weryfikacja")
 
-        raw = tk.Frame(self.notebook, bg=self.panel, padx=8, pady=8)
-        raw.grid_columnconfigure(0, weight=1)
-        raw.grid_rowconfigure(0, weight=1)
-        self.raw_text = tk.Text(
-            raw,
-            bg=blend_hex_colors(self.panel, self.bg, 0.35),
-            fg=self.fg,
-            insertbackground=self.fg,
-            wrap=tk.NONE,
-            font=("Consolas", 9),
-            relief=tk.FLAT,
+        # 4: no scientific or provenance data are deleted; only regrouped.
+        details = tab_frame(self.notebook)
+        self.technical_notebook = ttk.Notebook(details)
+        self.technical_notebook.grid(row=0, column=0, sticky="nsew")
+        detail_tools = tk.Frame(details, bg=self.panel)
+        detail_tools.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        detail_tools.grid_columnconfigure(0, weight=1)
+        self.btn_report_warnings = ttk.Button(detail_tools, text="Informacje o integralności",
+                        command=self._show_validation_details, state="disabled")
+        self.btn_report_warnings.grid(row=0, column=1, sticky="e")
+        self.notebook.add(details, text="Dane źródłowe")
+
+        summary = tab_frame(self.technical_notebook)
+        self.summary_table = _WrappedLabelTable(
+            summary, ("Pole", "Wartość", "Opis"), ("Pole", "Wartość", "Opis"),
+            (190, 250, 330), palette={**self.palette, "panel": self.panel}, height=17)
+        self.summary_table.shell.grid(row=0, column=0, sticky="nsew")
+        self.technical_notebook.add(summary, text="Raport źródłowy")
+
+        config = tab_frame(self.technical_notebook)
+        self.config_table = _WrappedLabelTable(
+            config, ("Sekcja", "Wartość", "Opis"), ("Sekcja", "Wartość", "Opis"),
+            (260, 360, 240), palette={**self.palette, "panel": self.panel}, height=17)
+        self.config_table.shell.grid(row=0, column=0, sticky="nsew")
+        self.technical_notebook.add(config, text="Warunki i modele")
+
+        # Z4MOBREP019_FIX04: the scientific plot is the primary content; the
+        # scrollable raw-metrics table lives in a smaller, independently
+        # adjustable pane. Neither plot data nor measurement semantics change.
+        latency = tab_frame(self.technical_notebook)
+        self.latency_split = ttk.PanedWindow(latency, orient=tk.VERTICAL)
+        self.latency_split.grid(row=0, column=0, sticky="nsew")
+        latency_plot = tk.Frame(self.latency_split, bg=self.panel)
+        # Display spacing is determined solely by source frame IDs; this
+        # checkbox controls ONLY whether already positioned points are linked.
+        self._latency_connect_neighbors_var = tk.BooleanVar(master=self.window, value=True)
+        self._latency_axis_bar = tk.Frame(latency_plot, bg=self.panel)
+        self._latency_axis_bar.pack(fill=tk.X, padx=6, pady=(1, 2))
+        self._latency_connections_toggle = tk.Checkbutton(
+            self._latency_axis_bar,
+            text="Łącz punkty sąsiednich klatek",
+            variable=self._latency_connect_neighbors_var,
+            command=self._on_latency_connections_change,
+            bg=self.panel, fg=self.fg, selectcolor=self.panel,
+            activebackground=self.panel, activeforeground=self.fg,
+            font=("Segoe UI", 9), borderwidth=0, highlightthickness=0,
         )
+        self._latency_connections_toggle.pack(side=tk.LEFT, anchor=tk.W)
+        self._latency_axis_mode_var = tk.StringVar(master=self.window, value='time')
+        # Explicit axis selection is different from the line-only checkbox.
+        # The checkbox must never change x/y coordinates or the current zoom.
+        self._latency_frame_axis_radio = tk.Radiobutton(
+            self._latency_axis_bar, text='ID klatki', value='frame',
+            variable=self._latency_axis_mode_var,
+            command=self._on_latency_axis_mode_change,
+            bg=self.panel, fg=self.fg, selectcolor=self.panel,
+            activebackground=self.panel, activeforeground=self.fg,
+            font=('Segoe UI', 9), highlightthickness=0, borderwidth=0,
+        )
+        self._latency_frame_axis_radio.pack(side=tk.RIGHT, padx=(8, 0))
+        self._latency_time_axis_radio = tk.Radiobutton(
+            self._latency_axis_bar, text='Czas sesji', value='time',
+            variable=self._latency_axis_mode_var,
+            command=self._on_latency_axis_mode_change,
+            bg=self.panel, fg=self.fg, selectcolor=self.panel,
+            activebackground=self.panel, activeforeground=self.fg,
+            font=('Segoe UI', 9), highlightthickness=0, borderwidth=0,
+        )
+        self._latency_time_axis_radio.pack(side=tk.RIGHT)
+        # One fixed-height line gives session duration and hover details,
+        # without changing geometry whenever the operator moves the mouse.
+        self._latency_context_var = tk.StringVar(master=self.window, value='')
+        self._latency_context_label = tk.Label(
+            latency_plot, textvariable=self._latency_context_var,
+            fg=self.muted, bg=self.panel, anchor=tk.W, justify=tk.LEFT,
+            font=('Segoe UI', 8), height=1, width=1,
+        )
+        self._latency_context_label.pack(fill=tk.X, padx=(50, 18), pady=(0, 1))
+        self.latency_canvas = tk.Canvas(latency_plot, bg=self.panel, highlightthickness=1,
+                                        highlightbackground=self.border, height=320)
+        self.latency_canvas.pack(fill=tk.BOTH, expand=True)
+        # Keep the X-axis explanation in a separate footer. Text painted only
+        # five pixels above the canvas bottom was clipped by the PanedWindow
+        # sash, especially after resizing the plot/table splitter.
+        self._latency_axis_footer_var = tk.StringVar(master=self.window, value="")
+        self._latency_axis_footer_label = tk.Label(
+            latency_plot, textvariable=self._latency_axis_footer_var,
+            fg=self.muted, bg=self.panel, anchor=tk.W, justify=tk.LEFT,
+            font=("Segoe UI", 8), wraplength=900,
+        )
+        # A PanedWindow lets the operator give more room to the table. Tk
+        # allocates space to packed children in packing order: when the 320px
+        # canvas was packed first, a shorter plot pane could starve this label
+        # and make the entire scientific X-axis explanation disappear.
+        # Reserve the bottom caption BEFORE allocating the stretchable canvas.
+        # The canvas alone shrinks as the splitter moves; the caption does not.
+        self._latency_axis_footer_label.pack(
+            side=tk.BOTTOM, fill=tk.X, before=self.latency_canvas,
+            padx=(50, 18), pady=(3, 6),
+        )
+        self.latency_canvas.bind("<Configure>", lambda _event: self._draw_latency_chart(), add="+")
+        self.latency_canvas.bind(
+            "<Configure>",
+            lambda event: self._latency_axis_footer_label.configure(
+                wraplength=max(220, int(event.width) - 72)),
+            add="+",
+        )
+        self.latency_canvas.bind("<MouseWheel>", self._zoom_latency_wheel, add="+")
+        self.latency_canvas.bind("<Button-4>", self._zoom_latency_wheel, add="+")
+        self.latency_canvas.bind("<Button-5>", self._zoom_latency_wheel, add="+")
+        self.latency_canvas.bind("<ButtonPress-1>", self._begin_latency_pan, add="+")
+        self.latency_canvas.bind("<B1-Motion>", self._move_latency_pan, add="+")
+        self.latency_canvas.bind("<ButtonRelease-1>", self._end_latency_pan, add="+")
+        self.latency_canvas.bind("<Double-Button-1>", self._reset_latency_zoom, add="+")
+        self.latency_canvas.bind('<Motion>', self._on_latency_point_hover, add='+')
+        self.latency_canvas.bind('<Leave>', self._clear_latency_point_hover, add='+')
+        latency_metrics = tk.Frame(self.latency_split, bg=self.panel)
+        self.latency_table = _TreeTable(
+            latency_metrics, ("Etap", "count", "mean", "p50", "p90", "p95", "p99", "min", "max", "std"),
+            ("Etap", "n", "mean", "p50", "p90", "p95", "p99", "min", "max", "std"),
+            (160, 48, 72, 72, 72, 72, 72, 72, 72, 72),
+            palette={**self.palette, "panel": self.panel}, height=5)
+        self.latency_table.shell.pack(fill=tk.BOTH, expand=True)
+        self.latency_split.add(latency_plot, weight=3)
+        self.latency_split.add(latency_metrics, weight=1)
+        self.technical_notebook.add(latency, text="Czasy szczegółowe")
+
+        artifacts = tab_frame(self.technical_notebook)
+        self.artifacts_table = _WrappedLabelTable(
+            artifacts, ("Artefakt", "Źródło", "Podgląd", "Status", "Opis"),
+            ("Artefakt", "Źródło", "Podgląd", "Status", "Opis"),
+            (170, 90, 90, 110, 430), palette={**self.palette, "panel": self.panel}, height=17)
+        self.artifacts_table.shell.grid(row=0, column=0, sticky="nsew")
+        self.technical_notebook.add(artifacts, text="Pliki i dowody")
+
+        quality = tab_frame(self.technical_notebook)
+        self.quality_table = _WrappedLabelTable(
+            quality, ("Metryka", "Wartość", "Komentarz"), ("Metryka", "Wartość", "Komentarz"),
+            (230, 160, 420), palette={**self.palette, "panel": self.panel}, height=17)
+        self.quality_table.shell.grid(row=0, column=0, sticky="nsew")
+        self.technical_notebook.add(quality, text="Pełne miary")
+
+        diagnostics = tab_frame(self.technical_notebook, row=1)
+        self.diagnostics_table = _WrappedLabelTable(
+            diagnostics, ("Obszar", "Wartość", "Opis"), ("Obszar", "Wartość", "Opis"),
+            (260, 240, 360), palette={**self.palette, "panel": self.panel}, height=8)
+        self.diagnostics_table.shell.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.log_text = tk.Text(
+            diagnostics, bg=blend_hex_colors(self.panel, self.bg, 0.35), fg=self.fg,
+            insertbackground=self.fg, height=8, wrap=tk.WORD,
+            font=("Consolas", 9), relief=tk.FLAT)
+        log_scroll = WebSlimScrollbar(diagnostics, orient=tk.VERTICAL,
+                                     command=self.log_text.yview, track_color=self.panel)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.grid(row=1, column=0, sticky="nsew")
+        log_scroll.grid(row=1, column=1, sticky="ns")
+        self.technical_notebook.add(diagnostics, text="Diagnostyka")
+
+        raw = tab_frame(self.technical_notebook)
+        self.raw_text = tk.Text(raw, bg=blend_hex_colors(self.panel, self.bg, 0.35),
+                                fg=self.fg, insertbackground=self.fg,
+                                wrap=tk.NONE, font=("Consolas", 9), relief=tk.FLAT)
         raw_scroll_y = WebSlimScrollbar(raw, orient=tk.VERTICAL, command=self.raw_text.yview, track_color=self.panel)
         raw_scroll_x = WebSlimScrollbar(raw, orient=tk.HORIZONTAL, command=self.raw_text.xview, track_color=self.panel)
         self.raw_text.configure(yscrollcommand=raw_scroll_y.set, xscrollcommand=raw_scroll_x.set)
         self.raw_text.grid(row=0, column=0, sticky="nsew")
         raw_scroll_y.grid(row=0, column=1, sticky="ns")
         raw_scroll_x.grid(row=1, column=0, sticky="ew")
-        self.notebook.add(raw, text="Surowe dane")
-        for tab_index, title in enumerate(("Przegląd", "Porównaj", "Parametry", "Czasy",
-                                          "Pliki", "Jakość", "Diagnostyka", "Cropy", "Dane JSON")):
-            self.notebook.tab(tab_index, text=title)
+        self.technical_notebook.add(raw, text="Dane JSON")
         self.notebook.select(0)
+
+    def _open_technical_details(self) -> None:
+        self.notebook.select(3)
+        self.technical_notebook.select(0)
+
+    def _science_cache_key(self, report, bundle) -> tuple:
+        sha = str(getattr(report, 'source_archive_sha256', '') or '').lower()
+        review_root = Path(getattr(CONFIG, 'DIR_7_RANKINGS_MOBILE_PACKAGES', CONFIG.DIR_7_RANKINGS / 'mobile_packages'))
+        sidecar = review_root / 'human_reviews' / f'{sha}.review.json'
+        try:
+            stat = sidecar.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = (None, None)
+        return (str(report.report_id), sha, str(getattr(bundle, 'path', '')), stamp)
+
+    def refresh_scientific_dashboard(self) -> None:
+        report = getattr(self, 'current_report', None)
+        if report is not None:
+            self._update_scientific_dashboard(report, getattr(self, 'current_bundle', None), force=True)
+
+    def _update_scientific_dashboard(self, report, bundle, *, force: bool = False) -> None:
+        """Load full canonical review outside Tk; stale selections cannot overwrite UI."""
+        self._science_sequence += 1
+        token = self._science_sequence
+        if bundle is None or not getattr(getattr(bundle, 'validation', None), 'ok', False):
+            self.science_panel.render(build_overview(report, None))
+            return
+        if (str(bundle.source_archive_sha256).lower() != str(report.source_archive_sha256).lower()
+                or str(bundle.report.report_id) != str(report.report_id)):
+            self.science_panel.render(build_overview(report, None))
+            return
+        cache_key = self._science_cache_key(report, bundle)
+        self._science_requested_key = cache_key
+        if not force and cache_key in self._science_cache:
+            self.science_panel.render(build_overview(report, bundle, self._science_cache[cache_key]))
+            self._populate_crops(report, bundle)
+            return
+        self.science_panel.render(build_overview(report, bundle, loading=True))
+
+        def worker() -> None:
+            try:
+                science = science_from_verified_bundle(bundle)
+                review_root = Path(getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS / "mobile_packages"))
+                try:
+                    # Canonical status is already computed from the same SHA-pinned
+                    # review; this projection adds display-only text GT by subject_key.
+                    science["_ui_desktop_samples"] = project_desktop_samples(bundle, science, review_root)
+                except (OSError, ValueError, TypeError, KeyError) as overlay_error:
+                    science["_ui_desktop_samples"] = {
+                        "state": "error", "error": str(overlay_error)[:180], "samples": {}}
+                error = ''
+            except Exception as exc:
+                science = None
+                error = str(exc)[:220]
+            self._run_on_ui(lambda: self._finish_scientific_dashboard(
+                report, bundle, cache_key, token, science, error))
+
+        threading.Thread(target=worker, daemon=True, name='alpr-scientific-overview').start()
+
+    def _finish_scientific_dashboard(self, report, bundle, cache_key, token, science, error) -> None:
+        if token != self._science_sequence or self._closing:
+            return
+        selected = getattr(self, 'current_report', None)
+        current_bundle = getattr(self, 'current_bundle', None)
+        if (selected is None or selected.report_id != report.report_id
+                or selected.source_archive_sha256 != report.source_archive_sha256
+                or current_bundle is None or current_bundle.source_archive_sha256 != bundle.source_archive_sha256):
+            return
+        if cache_key != self._science_cache_key(selected, current_bundle):
+            # A save happened while a worker was reading the old review: never
+            # mix an obsolete scientific status with a newer sidecar GT.
+            self._update_scientific_dashboard(selected, current_bundle, force=True)
+            return
+        if science is not None:
+            self._science_cache[cache_key] = science
+            self._science_error_by_key.pop(cache_key, None)
+        elif error:
+            self._science_error_by_key[cache_key] = error
+        self.science_panel.render(build_overview(selected, current_bundle, science, error=error))
+        self._populate_crops(selected, current_bundle)
+
+    def _refresh_review_on_focus(self, event) -> None:
+        if event.widget is not self.window or self._closing:
+            return
+        report, bundle = getattr(self, "current_report", None), getattr(self, "current_bundle", None)
+        if report is None or bundle is None:
+            return
+        if self._science_cache_key(report, bundle) != self._science_requested_key:
+            self._populate_crops(report, bundle)
+            self._update_scientific_dashboard(report, bundle, force=True)
 
     def _set_status(self, text: str, tone: str = "info") -> None:
         colors = {"info": self.muted, "success": self.success, "warning": self.warning, "error": self.error}
@@ -1626,7 +1875,7 @@ class MobileReportBrowser:
                     maximum=max(1, int(maximum or 1)),
                     value=max(0.0, float(value or 0.0)),
                 )
-                self.progress.grid(row=0, column=2, sticky="w", padx=(0, 10))
+                self.progress.grid(row=0, column=1, sticky="e", padx=(8, 0))
                 if not determinate:
                     self.progress.start(14)
             else:
@@ -1668,7 +1917,7 @@ class MobileReportBrowser:
             query = ""
         filtered = [r for r in all_reports if matches_report_filter(r, query, self._matching_cached_bundle(r))]
         self.report_table.set_rows([
-            (report_identity(r, self._matching_cached_bundle(r))["date"],
+            (local_measurement_time(r.measured_at, compact=True, show_offset=False),
              report_identity(r, self._matching_cached_bundle(r))["variant_short"],
              _format_ms(_pipeline_p95(r))) for r in filtered
         ])
@@ -1716,14 +1965,15 @@ class MobileReportBrowser:
             self._metric_help.hide()
         try:
             self.btn_report_warnings.configure(state="disabled", text="Ostrzeżenia")
+            self.btn_report_warnings.grid_remove()
         except Exception:
             pass
 
     def _resize_report_details(self, event) -> None:
         try:
             width = max(400, int(event.width))
-            self.hero_title_label.configure(wraplength=max(260, width - 235))
-            self.hero_meta_label.configure(wraplength=max(260, width - 235))
+            self.hero_title_label.configure(wraplength=max(260, width - 40))
+            self.hero_meta_label.configure(wraplength=max(260, width - 40))
             self.review_status_label.configure(wraplength=max(260, width - 30))
             # Two rows when the right panel is narrow; four cards in one row otherwise.
             narrow = width < 830
@@ -1929,13 +2179,21 @@ class MobileReportBrowser:
         threading.Thread(target=worker, name="mobile-report-import", daemon=True).start()
 
     def _show_empty(self) -> None:
+        self._science_sequence += 1
+        if hasattr(self, "science_panel"):
+            self.science_panel.render({"status": "Wybierz sesję", "progress": "", "progress_subtitle": "", "cards": (), "performance": {}, "warnings": (), "source": "", "frames": ""})
         self._ux_reset_selection()
         self.current_bundle = None
         if hasattr(self, "btn_link_archive"):
             self.btn_link_archive.configure(state="disabled")
+            self.btn_link_archive.grid_remove()
         if hasattr(self, "source_status_var"):
-            self.source_status_var.set("Wybierz sesję, aby sprawdzić dostępność archiwum.")
+            self.source_status_var.set("")
         self.current_report = None
+        self._latency_report_identity = None
+        self._latency_x_view = None
+        self._latency_full_x = None
+        self._latency_pan_origin = None
         if hasattr(self, "btn_review_samples"):
             self.btn_review_samples.configure(state="disabled")
         for var in self.card_vars.values():
@@ -1953,13 +2211,21 @@ class MobileReportBrowser:
         self._draw_latency_chart()
 
     def _show_report_hint(self, report_count: int) -> None:
+        self._science_sequence += 1
+        if hasattr(self, "science_panel"):
+            self.science_panel.render({"status": "Wybierz sesję", "progress": "", "progress_subtitle": "", "cards": (), "performance": {}, "warnings": (), "source": "", "frames": ""})
         self._ux_reset_selection()
         self.current_bundle = None
         if hasattr(self, "btn_link_archive"):
             self.btn_link_archive.configure(state="disabled")
+            self.btn_link_archive.grid_remove()
         if hasattr(self, "source_status_var"):
-            self.source_status_var.set("Wybierz sesję, aby sprawdzić dostępność archiwum.")
+            self.source_status_var.set("")
         self.current_report = None
+        self._latency_report_identity = None
+        self._latency_x_view = None
+        self._latency_full_x = None
+        self._latency_pan_origin = None
         if hasattr(self, "btn_review_samples"):
             self.btn_review_samples.configure(state="disabled")
         for var in self.card_vars.values():
@@ -2071,7 +2337,7 @@ class MobileReportBrowser:
                 self.source_status_var.set(self._source_failures[report_id])
             else:
                 self.source_status_var.set(
-                    f"Oryginalne archiwum zweryfikowane · pomiary czasu: {n} · wycięte tablice: {crops}.")
+                    f"Źródło sprawdzone  ·  {n} pomiarów czasu  ·  {crops} wyciętych tablic")
 
     def _show_report(self, report: MobileBenchmarkReport | None, bundle: MobileReportBundle | None = None) -> None:
         if report is None:
@@ -2082,14 +2348,28 @@ class MobileReportBrowser:
             or bundle.report.report_id != report.report_id
         ):
             bundle = None  # Legacy report-id cache must not cross archive identities.
+        identity = (str(report.report_id), str(report.source_archive_sha256).lower())
+        if self._latency_report_identity != identity:
+            self._latency_report_identity = identity
+            self._latency_x_view = None
+            self._latency_full_x = None
+            self._latency_pan_origin = None
+            self._latency_effective_mode = None
+            axis_var = getattr(self, '_latency_axis_mode_var', None)
+            if axis_var is not None:
+                axis_var.set('time')  # new session: prefer its real clock, if documented
         self.current_bundle = bundle
         self.current_report = report
         if bundle is not None:
             n = len(bundle.trace_rows)
             c = sum(e.name.startswith("samples/crops/") for e in bundle.entries)
-            self.source_status_var.set(f"Archiwum źródłowe zweryfikowane · pomiary: {n} · obrazy tablic: {c}.")
+            self.source_status_var.set(f"Źródło sprawdzone  ·  {n} pomiarów czasu  ·  {c} wyciętych tablic")
         if hasattr(self, "btn_link_archive"):
             self.btn_link_archive.configure(state="normal")
+            if bundle is None:
+                self.btn_link_archive.grid()
+            else:
+                self.btn_link_archive.grid_remove()
         if bundle is None:
             self.source_status_var.set(self._source_failures.get(report.report_id,
                 "Dane zbiorcze są dostępne. Do wykresów i zdjęć potrzebne jest oryginalne archiwum."))
@@ -2097,7 +2377,7 @@ class MobileReportBrowser:
             self.btn_review_samples.configure(state="normal" if (bundle or report.source_path) else "disabled")
         self._update_cards(report, bundle)
         self._populate_summary(report, bundle)
-        self._populate_comparison_guard(report, bundle)
+        self._populate_scientific_comparison(report, bundle)
         self._populate_config(report)
         self._populate_latency(report, bundle)
         self._populate_artifacts(report, bundle)
@@ -2105,6 +2385,7 @@ class MobileReportBrowser:
         self._populate_diagnostics(report, bundle)
         self._populate_crops(report, bundle)
         self._populate_raw(report, bundle)
+        self._update_scientific_dashboard(report, bundle)
         if bundle is None:
             original = stored_source(report)
             if original:
@@ -2138,8 +2419,11 @@ class MobileReportBrowser:
         if not trace_total:
             trace_total = _safe_int(_nested_value(report.raw, "summary.processed_frames"), 0)
         info = report_identity(report, bundle)
-        self.hero_title_var.set(f"{info['variant']}  •  {info['date']}")
-        self.hero_meta_var.set(f"{info['device']}  •  {info['scenario'] or info['technical_variant'] or 'Pomiar mobilny'}")
+        self.hero_title_var.set(f"{info['variant']}  •  {local_measurement_time(report.measured_at, compact=True)}")
+        meta = f"{info['device']}  ·  {info['scenario'] or info['technical_variant'] or 'Pomiar mobilny'}"
+        if bundle and bundle.validation.warnings:
+            meta += f"  ·  {len(bundle.validation.warnings)} uwaga o archiwum (Szczegóły)"
+        self.hero_meta_var.set(meta)
         self.selected_report_info_var.set(selected_report_caption(report, bundle))
         review_root = Path(getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS / "mobile_packages"))
         snapshot = desktop_status(report, bundle, review_root)
@@ -2148,9 +2432,14 @@ class MobileReportBrowser:
         if bundle:
             warnings_count = len(bundle.validation.warnings) + len(bundle.validation.errors)
             self.btn_report_warnings.configure(state="normal" if warnings_count else "disabled",
-                                               text=f"Ostrzeżenia ({warnings_count})" if warnings_count else "Bez ostrzeżeń")
+                                               text=f"Wyjaśnij uwagi ({warnings_count})" if warnings_count else "Bez ostrzeżeń")
+            if warnings_count:
+                self.btn_report_warnings.grid()
+            else:
+                self.btn_report_warnings.grid_remove()
         else:
             self.btn_report_warnings.configure(state="disabled", text="Brak walidacji")
+            self.btn_report_warnings.grid_remove()
         self.card_vars["integrity"].set(integrity)
         self.card_vars["frames"].set(f"{trace_total or '-'} klatek")
         self.card_vars["quality"].set(_quality_value(report))
@@ -2226,7 +2515,7 @@ class MobileReportBrowser:
                         "Obecne w raporcie" if q.get("available") is True else "Nieustalone")
         rows = [
             ("GT z telefonu", phone_status, "Dotyczy tylko jakości zapisanej w źródłowym archiwum Androida."),
-            ("Oceny Desktop", review.get("title", "Nieustalone"), review.get("detail", "Brak odczytu sidecara.")),
+            ("Weryfikacja Desktop", review.get("title", "Nieustalone"), review.get("detail", "Brak odczytu sidecara.")),
         ] + rows
         self.summary_table.set_rows(validation_rows + rows[:2] + summary_measure_rows(report, bundle) + rows[2:])
 
@@ -2243,6 +2532,8 @@ class MobileReportBrowser:
     def _guard_profile_hash(self, value: Any) -> str:
         if value in (None, "", {}, []):
             return "-"
+        if isinstance(value, str):
+            return value.strip() or "-"
         try:
             text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except Exception:
@@ -2256,11 +2547,11 @@ class MobileReportBrowser:
         width = _nested_value(resolution, "width_px", "width") or _nested_value(raw, "capture.width_px", "capture.width", "camera.width_px", "input.width_px")
         height = _nested_value(resolution, "height_px", "height") or _nested_value(raw, "capture.height_px", "capture.height", "camera.height_px", "input.height_px")
         fps = _nested_value(resolution, "fps") or _nested_value(raw, "capture.fps", "camera.fps", "input.fps")
-        if width and height and fps:
-            return f"{width}x{height} @ {fps} fps"
-        if width and height:
-            return f"{width}x{height}"
-        return "-"
+        sizes = model_input_sizes(report)
+        frame = f"klatka {width}×{height}" if width and height else ""
+        if frame and fps:
+            frame += f" @ {fps} fps"
+        return "; ".join(item for item in (frame, sizes) if item) or "-"
 
     def _guard_android_version_value(self, report: MobileBenchmarkReport, index: dict[str, Any]) -> str:
         device = dict(getattr(report, "device", {}) or {})
@@ -2290,6 +2581,8 @@ class MobileReportBrowser:
 
     def _guard_model_fingerprint_value(self, report: MobileBenchmarkReport, index: dict[str, Any], role: str) -> str:
         role_key = str(role or "").strip().lower()
+        if stage_enabled(report, role_key) is False:
+            return "Wyłączony"
         raw = dict(getattr(report, "raw", {}) or {})
         fingerprints: dict[str, Any] = {}
         for candidate in (
@@ -2308,6 +2601,8 @@ class MobileReportBrowser:
         if value in (None, "", {}, []):
             return "-"
         if isinstance(value, dict):
+            if value.get("enabled") is False:
+                return "Wyłączony"
             for key in (
                 "sha256",
                 "file_sha256",
@@ -2321,7 +2616,8 @@ class MobileReportBrowser:
                 text = str(value.get(key) or "").strip()
                 if text:
                     return text[:16] if len(text) > 20 else text
-            return self._guard_profile_hash(value).replace("profil ", "fp ")
+            # An enabled/disabled descriptor is not a cryptographic model ID.
+            return "-"
         text = str(value or "").strip()
         return text[:16] if len(text) > 20 else (text or "-")
 
@@ -2369,9 +2665,9 @@ class MobileReportBrowser:
                     "Zakres porównania",
                     scope,
                     f"{len(cohort)} raportów",
-                    "Gotowe" if scenario_id else "Niepełne",
-                    "Porównujemy tylko raporty z tej samej serii i tego samego scenariusza.",
-                    {"tag": "success" if scenario_id else "warning"},
+                    "Wspólna seria" if scenario_id else "Niepełne",
+                    "Ta sama seria/scenariusz to filtr kandydatów, nie zgoda na porównanie naukowe. Warunki wykonania wymagają osobnej kontroli.",
+                    {"tag": "warning"},
                 )
             )
 
@@ -2404,9 +2700,9 @@ class MobileReportBrowser:
                 True,
             ),
             (
-                "Rozdzielczość wejścia",
+                "Rozdzielczość modeli / kamery",
                 lambda candidate, index: self._guard_resolution_value(candidate, index),
-                "Zmiana rozdzielczości zmienia koszt inferencji i jakość detekcji.",
+                "Rozróżniamy wejścia MT/MZ od klatki kamery. Nieustalone wymiary blokują bezwarunkowe porównanie.",
                 True,
             ),
             (
@@ -2428,9 +2724,9 @@ class MobileReportBrowser:
                 True,
             ),
             (
-                "MP fingerprint",
+                "Model pojazdów (MP)",
                 lambda candidate, index: self._guard_model_fingerprint_value(candidate, index, "mp"),
-                "Model pojazdów w pakiecie musi być ten sam, jeśli nie jest badaną zmienną.",
+                "Wyłączony MP to brak użytego modelu pojazdów, nie jego fingerprint.",
                 True,
             ),
             (
@@ -2464,17 +2760,29 @@ class MobileReportBrowser:
             values = [str(getter(candidate, index_for(candidate)) or "-") for candidate in cohort]
             non_empty_values = [value for value in values if value and value != "-"]
             distinct = sorted(set(non_empty_values))
-            if selected_value in ("", "-"):
+            if label == "Model pojazdów (MP)" and values and all(value == "Wyłączony" for value in values):
+                status = "Nie używano"
+                tag = "muted"
+                series_value = "MP wyłączony"
+            elif selected_value in ("", "-"):
                 status = "Brak danych"
                 tag = "warning"
                 series_value = "-"
+            elif require_same and len(non_empty_values) != len(values):
+                status = "Brak danych"
+                tag = "warning"
+                series_value = f"{len(non_empty_values)}/{len(values)} raportów"
+            elif require_same and len(cohort) < 2:
+                status = "Jedna sesja"
+                tag = "muted"
+                series_value = selected_value
             elif require_same and len(distinct) > 1:
                 status = "Różne"
                 tag = "error"
                 series_value = f"{len(distinct)} wartości"
             elif require_same:
-                status = "Spójne"
-                tag = "success"
+                status = "Spójne konfiguracje"
+                tag = "muted"
                 series_value = selected_value
             else:
                 status = "Jest" if selected_value not in ("", "-") else "Brak"
@@ -2483,6 +2791,23 @@ class MobileReportBrowser:
             rows.append((label, selected_value, series_value, status, description, {"tag": tag}))
 
         self.comparison_table.set_rows(rows)
+
+    def _populate_scientific_comparison(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
+        """Evidence-sensitive comparisons; matching series alone never approves research parity.
+
+        The older configuration-guard remains available for compatibility, but
+        the operator's comparison tab uses the stricter, read-only analysis.
+        """
+        try:
+            analysis = assess_cohort(report, getattr(self.store, 'reports', ()), bundle=bundle)
+            self.comparison_table.set_rows(list(analysis['rows']))
+        except Exception:
+            logger.exception('Cannot assess scientific session comparability')
+            self.comparison_table.set_rows([
+                ('Weryfikacja porównywalności', 'Nie ustalono', '—', 'BRAK POTWIERDZENIA',
+                 'Błąd odczytu warunków. Nie traktuj raportu jako porównywalnego z innymi sesjami.',
+                 {'tag': 'error'})
+            ])
 
     def _populate_config(self, report: MobileBenchmarkReport) -> None:
         raw = dict(report.raw or {})
@@ -2512,7 +2837,8 @@ class MobileReportBrowser:
         rows: list[tuple[str, str, str, str, str, str, str, str, str, str]] = []
         sources: list[tuple[str, Any]] = []
         latency = dict(report.latency or {})
-        for key, label in (("mt", "MT inference"), ("mz", "MZ inference"), ("pipeline", "Pipeline")):
+        for key, label in (("mt", "MT: model tablic"), ("mz", "MZ: model znaków"),
+                           ("pipeline", "ALPR: cały proces")):
             if isinstance(latency.get(key), dict):
                 sources.append((label, latency.get(key)))
         stages = _nested_value(report.raw, "summary.stages")
@@ -2661,11 +2987,11 @@ class MobileReportBrowser:
             self.quality_table.set_rows(desktop_rows + [
                 ("Źródło jakości", "Weryfikacja człowieka", "Ukończona weryfikacja; surowe pomiary czasu i pamięci zachowane."),
                 ("Tryb weryfikacji", "Zaślepiona GT" if quality.get("review_mode") == "blinded_gt_v1" else "Asystowana", "Tryb zapisany w sidecarze weryfikacji."),
-                ("Poprawne odczyty MZ", ratio("exact_read_rate"), "Jednostka: oceniany crop."),
-                ("Brak odczytu MZ", ratio("no_read_rate"), "Oceniany crop z GT, bez użytecznego odczytu."),
+                ("Poprawne odczyty MZ", ratio("exact_read_rate"), "Jednostka: zweryfikowany obraz tablicy."),
+                ("Brak odczytu MZ", ratio("no_read_rate"), "Zweryfikowany obraz tablicy z GT, bez użytecznego odczytu."),
                 ("CER MZ", ratio("cer"), "Suma błędów / suma znaków GT. Wartość może przekraczać 100%."),
                 ("Skuteczność ALPR dla tablic", ratio("subject_success_rate"), "Co najmniej jeden poprawny odczyt lub wynik konsensusu."),
-                ("Skuteczność lokalizacji MT", ratio("mt_localization_success_rate"), "Ocenione wywołania z jedną widoczną tablicą; nie jest to mAP."),
+                ("Skuteczność lokalizacji MT", ratio("mt_localization_success_rate"), "Zweryfikowane wywołania z jedną widoczną tablicą; nie jest to mAP."),
                 ("SHA-256 źródła", quality.get("source_archive_sha256", ""), "Tożsamość archiwum powiązanego z weryfikacją."),
             ])
             return
@@ -2710,8 +3036,17 @@ class MobileReportBrowser:
 
     def _populate_diagnostics(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
         rows: list[tuple[str, str, str]] = []
-        for field, value, extra in _flatten_rows(report.errors, prefix="errors", limit=24):
-            rows.append((field, value, extra))
+        errors = dict(report.errors or {})
+        historical_crash = crash_description(errors)
+        for field, value, extra in _flatten_rows(errors, prefix="errors", limit=24):
+            if historical_crash and field == "errors.crash_count":
+                rows.append((historical_crash[0], value,
+                             "Odzyskane poprzednie, niekontrolowane pomiary. Nie jest to liczba awarii wybranego eksperymentu."))
+            elif historical_crash and field == "errors.crash_semantics":
+                rows.append(("Znaczenie licznika odzyskania", "Poprzednie sesje",
+                             "Ta informacja jest metadanymi historii uruchomień. Nie przypisuj jej bieżącej sesji."))
+            else:
+                rows.append((field, value, extra))
         counters = _nested_value(report.raw, "summary.counters")
         for field, value, extra in _flatten_rows(counters, prefix="counters", limit=28):
             rows.append((field, value, extra))
@@ -2727,8 +3062,10 @@ class MobileReportBrowser:
         )
 
     def _populate_crops(self, report: MobileBenchmarkReport, bundle: MobileReportBundle | None) -> None:
-        """List real samples and resolve only image entries present in verified ZIP."""
+        """Display verified *Desktop* review without rewriting Android history."""
         rows: list[tuple[str, str, str, str, str, str, str]] = []
+        selected = self.crops_table.tree.selection()
+        selected_id = str(selected[0]) if selected else ""
         self._crop_entry_rows = []
         self._crop_photo = None
         self.crop_image_label.configure(image="")
@@ -2736,29 +3073,58 @@ class MobileReportBrowser:
             self.crop_preview_var.set("Połącz oryginalne archiwum, aby zobaczyć wycięte tablice.")
             rows.append(("—", "—", "—", "—", "—", "—", "Podłącz oryginalne archiwum"))
         else:
+            key = self._science_cache_key(report, bundle)
+            science = self._science_cache.get(key, {})
+            overlay = science.get("_ui_desktop_samples", {}) if isinstance(science, dict) else {}
+            state = overlay.get("state") if isinstance(overlay, dict) else None
+            preview = overlay.get("samples", {}) if state == "current" else {}
             entry_names = {str(e.name) for e in bundle.entries}
             for row in bundle.sample_rows[:500]:
                 entry = crop_entry_for_row(row, entry_names)
+                capture_id = str(row.get("capture_id") or row.get("sample_id") or row.get("id") or "")
+                decision = preview.get(capture_id) if isinstance(preview, dict) else None
+                if isinstance(decision, dict):
+                    status, gt = decision["status"], decision["gt"] or "—"
+                elif state == "not_started":
+                    status, gt = "Nie rozpoczęto w Desktop", "—"
+                elif state == "error":
+                    status, gt = "Weryfikacja wymaga sprawdzenia", "—"
+                elif state == "current":
+                    status, gt = "Brak powiązania weryfikacji", "—"
+                elif key in self._science_error_by_key:
+                    status, gt = "Nie można odczytać weryfikacji", "—"
+                else:
+                    status, gt = "Wczytuję weryfikację Desktop…", "—"
                 rows.append((
-                    row.get("capture_id") or row.get("id") or "—",
-                    row.get("track_id") or "—",
-                    row.get("verification_status") or row.get("status") or "—",
-                    row.get("prediction") or row.get("text") or "—",
-                    row.get("ground_truth") or row.get("ground_truth_text") or "—",
+                    capture_id or "—", row.get("track_id") or "—", status,
+                    row.get("prediction") or row.get("text") or "—", gt,
                     row.get("captured_at_ms") or row.get("timestamp_ms") or "—",
                     "Obraz dostępny" if entry else "Brak obrazu",
                 ))
                 self._crop_entry_rows.append(entry)
             if not rows:
-                for entry in sorted(e for e in entry_names if e.startswith("samples/crops/") and e.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))[:500]:
-                    rows.append((Path(entry).stem, "—", "—", "—", "—", "—", "Obraz dostępny"))
+                for entry in sorted(e for e in entry_names if e.startswith("samples/crops/")
+                                    and e.lower().endswith((".jpg", ".jpeg", ".png", ".webp")))[:500]:
+                    rows.append((Path(entry).stem, "—", "Brak identyfikatora GT", "—", "—", "—", "Obraz dostępny"))
                     self._crop_entry_rows.append(entry)
             if rows:
-                self.crop_preview_var.set("Wybierz wyciętą tablicę na liście, aby zobaczyć jej obraz.")
+                if state == "error":
+                    self.crop_preview_var.set("Nie można powiązać weryfikacji Desktop: " + str(overlay.get("error") or "błąd weryfikacji")[:180])
+                elif key in self._science_error_by_key:
+                    self.crop_preview_var.set("Nie można odczytać weryfikacji Desktop: " + self._science_error_by_key[key][:180])
+                elif state == "not_started":
+                    self.crop_preview_var.set("Brak zapisanej weryfikacji Desktop. Oryginalny status Androida pozostaje w archiwum.")
+                elif state != "current":
+                    self.crop_preview_var.set("Trwa odczyt weryfikacji Desktop…")
+                else:
+                    self.crop_preview_var.set("Status i GT: weryfikacja Desktop • obraz oraz odczyt: niezmienne archiwum Androida.")
             else:
                 self.crop_preview_var.set("W zweryfikowanym archiwum nie znaleziono wyciętych tablic.")
                 rows.append(("—", "—", "—", "—", "—", "—", "Brak wyciętych tablic"))
         self.crops_table.set_rows(rows)
+        if selected_id and bundle is not None and selected_id in self.crops_table.tree.get_children(""):
+            self.crops_table.tree.selection_set(selected_id)
+            self._on_crop_selected()
 
     def _on_crop_selected(self, _event=None) -> None:
         """Render selected image from the archive, bounded by the shared reader."""
@@ -2817,71 +3183,336 @@ class MobileReportBrowser:
         except Exception:
             pass
 
+    def _on_latency_connections_change(self) -> None:
+        """Toggle line segments ONLY; never reset zoom, pan, axes or data."""
+        self._draw_latency_chart()
+
+    def _on_latency_axis_mode_change(self) -> None:
+        # Only an EXPLICIT coordinate-system change can reset the x zoom.
+        # The connect/disconnect checkbox does not touch this state.
+        self._latency_x_view = None
+        self._latency_pan_origin = None
+        self._latency_hit_points = []
+        self._draw_latency_chart()
+
+    def _clear_latency_point_hover(self, _event=None):
+        context_label = getattr(self, '_latency_context_var', None)
+        if context_label is not None:
+            baseline = getattr(self, '_latency_hover_baseline', '')
+            if context_label.get() != baseline:
+                context_label.set(baseline)
+
+    def _on_latency_point_hover(self, event):
+        candidates = getattr(self, '_latency_hit_points', [])
+        if not candidates:
+            return
+        x, y = float(event.x), float(event.y)
+        nearest = min(candidates, key=lambda item: (item[0] - x)**2 + (item[1] - y)**2)
+        if (nearest[0] - x)**2 + (nearest[1] - y)**2 > 12**2:
+            self._clear_latency_point_hover()
+            return
+        _, _, index, key, value = nearest
+        bundle = getattr(self, 'current_bundle', None)
+        if bundle is None or index >= len(bundle.trace_rows):
+            return
+        stamps = getattr(self, '_latency_time_seconds', None)
+        offset = stamps[index] if stamps is not None and index < len(stamps) else None
+        title = STAGE_DESCRIPTIONS.get(key, str(key))
+        label = point_caption(bundle.trace_rows[index], offset, title, value,
+                              getattr(self, '_latency_time_context', {}))
+        context_label = getattr(self, '_latency_context_var', None)
+        if context_label is not None and context_label.get() != label:
+            context_label.set(label)
+
+    def _zoom_latency_wheel(self, event):
+        """Mouse wheel scales the X axis around the cursor, not the original data."""
+        full = self._latency_full_x
+        if full is None or full[1] <= full[0]:
+            return "break"
+        number = getattr(event, "num", None)
+        delta = getattr(event, "delta", 0)
+        inward = number == 4 or (number not in (4, 5) and delta > 0)
+        outward = number == 5 or (number not in (4, 5) and delta < 0)
+        if not (inward or outward):
+            return "break"
+        plot_width = max(1, int(self.latency_canvas.winfo_width()) - 68)
+        fraction = (float(event.x) - 50.0) / plot_width
+        self._latency_x_view = zoom_x_view(
+            full, self._latency_x_view, fraction, zoom_in=inward,
+            integer_axis=getattr(self, "_latency_axis_label", "") == "ID klatki")
+        self._latency_pan_origin = None
+        self._draw_latency_chart()
+        return "break"
+
+    def _begin_latency_pan(self, event):
+        self._latency_pan_origin = (float(event.x), self._latency_x_view) if self._latency_x_view is not None else None
+
+    def _move_latency_pan(self, event):
+        if self._latency_pan_origin is None or self._latency_full_x is None:
+            return
+        initial_x, initial_view = self._latency_pan_origin
+        plot_width = max(1, int(self.latency_canvas.winfo_width()) - 68)
+        self._latency_x_view = pan_x_view(self._latency_full_x, initial_view,
+                                           float(event.x) - initial_x, plot_width)
+        self._draw_latency_chart()
+        return "break"
+
+    def _end_latency_pan(self, _event):
+        self._latency_pan_origin = None
+
+    def _reset_latency_zoom(self, _event=None):
+        self._latency_x_view = None
+        self._latency_pan_origin = None
+        self._draw_latency_chart()
+        return "break"
+
     def _draw_latency_chart(self) -> None:
+        """Scientific per-frame plot: labeled X axis and lossless visible extrema.
+
+        For short sessions every measured point is shown, using the real frame
+        ID (or the honest timestamp/sample-number fallback). Long sessions
+        use pixel-column min/max envelopes, never stride-skipping spikes.
+        """
         canvas = getattr(self, "latency_canvas", None)
         if canvas is None:
             return
         try:
             width = max(320, int(canvas.winfo_width() or 760))
             height = max(150, int(canvas.winfo_height() or 180))
+            self._latency_hit_points = []
             canvas.delete("all")
             canvas.create_rectangle(0, 0, width, height, fill=self.panel, outline=self.border)
+            footer = getattr(self, "_latency_axis_footer_var", None)
             bundle = self.current_bundle
-            if not bundle or not bundle.trace_rows:
-                canvas.create_text(
-                    width / 2,
-                    height / 2,
-                    text=("Połącz oryginalne archiwum, aby zobaczyć czasy kolejnych klatek."
-                          if bundle is None else "Archiwum nie zawiera szczegółowych pomiarów czasu."),
-                    fill=self.muted,
-                    font=("Segoe UI", 10, "bold"),
-                )
+            if bundle is None or not bundle.trace_rows:
+                self._latency_hit_points = []
+                self._latency_time_seconds = None
+                self._latency_hover_baseline = ''
+                clock_radio = getattr(self, '_latency_time_axis_radio', None)
+                if clock_radio is not None:
+                    clock_radio.configure(state='disabled')
+                context_label = getattr(self, '_latency_context_var', None)
+                if context_label is not None:
+                    context_label.set('')
+                if footer is not None:
+                    footer.set("")
+                canvas.create_text(width / 2, height / 2,
+                                   text=("Połącz oryginalne archiwum, aby zobaczyć czasy klatek."
+                                         if bundle is None else "W archiwum nie ma szczegółowego śladu czasu."),
+                                   fill=self.muted, font=("Segoe UI", 10, "bold"))
                 return
-            series_specs = (
-                ("total_ms", "pipeline", self.accent),
-                ("plate_inference_ms", "MT", self.warning),
-                ("character_inference_ms", "MZ", self.success),
-                ("vehicle_inference_ms", "MP", "#2fffe6"),
-            )
-            series: list[tuple[str, list[float], str]] = []
-            max_value = 0.0
-            for column, label, color in series_specs:
-                values = [_safe_float(row.get(column), None) for row in bundle.trace_rows]
-                values = [float(value) for value in values if value is not None]
-                if not values:
-                    continue
-                series.append((label, values, color))
-                max_value = max(max_value, max(values))
-            if not series:
-                canvas.create_text(width / 2, height / 2, text="W traces.csv nie znaleziono kolumn *_ms.", fill=self.muted)
+            # Distinct, constant scientific colors and marker shapes are
+            # independent of the rest of the olive application theme.
+            specs = tuple((key, style) for key, style in LATENCY_SERIES_STYLES.items())
+            timeline = timeline_stages(bundle.trace_rows, tuple(item[0] for item in specs))
+            context = session_time_context(bundle, getattr(self, 'current_report', None))
+            stamps = session_elapsed_seconds(bundle.trace_rows, context)
+            self._latency_time_context = context
+            self._latency_time_seconds = stamps
+            caption = session_caption(context)
+            self._latency_hover_baseline = caption
+            label = getattr(self, '_latency_context_var', None)
+            if label is not None and label.get() != caption:
+                label.set(caption)
+            radio = getattr(self, '_latency_time_axis_radio', None)
+            if radio is not None:
+                radio.configure(state='normal' if stamps is not None else 'disabled')
+            if stamps is None:
+                axis_choice = getattr(self, '_latency_axis_mode_var', None)
+                if axis_choice is not None and axis_choice.get() == 'time':
+                    axis_choice.set('frame')
+            xs = timeline["x"]
+            stage_values = timeline["stages"]
+            mp_off = stage_enabled(getattr(self, "current_report", None), "mp") is False
+            present = [(key, style, stage_values[key]) for key, style in specs
+                       if (key != "vehicle_inference_ms" or not mp_off)
+                       and any(value is not None for value in stage_values[key])]
+            if not present:
+                if footer is not None:
+                    footer.set("")
+                canvas.create_text(width / 2, height / 2,
+                                   text="W archiwum nie ma czasów poszczególnych etapów.",
+                                   fill=self.muted, font=("Segoe UI", 10))
                 return
-            pad_l, pad_r, pad_t, pad_b = 42, 18, 22, 28
+            max_y = max(1.0, max(value for _, _, seq in present for value in seq if value is not None))
+            # Sparse frame-ID series use categorical positions automatically.
+            # Display X mapping and zoom are independent of line visibility.
+            # Source frame IDs remain intact and visible as axis tick labels.
+            use_even_spacing = has_sparse_frame_gap(xs, timeline["axis_label"])
+            connections = getattr(self, "_latency_connect_neighbors_var", None)
+            # Adjacency is ALWAYS checked against original frame IDs, even
+            # when points are arranged by actual elapsed session time.
+            connect_consecutive = (bool(connections.get()) if connections is not None else True) and (timeline["axis_label"] == "ID klatki")
+            mode_var = getattr(self, '_latency_axis_mode_var', None)
+            prefer_time = mode_var is not None and mode_var.get() == 'time'
+            time_axis = prefer_time and stamps is not None
+            effective_mode = 'time' if time_axis else 'frame'
+            previous_mode = getattr(self, '_latency_effective_mode', None)
+            if previous_mode is not None and previous_mode != effective_mode:
+                self._latency_x_view = None
+                self._latency_pan_origin = None
+            self._latency_effective_mode = effective_mode
+            if time_axis:
+                plot_xs = tuple(stamps)
+                source_min_x, source_max_x = 0.0, max(stamps[-1], context['duration_ms'] / 1000.0)
+                self._latency_axis_label = 'Czas sesji [s]'
+            else:
+                plot_xs = display_positions(xs, even_spacing=use_even_spacing)
+                source_min_x, source_max_x = min(plot_xs), max(plot_xs)
+                self._latency_axis_label = timeline['axis_label']
+            self._latency_full_x = (source_min_x, source_max_x)
+            self._latency_display_even_spacing = use_even_spacing and not time_axis
+            self._latency_x_view = clamp_x_view(self._latency_full_x, self._latency_x_view)
+            min_x, max_x = self._latency_x_view or self._latency_full_x
+            span_x = max_x - min_x
+            # Z4MOBREP036: full scientific series names need their own space.
+            # The legend and gesture instructions are two separate rows;
+            # no legend label may share a pixel row with the right-aligned hint.
+            # For narrow panes, wrap the legend into two or three rows instead
+            # of drawing several texts on top of one another.
+            pad_l, pad_r, pad_b = 50, 18, 46
             plot_w = max(1, width - pad_l - pad_r)
+            legend_cols = 3 if plot_w >= 1000 else 2 if plot_w >= 580 else 1
+            legend_rows = max(1, (len(present) + legend_cols - 1) // legend_cols)
+            legend_row_height = 20
+            legend_first_y = 13
+            hint_y = legend_first_y + legend_rows * legend_row_height + 2
+            pad_t = hint_y + 20
             plot_h = max(1, height - pad_t - pad_b)
-            max_value = max(1.0, max_value)
-            for index in range(5):
-                y = pad_t + plot_h * index / 4.0
-                value = max_value * (1.0 - index / 4.0)
-                canvas.create_line(pad_l, y, width - pad_r, y, fill=blend_hex_colors(self.panel, self.fg, 0.12))
-                canvas.create_text(8, y, text=f"{value:.0f}", fill=self.muted, font=("Segoe UI", 7), anchor=tk.W)
-            canvas.create_text(pad_l, height - 13, text="klatki", fill=self.muted, font=("Segoe UI", 8), anchor=tk.W)
-            canvas.create_text(8, 10, text="ms", fill=self.muted, font=("Segoe UI", 8), anchor=tk.W)
-            for s_index, (label, values, color) in enumerate(series):
-                step = max(1, int(len(values) / max(1, plot_w)))
-                sampled = values[::step]
-                if len(sampled) < 2:
-                    continue
-                points: list[float] = []
-                for idx, value in enumerate(sampled):
-                    x = pad_l + (plot_w * idx / max(1, len(sampled) - 1))
-                    y = pad_t + plot_h - (plot_h * max(0.0, min(max_value, value)) / max_value)
-                    points.extend([x, y])
-                canvas.create_line(*points, fill=color, width=2, smooth=True)
-                lx = width - pad_r - 240 + s_index * 58
-                canvas.create_rectangle(lx, 7, lx + 10, 17, fill=color, outline="")
-                canvas.create_text(lx + 14, 12, text=label, fill=self.fg, font=("Segoe UI", 8), anchor=tk.W)
+
+            def draw_x(source_x: float) -> float:
+                return pad_l + plot_w * ((source_x - min_x) / span_x if span_x > 0 else 0.5)
+
+            def draw_y(value: float) -> float:
+                return pad_t + plot_h * (1.0 - value / max_y)
+
+            for tick in range(5):
+                fraction = tick / 4.0
+                y = pad_t + plot_h * fraction
+                canvas.create_line(pad_l, y, width - pad_r, y,
+                                   fill=blend_hex_colors(self.panel, self.fg, 0.12))
+                canvas.create_text(7, y, text=f"{max_y * (1.0 - fraction):.0f}",
+                                   fill=self.muted, font=("Segoe UI", 7), anchor=tk.W)
+            canvas.create_text(7, 10, text="ms", fill=self.muted, font=("Segoe UI", 8), anchor=tk.W)
+
+            # X labels scale with available pixels; short sessions show real
+            # measured IDs, longer sessions show a sparse numeric ruler.
+            if time_axis:
+                marks = time_ticks(min_x, max_x, max_labels=(6 if plot_w >= 700 else 4))
+            elif use_even_spacing:
+                # Each tick is attached to an actually measured sample, and
+                # prints its original frame ID instead of the display index.
+                marks = source_id_ticks(xs, min_x, max_x, plot_w)
+            else:
+                marks = (axis_ticks((min_x, max_x), plot_w, timeline["axis_label"])
+                         if self._latency_x_view is not None else axis_ticks(xs, plot_w, timeline["axis_label"]))
+            for index, (tick_value, label) in enumerate(marks):
+                x = draw_x(tick_value)
+                canvas.create_line(x, pad_t, x, pad_t + plot_h,
+                                   fill=blend_hex_colors(self.panel, self.fg, 0.075))
+                canvas.create_line(x, pad_t + plot_h, x, pad_t + plot_h + 5,
+                                   fill=blend_hex_colors(self.panel, self.fg, 0.30), width=1)
+                align = (tk.W if index == 0 else tk.E if index == len(marks) - 1 else tk.CENTER)
+                canvas.create_text(x, pad_t + plot_h + 17, text=label,
+                                   fill=self.muted, font=("Segoe UI", 8), anchor=align)
+            if time_axis:
+                axis_caption = ('Oś X: czas od startu sesji · chwila zapisu pomiaru, '
+                                'nie moment ekspozycji kamery'
+                                + (' · linie: sąsiednie ID klatek' if connect_consecutive else ''))
+            elif use_even_spacing:
+                axis_caption = ("Oś X: ID klatki z pomiarem czasu · punkty w równych odstępach "
+                                "(nie jest to oś czasu)")
+            elif timeline["axis_label"] == "ID klatki":
+                axis_caption = "Oś X: ID klatki z pomiarem czasu · odstępy według numerów klatek"
+            else:
+                axis_caption = f"Oś X: {timeline['axis_label']}"
+            footer_notes = [axis_caption]
+
+            # No sampling at 100 frames. For >350 real trace rows, plot every
+            # screen-column's measured min/max instead of silently dropping
+            # spikes with stride sampling. The source values remain unmodified.
+            left_hidden, visible_count, right_hidden = viewport_counts(plot_xs, min_x, max_x)
+            dense = visible_count > 350
+            picked_points = []
+            for series_index, (key, style, values) in enumerate(present):
+                measured = sum(value is not None for value in values)
+                measured_visible = sum(value is not None and min_x <= x <= max_x
+                                       for x, value in zip(plot_xs, values))
+                # Each series has an exclusive column and row. The layout
+                # changes with pane width; neither data nor zoom state does.
+                legend_col = series_index % legend_cols
+                legend_row = series_index // legend_cols
+                legend_column_width = plot_w / legend_cols
+                legend_x = pad_l + legend_col * legend_column_width
+                legend_y = legend_first_y + legend_row * legend_row_height
+                # The legend reflects the same line-only toggle as the plot.
+                if connect_consecutive and not dense:
+                    canvas.create_line(legend_x, legend_y, legend_x + 11, legend_y,
+                                       fill=style.color, width=style.line_width)
+                draw_chart_marker(canvas, legend_x + 5.5, legend_y, style, radius=4.0,
+                                  background=self.panel)
+                legend_name = (STAGE_DESCRIPTIONS if legend_column_width >= 280 else STAGE_SHORT).get(key, style.label)
+                canvas.create_text(legend_x + 15, legend_y, text=(f"{legend_name} ({measured_visible}/{measured})"
+                                         if measured_visible != measured else f"{legend_name} (n={measured})"),
+                                   fill=self.fg, font=("Segoe UI", 8), anchor=tk.W)
+                if dense:
+                    # Dense view: a vertical min-max range is NOT one sample.
+                    if self._latency_x_view is None:
+                        bins = pixel_column_extrema(plot_xs, values, min_x, max_x, plot_w)
+                    else:
+                        sub_x, sub_v = visible_xy(plot_xs, values, min_x, max_x)
+                        bins = pixel_column_extrema(sub_x, sub_v, min_x, max_x, plot_w)
+                    for col, low, high, count in bins:
+                        px = pad_l + col
+                        if low < high:
+                            canvas.create_line(px, draw_y(low), px, draw_y(high),
+                                               fill=style.color, width=max(1.5, style.line_width * 0.75))
+                        else:
+                            draw_chart_marker(canvas, px, draw_y(low), style,
+                                              radius=2.1, background=self.panel)
+                else:
+                    if connect_consecutive:
+                        for i, j in continuous_segments(values, xs, require_consecutive=True):
+                            if not (min_x <= plot_xs[i] <= max_x and min_x <= plot_xs[j] <= max_x):
+                                continue
+                            canvas.create_line(draw_x(plot_xs[i]), draw_y(values[i]),
+                                               draw_x(plot_xs[j]), draw_y(values[j]),
+                                               fill=style.color, width=style.line_width, smooth=False)
+                    for i, value in enumerate(values):
+                        if value is None or not min_x <= plot_xs[i] <= max_x:
+                            continue
+                        point_x, point_y = draw_x(plot_xs[i]), draw_y(value)
+                        draw_chart_marker(canvas, point_x, point_y, style,
+                                          radius=3.3, background=self.panel)
+                        picked_points.append((point_x, point_y, i, key, value))
+            self._latency_hit_points = picked_points
+            if dense and plot_w >= 450:
+                footer_notes.append("Zagęszczony widok: zakres min–max na kolumnę")
+            # Guidance is below all legend rows, never behind MZ label.
+            hint = ("Rolka: oś X  ·  przeciągnij: przesuń  ·  dwuklik: reset"
+                    if plot_w >= 470 else "Rolka: zoom  ·  przesuń myszą  ·  dwuklik: reset")
+            canvas.create_text(width - pad_r, hint_y, text=hint,
+                               fill=self.muted, font=("Segoe UI", 8), anchor=tk.E)
+            if self._latency_x_view is not None and plot_w > 350:
+                # Explain which *measured* points the zoom hides; do not show a
+                # misleading numeric frame span for a categorical axis.
+                if use_even_spacing or time_axis:
+                    zoom_note = f"Widoczne pomiary: {visible_count}/{len(xs)} · poza: ◀{left_hidden}  ▶{right_hidden}"
+                else:
+                    zoom_note = (f"ID {min_x:.1f}–{max_x:.1f} · {visible_count}/{len(xs)} pomiarów"
+                                 f" · poza: ◀{left_hidden}  ▶{right_hidden}")
+                footer_notes.append(zoom_note)
+            if footer is not None:
+                footer.set("   |   ".join(footer_notes))
         except Exception:
-            pass
+            logger.exception("Nie udało się wyświetlić śladu czasów ALPR")
+            try:
+                canvas.delete("all")
+                canvas.create_text(canvas.winfo_width() / 2, canvas.winfo_height() / 2,
+                                   text="Nie można wyświetlić wykresu — sprawdź szczegóły diagnostyczne.",
+                                   fill=self.muted)
+            except Exception:
+                pass
 
 
 def open_mobile_report_browser(owner, parent=None):

@@ -473,7 +473,7 @@ class MobileReviewSession:
             self.samples[key].get("image_entry") in self.entry_names
             for key in self.sample_ids_by_attempt.get(row["id"], ()))
 
-    def subject_completion_issues(self, key: str) -> list[str]:
+    def _legacy_subject_completion_issues(self, key: str) -> list[str]:
         issues = []
         subject = self.subjects[key]
         rows = [self.samples[k] for k in subject["samples"]] + [self.attempts[k] for k in subject["attempts"]]
@@ -488,18 +488,36 @@ class MobileReviewSession:
             issues.extend(self.invocation_completion_issues(invocation))
         return issues
 
+    def subject_completion_issues(self, key: str) -> list[str]:
+        # Preserve the historical completion protocol for already-closed
+        # legacy reviews. New versions use the independent visual MT gate.
+        if (self.review.review_status == "COMPLETED" and
+                self.review.provenance.get("verification_policy") != "mobile_visual_mt_v1"):
+            return self._legacy_subject_completion_issues(key)
+        from .mobile_verification_policy import subject_verification_issues
+        return subject_verification_issues(self, key)
+
     def completion_issues(self) -> list[str]:
         if not self.subjects:
             return ["Sesja nie zawiera próbek ani prób do weryfikacji."]
         return list(dict.fromkeys(issue for key in self.subjects for issue in self.subject_completion_issues(key)))
 
     def complete(self) -> None:
-        issues = self.completion_issues()
+        from .mobile_verification_policy import verification_issues
+        from .mobile_verification_snapshot import create_ready_snapshot
+        issues = verification_issues(self)
         if issues:
-            raise ValueError(f"Pozostałe decyzje: {len(issues)}. {issues[0]}")
-        changed = copy.deepcopy(self.review)
-        changed.review_status = "COMPLETED"
-        self._save_change(changed)
+            raise ValueError(f"Pozostałe decyzje weryfikacji: {len(issues)}. {issues[0]}")
+        self.verify_source(force=True)
+        if self.review.review_status != "COMPLETED":
+            changed = copy.deepcopy(self.review)
+            changed.review_status = "COMPLETED"
+            changed.provenance = dict(changed.provenance or {})
+            changed.provenance["verification_policy"] = "mobile_visual_mt_v1"
+            self._save_change(changed)
+        # The immutable, SHA-bound snapshot is the material for subsequent
+        # scientific evaluation. It never changes the source archive or GT.
+        self.ready_for_evaluation_manifest = create_ready_snapshot(self)
 
     def statistics(self) -> dict:
         return calculate_review_statistics(self)
@@ -554,6 +572,12 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
     summary.update(subject_count=len(session.subjects), attempt_count=len(session.attempts), crop_count=len(session.samples))
     for key, subject in session.subjects.items():
         decision = review.subjects.get(key, {})
+        # multi_plate_scientific_guard_v1: never reuse one legacy subject GT
+        # as ground truth for several distinct physical plates.
+        from .mobile_multi_plate_verification import is_multi
+        if any(is_multi(session, session.invocation_by_attempt.get(aid, ""))
+               for aid in subject.get("attempts", ())):
+            decision = dict(decision, ground_truth="", evaluable=False)
         gt = normalize_registration(decision.get("ground_truth"))
         all_rows = [session.samples[k] for k in subject["samples"]] + [session.attempts[k] for k in subject["attempts"]]
         all_cancelled = all(session.cancelled(row) for row in all_rows)

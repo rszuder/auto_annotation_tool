@@ -139,7 +139,10 @@ def test_browser_has_split_filter_and_source_distinction():
     source = path.read_text(encoding="utf-8")
     assert "Z4MOBREP012_READABLE_MOBILE_REPORTS" in source
     assert "tk.PanedWindow" in source
-    assert '"Wyszukaj sesję"' in source
+    # Search is verified by the widget and live filtering, not a cosmetic label.
+    assert "self.search_entry.grid(" in source
+    assert 'self.search_var.trace_add("write"' in source
+    assert "matches_report_filter(r, query" in source
     assert '"GT z telefonu"' in source
     assert "_apply_report_filter" in source
     assert "_show_validation_details" in source

@@ -1,0 +1,288 @@
+"""Z4MOBREV031: accessible scrollable Tk dashboard over canonical ALPR results.
+
+Only presentation: there are no writes to sessions, GT, metrics or sidecars.
+"""
+from __future__ import annotations
+
+import tkinter as tk
+from tkinter import ttk
+from typing import Callable
+
+from .mobile_science_viewmodel import STATUS_DISPLAY, make_science_dashboard
+
+
+class MobileScienceSummaryPanel:
+    """One scroll area (including the table) to avoid nested wheel scrolling."""
+
+    def __init__(self, parent, *, background: str, surface: str, foreground: str,
+                 muted: str, accent: str, border: str,
+                 on_review: Callable[[], None] | None = None):
+        self.background, self.surface = background, surface
+        self.foreground, self.muted = foreground, muted
+        self.accent, self.border = accent, border
+        self.on_review = on_review
+        self.model = None
+        self._sections_open = {"why": False, "caveats": False,
+                               "methods": False, "source": False}
+        self.frame = tk.Frame(parent, bg=background)
+        self.frame.columnconfigure(0, weight=1)
+        self.frame.rowconfigure(0, weight=1)
+        self.canvas = tk.Canvas(self.frame, bg=background, bd=0, highlightthickness=0,
+                                takefocus=True)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.canvas.yview)
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.body = tk.Frame(self.canvas, bg=background)
+        self.item = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
+        self.canvas.bind("<Configure>", self._fit_body_width, add="+")
+        self.body.bind("<Configure>", self._refresh_scroll_region, add="+")
+        self._bind_wheel(self.canvas)
+        self._bind_wheel(self.body)
+        for key, amount in (("<Up>", -1), ("<Down>", 1),
+                            ("<Prior>", -8), ("<Next>", 8)):
+            self.canvas.bind(key, lambda _event, step=amount: self.canvas.yview_scroll(step, "units"), add="+")
+        self.tree = None
+        self._style_name = "MobileScience031.Treeview"
+        try:
+            style = ttk.Style(parent)
+            style.configure(self._style_name, rowheight=29,
+                            font=("Segoe UI", 9), background=surface,
+                            foreground=foreground, fieldbackground=surface)
+            style.configure(self._style_name + ".Heading", font=("Segoe UI", 9, "bold"))
+            style.map(self._style_name, background=[("selected", "#DDEBF5")],
+                      foreground=[("selected", "#17354C")])
+        except tk.TclError:
+            pass
+
+    def _fit_body_width(self, event=None):
+        width = self.canvas.winfo_width() if event is None else event.width
+        if width > 1:
+            self.canvas.itemconfigure(self.item, width=width)
+        self._refresh_scroll_region()
+
+    def _refresh_scroll_region(self, _event=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _bind_wheel(self, widget):
+        widget.bind("<MouseWheel>", self._wheel, add="+")
+        widget.bind("<Button-4>", self._wheel, add="+")
+        widget.bind("<Button-5>", self._wheel, add="+")
+
+    def _wheel(self, event):
+        direction = (-1 if getattr(event, "num", None) == 4 else
+                     1 if getattr(event, "num", None) == 5 else
+                     -1 if int(getattr(event, "delta", 0) or 0) > 0 else 1)
+        if getattr(event, "delta", None) == 0 and getattr(event, "num", None) not in (4, 5):
+            return None
+        self.canvas.yview_scroll(direction * 3, "units")
+        return "break"
+
+    def _bind_descendants(self, root):
+        for child in root.winfo_children():
+            self._bind_wheel(child)
+            self._bind_descendants(child)
+
+    def _text(self, parent, text: str, *, size=10, bold=False, muted=False, bg=None,
+              wrap=800, padx=0, pady=0, anchor="w"):
+        w = tk.Label(parent, text=text, bg=bg or self.background,
+                     fg=self.muted if muted else self.foreground,
+                     font=("Segoe UI", size, "bold" if bold else "normal"),
+                     justify="left", anchor=anchor, wraplength=wrap, padx=padx, pady=pady)
+        return w
+
+    def _section_title(self, text):
+        w = self._text(self.body, text, size=10, bold=True, padx=0)
+        w.pack(fill="x", padx=18, pady=(13, 5))
+        return w
+
+    def _card(self, host, card: dict, row: int, col: int):
+        box = tk.Frame(host, bg=self.surface, highlightbackground=self.border,
+                       highlightthickness=1, padx=11, pady=9)
+        box.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
+        self._text(box, card["heading"], bold=True, size=10, bg=self.surface,
+                   wrap=370).pack(fill="x")
+        self._text(box, card["value"], size=14, bold=True, bg=self.surface,
+                   wrap=370).pack(fill="x", pady=(6, 2))
+        label = card["reason"]
+        self._text(box, label, size=9, muted=True, bg=self.surface, wrap=370).pack(fill="x")
+        return box
+
+    def _table(self, model):
+        rows = model["rows"]
+        columns = ("group", "metric", "value", "sample", "status", "reason")
+        heading = ("Obszar", "Miara", "Wynik", "Próba", "Stan", "Wyjaśnienie")
+        wrapper = tk.Frame(self.body, bg=self.background)
+        wrapper.pack(fill="x", padx=18)
+        self.tree = ttk.Treeview(wrapper, columns=columns, show="headings",
+                                 selectmode="browse", style=self._style_name,
+                                 height=max(1, len(rows)), takefocus=True)
+        self.tree.pack(fill="x")
+        for key, name in zip(columns, heading):
+            self.tree.heading(key, text=name, anchor="w")
+        palette = {
+            "AVAILABLE": ("#E8F2E9", "#214B2A"),
+            "PRELIMINARY": ("#F9F0DA", "#5F4B21"),
+            "DIAGNOSTIC": ("#E7EEF4", "#264865"),
+            "MISSING": ("#F1F3F4", "#4C5961"),
+            "NOT_EVALUABLE": ("#F5E9E9", "#703C3C"),
+            "SOURCE_UNVERIFIED": ("#F5E9E9", "#703C3C"),
+            "NOT_RUN": ("#F1F3F4", "#4C5961"),
+            "INVALID": ("#F5E9E9", "#703C3C"),
+        }
+        for status, (bg, fg) in palette.items():
+            self.tree.tag_configure(status, background=bg, foreground=fg)
+        for entry in rows:
+            if entry.status == "SOURCE_UNVERIFIED":
+                sample = "—"
+            elif entry.denominator:
+                sample = f"{entry.denominator} · {entry.unit}"
+            elif entry.metric_id in {"pose_iou", "pose_nmce"}:
+                sample = "0 par GT"
+            elif entry.metric_id == "mz_cer" and entry.denominator is not None:
+                sample = f"{entry.denominator} znaków GT"
+            else:
+                sample = "—"
+            self.tree.insert("", "end", iid=entry.metric_id, tags=(entry.status,),
+                             values=(entry.group, entry.label, entry.formatted_value,
+                                     sample, STATUS_DISPLAY.get(entry.status, entry.status),
+                                     entry.reason))
+        self._size_columns()
+        wrapper.bind("<Configure>", lambda _e: self._size_columns(), add="+")
+        explanation = self._text(wrapper, "Kliknij wiersz, aby zobaczyć pełne wyjaśnienie.",
+                                 size=9, muted=True, wrap=980)
+        explanation.pack(fill="x", pady=(4, 2))
+        index = {entry.metric_id: entry for entry in rows}
+        def select(_event=None):
+            selected = self.tree.selection()
+            if not selected:
+                return
+            entry = index.get(selected[0])
+            if entry is not None:
+                explanation.configure(text=f"{entry.label}: {entry.reason}  •  Źródło: {entry.source_path}")
+        self.tree.bind("<<TreeviewSelect>>", select, add="+")
+        self._table_description = explanation
+
+    def _size_columns(self):
+        if not self.tree or not self.tree.winfo_exists():
+            return
+        width = self.tree.winfo_width()
+        if width <= 1:
+            width = self.canvas.winfo_width() - 45
+        if width <= 1:
+            width = 1080
+        shares = (("group", .075, 64), ("metric", .195, 140), ("value", .120, 110),
+                  ("sample", .180, 140), ("status", .165, 130), ("reason", .265, 200))
+        total = max(735, width - 10)
+        for column, weight, minimum in shares:
+            self.tree.column(column, width=max(minimum, int(total * weight)),
+                             minwidth=minimum, stretch=True, anchor="w")
+
+    def _progress(self, host, item, col: int):
+        cell = tk.Frame(host, bg=self.surface, padx=10, pady=8,
+                        highlightthickness=1, highlightbackground=self.border)
+        cell.grid(row=0, column=col, sticky="nsew", padx=4)
+        heading = tk.Frame(cell, bg=self.surface)
+        heading.pack(fill="x")
+        self._text(heading, item["label"], size=9, bold=True,
+                   bg=self.surface, wrap=440).pack(side="left", anchor="w")
+        self._text(heading, item["text"], size=9, bg=self.surface).pack(side="right", anchor="e")
+        track = tk.Canvas(cell, bg=self.surface, height=13, bd=0, highlightthickness=0)
+        track.pack(fill="x", pady=(5, 2))
+        ratio = (max(0, min(1, item["done"] / item["total"]))
+                 if item["done"] is not None and item["total"] else 0.0)
+        def draw(event):
+            track.delete("all")
+            width = max(1, event.width)
+            track.create_rectangle(0, 0, width, 11, outline=self.border, fill="#E5E9EB")
+            if ratio > 0:
+                track.create_rectangle(1, 1, width * ratio, 10, outline="", fill="#4B8B73")
+        track.bind("<Configure>", draw)
+
+    def _expand(self, key, name, details: list[str]):
+        row = tk.Frame(self.body, bg=self.background)
+        row.pack(fill="x", padx=18, pady=2)
+        content = tk.Frame(row, bg=self.surface, padx=12, pady=8,
+                           highlightthickness=1, highlightbackground=self.border)
+        for line in details or ["Brak dodatkowych danych."]:
+            self._text(content, "• " + str(line), size=9, bg=self.surface,
+                       wrap=1090).pack(fill="x", anchor="w", pady=2)
+        def toggle():
+            self._sections_open[key] = not self._sections_open[key]
+            if self._sections_open[key]:
+                content.pack(fill="x", pady=(3, 7))
+                button.configure(text="▾ " + name)
+            else:
+                content.pack_forget()
+                button.configure(text="▸ " + name)
+            self._refresh_scroll_region()
+        button = ttk.Button(row, text=("▾ " if self._sections_open[key] else "▸ ") + name,
+                            command=toggle)
+        button.pack(anchor="w")
+        if self._sections_open[key]:
+            content.pack(fill="x", pady=(3, 7))
+
+    def render(self, report: dict, form: dict | None = None, *, source_verified=True):
+        model = make_science_dashboard(report, form, source_verified=source_verified)
+        preserved = self.canvas.yview()[0]
+        for child in self.body.winfo_children():
+            child.destroy()
+        self.model = model
+        header = tk.Frame(self.body, bg=self.background)
+        header.pack(fill="x", padx=18, pady=(10, 4))
+        header.columnconfigure(0, weight=1)
+        self._text(header, model["form_status"] + "  ·  " + model["science_status"] +
+                   "  ·  " + model["review_mode"], bold=True, size=10, wrap=1070).grid(
+            row=0, column=0, sticky="w")
+        self._text(header, model["conditions"], size=9, muted=True,
+                   wrap=1070).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        top = tk.Frame(self.body, bg=self.background)
+        top.pack(fill="x", padx=14, pady=(2, 7))
+        top.columnconfigure(0, weight=1, uniform="science_card")
+        top.columnconfigure(1, weight=1, uniform="science_card")
+        for i, card in enumerate(model["cards"]):
+            self._card(top, card, i // 2, i % 2)
+        self._section_title("WYNIKI I ICH WIARYGODNOŚĆ")
+        self._table(model)
+        self._section_title("POSTĘP WERYFIKACJI")
+        progress_box = tk.Frame(self.body, bg=self.background)
+        progress_box.pack(fill="x", padx=14)
+        progress_box.columnconfigure(0, weight=1, uniform="science_progress")
+        progress_box.columnconfigure(1, weight=1, uniform="science_progress")
+        for i, item in enumerate(model["progress"]):
+            self._progress(progress_box, item, i)
+        gt_info = (f"Niezależne porównania Pose: {model['pose_pair_count']}" if model["pose_pair_count"] is not None else
+                   "Niezależne porównania Pose: brak danych")
+        mz_info = (f"Odczyty MZ z GT: {model['mz_reviewed_count']}" if model["mz_reviewed_count"] is not None else
+                   "Odczyty MZ z GT: brak danych")
+        self._text(self.body, gt_info + "    ·    " + mz_info, size=9, muted=True).pack(fill="x", padx=19, pady=(7, 2))
+        if self.on_review is not None:
+            ttk.Button(self.body, text="Przejdź do weryfikacji próbek",
+                       command=self.on_review).pack(anchor="w", padx=19, pady=(1, 6))
+        self._section_title("CZASY NA TELEFONIE — NIEZALEŻNE OD GT")
+        times = tk.Frame(self.body, bg=self.background)
+        times.pack(fill="x", padx=14)
+        for i, item in enumerate(model["latencies"]):
+            times.columnconfigure(i, weight=1, uniform="science_times")
+            cell = tk.Frame(times, bg=self.surface, padx=10, pady=7,
+                            highlightbackground=self.border, highlightthickness=1)
+            cell.grid(row=0, column=i, sticky="nsew", padx=4)
+            self._text(cell, item["label"], bg=self.surface, size=9,
+                       bold=True, wrap=320).pack(fill="x")
+            self._text(cell, item["value"], bg=self.surface, size=9,
+                       wrap=320).pack(fill="x", pady=(4, 0))
+        self._text(self.body, "Czasy z raportu telefonu (p50, P95, n), nie pomiary kamera→ekran.",
+                   size=9, muted=True).pack(fill="x", padx=19, pady=(5, 7))
+        self._section_title("SZCZEGÓŁY I OGRANICZENIA")
+        self._expand("why", "Dlaczego nie ma wyniku?", model["why"])
+        self._expand("caveats", "Ograniczenia badania", model["caveats"])
+        self._expand("methods", "Definicje miar i metodyka", model["methods"])
+        self._expand("source", "Pochodzenie danych", [f"{k}: {v}" for k, v in model["source"]])
+        self._text(self.body, "Raport prezentacyjny nie zastępuje pełnej tabeli technicznej ani źródłowego eksportu.",
+                   size=9, muted=True).pack(fill="x", padx=18, pady=(6, 17))
+        self._bind_descendants(self.body)
+        self._refresh_scroll_region()
+        if preserved > 0:
+            self.canvas.after_idle(lambda: self.canvas.yview_moveto(preserved)
+                                   if self.canvas.winfo_exists() else None)
+        return model
