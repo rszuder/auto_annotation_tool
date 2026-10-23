@@ -17,6 +17,9 @@ DETECTION_STATUSES = frozenset({"VALID_QUAD", "DETECTION_INVALID_QUAD"})
 
 
 def is_multi(session, invocation_id: str) -> bool:
+    from .mobile_canvas_review import has_scene
+    if has_scene(session, invocation_id):
+        return False  # Active canvas data are reported separately; legacy inventory stays in history.
     group = session.mt_invocations.get(invocation_id)
     if group is None or not group.executed or group.cancelled or group.execution_failed:
         return False

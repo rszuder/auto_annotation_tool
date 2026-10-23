@@ -163,7 +163,7 @@ class F4UiGateTests(unittest.TestCase):
                       'Wykorzystaj gotowy MT z biblioteki',
                       'Przygotuj nowy MZ z wybranego best.pt',
                       'Wykorzystaj gotowy MZ z biblioteki',
-                      'f4_no_conversion = tk.BooleanVar(value=False)',
+                      'f4_no_conversion = tk.BooleanVar(master=executor_modal, value=False)',
                       'f4_no_conversion.trace_add("write", _mark_executor_dirty)',
                       'require_f4_selection(',
                       'require_f4_no_conversion_request(bundle_request)',

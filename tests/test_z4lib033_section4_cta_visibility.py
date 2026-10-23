@@ -10,15 +10,16 @@ class Section4ActionVisibilityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.raw = SOURCE.read_text(encoding='utf-8-sig')
         start = cls.raw.index('        checks_shell = tk.Frame(')
-        end = cls.raw.index('        status_shell = tk.Frame(exec_root, bg=bg)', start)
+        end = cls.raw.index('        status_shell, exec_status_label, exec_progress_row', start)
         cls.section = cls.raw[start:end]
 
-    def test_01_controls_above_tables_and_only_table_scrolled(self):
-        self.assertIn('verify_section.grid(row=1, column=0, sticky="ew", pady=(3, 7))', self.section)
+    def test_01_controls_outside_scroll_area_and_full_width_checks_tab(self):
+        self.assertIn('verify_section.grid(row=3, column=0, sticky="ew", pady=(8, 0))', self.section)
         self.assertIn('executor_requirements_table["shell"].grid(row=2, column=0, sticky="nsew")', self.section)
         self.assertIn('executor_install_table["shell"].grid(row=2, column=0, sticky="nsew")', self.section)
-        self.assertIn('checks_shell.grid_rowconfigure(2, weight=1, minsize=250)', self.section)
+        self.assertIn('checks_shell.grid_rowconfigure(2, weight=1, minsize=160)', self.section)
         self.assertNotIn('verify_section.grid(row=2', self.section)
+        self.assertIn('checks_parent', self.section)
 
     def test_02_both_tables_have_compact_scrollable_viewport(self):
         self.assertEqual(self.section.count('height=260,'), 2)

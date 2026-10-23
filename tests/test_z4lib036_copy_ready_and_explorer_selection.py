@@ -120,7 +120,10 @@ def test_gui_wires_explorer_highlight_without_new_copy_mechanism():
     assert 'text="Pokaż wybrany plik w folderze", command=self.open_location' in gui
     assert 'subprocess.Popen(["explorer.exe", "/select,", str(path)])' in gui
     assert 'self._transfer_status_label(row)' in gui
-    assert 'label = self._transfer_status_label(' in gui
+    assert 'label = state.label' in gui
+    view = (repo / 'auto_annotation_tool/gui/z4_mobile_library_view.py').read_text(encoding='utf-8')
+    assert 'verdict = transfer_guidance(' in view
+    assert 'history_entry=history' in view
     assert 'transfer_guidance(' in card
     assert 'PRZENIESIENIE NA TELEFON' in card
     assert 'history_entry=history_entry' in card

@@ -11,8 +11,8 @@ SOURCE = Path(__file__).resolve().parents[1] / 'auto_annotation_tool/gui/z4_mode
 
 def test_training_sources_are_shown_before_role_choices():
     source = SOURCE.read_text(encoding='utf-8-sig')
-    assert 'Wybrane modele z Centrum:' in source
-    assert 'Zdecyduj osobno dla MT i MZ' in source
+    assert '''text=f"{marker} | {candidate.get('model_label') or '-'}"''' in source
+    assert 'presentation.add_role(state["marker"])' in source
     assert 'export_plan_var' in source
     ast.parse(source)
 
@@ -31,7 +31,7 @@ def test_paths_are_for_existing_mobile_packages_only():
 def test_no_duplicate_global_mode_or_bypassed_safety():
     source = SOURCE.read_text(encoding='utf-8-sig')
     assert 'export_strategy_frame' not in source
-    assert 'f4_no_conversion = tk.BooleanVar(value=False)' in source
+    assert 'f4_no_conversion = tk.BooleanVar(master=executor_modal, value=False)' in source
     assert 'f4_no_conversion.trace_add("write", _mark_executor_dirty)' in source
     for guard in (
         'require_f4_selection(',

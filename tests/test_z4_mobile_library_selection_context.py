@@ -101,8 +101,9 @@ def library():
     obj.events_tab = "events"
     obj.packages_tab = "packages"
     obj.active_source = "artifact"
-    obj.detail = object()
-    obj.show_text = lambda text: setattr(obj, "detail_text", text)
+    obj._detail_sheet = None
+    obj._detail_json = ""
+    obj._detail_text = ""
     obj.sort_state = {"artifacts": None, "events": None}
     obj.sort_labels = {
         "artifacts": dict(zip(("role", "name", "variants", "size", "date", "state"),
@@ -128,7 +129,7 @@ def test_artifact_selection_survives_filter_and_scan_reordering():
     obj.filter_var.set("mt_b")
     obj.refresh_views()
     assert obj.selected_artifact() is b
-    assert "mt_b" in obj.detail_text
+    assert "mt_b" in obj._detail_text
 
 
 def test_filter_removes_selection_and_clears_stale_details():
@@ -140,7 +141,7 @@ def test_filter_removes_selection_and_clears_stale_details():
     obj.refresh_views()
     assert obj.selected_artifact() is None
     assert obj.active_path() is None
-    assert "Wybierz paczkę" in obj.detail_text
+    assert "Wybierz paczkę" in obj._detail_text
 
 
 def test_selected_history_operation_survives_insert_at_front():
@@ -168,7 +169,7 @@ def test_history_audit_toggle_does_not_select_unrelated_event():
     obj.show_raw_events.set(True)
     obj.refresh_views()
     assert obj.selected_event() is None
-    assert "Wybierz operację" in obj.detail_text
+    assert "Wybierz wpis historii" in obj._detail_text
 
 
 def test_history_raw_event_selection_pinned_to_event_id_not_index():
@@ -193,11 +194,11 @@ def test_tab_switch_controls_active_path_even_without_click():
     obj.notebook.active = "events"
     assert obj.active_path() == Path(obj.history[0]["artifact_path"])
     obj._on_tab_changed()
-    assert "OP-A-12345678" in obj.detail_text
+    assert "OP-A-12345678" in obj._detail_text
     obj.notebook.active = "packages"
     obj._on_tab_changed()
     assert obj.active_path() == Path(obj.rows[0].path)
-    assert "mt_a" in obj.detail_text
+    assert "mt_a" in obj._detail_text
 
 
 def test_hidden_tab_actions_cannot_validate_or_export(monkeypatch):
@@ -222,6 +223,5 @@ def test_older_stub_without_selection_and_notebook_still_renders():
     obj = library()
     obj.rows = [artifact("mt_a.alprmodel")]
     del obj.notebook
-    del obj.detail
     obj.refresh_views()
     assert obj.art_tree.ids == ["a0"]

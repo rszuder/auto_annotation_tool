@@ -110,4 +110,4 @@ def test_approval_and_export_guards_remain_unmodified():
     assert "require_f4_no_conversion_request(bundle_request)" in text
     assert "require_f4_no_conversion_request(request, require_fresh_destination=True)" in text
     assert "export_f4_atomic_no_overwrite(" in text
-    assert "model_card_columns = 1  # Z4LIB029" in text
+    assert "model_card_columns = 1  # One wide scrollable card per role tab." in text

@@ -1,3 +1,4 @@
+# Z4MOBREV032_FIX02_CURRENT_SHA_CANVAS_20261023
 """Z4MOBREV022 — human MT verification policy, separate from Pose GT geometry.
 
 Only operator decisions count as verification. The optional geometric measurement
@@ -86,7 +87,32 @@ def _active(session, group) -> bool:
     return bool(group and group.executed and not group.cancelled and not group.execution_failed)
 
 
+def _subject_requires_text_gt(session, subject: dict) -> bool:
+    """Require an explicit GT decision for non-cancelled MZ sample records.
+
+    Legacy crop indexes do not always carry ``mz_status``. Missing/unknown
+    status must not silently waive GT confirmation for those records; they
+    can already contribute to the legacy read metrics. An empty prediction
+    is likewise not evidence that MZ was NOT_RUN. This is a conservative
+    verification gate, not a claim that an unknown inference did execute.
+    Explicit NOT_RUN and cancelled records remain outside this requirement.
+    """
+    for sample_id in subject.get("samples", ()):
+        sample = session.samples.get(sample_id)
+        if sample is None or session.cancelled(sample):
+            continue
+        attempt = session.attempts.get(str(sample.get("attempt_id") or ""), {})
+        from .mobile_canvas_review import has_scene
+        if has_scene(session, session.invocation_by_attempt.get(str(sample.get("attempt_id") or ""), "")):
+            continue  # Canvas owns this plate-number decision, never subject-level GT.
+        mz_status = str(attempt.get("mz_status") or sample.get("mz_status") or "").strip().upper()
+        if mz_status != "NOT_RUN":
+            return True
+    return False
+
+
 def subject_verification_issues(session, subject_key: str) -> list[str]:
+    from .mobile_mt_postdedup import eligible_suppressed_id
     """Required actions for an observation; no mandatory manual Pose polygon."""
     subject = session.subjects.get(subject_key, {})
     attempt_ids = subject.get("attempts", ())
@@ -96,6 +122,10 @@ def subject_verification_issues(session, subject_key: str) -> list[str]:
     for group_id in group_ids:
         group = session.mt_invocations.get(group_id)
         if not _active(session, group):
+            continue
+        from .mobile_canvas_review import has_scene, group_issues as canvas_group_issues
+        if has_scene(session, group_id):
+            issues.extend(canvas_group_issues(session, group_id))
             continue
         decision = session.invocation_annotation(group_id)
         count = decision.get("visible_plate_count")
@@ -108,11 +138,16 @@ def subject_verification_issues(session, subject_key: str) -> list[str]:
             continue  # multi: GT tekstowe jest PER TABLICA, nie per subject
         if count == "uncertain" or decision.get("evaluable") is False:
             continue  # explicit operator abstention, not a false model result
-        if group.evidence_entries and not any(entry in session.entry_names for entry in group.evidence_entries):
-            issues.append(f"Brak dowodowego obrazu wejścia MT: {group_id}")
+        # An empty reference list is also missing evidence, not a waiver.
+        if not any(entry in session.entry_names for entry in group.evidence_entries):
+            issues.append(f"Brak dowodu wejścia MT; oznacz wywołanie jako nie do oceny: {group_id}")
             continue
+        discarded = eligible_suppressed_id(session, group_id)
         for record in group.records:
             aid = str(record.get("id") or "")
+            if discarded and aid == discarded:
+                # Telemetry confirms pre-NMS diagnostic-only candidate.
+                continue
             if aid not in attempt_ids:
                 continue
             if _attempt_status(record) not in DETECTION_STATUSES or session.cancelled(record):
@@ -123,23 +158,15 @@ def subject_verification_issues(session, subject_key: str) -> list[str]:
             guided_issue = _guided_correction_issue(session, record)
             if guided_issue:
                 issues.append(guided_issue)
-    # MZ ground truth is required only when a real MZ inference has run.
-    mz_has_result = False
-    for sample_id in subject.get("samples", ()):
-        sample = session.samples.get(sample_id, {})
-        attempt = session.attempts.get(str(sample.get("attempt_id") or ""), {})
-        if session.cancelled(sample):
-            continue
-        mz_status = str(attempt.get("mz_status") or sample.get("mz_status") or "").upper()
-        if mz_status not in {"", "NOT_RUN", "UNKNOWN"}:
-            mz_has_result = True
-            break
+    # Legacy MZ samples still require GT or a reasoned exclusion even when
+    # the source did not export mz_status. Do not auto-confirm a saved draft.
+    mz_requires_gt = _subject_requires_text_gt(session, subject)
     from .mobile_multi_plate_verification import is_multi
     exclusively_multi = bool(group_ids) and all(is_multi(session, gid) for gid in group_ids)
     all_no_plate = bool(group_ids) and all(
         session.invocation_annotation(gid).get("visible_plate_count") == "none" for gid in group_ids)
     # False-positive OCR crop cannot have a genuine plate-number GT.
-    if mz_has_result and not exclusively_multi and not all_no_plate:
+    if mz_requires_gt and not exclusively_multi and not all_no_plate:
         decision = session.review.subjects.get(subject_key, {})
         if decision.get("evaluable") is False:
             if not str(decision.get("note") or "").strip():
@@ -206,11 +233,28 @@ def observation_verification_cells(session, subject_key: str, geometry_rows=None
     correct. ○ means missing; — means not applicable/excluded from that step.
     """
     subject = session.subjects.get(subject_key, {})
+    from .mobile_mt_postdedup import suppressed_subject
+    if suppressed_subject(session, subject):
+        # Historic raw-only child; original GT and decisions remain stored.
+        # This is *not* another physical plate awaiting review.
+        return ("—", "—", "—", "—", "✓")
     attempts = [session.attempts[aid] for aid in subject.get("attempts", ())
                 if aid in session.attempts]
     groups = {session.invocation_by_attempt[aid]:session.mt_invocations.get(session.invocation_by_attempt[aid])
               for aid in subject.get("attempts", ()) if aid in session.invocation_by_attempt}
     active = {gid:g for gid,g in groups.items() if _active(session,g)}
+    from .mobile_canvas_review import has_scene, group_issues as canvas_group_issues
+    if active and all(has_scene(session, gid) for gid in active):
+        from .mobile_canvas_review import scene, scene_review_cells, merge_review_cells
+        rows = []
+        for gid in active:
+            try:
+                rows.append(scene_review_cells(scene(session, gid)))
+            except (ValueError, TypeError, KeyError):
+                rows.append(("○", "○", "○", "○", "○"))
+        cells = list(merge_review_cells(rows))
+        cells[-1] = "✓" if not subject_verification_issues(session, subject_key) else "○"
+        return tuple(cells)
     cardinality = "—" if not active else "✓" if all(
         session.invocation_annotation(gid).get("visible_plate_count")
         in {"none", "one", "multiple", "uncertain"} for gid in active) else "○"
@@ -236,18 +280,10 @@ def observation_verification_cells(session, subject_key: str, geometry_rows=None
         for row in regions) else "○"
     decision = session.review.subjects.get(subject_key, {})
     gt = str(decision.get("ground_truth") or "").strip()
-    has_mz = False
-    for sample_id in subject.get("samples", ()):
-        sample = session.samples.get(sample_id, {})
-        attempt = session.attempts.get(str(sample.get("attempt_id") or ""), {})
-        if session.cancelled(sample):
-            continue
-        if str(attempt.get("mz_status") or sample.get("mz_status") or "").upper() not in {"", "NOT_RUN", "UNKNOWN"}:
-            has_mz = True
-            break
+    has_mz = _subject_requires_text_gt(session, subject)
     no_real_plate = bool(active) and all(session.invocation_annotation(gid).get("visible_plate_count")=="none" for gid in active)
     gt_state = ("—" if no_real_plate else
-                "✓" if gt and decision.get("evaluable") is True else
+                "✓" if gt and decision.get("evaluable") is True and session.predictions_visible(subject_key) else
                 "—" if decision.get("evaluable") is False or not has_mz else "○")
     geom = geometry_rows or {}
     vals = [geom.get(row["id"], {}).get("metric_status", "") for row in attempts]

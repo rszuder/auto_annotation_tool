@@ -125,10 +125,10 @@ def test_correct_selected_row_displays_pinned_sha_only_for_desktop():
     obj.pipe.put(('verified', result()))
     obj.poll()
     assert obj.busy is False
-    assert 'WALIDACJA PASS' in obj.status.get()
+    assert 'Kontrola na komputerze zaliczona' in obj.status.get()
     assert len(obj.detail_seen) == 1
     assert 'd'*64 in obj.detail_seen[0]
-    assert 'NIE POTWIERDZA' in obj.detail_seen[0]
+    assert 'Nie potwierdzono jeszcze uruchomienia w ALPR Mobile ani jakości' in obj.detail_seen[0]
     assert obj._verified_selection_path == 'C:/mt-one.alprmodel'
 
 
@@ -164,9 +164,11 @@ def test_failed_selected_row_remains_unverified():
     obj = stub_verifier()
     obj.pipe.put(('verified', result(success=False)))
     obj.poll()
-    assert obj.detail_seen == []
+    assert len(obj.detail_seen) == 1  # Operator must see the actual failure reason.
+    assert 'NIEZALICZONA' in obj.detail_seen[0] and 'GRAPH_ERROR' in obj.detail_seen[0]
     assert obj._verified_selection_path is None
-    assert 'GRAPH_ERROR' in obj.status.get()
+    assert obj._verification_error['detail'] == 'GRAPH_ERROR'
+    assert 'niezaliczona' in obj.status.get()
 
 
 def test_selection_change_clears_stale_pass_indication():
@@ -180,4 +182,4 @@ def test_selection_change_clears_stale_pass_indication():
     )
     obj.artifact_selected()
     assert obj._verified_selection_path is None
-    assert 'Nowa paczka' in obj.status.get()
+    assert 'Wybrano inną paczkę' in obj.status.get()

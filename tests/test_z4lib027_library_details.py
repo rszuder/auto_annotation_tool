@@ -66,8 +66,13 @@ def test_event_summary_is_only_historical():
 def test_library_ui_keeps_full_validation_and_read_only_controls():
     text=(Path(__file__).resolve().parents[1]/
           "auto_annotation_tool/gui/z4_mobile_artifact_library.py").read_text(encoding="utf-8")
-    assert 'ttk.PanedWindow(shell, orient=tk.VERTICAL)' in text
-    assert 'text="Opis modelu"' in text and 'text="Manifest JSON"' in text
+    modal=(Path(__file__).resolve().parents[1]/
+           "auto_annotation_tool/gui/z4_mobile_details_dialog.py").read_text(encoding="utf-8")
+    assert 'ttk.PanedWindow' not in text
+    assert 'text="Podsumowanie"' in modal and 'json_label = "Manifest i źródła (JSON)"' in text
+    assert 'text="Szczegóły…", command=self.show_details' in text
     assert 'command=self.validate_selected' in text
-    assert 'command=self.copy_checkpoint_sha' in text
+    assert 'sha_label = "Kopiuj SHA checkpointu"' in text
+    assert 's.sha_value' in modal
+    assert 'return self.copy_checkpoint_sha()' in text
     assert 'verify_unchanged_mobile_package(' in text

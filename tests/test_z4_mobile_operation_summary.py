@@ -149,7 +149,8 @@ def test_ui_switch_operations_and_raw_records_sort_survives():
     obj.refresh_views()
     assert len(obj.event_tree.children) == 2
     assert any("(2 zdarzeń)" in value[1] for value in obj.event_tree.values.values())
-    assert "2 pozycji / 3 zdarzeń" in obj.event_view_status.get()
+    assert obj.history_counts["export_operations"] == 2 and obj.history_counts["export_events"] == 3
+    assert "Wiersze po filtrze: 2 / 2" in obj.event_view_status.get()
     obj.show_raw_events.set(True)
     obj.refresh_views()
     assert len(obj.event_tree.children) == 3
@@ -180,6 +181,6 @@ def test_summary_and_ui_do_not_write_jsonl_or_model_artifacts(tmp_path):
 
 def test_gui_has_audit_toggle_and_preserves_raw_history():
     source = (Path(__file__).resolve().parents[1] / "auto_annotation_tool/gui/z4_mobile_artifact_library.py").read_text(encoding="utf-8")
-    assert "Pokaż każde zdarzenie (audyt)" in source
+    assert "Pokaż każde zdarzenie eksportu" in source
     assert "summarize_operations(self.history)" in source
     assert "self.history if raw_view" in source

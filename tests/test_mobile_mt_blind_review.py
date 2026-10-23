@@ -10,6 +10,9 @@ from auto_annotation_tool.ranking.mobile_package_experiments import MobilePackag
 from auto_annotation_tool.ranking.mobile_mt_invocations import group_mt_invocations
 
 
+from auto_annotation_tool.ranking.mobile_verification_policy import visual_decision
+
+
 def children(count=1, *, invocation="mt-x", statuses=None):
     rows = []
     for index in range(max(1, count)):
@@ -196,7 +199,7 @@ def test_b5_b7_export_quality_mode_and_immutable_source(tmp_path):
         session.set_subject(key, ground_truth="WI1234A")
     session.annotate_invocation("mt-x", visible_plate_count="one")
     for row in rows:
-        session.annotate("attempt", row["attempt_id"], is_plate=True)
+        session.annotate("attempt", row["attempt_id"], **visual_decision("accurate"))
     session.complete()
     store = MobilePackageExperimentStore(tmp_path / "ranking")
     store.add_report(session.bundle.report)
@@ -213,7 +216,9 @@ def test_b5_b7_export_quality_mode_and_immutable_source(tmp_path):
     assert _file_sha256(session.path) == source_hash
 
 
-def test_invocation_decisions_do_not_change_mz_or_alpr_metrics(tmp_path):
+def test_single_plate_invocation_decisions_do_not_change_mz_or_alpr_metrics(tmp_path):
+    # "multiple" intentionally activates the per-plate GT scientific guard.
+    # That case (including return to "one") has its own regression test.
     rows = children(2)
     rows[0].update(prediction="", consensus_prediction="WI1234A", capture_source="auto_zoom", camera_zoom_ratio=2)
     rows[1]["prediction"] = "WI12B4A"
@@ -221,7 +226,7 @@ def test_invocation_decisions_do_not_change_mz_or_alpr_metrics(tmp_path):
     session = load(make_bundle(tmp_path / "source.alprsession", samples=samples, attempts=rows), tmp_path)
     session.set_subject(next(iter(session.subjects)), ground_truth="WI1234A")
     before = session.statistics()
-    for visible in ("one", "none", "multiple", "uncertain"):
+    for visible in ("one", "none", "uncertain"):
         session.annotate_invocation("mt-x", visible_plate_count=visible)
         after = session.statistics()
         for key in ("exact_reads", "incorrect_reads", "no_reads", "cer", "gt_characters", "correct_characters",

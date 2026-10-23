@@ -1,3 +1,4 @@
+# Z4MOBREV032_FIX02_CURRENT_SHA_CANVAS_20261023
 """Validated MT backend invocations, independent of subjects and OCR predictions."""
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -285,8 +286,9 @@ def group_mt_invocations(
 
 
 def calculate_mt_invocations(session):
+    from .mobile_mt_postdedup import eligible_suppressed_id, post_nms_proof
     names = ("evaluable_mt_invocations", "mt_successful_invocations", "mt_no_detection_invocations",
-             "mt_invalid_quad_invocations", "mt_multi_plate_invocations", "mt_uncertain_invocations", "mt_false_detections",
+             "mt_invalid_quad_invocations", "mt_multi_plate_invocations", "mt_uncertain_invocations", "mt_false_detections", "mt_raw_suppressed_candidates",
              "mt_execution_error_invocations")
     counts = dict.fromkeys(names, 0)
     results = []
@@ -294,12 +296,18 @@ def calculate_mt_invocations(session):
                              if decision.get("is_plate") is False}
     for key, group in session.mt_invocations.items():
         annotation = session.invocation_annotation(key)
+        trace_proof = post_nms_proof(session, key)
+        discarded = eligible_suppressed_id(session, key)
         visible = annotation.get("visible_plate_count")
         evidence = any(entry in session.entry_names for entry in group.evidence_entries)
         active = group.executed and not group.cancelled and not group.execution_failed
-        included = active and annotation.get("evaluable") is True and evidence and visible == "one"
+        canvas_review = "canvas_review_v1" in annotation
+        included = active and annotation.get("evaluable") is True and evidence and visible == "one" and not canvas_review
         valid, invalid, false = False, False, 0
         for row in group.records:
+            if discarded and str(row.get("id") or "") == discarded:
+                # Raw pre-NMS candidate: not a final TP or FP.
+                continue
             child = session.review.attempt_annotations.get(row["id"], {})
             is_plate = False if row["id"] in false_sample_attempts else child.get("is_plate")
             if visible == "none":
@@ -321,9 +329,13 @@ def calculate_mt_invocations(session):
         elif group.execution_failed:
             outcome = "execution_error"
             counts["mt_execution_error_invocations"] += 1
+        if canvas_review:
+            false = 0  # Assisted canvas FP have a separate explicit denominator.
+            outcome = "canvas_review_separate"
         counts["mt_false_detections"] += false
-        counts["mt_multi_plate_invocations"] += active and visible == "multiple"
-        counts["mt_uncertain_invocations"] += active and visible == "uncertain"
+        counts["mt_raw_suppressed_candidates"] += int(bool(discarded))
+        counts["mt_multi_plate_invocations"] += active and visible == "multiple" and not canvas_review
+        counts["mt_uncertain_invocations"] += active and visible == "uncertain" and not canvas_review
         if included:
             counts["evaluable_mt_invocations"] += 1
             if valid:
@@ -337,7 +349,9 @@ def calculate_mt_invocations(session):
                         "executed": group.executed, "execution_failed": group.execution_failed,
                         "execution_errors": list(group.execution_errors),
                         "visible_plate_count": visible, "included": bool(included), "outcome": outcome,
-                        "false_detections": false, "decision_source": annotation.get("decision_source", "operator")})
+                        "false_detections": false, "raw_detection_count": (trace_proof["raw"] if trace_proof else group.detection_count),
+            "post_nms_detection_count": (trace_proof["after_dedup"] if trace_proof else None),
+            "raw_suppressed_candidates": int(bool(discarded)), "decision_source": annotation.get("decision_source", "operator")})
     denominator = counts["evaluable_mt_invocations"]
     counts["mt_localization_success_rate"] = counts["mt_successful_invocations"] / denominator if denominator else None
     if not session.attempts_available:

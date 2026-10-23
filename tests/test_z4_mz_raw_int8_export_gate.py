@@ -87,7 +87,7 @@ def test_preflight_wires_gate_and_checks_it_before_conversion():
 def test_gui_does_not_conflate_preflight_with_proven_precision():
     source = GUI.read_text(encoding='utf-8-sig')
     assert 'Eksport gotowy. Możesz zapisać gotowy plik .alprmodel.' not in source
-    assert 'Pełny graf INT8' in source
+    assert 'Kontrola wstępna PASS. Warianty świeżego eksportu wymagają weryfikacji po konwersji.' in source
 
 
 def test_no_fp32_fallback_inside_gate():

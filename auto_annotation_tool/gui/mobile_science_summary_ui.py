@@ -9,6 +9,7 @@ from tkinter import ttk
 from typing import Callable
 
 from .mobile_science_viewmodel import STATUS_DISPLAY, make_science_dashboard
+from .mobile_canvas_ui import palette, Disclosure
 
 
 class MobileScienceSummaryPanel:
@@ -17,6 +18,10 @@ class MobileScienceSummaryPanel:
     def __init__(self, parent, *, background: str, surface: str, foreground: str,
                  muted: str, accent: str, border: str,
                  on_review: Callable[[], None] | None = None):
+        self.ui_p = palette(parent, background)
+        background, surface = self.ui_p["bg"], self.ui_p["surface"]
+        foreground, muted = self.ui_p["fg"], self.ui_p["muted"]
+        accent, border = self.ui_p["blue"], self.ui_p["border"]
         self.background, self.surface = background, surface
         self.foreground, self.muted = foreground, muted
         self.accent, self.border = accent, border
@@ -28,7 +33,7 @@ class MobileScienceSummaryPanel:
         self.frame.columnconfigure(0, weight=1)
         self.frame.rowconfigure(0, weight=1)
         self.canvas = tk.Canvas(self.frame, bg=background, bd=0, highlightthickness=0,
-                                takefocus=True)
+                                takefocus=True, yscrollincrement=22)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar = ttk.Scrollbar(self.frame, orient="vertical", command=self.canvas.yview)
         self.scrollbar.grid(row=0, column=1, sticky="ns")
@@ -89,6 +94,8 @@ class MobileScienceSummaryPanel:
                      fg=self.muted if muted else self.foreground,
                      font=("Segoe UI", size, "bold" if bold else "normal"),
                      justify="left", anchor=anchor, wraplength=wrap, padx=padx, pady=pady)
+        parent.bind("<Configure>", lambda e: w.configure(wraplength=max(120,e.width-24))
+                    if w.winfo_exists() else None, add="+")
         return w
 
     def _section_title(self, text):
@@ -102,18 +109,19 @@ class MobileScienceSummaryPanel:
         box.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
         self._text(box, card["heading"], bold=True, size=10, bg=self.surface,
                    wrap=370).pack(fill="x")
-        self._text(box, card["value"], size=14, bold=True, bg=self.surface,
-                   wrap=370).pack(fill="x", pady=(6, 2))
+        value_label = self._text(box, card["value"], size=19, bold=True, bg=self.surface, wrap=370)
+        value_label.configure(fg=self.ui_p["blue"])
+        value_label.pack(fill="x", pady=(6, 2))
         label = card["reason"]
         self._text(box, label, size=9, muted=True, bg=self.surface, wrap=370).pack(fill="x")
         return box
 
-    def _table(self, model):
+    def _table(self, model, parent=None):
         rows = model["rows"]
         columns = ("group", "metric", "value", "sample", "status", "reason")
         heading = ("Obszar", "Miara", "Wynik", "Próba", "Stan", "Wyjaśnienie")
-        wrapper = tk.Frame(self.body, bg=self.background)
-        wrapper.pack(fill="x", padx=18)
+        wrapper = tk.Frame(parent or self.body, bg=self.background)
+        wrapper.pack(fill="x", padx=4 if parent else 18)
         self.tree = ttk.Treeview(wrapper, columns=columns, show="headings",
                                  selectmode="browse", style=self._style_name,
                                  height=max(1, len(rows)), takefocus=True)
@@ -196,31 +204,21 @@ class MobileScienceSummaryPanel:
             width = max(1, event.width)
             track.create_rectangle(0, 0, width, 11, outline=self.border, fill="#E5E9EB")
             if ratio > 0:
-                track.create_rectangle(1, 1, width * ratio, 10, outline="", fill="#4B8B73")
+                track.create_rectangle(1, 1, width * ratio, 10, outline="", fill=self.ui_p["blue"])
         track.bind("<Configure>", draw)
 
     def _expand(self, key, name, details: list[str]):
-        row = tk.Frame(self.body, bg=self.background)
-        row.pack(fill="x", padx=18, pady=2)
-        content = tk.Frame(row, bg=self.surface, padx=12, pady=8,
-                           highlightthickness=1, highlightbackground=self.border)
-        for line in details or ["Brak dodatkowych danych."]:
-            self._text(content, "• " + str(line), size=9, bg=self.surface,
-                       wrap=1090).pack(fill="x", anchor="w", pady=2)
-        def toggle():
-            self._sections_open[key] = not self._sections_open[key]
-            if self._sections_open[key]:
-                content.pack(fill="x", pady=(3, 7))
-                button.configure(text="▾ " + name)
-            else:
-                content.pack_forget()
-                button.configure(text="▸ " + name)
+        def changed(opened):
+            self._sections_open[key] = opened
             self._refresh_scroll_region()
-        button = ttk.Button(row, text=("▾ " if self._sections_open[key] else "▸ ") + name,
-                            command=toggle)
-        button.pack(anchor="w")
-        if self._sections_open[key]:
-            content.pack(fill="x", pady=(3, 7))
+        row = Disclosure(self.body, name, p=self.ui_p,
+                         opened=self._sections_open[key], command=changed)
+        row.pack(fill="x", padx=18, pady=4)
+        for line in details or ["Brak dodatkowych danych."]:
+            item = self._text(row.body, str(line), size=10, bg=self.surface, wrap=950)
+            item.pack(fill="x", anchor="w", pady=4)
+            item.bind("<Configure>", lambda e,w=item: w.configure(wraplength=max(120,e.width-10)))
+        return row
 
     def render(self, report: dict, form: dict | None = None, *, source_verified=True):
         model = make_science_dashboard(report, form, source_verified=source_verified)
@@ -236,15 +234,13 @@ class MobileScienceSummaryPanel:
             row=0, column=0, sticky="w")
         self._text(header, model["conditions"], size=9, muted=True,
                    wrap=1070).grid(row=1, column=0, sticky="w", pady=(3, 0))
-        top = tk.Frame(self.body, bg=self.background)
-        top.pack(fill="x", padx=14, pady=(2, 7))
-        top.columnconfigure(0, weight=1, uniform="science_card")
-        top.columnconfigure(1, weight=1, uniform="science_card")
-        for i, card in enumerate(model["cards"]):
-            self._card(top, card, i // 2, i % 2)
-        self._section_title("WYNIKI I ICH WIARYGODNOŚĆ")
-        self._table(model)
-        self._section_title("POSTĘP WERYFIKACJI")
+        if self.on_review is not None:
+            tk.Button(header, text="← Weryfikacja", command=self.on_review,
+                      bg=self.ui_p["blue_bg"], fg=self.ui_p["blue"],
+                      activebackground=self.ui_p["blue_bg"], activeforeground=self.ui_p["blue"],
+                      relief="flat", bd=0, cursor="hand2", padx=12, pady=7,
+                      font=("Segoe UI", 9, "bold")).grid(row=0,column=1,rowspan=2,sticky="ne",padx=(12,0))
+        self._section_title("01  POSTĘP • PROTOKÓŁ HISTORYCZNY")
         progress_box = tk.Frame(self.body, bg=self.background)
         progress_box.pack(fill="x", padx=14)
         progress_box.columnconfigure(0, weight=1, uniform="science_progress")
@@ -256,10 +252,19 @@ class MobileScienceSummaryPanel:
         mz_info = (f"Odczyty MZ z GT: {model['mz_reviewed_count']}" if model["mz_reviewed_count"] is not None else
                    "Odczyty MZ z GT: brak danych")
         self._text(self.body, gt_info + "    ·    " + mz_info, size=9, muted=True).pack(fill="x", padx=19, pady=(7, 2))
-        if self.on_review is not None:
-            ttk.Button(self.body, text="Przejdź do weryfikacji próbek",
-                       command=self.on_review).pack(anchor="w", padx=19, pady=(1, 6))
-        self._section_title("CZASY NA TELEFONIE — NIEZALEŻNE OD GT")
+        self._section_title("02  WYNIKI • PROTOKÓŁ HISTORYCZNY")
+        top = tk.Frame(self.body, bg=self.background)
+        top.pack(fill="x", padx=14, pady=(2, 7))
+        top.columnconfigure(0, weight=1, uniform="science_card")
+        top.columnconfigure(1, weight=1, uniform="science_card")
+        for i, card in enumerate(model["cards"]):
+            self._card(top, card, i // 2, i % 2)
+        table_section = Disclosure(self.body, "Szczegółowe miary i wiarygodność", p=self.ui_p,
+                                   opened=self._sections_open.get("metrics", False),
+                                   command=lambda opened: self._sections_open.update(metrics=opened))
+        table_section.pack(fill="x", padx=18, pady=(6, 7))
+        self._table(model, parent=table_section.body)
+        self._section_title("03  CZASY TELEFONU • NIEZALEŻNE OD GT")
         times = tk.Frame(self.body, bg=self.background)
         times.pack(fill="x", padx=14)
         for i, item in enumerate(model["latencies"]):
@@ -267,17 +272,18 @@ class MobileScienceSummaryPanel:
             cell = tk.Frame(times, bg=self.surface, padx=10, pady=7,
                             highlightbackground=self.border, highlightthickness=1)
             cell.grid(row=0, column=i, sticky="nsew", padx=4)
+            tk.Frame(cell, bg=self.ui_p[("blue", "green", "purple")[i % 3]], height=3).pack(fill="x",pady=(0,7))
             self._text(cell, item["label"], bg=self.surface, size=9,
                        bold=True, wrap=320).pack(fill="x")
             self._text(cell, item["value"], bg=self.surface, size=9,
                        wrap=320).pack(fill="x", pady=(4, 0))
         self._text(self.body, "Czasy z raportu telefonu (p50, P95, n), nie pomiary kamera→ekran.",
                    size=9, muted=True).pack(fill="x", padx=19, pady=(5, 7))
-        self._section_title("SZCZEGÓŁY I OGRANICZENIA")
-        self._expand("why", "Dlaczego nie ma wyniku?", model["why"])
-        self._expand("caveats", "Ograniczenia badania", model["caveats"])
-        self._expand("methods", "Definicje miar i metodyka", model["methods"])
-        self._expand("source", "Pochodzenie danych", [f"{k}: {v}" for k, v in model["source"]])
+        self._section_title("SZCZEGÓŁY BADANIA")
+        self._expand("why", "Braki danych i status wyników", model["why"])
+        self._expand("caveats", "Ograniczenia", model["caveats"])
+        self._expand("methods", "Miary i metodyka", model["methods"])
+        self._expand("source", "Źródła danych", [f"{k}: {v}" for k, v in model["source"]])
         self._text(self.body, "Raport prezentacyjny nie zastępuje pełnej tabeli technicznej ani źródłowego eksportu.",
                    size=9, muted=True).pack(fill="x", padx=18, pady=(6, 17))
         self._bind_descendants(self.body)

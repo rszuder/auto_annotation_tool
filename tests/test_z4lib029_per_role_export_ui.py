@@ -49,9 +49,9 @@ def test_invalid_role_sets_are_rejected(rows):
 
 def test_gui_uses_one_wide_column_of_scrollable_cards():
     source = GUI.read_text(encoding='utf-8-sig')
-    assert 'model_card_columns = 1  # Z4LIB029' in source
-    assert 'model_cards_canvas' in source
-    assert 'model_cards_scroll' in source
+    assert 'model_card_columns = 1  # One wide scrollable card per role tab.' in source
+    assert 'presentation.add_role(state["marker"])' in source
+    assert '_create_model_panel(model_cards_content, state, 0)' in source
 
 
 def test_each_role_has_exactly_one_action_choice_with_two_options():

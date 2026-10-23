@@ -10903,137 +10903,17 @@ def _open_mobile_model_export_center(self, initial_run=None):
         except Exception:
             pass
 
-        exec_root = tk.Frame(
-            executor_modal,
-            bg=bg,
-            padx=18,
-            pady=15,
-            highlightthickness=1,
-            highlightbackground=border,
-        )
-        exec_root.pack(fill=tk.BOTH, expand=True)
-        exec_root.grid_columnconfigure(0, weight=1)
-        exec_root.grid_rowconfigure(2, weight=1)
-
-        tk.Label(
-            exec_root,
-            text=f"Eksport mobilny: {package_kind}",
-            bg=bg,
-            fg=fg,
-            font=("Segoe UI", 14, "bold"),
-            anchor=tk.W,
-        ).grid(row=0, column=0, sticky="ew")
-        f4_no_conversion = tk.BooleanVar(value=False)
-        intro_shell = tk.Frame(exec_root, bg=bg)
-        intro_shell.grid(row=1, column=0, sticky="ew", pady=(3, 10))
-        tk.Label(
-            intro_shell,
-            text=(
-                artifact.message + "\n"
-                "Po co to okno? Tutaj przygotujesz modele, które później uruchomisz na telefonie. "
-                "Wybrane wcześniej modele treningowe (.pt) są już przypisane. "
-                "Dla każdego możesz utworzyć nową paczkę albo użyć gotowej z biblioteki. "
-                "Najpierw sprawdzimy ustawienia — nic nie zapisujemy bez uruchomienia eksportu."
-            ),
-            bg=bg,
-            fg=muted,
-            font=("Segoe UI", 9),
-            anchor=tk.W,
-            justify=tk.LEFT,
-            wraplength=980,
-        ).pack(fill=tk.X)
-        export_plan_var = tk.StringVar(value="Plan przygotowania zostanie pokazany poniżej.")
-        if set(selected_by_marker) == {"MT", "MZ"}:
-            selected_source_text = "  |  ".join(
-                f"{role}: {selected_by_marker[role].get('model_label') or selected_by_marker[role].get('run_label') or 'best.pt'} (model treningowy)"
-                for role in ("MT", "MZ")
-            )
-            ttk.Label(
-                intro_shell,
-                text="Wybrane modele z Centrum: " + selected_source_text,
-                wraplength=980,
-            ).pack(anchor="w", fill="x", pady=(5, 3))
-            ttk.Label(
-                intro_shell,
-                text="Zdecyduj osobno dla MT i MZ: MT znajduje tablice, a MZ odczytuje znaki. „Nowy” tworzy model z .pt, „z biblioteki” używa gotowej paczki .alprmodel.",
-                wraplength=980,
-            ).pack(anchor="w", fill="x", pady=(3, 2))
-            ttk.Label(
-                intro_shell,
-                textvariable=export_plan_var,
-                wraplength=980,
-                justify="left",
-            ).pack(anchor="w", fill="x", pady=(2, 4))
-
-        model_grid = tk.Frame(exec_root, bg=bg)
-        model_grid.grid(row=2, column=0, sticky="nsew")
-        selected_count = max(1, len(selected_candidates))
-        single_model_layout = selected_count == 1
-        model_grid.grid_columnconfigure(0, weight=2, minsize=620)
-        model_grid.grid_columnconfigure(1, weight=1, minsize=430)
-        model_grid.grid_rowconfigure(0, weight=1)
-
-        model_cards_shell = tk.Frame(model_grid, bg=bg)
-        model_cards_shell.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
-        model_cards_shell.grid_columnconfigure(0, weight=1)
-        model_cards_shell.grid_rowconfigure(0, weight=1)
-        model_cards_canvas = tk.Canvas(model_cards_shell, bg=bg, highlightthickness=0, bd=0)
-        model_cards_scroll = WebSlimScrollbar(
-            model_cards_shell,
-            orient=tk.VERTICAL,
-            command=model_cards_canvas.yview,
-            **_mobile_export_scrollbar_kwargs(palette, bg),
-        )
-        model_cards_canvas.configure(yscrollcommand=model_cards_scroll.set)
-        model_cards_canvas.grid(row=0, column=0, sticky="nsew")
-        model_cards_scroll.grid(row=0, column=1, sticky="ns", padx=(6, 0))
-        model_cards_content = tk.Frame(model_cards_canvas, bg=bg)
-        model_cards_window_id = model_cards_canvas.create_window((0, 0), window=model_cards_content, anchor=tk.NW)
-        model_card_columns = 1  # Z4LIB029: wide, vertically scrolling MT/MZ cards
-        for grid_index in range(model_card_columns):
-            model_cards_content.grid_columnconfigure(grid_index, weight=1, uniform="mobile_export_model_cards")
-
-        def _sync_model_cards_scrollregion(_event=None) -> None:
-            try:
-                model_cards_canvas.configure(scrollregion=model_cards_canvas.bbox("all"))
-            except Exception:
-                pass
-
-        def _sync_model_cards_width(event=None) -> None:
-            try:
-                width = int(getattr(event, "width", 0) or model_cards_canvas.winfo_width() or 1)
-                model_cards_canvas.itemconfigure(model_cards_window_id, width=max(1, width))
-                _sync_model_cards_scrollregion()
-            except Exception:
-                pass
-
-        model_cards_content.bind("<Configure>", _sync_model_cards_scrollregion, add="+")
-        model_cards_canvas.bind("<Configure>", _sync_model_cards_width, add="+")
-
-        def _on_model_cards_mousewheel(event) -> str:
-            try:
-                delta = int(getattr(event, "delta", 0) or 0)
-                if delta:
-                    model_cards_canvas.yview_scroll(int(-1 * (delta / 120)), "units")
-                    return "break"
-            except Exception:
-                pass
-            return ""
-
-        model_cards_canvas.bind("<MouseWheel>", _on_model_cards_mousewheel, add="+")
-        model_cards_content.bind("<MouseWheel>", _on_model_cards_mousewheel, add="+")
-
-        def _bind_model_cards_mousewheel(widget) -> None:
-            try:
-                widget.bind("<MouseWheel>", _on_model_cards_mousewheel, add="+")
-            except Exception:
-                pass
-            try:
-                children = list(widget.winfo_children())
-            except Exception:
-                children = []
-            for child in children:
-                _bind_model_cards_mousewheel(child)
+        # EXPORT_UX01: one full-width page per role; no permanent empty side panel.
+        from .z4_export_configurator_view import ExportConfiguratorView, role_plan_text
+        presentation = ExportConfiguratorView(executor_modal, f"Eksport mobilny · {artifact.label}")
+        palette = presentation.colors
+        bg, fg, muted = palette["bg"], palette["fg"], palette["muted"]
+        card_bg, border = palette["card_bg"], palette["border"]
+        accent, success, warning, error = (palette[k] for k in ("accent", "success", "warning", "error"))
+        exec_root, intro_shell = presentation.root, presentation.intro
+        f4_no_conversion = tk.BooleanVar(master=executor_modal, value=False)
+        export_plan_var = presentation.plan
+        model_card_columns = 1  # One wide scrollable card per role tab.
 
         model_states: list[dict] = []
         exec_status_var = tk.StringVar(value="Najpierw sprawdzimy ustawienia i wymagane narzędzia. To sprawdzenie nie utworzy żadnego modelu.")
@@ -11051,6 +10931,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
         }
         exec_buttons: dict[str, ttk.Button] = {}
         last_exported_package = {"path": None}
+        exec_operation = {"completed": False, "failed": False}
 
         def _default_calibration_for_candidate(candidate: dict) -> str:
             return _mobile_export_default_calibration_path(candidate)
@@ -11132,18 +11013,21 @@ def _open_mobile_model_export_center(self, initial_run=None):
             )
 
         def _mark_executor_dirty(*_args) -> None:
+            if worker_state.get("running") or exec_install_control.get("running"):
+                return
+            exec_operation.update(completed=False, failed=False)
             exec_preflight_state.update({"ready": False, "problems": [], "installable": False})
-            exec_status_var.set("Ustawienia zmienione. Przegląd wyboru jest aktualny; zweryfikuj gotowość przed eksportem.")
+            exec_status_var.set("Ustawienia zmienione. Sprawdź gotowość przed eksportem.")
             _sync_executor_buttons()
             _schedule_pending_executor_rows()
 
         f4_no_conversion.trace_add("write", _mark_executor_dirty)
 
         def _executor_panel_wraplength() -> int:
-            return 610 if model_card_columns == 1 else 350
+            return 1100
 
         def _format_card_wraplength() -> int:
-            return 310 if model_card_columns == 1 else 170
+            return 480
 
         def _create_format_hint_card(
             parent,
@@ -11176,7 +11060,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 text=body,
                 bg=card["bg"],
                 fg=fg,
-                font=("Segoe UI", 7),
+                font=("Segoe UI", 10),
                 anchor=tk.W,
                 justify=tk.LEFT,
                 wraplength=_format_card_wraplength(),
@@ -11211,14 +11095,14 @@ def _open_mobile_model_export_center(self, initial_run=None):
             tk.Label(
                 panel,
                 text=(
-                    f"YOLO: {_mobile_export_compact_yolo_label(candidate.get('model_version'))} | "
-                    f"{_candidate_metric_label(candidate)} | "
+                    f"{_mobile_export_compact_yolo_label(candidate.get('model_version'))} · "
+                    f"metryka treningowa: {_candidate_metric_label(candidate)} · "
                     f"łącznie epok: {_mobile_export_candidate_epochs_label(candidate)} | "
                     f"parametry: {_format_mobile_export_params(params_m, source=params_source, include_source=False)}"
                 ),
                 bg=panel_bg,
                 fg=muted,
-                font=("Segoe UI", 8),
+                font=("Segoe UI", 10),
                 anchor=tk.W,
                 justify=tk.LEFT,
                 wraplength=_executor_panel_wraplength(),
@@ -11232,7 +11116,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 )
                 mt_source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
                 mt_source.grid_columnconfigure(0, weight=1)
-                ttk.Label(mt_source, text="MT — co chcesz zrobić?").grid(
+                ttk.Label(mt_source, text="1. Źródło modelu MT").grid(
                     row=0, column=0, sticky="w", pady=(0, 3))
                 ttk.Radiobutton(
                     mt_source, text="Przygotuj nowy MT z wybranego best.pt",
@@ -11298,7 +11182,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                            command=lambda current_state=state: _open_slot_mobile_library(current_state)).grid(
                     row=0, column=2, sticky="e", padx=(5, 0))
                 tk.Label(mt_source_controls, textvariable=mt_filename_var,
-                         bg=mt_source["bg"], fg=muted, font=("Segoe UI", 8),
+                         bg=mt_source["bg"], fg=muted, font=("Segoe UI", 10),
                          anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
                     row=1, column=0, sticky="ew", pady=(4, 0))
                 ttk.Button(mt_source_controls, text="Pokaż folder", command=_show_mt_folder).grid(
@@ -11308,7 +11192,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     text="Gotowy MT musi odpowiadać zaznaczonemu best.pt (SHA), "
                          "imgsz oraz przejść kontrolę grafu TFLite zgodną z wybranym INT8 lub FP32. "
                          "INT8 zachowuje status kalibracji zapisany w paczce; FP32 nie wymaga kalibracji.",
-                    bg=mt_source["bg"], fg=muted, font=("Segoe UI", 7),
+                    bg=mt_source["bg"], fg=muted, font=("Segoe UI", 10),
                     anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength(),
                 ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
                 state["_reuse_mt_source_controls"] = mt_source_controls
@@ -11322,7 +11206,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 )
                 mz_source.grid(row=2, column=0, sticky="ew", pady=(0, 8))
                 mz_source.grid_columnconfigure(0, weight=1)
-                ttk.Label(mz_source, text="MZ — co chcesz zrobić?").grid(
+                ttk.Label(mz_source, text="1. Źródło modelu MZ").grid(
                     row=0, column=0, sticky="w", pady=(0, 3))
                 ttk.Radiobutton(
                     mz_source, text="Przygotuj nowy MZ z wybranego best.pt",
@@ -11373,7 +11257,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                            command=lambda current_state=state: _open_slot_mobile_library(current_state)).grid(
                     row=0, column=2, sticky="e", padx=(5, 0))
                 tk.Label(controls_mz, textvariable=mz_filename,
-                         bg=mz_source["bg"], fg=muted, font=("Segoe UI", 8),
+                         bg=mz_source["bg"], fg=muted, font=("Segoe UI", 10),
                          anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
                     row=1, column=0, columnspan=3, sticky="ew", pady=(4, 0))
                 tk.Label(
@@ -11381,7 +11265,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     text="Gotowy MZ musi odpowiadać best.pt (SHA), mieć zgodne imgsz i dokładnie "
                          "jeden zweryfikowany wariant TFLite wybranej precyzji INT8 albo FP32. "
                          "Surowy MZ-DAY CLEAN .tflite pozostaje wyłącznie artefaktem badawczym.",
-                    bg=mz_source["bg"], fg=muted, font=("Segoe UI", 8),
+                    bg=mz_source["bg"], fg=muted, font=("Segoe UI", 10),
                     anchor=tk.W, justify=tk.LEFT, wraplength=_executor_panel_wraplength(),
                 ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(4, 0))
                 state["_reuse_mz_source_controls"] = controls_mz
@@ -11393,18 +11277,18 @@ def _open_mobile_model_export_center(self, initial_run=None):
             formats.grid_columnconfigure(1, weight=1, uniform="mobile_export_format_cards")
             tk.Label(
                 formats,
-                text=f"1. Formaty i precyzja — {marker}",
+                text="2. Format wykonania",
                 bg=formats["bg"],
                 fg=fg,
-                font=("Segoe UI", 8, "bold"),
+                font=("Segoe UI", 11, "bold"),
                 anchor=tk.W,
             ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
             tk.Label(
                 formats,
-                text="Kilka formatów ma sens w badaniach; finalnie wybieramy wariant zmierzony na telefonie.",
+                text="Możesz wybrać kilka formatów. Każdy zaznaczony format zostanie wyeksportowany.",
                 bg=formats["bg"],
                 fg=muted,
-                font=("Segoe UI", 7),
+                font=("Segoe UI", 10),
                 anchor=tk.W,
                 justify=tk.LEFT,
                 wraplength=_executor_panel_wraplength(),
@@ -11413,8 +11297,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 formats,
                 row=1,
                 column=0,
-                title="Android stabilny",
-                body="LiteRT/TFLite FP32. Najbezpieczniejszy wariant startowy i punkt odniesienia.",
+                title="TFLite · FP32",
+                body="Eksport FP32 bez kalibracji INT8. Działanie na telefonie sprawdzamy osobno.",
                 color=success,
                 bg_color=formats["bg"],
                 variable=state["litert"],
@@ -11423,56 +11307,59 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 formats,
                 row=1,
                 column=1,
-                title="Android lekki",
-                body="LiteRT/TFLite INT8. Mniejszy i potencjalnie szybszy, ale wymaga kalibracji i testu jakości.",
+                title="TFLite · INT8",
+                body="Wymaga manifestu kalibracji. Rozmiar, czas i jakość trzeba zmierzyć.",
                 color=warning,
                 bg_color=formats["bg"],
                 variable=state["int8"],
             )
+            other_frame, other_formats = presentation.foldout(
+                formats, [state["onnx"], state["onnx_int8"], state["ncnn"]])
+            other_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
             _create_format_hint_card(
-                formats,
-                row=2,
+                other_formats,
+                row=0,
                 column=0,
-                title="Kontrola",
-                body="ONNX FP32. Dobry do diagnostyki, fallbacku i porównania z TFLite.",
+                title="ONNX · FP32",
+                body="Osobny wariant ONNX; wymaga zgodnego środowiska wykonawczego.",
                 color=accent,
                 bg_color=formats["bg"],
                 variable=state["onnx"],
             )
             _create_format_hint_card(
-                formats,
-                row=2,
+                other_formats,
+                row=0,
                 column=1,
-                title="ONNX INT8",
+                title="ONNX · INT8",
                 body="Kwantyzowany ONNX. Wymaga ścisłego manifestu bezpiecznej kalibracji INT8.",
                 color=warning,
                 bg_color=formats["bg"],
                 variable=state["onnx_int8"],
             )
             _create_format_hint_card(
-                formats,
-                row=3,
+                other_formats,
+                row=1,
                 column=0,
-                title="Eksperyment",
+                title="NCNN · FP32",
                 body="NCNN FP32. Tylko gdy klient Android ma obsługę runtime NCNN.",
                 color=muted,
                 bg_color=formats["bg"],
                 variable=state["ncnn"],
             )
 
-            params_title = tk.Label(panel, text="2. Parametry inferencji", bg=panel_bg, fg=fg,
-                                    font=("Segoe UI", 8, "bold"), anchor=tk.W)
+            params_title = tk.Label(panel, text="3. Parametry zapisane w paczce", bg=panel_bg, fg=fg,
+                                    font=("Segoe UI", 11, "bold"), anchor=tk.W)
             params_title.grid(row=4, column=0, sticky="ew", pady=(0, 4))
             params = tk.Frame(panel, bg=panel_bg)
             params.grid(row=5, column=0, sticky="ew", pady=(0, 8))
             for grid_col in range(6):
                 params.grid_columnconfigure(grid_col, weight=1 if grid_col in {1, 3, 5} else 0)
-            tk.Label(params, text="imgsz", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5))
+            tk.Label(params, text="Wejście [px]", bg=panel_bg, fg=muted, font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 5))
             ttk.Spinbox(params, from_=128, to=2048, increment=32, textvariable=state["imgsz"], width=7).grid(row=0, column=1, sticky="w", padx=(0, 12))
-            tk.Label(params, text="conf", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=2, sticky="w", padx=(0, 5))
-            ttk.Spinbox(params, from_=0.00001, to=1.0, increment=0.01, textvariable=state["conf"], width=7, format="%.5f").grid(row=0, column=3, sticky="w", padx=(0, 12))
-            tk.Label(params, text="IoU", bg=panel_bg, fg=muted, font=("Segoe UI", 8, "bold")).grid(row=0, column=4, sticky="w", padx=(0, 5))
-            ttk.Spinbox(params, from_=0.00001, to=1.0, increment=0.01, textvariable=state["iou"], width=7, format="%.5f").grid(row=0, column=5, sticky="w")
+            tk.Label(params, text="Próg conf", bg=panel_bg, fg=muted, font=("Segoe UI", 11, "bold")).grid(row=0, column=2, sticky="w", padx=(0, 5))
+            ttk.Spinbox(params, from_=0.0, to=1.0, increment=0.01, textvariable=state["conf"], width=7, format="%.5f").grid(row=0, column=3, sticky="w", padx=(0, 12))
+            tk.Label(params, text="Próg IoU", bg=panel_bg, fg=muted, font=("Segoe UI", 11, "bold")).grid(row=0, column=4, sticky="w", padx=(0, 5))
+            ttk.Spinbox(params, from_=0.0, to=1.0, increment=0.01, textvariable=state["iou"], width=7, format="%.5f").grid(row=0, column=5, sticky="w")
 
             next_row = 6
             if marker == "MP":
@@ -11493,7 +11380,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     text="MP: klasy ROI dla MT",
                     bg=vehicle_box["bg"],
                     fg=fg,
-                    font=("Segoe UI", 8, "bold"),
+                    font=("Segoe UI", 11, "bold"),
                     anchor=tk.W,
                 ).grid(row=0, column=0, sticky="ew", pady=(0, 3))
                 ttk.Entry(vehicle_box, textvariable=state["vehicle_classes"]).grid(row=1, column=0, sticky="ew")
@@ -11505,7 +11392,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     ),
                     bg=vehicle_box["bg"],
                     fg=muted,
-                    font=("Segoe UI", 8),
+                    font=("Segoe UI", 10),
                     anchor=tk.W,
                     justify=tk.LEFT,
                     wraplength=_executor_panel_wraplength(),
@@ -11522,7 +11409,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 for item in calibration_suggestions
                 if str(item.get("label") or item.get("path") or "")
             }
-            calibration_intro = f"3. Kalibracja INT8 — {marker} (train + SHA-256)"
+            calibration_intro = f"4. Kalibracja INT8 — {marker} (train + SHA-256)"
             calibration_suggestion_text = "Wybór jawny; brak automatycznego datasetu kalibracji."
             calibration_missing_text = "Wybierz tryb, przygotuj lub wskaż manifest dla tego modelu."
             tk.Label(
@@ -11530,7 +11417,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 text=calibration_intro,
                 bg=panel_bg,
                 fg=muted,
-                font=("Segoe UI", 8),
+                font=("Segoe UI", 10),
                 anchor=tk.W,
                 justify=tk.LEFT,
                 wraplength=_executor_panel_wraplength(),
@@ -11558,7 +11445,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     text=calibration_suggestion_text,
                     bg=panel_bg,
                     fg=muted,
-                    font=("Segoe UI", 8),
+                    font=("Segoe UI", 10),
                     anchor=tk.W,
                     justify=tk.LEFT,
                     wraplength=_executor_panel_wraplength(),
@@ -11569,7 +11456,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     textvariable=state["manifest_status"],
                     bg=panel_bg,
                     fg=muted,
-                    font=("Segoe UI", 8, "bold"),
+                    font=("Segoe UI", 11, "bold"),
                     anchor=tk.W,
                     justify=tk.LEFT,
                     wraplength=_executor_panel_wraplength(),
@@ -11631,6 +11518,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     _manifest_status(f"Nie udało się otworzyć folderu: {exc}", "warning")
 
             def _apply_verified_manifest(item: dict, current_state=state) -> None:
+                if (worker_state.get("running") or exec_install_control.get("running")
+                        or _state_reuses_existing_mt(current_state) or _state_reuses_existing_mz(current_state)):
+                    return
                 # Manual edits are respected until the operator explicitly searches.
                 current_state["_manifest_programmatic"] = True
                 try:
@@ -11662,7 +11552,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                          bg=bg, fg=fg, font=("Segoe UI", 10, "bold"),
                          wraplength=680, justify=tk.LEFT, anchor=tk.W).pack(fill="x", pady=(0, 10))
                 choices = tk.Listbox(shell, height=min(8, max(3, len(options))), exportselection=False,
-                                     font=("Segoe UI", 9))
+                                     font=("Segoe UI", 10))
                 choices.pack(fill="both", expand=True)
                 for item in options:
                     path = Path(item["path"])
@@ -11686,6 +11576,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 ttk.Button(buttons, text="Użyj wybranego manifestu", command=accept).pack(side=tk.RIGHT, padx=(0, 8))
 
             def _search_manifest(*, manual_path: str = "", current_state=state) -> None:
+                if (worker_state.get("running") or exec_install_control.get("running")
+                        or _state_reuses_existing_mt(current_state) or _state_reuses_existing_mz(current_state)):
+                    return
                 if not (bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get())):
                     _manifest_status("Najpierw zaznacz format INT8.", "warning")
                     return
@@ -11807,7 +11700,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             path_widget = ttk.Entry(calibration, textvariable=state["calibration"])
             path_widget.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(0, 4))
             tk.Label(calibration, textvariable=state["manifest_filename"], bg=panel_bg,
-                     fg=muted, font=("Segoe UI", 8), anchor=tk.W,
+                     fg=muted, font=("Segoe UI", 10), anchor=tk.W,
                      justify=tk.LEFT, wraplength=_executor_panel_wraplength()).grid(
                 row=7, column=0, sticky="ew", pady=(0, 4))
             ttk.Button(calibration, text="Pokaż folder", command=_show_manifest_in_folder).grid(
@@ -11857,7 +11750,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
             def _queue_auto_manifest_lookup(*_args, current_state=state) -> None:
                 # Only when there is no manual selection, never overwrite a path.
-                if marker == "MT" and _state_reuses_existing_mt(current_state):
+                if (worker_state.get("running") or exec_install_control.get("running")
+                        or _state_reuses_existing_mt(current_state) or _state_reuses_existing_mz(current_state)):
                     return
                 if not (bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get())):
                     return
@@ -11881,6 +11775,9 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 state[_param_key].trace_add("write", _queue_auto_manifest_lookup)
 
             def _sync_calibration_visibility(*_args, current_state=state) -> None:
+                if _state_reuses_existing_mt(current_state) or _state_reuses_existing_mz(current_state):
+                    calibration.grid_remove()
+                    return
                 if bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get()):
                     calibration.grid()
                 else:
@@ -11944,34 +11841,42 @@ def _open_mobile_model_export_center(self, initial_run=None):
         for idx, candidate in enumerate(selected_candidates):
             state = _make_model_state(candidate)
             model_states.append(state)
-            _create_model_panel(model_cards_content, state, idx)
-        _bind_model_cards_mousewheel(model_cards_content)
+            model_cards_content = presentation.add_role(state["marker"])
+            _create_model_panel(model_cards_content, state, 0)
+        checks_parent = presentation.add_checks()
+
+        def _refresh_plan_preview(*_args):
+            export_plan_var.set("\n".join(role_plan_text(state) for state in model_states))
+        for _state in model_states:
+            for _field in ("litert", "int8", "onnx", "onnx_int8", "ncnn", "imgsz",
+                           "reuse_mt", "reuse_mt_path", "reuse_mt_precision", "reuse_mz", "reuse_mz_path", "reuse_mz_precision"):
+                _state[_field].trace_add("write", _refresh_plan_preview)
+        _refresh_plan_preview()
 
         if set(selected_by_marker) == {"MT", "MZ"}:
             from .z4_mobile_export_plan import summarize_export_plan
 
             def _sync_f4_reuse_plan(*_args) -> None:
-                specs = []
-                for current_state in model_states:
-                    role = str(current_state.get("marker") or "")
-                    if role not in {"MT", "MZ"}:
-                        continue
-                    key = "reuse_" + role.lower()
-                    specs.append({
-                        "role": role,
-                        "reuse": bool(current_state[key].get()),
-                        "path": str(current_state[key + "_path"].get() or ""),
-                        "precision": str(current_state[key + "_precision"].get() or ""),
-                        "image_size": int(current_state["imgsz"].get() or 0),
-                        "formats": {name: bool(current_state[name].get())
-                                    for name in ("litert", "int8", "onnx", "onnx_int8", "ncnn")},
-                    })
                 try:
+                    specs = []
+                    for current_state in model_states:
+                        role = str(current_state.get("marker") or "")
+                        if role not in {"MT", "MZ"}:
+                            continue
+                        key = "reuse_" + role.lower()
+                        specs.append({
+                            "role": role, "reuse": bool(current_state[key].get()),
+                            "path": str(current_state[key + "_path"].get() or ""),
+                            "precision": str(current_state[key + "_precision"].get() or ""),
+                            "image_size": int(current_state["imgsz"].get() or 0),
+                            "formats": {name: bool(current_state[name].get())
+                                        for name in ("litert", "int8", "onnx", "onnx_int8", "ncnn")},
+                        })
                     plan_text, reuse_only = summarize_export_plan(specs)
-                except (TypeError, ValueError, tk.TclError) as exc:
-                    export_plan_var.set("Nie mogę jeszcze ustalić planu: " + str(exc))
+                except (TypeError, ValueError, tk.TclError):
+                    _refresh_plan_preview()
                     return
-                export_plan_var.set("Plan działania (bez uruchamiania eksportu):\n" + plan_text)
+                _refresh_plan_preview()
                 if bool(f4_no_conversion.get()) != reuse_only:
                     f4_no_conversion.set(reuse_only)
 
@@ -12204,34 +12109,34 @@ def _open_mobile_model_export_center(self, initial_run=None):
             ttk.Button(
                 intro_shell, text="Sprawdź gotowe paczki (FP32 / INT8)",
                 command=show_f4_inventory,
-            ).pack(anchor=tk.W, pady=(3, 0))
+            ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         checks_shell = tk.Frame(
-            model_grid,
+            checks_parent,
             bg=blend_hex_colors(card_bg, accent, 0.035),
             padx=10,
             pady=8,
             highlightthickness=1,
             highlightbackground=blend_hex_colors(accent, bg, 0.45),
         )
-        checks_shell.grid(row=0, column=1, sticky="nsew")
+        checks_shell.pack(fill="both", expand=True)
         checks_shell.grid_columnconfigure(0, weight=1)
         # The requirements tables are scrollable. Do not reserve 520 px
         # here: on common Windows DPI scaling that pushes the status/CTA
         # footer below the visible work area in the default window.
-        checks_shell.grid_rowconfigure(2, weight=1, minsize=250)
+        checks_shell.grid_rowconfigure(2, weight=1, minsize=160)
         tk.Label(
             checks_shell,
-            text="4. Sprawdzenie ustawień przed eksportem",
+            text="Gotowość do eksportu · źródła, ustawienia i zależności",
             bg=checks_shell["bg"],
             fg=fg,
             font=("Segoe UI", 10, "bold"),
             anchor=tk.W,
         ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        executor_requirements_table = _build_wrapped_info_table(
+        executor_requirements_table = presentation.build_table(
             checks_shell,
             [
-                {"key": "status", "title": "Stan", "minsize": 44, "width": 48, "wrap": 38},
+                {"key": "status", "title": "Wynik", "minsize": 44, "width": 48, "wrap": 38},
                 {"key": "model", "title": "Model", "minsize": 38, "width": 40, "wrap": 34},
                 {"key": "requirement", "title": "Wymaganie", "minsize": 112, "width": 128, "wrap": 92},
                 {"key": "description", "title": "Opis", "minsize": 360, "width": 560, "weight": 1, "wrap": 320},
@@ -12241,7 +12146,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             height=260,
         )
         executor_requirements_table["shell"].grid(row=2, column=0, sticky="nsew")
-        executor_install_table = _build_wrapped_info_table(
+        executor_install_table = presentation.build_table(
             checks_shell,
             [
                 {"key": "status", "title": "Stan", "minsize": 76, "width": 92, "wrap": 58},
@@ -12275,11 +12180,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
         # Narzędzia kontroli są w modalu EKSPORTU, nie w Centrum wyboru kandydatów.
         verify_section = tk.Frame(checks_shell, bg=checks_shell["bg"])
-        verify_section.grid(row=1, column=0, sticky="ew", pady=(3, 7))
+        verify_section.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         verify_section.grid_columnconfigure(0, weight=1)
         verify_section.grid_columnconfigure(1, weight=1)
-        tk.Label(verify_section, text="Kontrola gotowego pakietu / wyniki z telefonu",
-                 bg=verify_section["bg"], fg=fg, font=("Segoe UI", 9, "bold"),
+        tk.Label(verify_section, text="Dodatkowe narzędzia · nie zastępują kontroli gotowości",
+                 bg=verify_section["bg"], fg=fg, font=("Segoe UI", 11, "bold"),
                  anchor=tk.W).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         def _inspect_last_or_selected_tflite() -> None:
@@ -12299,41 +12204,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
                    command=lambda: open_mobile_report_browser(self, parent=executor_modal)).grid(
             row=1, column=1, sticky="ew", padx=(5, 0))
 
-        status_shell = tk.Frame(exec_root, bg=bg)
-        status_shell.grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        status_shell.grid_columnconfigure(0, weight=1)
-        exec_status_label = tk.Label(
-            status_shell,
-            textvariable=exec_status_var,
-            bg=bg,
-            fg=muted,
-            font=("Segoe UI", 9),
-            anchor=tk.W,
-            justify=tk.LEFT,
-            wraplength=900,
-        )
-        exec_status_label.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        exec_progress_row = tk.Frame(status_shell, bg=bg)
-        exec_progress_row.grid(row=1, column=0, sticky="ew")
-        exec_progress_row.grid_columnconfigure(0, weight=1)
-        exec_progress = ttk.Progressbar(exec_progress_row, mode="determinate", maximum=100.0, variable=exec_progress_var)
-        exec_progress.grid(row=0, column=0, sticky="ew")
-        tk.Label(
-            exec_progress_row,
-            textvariable=exec_progress_percent_var,
-            bg=bg,
-            fg=fg,
-            font=("Segoe UI", 9, "bold"),
-            width=5,
-            anchor=tk.E,
-        ).grid(row=0, column=1, sticky="e", padx=(10, 0))
-
-        actions_exec = tk.Frame(exec_root, bg=bg)
-        actions_exec.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        actions_exec.grid_columnconfigure(0, weight=1)
-        tk.Label(actions_exec, text="5. Następny krok", bg=bg, fg=fg,
-                 font=("Segoe UI", 9, "bold"), anchor=tk.W).grid(
-            row=0, column=0, sticky="w", padx=(0, 12))
+        status_shell, exec_status_label, exec_progress_row, exec_progress, actions_exec = presentation.prepare_footer(
+            exec_status_var, exec_progress_var, exec_progress_percent_var)
 
         def _set_executor_status(text: str, tone: str = "info") -> None:
             colors = {
@@ -12388,11 +12260,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
             install_running = bool(exec_install_control.get("running"))
             installable = bool(exec_preflight_state.get("installable"))
             ready = bool(exec_preflight_state.get("ready")) and not bool(exec_preflight_state.get("problems"))
-            if running:
-                primary_text = "Eksport trwa..."
-                primary_state = tk.DISABLED
-            elif install_running:
+            if install_running:
                 primary_text = "Instaluję zależności..."
+                primary_state = tk.DISABLED
+            elif running:
+                primary_text = "Eksport trwa..."
                 primary_state = tk.DISABLED
             elif ready:
                 primary_text = artifact.export_label
@@ -12406,10 +12278,13 @@ def _open_mobile_model_export_center(self, initial_run=None):
             else:
                 primary_text = "Sprawdź gotowość eksportu"
                 primary_state = tk.NORMAL
+            presentation.feedback(running=running, installing=install_running, ready=ready,
+                                  problems=bool(exec_preflight_state.get("problems")),
+                                  completed=bool(exec_operation.get("completed")), failed=bool(exec_operation.get("failed")))
             for key, state_value in (
                 ("primary", primary_state),
                 ("pause", tk.NORMAL if install_running else tk.DISABLED),
-                ("close", tk.DISABLED if running else tk.NORMAL),
+                ("close", tk.DISABLED if running or install_running else tk.NORMAL),
             ):
                 button = exec_buttons.get(key)
                 if button is None:
@@ -12427,7 +12302,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
             try:
                 pause_button = exec_buttons.get("pause")
                 if pause_button is not None:
-                    pause_button.configure(text="Wznów" if exec_install_control.get("pause_requested") else "Pauza")
+                    pause_button.configure(text="Wznów instalację" if exec_install_control.get("pause_requested") else "Wstrzymaj instalację")
             except Exception:
                 pass
 
@@ -12672,7 +12547,11 @@ def _open_mobile_model_export_center(self, initial_run=None):
             rows = []
             for current_state in model_states:
                 current_marker = str(current_state.get("marker") or "-")
-                description = _executor_formats_description(current_state)
+                try:
+                    description = _executor_formats_description(current_state)
+                except (tk.TclError, ValueError, TypeError):
+                    rows.append(("Do korekty", current_marker, "Parametry", "Uzupełnij poprawne wartości liczbowe."))
+                    continue
                 if _state_reuses_existing_mt(current_state):
                     path_text = str(current_state["reuse_mt_path"].get() or "").strip()
                     description += " | MT z istniejącej paczki: " + (Path(path_text).name if path_text else "nie wskazano")
@@ -12682,7 +12561,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                 elif bool(current_state["int8"].get()) or bool(current_state["onnx_int8"].get()):
                     path_text = str(current_state["calibration"].get() or "").strip()
                     description += " | kalibracja: " + (Path(path_text).name if path_text else "wyszukiwanie / brak wyboru")
-                rows.append(("-", current_marker, "Wybór — do kontroli", description))
+                rows.append(("Czeka", current_marker, "Ustawienia — niesprawdzone", description))
             return rows
 
         _pending_executor_rows_after = {"id": None}
@@ -12693,7 +12572,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
             def paint():
                 _pending_executor_rows_after["id"] = None
-                if not exec_preflight_state.get("ready"):
+                if (not exec_preflight_state.get("ready") and not exec_preflight_state.get("problems")
+                        and not worker_state.get("running") and not exec_install_control.get("running")):
                     _set_executor_rows(_pending_executor_rows())
 
             try:
@@ -12940,11 +12820,27 @@ def _open_mobile_model_export_center(self, initial_run=None):
             return any(token in lower for token in reflected_tokens)
 
         def run_executor_preflight(*, show_dialog: bool = False) -> bool:
+            if worker_state.get("running") or exec_install_control.get("running"):
+                return False
+            exec_operation.update(completed=False, failed=False)
+            exec_preflight_state["ready"] = False
+            exec_progress_var.set(0.0)
+            exec_progress_percent_var.set("0%")
+            presentation.show_checks()
+            _set_executor_status("Sprawdzam źródła, ustawienia i zależności. Eksport nie został uruchomiony.")
+            executor_modal.update_idletasks()
             rows: list[tuple[str, str, str, str]] = []
             all_problems: list[str] = []
+            local_problems = []
             for state in model_states:
-                rows.extend(_executor_model_check_rows(state))
-            local_problems = _executor_local_validation_problems()
+                try:
+                    rows.extend(_executor_model_check_rows(state))
+                except (tk.TclError, TypeError, ValueError) as exc:
+                    local_problems.append(f"{state['marker']}: nieprawidłowe pole: {exc}")
+            try:
+                local_problems.extend(_executor_local_validation_problems())
+            except (tk.TclError, TypeError, ValueError) as exc:
+                local_problems.append(f"Nieprawidłowe ustawienia: {exc}")
             try:
                 destination = _default_executor_destination()
                 request = _build_executor_package_request(destination, include_metadata=False)
@@ -12977,7 +12873,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                     rows.append(("Brak", marker, "Sprawdzenie", clean))
 
             try:
-                rows.append(("Jest", artifact.label, "Miejsce zapisu", str(_default_executor_destination())))
+                rows.append(("Plan", artifact.label, "Domyślna ścieżka (wybór przy eksporcie)", str(_default_executor_destination())))
             except Exception as exc:
                 rows.append(("Brak", artifact.label, "Miejsce zapisu", str(exc)))
 
@@ -13018,8 +12914,8 @@ def _open_mobile_model_export_center(self, initial_run=None):
             )
             exec_progress.stop()
             exec_progress.configure(mode="determinate")
-            exec_progress_var.set(100.0)
-            exec_progress_percent_var.set("100%")
+            exec_progress_var.set(0.0)
+            exec_progress_percent_var.set("0%")
             _sync_executor_buttons()
             return True
 
@@ -13318,6 +13214,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
 
                     def done() -> None:
                         last_exported_package["path"] = str(package_path)
+                        exec_operation["completed"] = True
                         set_running(False)
                         _sync_executor_buttons()
                         exec_progress.stop()
@@ -13360,6 +13257,7 @@ def _open_mobile_model_export_center(self, initial_run=None):
                         logger.exception("Z4: nie udało się zapisać błędu w rejestrze eksportów")
 
                     def failed() -> None:
+                        exec_operation["failed"] = True
                         set_running(False)
                         _sync_executor_buttons()
                         exec_progress.stop()
@@ -13390,29 +13288,28 @@ def _open_mobile_model_export_center(self, initial_run=None):
         exec_buttons["primary"].grid(row=0, column=1, sticky="e", padx=(0, 7), ipadx=12, ipady=3)
         exec_buttons["pause"] = ttk.Button(actions_exec, text="Pauza", command=toggle_executor_pause, state=tk.DISABLED)
         exec_buttons["pause"].grid(row=0, column=2, sticky="e", padx=(0, 7), ipadx=8, ipady=3)
-        exec_buttons["close"] = ttk.Button(actions_exec, text="Zamknij", command=executor_modal.destroy)
+        def _request_executor_close(_event=None):
+            if worker_state.get("running") or exec_install_control.get("running"):
+                _set_executor_status("Operacja trwa. Poczekaj na jej zakończenie; zamknięcie okna nie jest anulowaniem.", "warning")
+                return "break"
+            executor_modal.destroy()
+            return "break"
+
+        exec_buttons["close"] = ttk.Button(actions_exec, text="Zamknij", command=_request_executor_close)
+        executor_modal.protocol("WM_DELETE_WINDOW", _request_executor_close)
         exec_buttons["close"].grid(row=0, column=3, sticky="e", ipadx=8, ipady=3)
 
+        exec_buttons["pause"]._hide_when_idle = True
+        presentation.action_buttons = [exec_buttons["primary"], exec_buttons["pause"], exec_buttons["close"]]
+        presentation.style_widgets(exec_root)
         _set_executor_rows(_pending_executor_rows())
         _sync_executor_buttons()
+        # Named UI references support non-invasive integration/geometry checks.
+        executor_modal._export_configurator = presentation
+        executor_modal._export_states = model_states
 
-        # Re-fit after the complete executor UI (including the footer) exists.
-        # This keeps the primary CTA visible on Windows displays with DPI
-        # scaling without requiring the user to maximize the window.
-        try:
-            fitter = getattr(self.app, "_fit_dialog_to_content", None)
-            if callable(fitter):
-                executor_modal.after_idle(
-                    lambda current=fitter: current(
-                        executor_modal,
-                        parent=dialog,
-                        min_width=1040,
-                        min_height=660,
-                        margin=18,
-                    )
-                )
-        except Exception:
-            pass
+        executor_modal.update_idletasks()
+        presentation._queue_geometry()
 
     def export_package() -> None:
         if worker_state.get("running"):

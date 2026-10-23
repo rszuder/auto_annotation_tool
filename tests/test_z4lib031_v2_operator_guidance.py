@@ -23,9 +23,9 @@ def test_center_tells_user_what_will_happen():
 
 def test_export_explains_source_and_why_paths_may_be_empty():
     s = _code('z4_model_export.py')
-    for p in ('Po co to okno?', 'Wybrane wcześniej modele treningowe (.pt)',
-              '„Nowy” tworzy model z .pt', 'gotowej paczki .alprmodel',
-              'Najpierw sprawdzimy ustawienia', 'Sprawdzenie ustawień przed eksportem'):
+    for p in ('1. Źródło modelu MT', '1. Źródło modelu MZ',
+              'Przygotuj nowy MT z wybranego best.pt', 'Wykorzystaj gotowy MZ z biblioteki',
+              'Najpierw sprawdzimy ustawienia', 'Gotowość do eksportu · źródła, ustawienia i zależności'):
         assert p in s
 
 
@@ -51,7 +51,7 @@ def test_internal_f4_ids_and_guards_stay():
     for p in ('def show_f4_inventory()', 'f4_zero_conversion_only',
               'require_f4_no_conversion_request(bundle_request)',
               'require_f4_no_conversion_request(request, require_fresh_destination=True)',
-              'export_f4_atomic_no_overwrite(', 'model_card_columns = 1  # Z4LIB029'):
+              'export_f4_atomic_no_overwrite(', 'model_card_columns = 1  # One wide scrollable card per role tab.'):
         assert p in s
     assert 'view.title("F4' not in s
     assert '"F4: pakiety' not in s

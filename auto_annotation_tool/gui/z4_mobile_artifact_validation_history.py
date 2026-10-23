@@ -123,6 +123,44 @@ def _valid_record(data) -> bool:
                  (data["outcome"] == "FAILED" and data["sha256"] == "")))
 
 
+
+def read_check_events(root: Path) -> tuple[list[dict], str]:
+    """Read the full *recorded* desktop-check audit, without any writes.
+
+    A bad/truncated line is not an event. A truncated or redirected complete
+    ledger is never presented as a complete history. This is NOT approval.
+    """
+    try:
+        journal = _safe_ledger(root, create=False)
+        if not journal.exists():
+            return [], "Brak dziennika kontroli PC"
+        if not journal.is_file() or journal.stat().st_size > MAX_LEDGER_BYTES:
+            return [], "Dziennik kontroli PC jest niedostępny lub przekracza limit"
+        records = []
+        bad = 0
+        with journal.open("rb") as fp:
+            for index, raw in enumerate(fp):
+                if index >= MAX_RECORDS:
+                    return [], "Dziennik kontroli PC przekracza limit rekordów — odczyt zablokowany"
+                if len(raw) > MAX_RECORD_BYTES or not raw.endswith(b"\n"):
+                    bad += 1
+                    continue
+                try:
+                    record = json.loads(raw.decode("utf-8"))
+                except (ValueError, UnicodeError):
+                    bad += 1
+                    continue
+                if not _valid_record(record):
+                    bad += 1
+                    continue
+                entry = dict(record)
+                entry["_ledger_index"] = index
+                records.append(entry)
+        note = f"Pominięto {bad} niepoprawnych wpisów kontroli PC" if bad else ""
+        return records, note
+    except (OSError, ValueError, RuntimeError):
+        return [], "Nie można bezpiecznie odczytać dziennika kontroli PC"
+
 def read_last_checks(root: Path) -> dict[str, dict]:
     """Read bounded append order; ignore corrupt lines, never approve a model."""
     try:

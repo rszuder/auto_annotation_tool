@@ -9,14 +9,25 @@ import queue
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, font as tkfont
 
+from .z4_mobile_library_view import inventory_caption
+from .z4_mobile_details_dialog import DetailSnapshot, MobileArtifactDetailsDialog
+from .z4_mobile_library_view import (
+    artifact_state, artifact_sheet, event_sheet, event_tone, short_sha,
+    display_utc, file_name, size_mib,
+)
 from .z4_mobile_artifact_registry import library_snapshot, sha256_file
 from .z4_mobile_operation_summary import summarize_operations
 from .z4_mobile_artifact_status_ui import artifact_status_label, validation_result_text
 from .z4_mobile_artifact_validation_history import (
-    record_desktop_check, observe_last_checks, history_key,
+    record_desktop_check, observe_last_checks, read_check_events, history_key,
     historical_status_label,
+)
+from .z4_mobile_history_presentation import (
+    build_history_presentation, history_source_label,
+    history_operation_label, history_outcome_label, history_detail_card,
+    SOURCE_EXPORT, SOURCE_CHECK, SOURCE_FILE,
 )
 # Z4LIB035_HISTORY_UI_20261015
 from .z4_mobile_artifact_transfer_ui import transfer_guidance
@@ -79,9 +90,9 @@ class MobileArtifactLibrary:
         self.sort_state = {"artifacts": None, "events": None}
         self.sort_labels = {
             "artifacts": {"role": "Rola", "name": "Nazwa", "variants": "Runtime / precyzja",
-                          "size": "Rozmiar", "date": "Data pliku (UTC)", "state": "Stan"},
-            "events": {"date": "Czas (UTC)", "operation": "Operacja", "outcome": "Wynik",
-                       "file": "Plik", "sha": "SHA-256"},
+                          "size": "MiB", "date": "Modyfikacja (UTC)", "state": "Kontrola PC"},
+            "events": {"date": "Data (UTC)", "source": "Źródło", "operation": "Operacja",
+                        "outcome": "Wynik", "file": "Plik", "sha": "SHA pliku (skrót)"},
         }
         self.active_source = "artifact"
         self._event_view_raw = False
@@ -92,11 +103,22 @@ class MobileArtifactLibrary:
         self._verified_selection_path = None
         self._verification_error = None  # only while THIS selection is active
         self._previous_desktop_checks = {}  # observations from separate history ledger
+        self._desktop_check_events = []   # full recorded PC audit, read only
+        self._desktop_check_note = ""
+        self._history_read_note = ""
+        self._closed = False
+        self._poll_after_id = None
+        self._layout_after_id = None
+        self._details_dialog = None
+        self._detail_sheet = None
+        self._detail_text = ""
+        self._detail_json = ""
         self.window = tk.Toplevel(parent)
         self.show_raw_events = tk.BooleanVar(master=self.window, value=False)
         self.event_view_status = tk.StringVar(
-            master=self.window, value="Widok operacji: jeden wpis na eksport lub konwersję"
+            master=self.window, value="Odczytuję operacje, kontrole PC i starsze pakiety..."
         )
+        self.history_source_filter = tk.StringVar(master=self.window, value="Wszystkie źródła")
         self.window.title("Biblioteka modeli mobilnych — Z4")
         self.window.geometry("1300x790")
         self.window.minsize(940, 570)
@@ -104,112 +126,114 @@ class MobileArtifactLibrary:
         # minimize/maximize/restore controls; a transient dialog can hide them.
         self.window.resizable(True, True)
         self.window.protocol("WM_DELETE_WINDOW", self.close)
-        shell = ttk.Frame(self.window, padding=14)
+        self._init_appearance()
+        self.shell = shell = ttk.Frame(self.window, padding=12, style=self._ui + ".TFrame")
         shell.pack(fill="both", expand=True)
-        ttk.Label(shell, text="Biblioteka modeli mobilnych", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        ttk.Label(shell, text=(
-            "Kolumna «Stan» pokazuje, czy paczka jest gotowa do ręcznego skopiowania na telefon po kontroli PC. "
-            "To nie jest potwierdzenie działania na Androidzie. Zaznacz pakiet, aby zobaczyć następny krok."
-        ), wraplength=1200).pack(anchor="w", pady=(1, 8))
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(2, weight=1)
+        header = ttk.Frame(shell, style=self._ui + ".TFrame")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(header, text="Biblioteka modeli mobilnych", style=self._ui + ".Title.TLabel").pack(anchor="w")
+        self.intro = ttk.Label(header,
+            text="Z4 · Paczki, pochodzenie i kontrole techniczne. Wyniki PC nie są wynikami badań na telefonie.",
+            style=self._ui + ".Muted.TLabel", justify="left")
+        self.intro.pack(anchor="w", fill="x", pady=(2, 0))
 
-        controls = ttk.Frame(shell)
-        controls.pack(fill="x", pady=(0, 9))
-        ttk.Label(controls, text="Filtr:").pack(side="left")
-        self.filter_var = tk.StringVar()
-        ent = ttk.Entry(controls, textvariable=self.filter_var, width=36)
-        ent.pack(side="left", padx=(6, 12))
+        controls = ttk.Frame(shell, style=self._ui + ".TFrame")
+        controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        controls.columnconfigure(1, weight=1)
+        ttk.Label(controls, text="Szukaj:", style=self._ui + ".TLabel").grid(row=0, column=0, padx=(0, 6))
+        self.filter_var = tk.StringVar(master=self.window)
+        ent = ttk.Entry(controls, textvariable=self.filter_var, width=28)
+        ent.grid(row=0, column=1, sticky="ew")
         self.filter_var.trace_add("write", lambda *_: self.refresh_views())
+        ttk.Button(controls, text="Wyczyść", command=lambda: self.filter_var.set("")).grid(row=0, column=2, padx=6)
         self.refresh_button = ttk.Button(controls, text="Odśwież z dysku", command=self.refresh)
-        self.refresh_button.pack(side="left")
-        ttk.Label(controls, text=str(self.packages_root)).pack(side="right")
+        self.refresh_button.grid(row=0, column=3)
+        try:
+            directory = str(self.packages_root.relative_to(self.repo_root))
+        except ValueError:
+            directory = "…/" + "/".join(self.packages_root.parts[-3:])
+        self.storage_label = ttk.Label(controls, text="Katalog: " + directory,
+            style=self._ui + ".Muted.TLabel", justify="left")
+        self.storage_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
-        # Z4LIB027: movable divider between list and summary; keeps native Win32 chrome.
-        split = ttk.PanedWindow(shell, orient=tk.VERTICAL)
-        split.pack(fill="both", expand=True)
-        notebook = ttk.Notebook(split)
-        split.add(notebook, weight=3)
-        self.packages_tab = ttk.Frame(notebook, padding=(0, 9, 0, 0))
-        self.events_tab = ttk.Frame(notebook, padding=(0, 9, 0, 0))
+        # FIX04: the lists own the entire elastic row. Details are on demand,
+        # in a separate modal, never another pane competing with table rows.
+        notebook = ttk.Notebook(shell, style=self._ui + ".TNotebook")
+        notebook.grid(row=2, column=0, sticky="nsew")
+        self.packages_tab = ttk.Frame(notebook, padding=(0, 6, 0, 0), style=self._ui + ".TFrame")
+        self.events_tab = ttk.Frame(notebook, padding=(0, 6, 0, 0), style=self._ui + ".TFrame")
         notebook.add(self.packages_tab, text="Pakiety i modele")
-        notebook.add(self.events_tab, text="Historia konwersji i eksportów")
+        notebook.add(self.events_tab, text="Historia i kontrole PC")
         self.notebook = notebook
         notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed, add="+")
-        event_controls = ttk.Frame(self.events_tab)
-        event_controls.pack(fill="x", pady=(0, 7))
-        ttk.Checkbutton(
-            event_controls, text="Pokaż każde zdarzenie (audyt)",
-            variable=self.show_raw_events, command=self.refresh_views,
-        ).pack(side="left")
-        ttk.Label(event_controls, textvariable=self.event_view_status).pack(side="left", padx=(14, 0))
+        self.package_count = tk.StringVar(master=self.window, value="Odczytuję paczki…")
+        ttk.Label(self.packages_tab, textvariable=self.package_count, style=self._ui + ".Muted.TLabel").pack(anchor="w", pady=(0, 5))
+        self._make_history_header()
         self.art_tree = self.build_tree(self.packages_tab,
             ("role", "name", "variants", "size", "date", "state"),
-            ("Rola", "Nazwa", "Runtime / precyzja", "Rozmiar", "Data pliku (UTC)", "Stan"),
-            (105, 310, 280, 96, 150, 200),
+            ("Rola", "Nazwa", "Runtime / precyzja", "MiB", "Modyfikacja (UTC)", "Kontrola PC"),
+            (85, 320, 230, 75, 165, 225),
             on_sort=lambda column: self.sort_column("artifacts", column))
         self.art_tree.bind("<<TreeviewSelect>>", self.artifact_selected)
         self.event_tree = self.build_tree(self.events_tab,
-            ("date", "operation", "outcome", "file", "sha"),
-            ("Czas (UTC)", "Operacja", "Wynik", "Plik", "SHA-256"),
-            (180, 175, 110, 410, 290),
+            ("date", "source", "operation", "outcome", "file", "sha"),
+            ("Data (UTC)", "Źródło", "Operacja", "Wynik", "Plik", "SHA pliku (skrót)"),
+            (190, 150, 180, 190, 285, 190),
             on_sort=lambda column: self.sort_column("events", column))
         self.event_tree.bind("<<TreeviewSelect>>", self.event_selected)
+        for tree in (self.art_tree, self.event_tree):
+            tree.bind("<Double-Button-1>", self._details_double_click, add="+")
+            tree.bind("<Return>", self._details_key, add="+")
+            tree.bind("<KP_Enter>", self._details_key, add="+")
+            tree.configure(style=self._ui + ".Treeview")
+            for tone in ("success", "warning", "danger", "info", "neutral"):
+                tree.tag_configure(tone, background=self.colors[tone + "_bg"], foreground=self.colors["ink"])
+        self.art_tree.column("size", anchor="e")
 
-        details = ttk.LabelFrame(split, text="Szczegóły i proweniencja", padding=9)
-        split.add(details, weight=2)
-        detail_actions = ttk.Frame(details)
-        detail_actions.pack(fill="x", pady=(0, 5))
-        ttk.Label(detail_actions, text="Zestawienie z manifestu (odczyt, bez zatwierdzenia)").pack(side="left")
-        ttk.Button(detail_actions, text="Kopiuj SHA checkpointu", command=self.copy_checkpoint_sha).pack(side="right")
-        self.detail_tabs = ttk.Notebook(details)
-        self.detail_tabs.pack(fill="both", expand=True)
-        summary_tab = ttk.Frame(self.detail_tabs)
-        raw_tab = ttk.Frame(self.detail_tabs)
-        self.detail_tabs.add(summary_tab, text="Opis modelu")
-        self.detail_tabs.add(raw_tab, text="Manifest JSON")
-
-        self.detail = tk.Text(summary_tab, height=9, wrap="word", state="disabled", font=("Segoe UI", 10))
-        scroll = ttk.Scrollbar(summary_tab, command=self.detail.yview)
-        self.detail.configure(yscrollcommand=scroll.set)
-        self.detail.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
-        self.raw_detail = tk.Text(raw_tab, height=9, wrap="none", state="disabled", font=("Consolas", 10))
-        raw_y = ttk.Scrollbar(raw_tab, command=self.raw_detail.yview)
-        raw_x = ttk.Scrollbar(raw_tab, command=self.raw_detail.xview, orient="horizontal")
-        self.raw_detail.configure(yscrollcommand=raw_y.set, xscrollcommand=raw_x.set)
-        self.raw_detail.grid(row=0, column=0, sticky="nsew")
-        raw_y.grid(row=0, column=1, sticky="ns")
-        raw_x.grid(row=1, column=0, sticky="ew")
-        raw_tab.grid_columnconfigure(0, weight=1)
-        raw_tab.grid_rowconfigure(0, weight=1)
-
-        actions = ttk.Frame(shell)
-        actions.pack(fill="x", pady=(5, 1))
-        ttk.Button(actions, text="Pokaż wybrany plik w folderze", command=self.open_location).pack(side="left", padx=(0, 7))
-        ttk.Button(actions, text="Kopiuj ścieżkę", command=self.copy_path).pack(side="left", padx=(0, 7))
-        ttk.Button(actions, text="Sprawdź paczkę (pełna kontrola)", command=self.validate_selected).pack(side="left")
+        self.footer = ttk.Frame(shell, style=self._ui + ".TFrame")
+        self.footer.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.footer.columnconfigure(0, weight=1)
+        self.action_group = ttk.Frame(self.footer, style=self._ui + ".TFrame")
+        self.action_group.grid(row=0, column=0, sticky="ew")
+        self.open_button = ttk.Button(self.action_group, text="Pokaż wybrany plik w folderze", command=self.open_location)
+        self.path_button = ttk.Button(self.action_group, text="Kopiuj ścieżkę", command=self.copy_path)
+        self.validate_button = ttk.Button(self.action_group, text="Sprawdź paczkę (pełna kontrola)", command=self.validate_selected)
+        self.details_button = ttk.Button(self.action_group, text="Szczegóły…", command=self.show_details)
+        self.action_buttons = [self.details_button, self.open_button, self.path_button, self.validate_button]
+        self.choose_button = None
         if self.on_choose is not None:
-            ttk.Button(
-                actions, text=f"Wybierz jako {self.choose_role} (kontrola przed eksportem)",
-                command=self.choose_for_export,
-            ).pack(side="left", padx=(9, 0))
-        ttk.Button(actions, text="Zamknij", command=self.close).pack(side="right")
-        self.status = tk.StringVar(value="Gotowe. Odświeżam katalog zarządzanych pakietów.")
-        ttk.Label(shell, textvariable=self.status, wraplength=1160).pack(anchor="w", pady=(6, 0))
-        self.window.after(90, self.poll)
+            self.choose_button = ttk.Button(self.action_group, text=f"Wybierz jako {self.choose_role}", command=self.choose_for_export)
+            self.action_buttons.append(self.choose_button)
+        self.close_button = ttk.Button(self.footer, text="Zamknij", command=self.close)
+        self.close_button.grid(row=0, column=1, sticky="se", padx=(10, 0), pady=2)
+        self.status = tk.StringVar(master=self.window, value="Odczytuję bibliotekę…")
+        self.status_label = ttk.Label(self.footer, textvariable=self.status,
+            style=self._ui + ".Muted.TLabel", justify="left")
+        self.status_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        shell.bind("<Configure>", self._queue_layout, add="+")
+        self.window.bind("<<ThemeChanged>>", self._theme_changed, add="+")
+        max_w = max(640, self.window.winfo_screenwidth() - 60)
+        max_h = max(420, self.window.winfo_screenheight() - 100)
+        if max_w < 1300 or max_h < 790:
+            self.window.geometry(f"{min(1300, max_w)}x{min(790, max_h)}")
+            self.window.minsize(min(940, max_w), min(570, max_h))
+        self._poll_after_id = self.window.after(90, self.poll)
+        self._queue_layout()
         self.refresh()
 
     @staticmethod
     def build_tree(parent, cols, headings, widths, *, on_sort=None):
         host = ttk.Frame(parent)
         host.pack(fill="both", expand=True)
-        tree = ttk.Treeview(host, columns=cols, show="headings", selectmode="browse", height=10)
+        tree = ttk.Treeview(host, columns=cols, show="headings", selectmode="browse", height=4)
         for key, title, width in zip(cols, headings, widths):
             if on_sort is None:
                 tree.heading(key, text=title)
             else:
                 tree.heading(key, text=title, command=lambda column=key: on_sort(column))
-            tree.column(key, width=width, minwidth=68, stretch=(key in ("name", "variants", "file")))
+            tree.column(key, width=width, minwidth={"name": 240, "file": 220, "variants": 180}.get(key, 68), stretch=(key in ("name", "variants", "file")))
         y = ttk.Scrollbar(host, command=tree.yview)
         x = ttk.Scrollbar(host, command=tree.xview, orient="horizontal")
         tree.configure(yscrollcommand=y.set, xscrollcommand=x.set)
@@ -231,7 +255,8 @@ class MobileArtifactLibrary:
             value = fields.get(column, "")
         elif source == "events":
             fields = {
-                "date": item.get("observed_utc", ""),
+                "date": item.get("_history_sort_date", item.get("observed_utc", "")),
+                "source": history_source_label(item),
                 "operation": item.get("operation", ""), "outcome": item.get("outcome", ""),
                 "file": Path(str(item.get("artifact_path") or "-")).name,
                 "sha": item.get("artifact_sha256") or "-",
@@ -266,13 +291,29 @@ class MobileArtifactLibrary:
             tree.heading(key, text=label + marker if key == column else label)
         ordered = sorted(
             tree.get_children(""),
-            key=lambda iid: self._sort_value(source, column, lookup[iid]),
+            key=lambda iid: (
+                self._state_view(lookup[iid]).label.casefold() if source == "artifacts" and column == "state"
+                else history_operation_label(lookup[iid]).casefold() if source == "events" and column == "operation"
+                else history_outcome_label(lookup[iid]).casefold() if source == "events" and column == "outcome"
+                else self._sort_value(source, column, lookup[iid])),
             reverse=descending,
         )
         for position, iid in enumerate(ordered):
             tree.move(iid, "", position)
 
     def close(self):
+        self._closed = True
+        dialog = getattr(self, "_details_dialog", None)
+        if dialog is not None:
+            dialog.close(restore_focus=False)
+        for name in ("_poll_after_id", "_layout_after_id"):
+            timer = getattr(self, name, None)
+            if timer:
+                try:
+                    self.window.after_cancel(timer)
+                except tk.TclError:
+                    pass
+                setattr(self, name, None)
         try:
             self.window.destroy()
         except tk.TclError:
@@ -291,22 +332,38 @@ class MobileArtifactLibrary:
             try:
                 scan_result = library_snapshot(self.packages_root, self.repo_root)
                 previous_checks = observe_last_checks(self.packages_root, scan_result[0])
-                self.pipe.put(("scan", (scan_result, previous_checks)))
+                check_events, check_note = read_check_events(self.packages_root)
+                self.pipe.put(("scan", (scan_result, previous_checks, check_events, check_note)))
             except Exception as exc:
                 self.pipe.put(("error", str(exc)))
         threading.Thread(target=work, daemon=True, name="z4-artifact-library-readonly-scan").start()
 
     def poll(self):
+        if getattr(self, "_closed", False):
+            return
+        timer = getattr(self, "_poll_after_id", None)
+        if timer is not None:
+            try:
+                self.window.after_cancel(timer)
+            except (AttributeError, tk.TclError):
+                pass
+            self._poll_after_id = None
         try:
             while True:
                 kind, value = self.pipe.get_nowait()
                 if kind == "scan":
                     self.rows, self.history, note = value[0]
                     self._previous_desktop_checks = value[1]
+                    self._desktop_check_events = value[2]
+                    self._desktop_check_note = value[3]
+                    self._history_read_note = note
                     self.busy = False
                     self.refresh_button.configure(state="normal")
                     self.refresh_views()
-                    self.status.set(f"Znaleziono {len(self.rows)} artefaktów; {len(self.history)} zapisanych zdarzeń. {note}")
+                    self.status.set(
+                        inventory_caption(self.rows) + ". "
+                        + ("Uwagi o źródłach w zakładce historii." if note or self._desktop_check_note else "")
+                    )
                 elif kind == "verified":
                     # The background result may arrive after a tab/row/filter change.
                     ticket = value if isinstance(value, dict) else {}
@@ -316,6 +373,12 @@ class MobileArtifactLibrary:
                             "record": stored,
                             "comparison": ("MATCH" if stored.get("sha256") else "UNCONFIRMED"),
                         }
+                        entry = dict(stored)
+                        entry["_ledger_index"] = max(
+                            (int(item.get("_ledger_index", -1)) for item in self._desktop_check_events),
+                            default=-1,
+                        ) + 1
+                        self._desktop_check_events.append(entry)
                     active = self._verification_active
                     if not isinstance(active, dict) or any(
                         ticket.get(key) != active.get(key) for key in ("token", "path", "kind")
@@ -363,14 +426,22 @@ class MobileArtifactLibrary:
                         self.status.set(self.status.get() + " Nie udało się zapisać historii kontroli: "
                                         + str(ticket["history_warning"])[:240])
                     self._refresh_artifact_status_cells()
+                    # Live refresh of both sources; do not present a PC check as export.
+                    if isinstance(stored, dict) and stored.get("path"):
+                        self.refresh_views()
+                    if still_selected and hasattr(self, "colors"):
+                        self.artifact_selected()
+
                 else:
                     self.busy = False
                     self.refresh_button.configure(state="normal")
                     self.status.set("Błąd odczytu: " + str(value))
         except queue.Empty:
             pass
+        self._sync_actions()
         try:
-            self.window.after(150, self.poll)
+            if not getattr(self, "_closed", False):
+                self._poll_after_id = self.window.after(150, self.poll)
         except tk.TclError:
             return
 
@@ -387,6 +458,11 @@ class MobileArtifactLibrary:
     def _history_selection_key(event, *, raw: bool):
         if not isinstance(event, dict):
             return None
+        origin = event.get("_history_origin")
+        if origin == SOURCE_CHECK:
+            return ("pc_check", str(event.get("_history_source_index")))
+        if origin == SOURCE_FILE:
+            return ("disk_file", history_key(event.get("artifact_path") or ""))
         if raw:
             event_id = str(event.get("event_id") or "").strip()
             return ("event", event_id) if event_id else None
@@ -416,57 +492,76 @@ class MobileArtifactLibrary:
         was_raw = bool(getattr(self, "_event_view_raw", raw_view))
         current_event = self._selection_row(self.event_tree, self.events_by_iid)
         event_key = (self._history_selection_key(current_event, raw=raw_view)
-                     if raw_view == was_raw else None)
+                     if raw_view == was_raw or (isinstance(current_event, dict)
+                        and current_event.get("_history_origin") in (SOURCE_CHECK, SOURCE_FILE))
+                     else None)
         self.by_iid.clear()
         for item in self.art_tree.get_children():
             self.art_tree.delete(item)
         for index, row in enumerate(self.rows):
             if phrase not in (artifact_search_text(row) + " " + artifact_status_label(row)
-                              + " " + self._transfer_status_label(row)).casefold():
+                              + " " + self._transfer_status_label(row) + " " + self._state_view(row).label).casefold():
                 continue
             iid = f"a{index}"
             self.by_iid[iid] = row
-            size = f"{row.size_bytes / 1024 / 1024:.2f} MB"
+            size = size_mib(row.size_bytes)
+            state = self._state_view(row)
             self.art_tree.insert("", "end", iid=iid, values=(row.role, row.name, row.variants,
-                                size, row.modified_utc[:19], self._transfer_status_label(row)))
+                                size, display_utc(row.modified_utc), state.label))
+            if hasattr(self, "colors"):
+                self.art_tree.item(iid, tags=(state.tone,))
         self.events_by_iid.clear()
         for item in self.event_tree.get_children():
             self.event_tree.delete(item)
-        visible_history = self.history if raw_view else summarize_operations(self.history)
-        view_status = getattr(self, "event_view_status", None)
-        if view_status is not None:
-            view_status.set(
-                f"{len(visible_history)} pozycji / {len(self.history)} zdarzeń"
-                + (" — pełny audyt" if raw_view else " — ostatni stan każdej operacji")
+        # A partial __new__ test fixture without a package root represents the
+        # original export-only interface. Real instances always have a root.
+        if hasattr(self, "packages_root"):
+            visible_history, counts = build_history_presentation(
+                self.rows, self.history, self._desktop_check_events, raw_exports=raw_view,
             )
+        else:
+            visible_history = self.history if raw_view else summarize_operations(self.history)
+            counts = {"export_operations": len(summarize_operations(self.history)),
+                      "export_events": len(self.history), "pc_checks": 0, "unlogged_packages": 0}
+        choice = str(getattr(getattr(self, "history_source_filter", None), "get", lambda: "Wszystkie źródła")())
+        source_choices = {"Eksporty": SOURCE_EXPORT, "Kontrole PC": SOURCE_CHECK,
+                          "Pakiety z dysku": SOURCE_FILE}
+        source_limit = source_choices.get(choice)
+        if source_limit is not None:
+            visible_history = [row for row in visible_history
+                               if row.get("_history_origin", SOURCE_EXPORT) == source_limit]
+        history_total = len(visible_history)
+        visible_history = [event for event in visible_history if phrase in (
+            json.dumps(event, ensure_ascii=False, default=str) + " " + history_source_label(event) +
+            " " + history_operation_label(event, raw_exports=raw_view) + " " + history_outcome_label(event) +
+            " " + display_utc(event.get("_history_sort_date", event.get("observed_utc"))) +
+            " " + short_sha(event.get("artifact_sha256"))).casefold()]
+        self._update_history_header(counts, len(visible_history), history_total, choice)
+        if hasattr(self, "package_count"):
+            self.package_count.set(f"Wyświetlono: {len(self.by_iid)} / {len(self.rows)} artefaktów · MiB = bajty / 1 048 576")
         for index, event in enumerate(visible_history):
-            if phrase not in json.dumps(event, ensure_ascii=False).casefold():
-                continue
-            iid = f"e{event.get('_source_index', index) if not raw_view else index}"
+            # Stable legacy Treeview IDs for lightweight export-only fixtures;
+            # actual unified histories use unique sequential view IDs.
+            iid = (f"e{event.get('_source_index', index)}" if
+                   not hasattr(self, "packages_root") and not raw_view else f"e{index}")
             self.events_by_iid[iid] = event
-            operation_label = event.get("operation", "")
-            if operation_label == "MODEL_CONVERSION":
-                role = str((event.get("conversion") or {}).get("role") or "?")
-                operation_label = f"Konwersja {role}"
-            elif operation_label == "COMPLETE_PACKAGE_EXPORT":
-                operation_label = "Eksport zestawu ALPR"
-            elif operation_label == "SINGLE_MODEL_EXPORT":
-                operation_label = "Eksport modelu"
-            event_count = int(event.get("_event_count") or 0)
-            if event_count > 1 and not raw_view:
-                operation_label += f" ({event_count} zdarzeń)"
-            outcome_label = {
-                "STARTED_NO_RESULT": "BRAK WYNIKU",
-                "INCONSISTENT_HISTORY": "SPRZECZNOŚĆ",
-                "UNCONFIRMED": "NIEPOTWIERDZONE",
-                "SUCCEEDED": "ZAKOŃCZONO",
-                "FAILED": "BŁĄD",
-                "STARTED": "ROZPOCZĘTO",
-            }.get(str(event.get("outcome") or ""), str(event.get("outcome") or ""))
-            self.event_tree.insert("", "end", iid=iid, values=(event.get("observed_utc", "")[:19],
-                 operation_label, outcome_label,
-                 Path(event.get("artifact_path") or "-").name,
-                 event.get("artifact_sha256") or "-"))
+            date = display_utc(event.get("observed_utc"))
+            if event.get("_history_origin") == SOURCE_FILE:
+                date = "plik: " + display_utc(event.get("_file_modified_utc"))
+            values = (
+                date, history_source_label(event),
+                history_operation_label(event, raw_exports=raw_view),
+                history_outcome_label(event),
+                file_name(event.get("artifact_path")),
+                short_sha(event.get("artifact_sha256")),
+            )
+            # Partial legacy fixtures retain their original five-column shape;
+            # real Tk library windows use the explicit six-column source display.
+            if not hasattr(self, "packages_root"):
+                values = (values[0], *values[2:])
+            self.event_tree.insert("", "end", iid=iid, values=values)
+            if hasattr(self, "colors"):
+                self.event_tree.item(iid, tags=(event_tone(event),))
         # Refreshing/filtering rebuilds the Treeviews; reapply the user's sort.
         self._apply_sort("artifacts")
         self._apply_sort("events")
@@ -476,7 +571,7 @@ class MobileArtifactLibrary:
         self._restore_row_by_identity(self.event_tree, self.events_by_iid, event_key,
                                       lambda row: self._history_selection_key(row, raw=raw_view))
         self._refresh_artifact_status_cells()
-        if getattr(self, "detail", None) is not None:
+        if getattr(self, "notebook", None) is not None:
             self._on_tab_changed()
 
     def _previous_record(self, row):
@@ -508,15 +603,10 @@ class MobileArtifactLibrary:
             in_progress = (is_current and isinstance(active, dict)
                            and str(row.path) == active.get("path")
                            and bool(getattr(self, "busy", False)))
-            label = artifact_status_label(
-                row, desktop_validated=is_pass, validation_failed=is_fail,
-                validation_running=in_progress,
-            )
-            if not (is_pass or is_fail or in_progress):
-                label = historical_status_label(row, self._previous_record(row), fallback=label)
-            label = self._transfer_status_label(
-                row, is_pass=is_pass, is_fail=is_fail, in_progress=in_progress,
-            )
+            state = self._state_view(row, validated=is_pass, failed=is_fail, running=in_progress)
+            label = state.label
+            if hasattr(self, "colors"):
+                tree.item(iid, tags=(state.tone,))
             try:
                 if tree.set(iid, "state") != label:
                     tree.set(iid, "state", label)
@@ -543,17 +633,317 @@ class MobileArtifactLibrary:
         return "event" if getattr(self, "active_source", "artifact") == "event" else "artifact"
 
     def _on_tab_changed(self, _event=None):
-        """Commands and details always follow the VISIBLE tab, not the last click."""
+        """No stale JSON or copy/check action from the other (hidden) table."""
         self.active_source = self._active_tab_source()
         if self.active_source == "event":
-            if self.selected_event() is not None:
-                self.event_selected()
-            else:
-                self.show_text("Wybierz operację, aby wyświetlić jej historię i dowody.")
-        elif self.selected_artifact() is not None:
-            self.artifact_selected()
+            self.event_selected()
         else:
-            self.show_text("Wybierz paczkę, aby zobaczyć manifest i proweniencję.")
+            self.artifact_selected()
+        self._queue_layout()
+
+    def _init_appearance(self):
+        """Window-scoped styles; no global theme/font changes for Z1–Z4."""
+        self._ui = f"Z4Library{id(self)}"
+        self._font_body = tkfont.nametofont("TkDefaultFont", root=self.window).copy()
+        self._font_bold = self._font_body.copy()
+        self._font_bold.configure(weight="bold")
+        self._font_title = self._font_body.copy()
+        size = int(self._font_body.cget("size"))
+        self._font_title.configure(size=(size + 2 if size > 0 else size - 3), weight="bold")
+        self._font_mono = tkfont.nametofont("TkFixedFont", root=self.window).copy()
+        self._apply_palette()
+
+    def _apply_palette(self):
+        style = ttk.Style(self.window)
+        bg = style.lookup("TFrame", "background") or self.window.cget("background")
+        try:
+            rgb = self.window.winfo_rgb(bg)
+            dark = sum(rgb) / (3 * 65535) < .48
+        except tk.TclError:
+            dark = False
+        self.colors = ({
+            "bg": "#232B33", "surface": "#29343E", "ink": "#EFF4F8", "muted": "#B8C5D0",
+            "border": "#526372", "info": "#99D0F2", "success": "#8EE0B5",
+            "warning": "#F5D28B", "danger": "#FFB0B4", "neutral": "#C3CDD7",
+            "info_bg": "#263F52", "success_bg": "#243F35", "warning_bg": "#423B2A",
+            "danger_bg": "#4B2D35", "neutral_bg": "#303B45",
+        } if dark else {
+            "bg": "#F1F4F7", "surface": "#FFFFFF", "ink": "#243343", "muted": "#536679",
+            "border": "#D2DCE5", "info": "#205E8B", "success": "#216443",
+            "warning": "#845A0C", "danger": "#A12D3A", "neutral": "#526275",
+            "info_bg": "#EEF5FB", "success_bg": "#EFF7F2", "warning_bg": "#FFF7E7",
+            "danger_bg": "#FFF0F1", "neutral_bg": "#F5F7FA",
+        })
+        c, prefix = self.colors, self._ui
+        style.configure(prefix + ".TFrame", background=c["bg"])
+        style.configure(prefix + ".TLabel", background=c["bg"], foreground=c["ink"], font=self._font_body)
+        style.configure(prefix + ".Muted.TLabel", background=c["bg"], foreground=c["muted"], font=self._font_body)
+        style.configure(prefix + ".Title.TLabel", background=c["bg"], foreground=c["ink"], font=self._font_title)
+        style.configure(prefix + ".TLabelframe", background=c["bg"])
+        style.configure(prefix + ".TLabelframe.Label", background=c["bg"], foreground=c["muted"], font=self._font_bold)
+        style.configure(prefix + ".TNotebook", background=c["bg"], tabmargins=(0, 0, 0, 0))
+        style.configure(prefix + ".TNotebook.Tab", padding=(10, 5), background=c["bg"], foreground=c["ink"])
+        style.map(prefix + ".TNotebook.Tab", background=[("selected", c["surface"])], foreground=[("selected", c["info"])])
+        style.configure(prefix + ".TCheckbutton", background=c["bg"], foreground=c["ink"])
+        style.map(prefix + ".TCheckbutton", foreground=[("disabled", c["muted"])])
+        style.configure(prefix + ".Treeview", background=c["surface"], fieldbackground=c["surface"],
+                        foreground=c["ink"], font=self._font_body,
+                        rowheight=max(26, self._font_body.metrics("linespace") + 9))
+        style.configure(prefix + ".Treeview.Heading", font=self._font_bold, padding=(5, 6))
+        style.map(prefix + ".Treeview", background=[("selected", c["info"])],
+                  foreground=[("selected", "#FFFFFF" if not dark else "#142330")])
+
+    def _theme_changed(self, _event=None):
+        if getattr(self, "_closed", False) or not hasattr(self, "art_tree"):
+            return
+        self._apply_palette()
+        for tone in ("success", "warning", "danger", "info", "neutral"):
+            for tree in (self.art_tree, self.event_tree):
+                tree.tag_configure(tone, background=self.colors[tone + "_bg"], foreground=self.colors["ink"])
+        for key, (frame, value, hint, line) in getattr(self, "_source_cards", {}).items():
+            tone = {"export_operations": "info", "pc_checks": "success", "unlogged_packages": "neutral"}[key]
+            frame.configure(background=self.colors["surface"], highlightbackground=self.colors["border"])
+            value.configure(background=self.colors["surface"], foreground=self.colors[tone])
+            hint.configure(background=self.colors["surface"], foreground=self.colors["muted"])
+            line.configure(background=self.colors[tone])
+        dialog = getattr(self, "_details_dialog", None)
+        if dialog is not None:
+            dialog.apply_palette()
+
+    def _make_history_header(self):
+        self._source_cards = {}
+        self._history_cards_frame = box = ttk.Frame(self.events_tab, style=self._ui + ".TFrame")
+        box.pack(fill="x", pady=(0, 7))
+        for column, (key, title, tone) in enumerate((
+            ("export_operations", "Eksporty / konwersje", "info"),
+            ("pc_checks", "Kontrole PC", "success"),
+            ("unlogged_packages", "Paczki bez wpisu eksportu", "neutral"),
+        )):
+            box.columnconfigure(column, weight=1, uniform="history")
+            frame = tk.Frame(box, background=self.colors["surface"], highlightthickness=1,
+                             highlightbackground=self.colors["border"])
+            frame.grid(row=0, column=column, sticky="nsew", padx=(0, 6 if column < 2 else 0))
+            stripe = tk.Frame(frame, height=3, background=self.colors[tone])
+            stripe.pack(fill="x")
+            value = tk.Label(frame, text="—  " + title, anchor="w", font=self._font_bold,
+                             background=self.colors["surface"], foreground=self.colors[tone])
+            value.pack(fill="x", padx=10, pady=(6, 2))
+            hint = tk.Label(frame, text="Odczyt…", anchor="w", font=self._font_body,
+                            background=self.colors["surface"], foreground=self.colors["muted"])
+            hint.pack(fill="x", padx=10, pady=(0, 6))
+            self._source_cards[key] = (frame, value, hint, stripe)
+        self._event_controls = event_controls = ttk.Frame(self.events_tab, style=self._ui + ".TFrame")
+        event_controls.pack(fill="x", pady=(0, 5))
+        ttk.Label(event_controls, text="Źródło:", style=self._ui + ".TLabel").pack(side="left", padx=(0, 6))
+        self.source_picker = ttk.Combobox(event_controls, textvariable=self.history_source_filter,
+            values=("Wszystkie źródła", "Eksporty", "Kontrole PC", "Pakiety z dysku"), state="readonly", width=22)
+        self.source_picker.pack(side="left")
+        self.source_picker.bind("<<ComboboxSelected>>", lambda _event: self.refresh_views())
+        self.audit_checkbox = ttk.Checkbutton(event_controls, text="Pokaż każde zdarzenie eksportu",
+            variable=self.show_raw_events, command=self.refresh_views, style=self._ui + ".TCheckbutton")
+        self.audit_checkbox.pack(side="left", padx=(12, 0))
+        self.history_info_label = ttk.Label(self.events_tab, textvariable=self.event_view_status,
+                                            justify="left", style=self._ui + ".Muted.TLabel")
+        self.history_info_label.pack(fill="x", pady=(0, 4))
+        self.history_note_var = tk.StringVar(master=self.window)
+        self.history_note_label = ttk.Label(self.events_tab, textvariable=self.history_note_var,
+                                            justify="left", style=self._ui + ".Muted.TLabel")
+        self.history_note_label.pack(fill="x", pady=(0, 6))
+
+    def _update_history_header(self, counts, visible, source_total, choice):
+        self.history_counts = dict(counts)
+        var = getattr(self, "event_view_status", None)
+        if var is not None:
+            var.set(f"Wiersze po filtrze: {visible} / {source_total} · Wpisy historii, nie liczba plików")
+        titles = ({"export_operations": "Operacje", "pc_checks": "Kontrole PC", "unlogged_packages": "Paczki bez wpisu"}
+                  if getattr(self, "_compact", False) else
+                  {"export_operations": "Eksporty / konwersje", "pc_checks": "Kontrole PC", "unlogged_packages": "Paczki bez wpisu eksportu"})
+        hints = {"export_operations": f"{counts['export_events']} zapisanych zdarzeń",
+                 "pc_checks": "Wyniki historyczne, nie nowe testy",
+                 "unlogged_packages": "Pliki, nie odtworzone operacje"}
+        for key, (_, value, hint, _) in getattr(self, "_source_cards", {}).items():
+            value.configure(text=f"{counts[key]}  {titles[key]}")
+            hint.configure(text=hints[key])
+        if hasattr(self, "audit_checkbox"):
+            self.audit_checkbox.configure(state="normal" if choice in ("Wszystkie źródła", "Eksporty") else "disabled")
+        if hasattr(self, "history_note_var"):
+            notes = " ".join(x for x in (getattr(self, "_history_read_note", ""),
+                                         getattr(self, "_desktop_check_note", "")) if x)
+            if not notes:
+                notes = ("Brak odczytanych zdarzeń eksportu. Nie oznacza to braku dawnych eksportów."
+                         if counts["export_events"] == 0 else "Daty „plik:” oznaczają modyfikację, nie czas konwersji.")
+            self.history_note_var.set(notes)
+        self._queue_layout()
+
+    def _queue_layout(self, _event=None):
+        if not hasattr(self, "shell") or getattr(self, "_closed", False):
+            return
+        if getattr(self, "_layout_after_id", None) is None:
+            self._layout_after_id = self.window.after_idle(self._layout_content)
+
+    def _layout_content(self):
+        self._layout_after_id = None
+        if getattr(self, "_closed", False):
+            return
+        linespace = self._font_body.metrics("linespace")
+        # Large system text needs a larger local minimum, not clipped controls.
+        min_w = min(940 + max(0, linespace - 17) * 10, max(640, self.window.winfo_screenwidth() - 60))
+        min_h = min(570 + max(0, linespace - 17) * 14, max(420, self.window.winfo_screenheight() - 100))
+        if self.window.minsize() != (min_w, min_h):
+            self.window.minsize(min_w, min_h)
+        compact = (self.window.winfo_height() < 740 or
+                   (self._font_body.metrics("linespace") > 22 and self.window.winfo_height() < 920))
+        if compact != getattr(self, "_compact", None):
+            self._compact = compact
+            if compact:
+                self.intro.pack_forget()
+                self.storage_label.grid_remove()
+            else:
+                self.intro.pack(anchor="w", fill="x", pady=(2, 0))
+                self.storage_label.grid()
+            for key, (_, value, hint, _) in self._source_cards.items():
+                if compact:
+                    hint.pack_forget()
+                else:
+                    hint.pack(fill="x", padx=10, pady=(0, 6))
+                titles = ({"export_operations": "Operacje", "pc_checks": "Kontrole PC", "unlogged_packages": "Paczki bez wpisu"}
+                          if compact else {"export_operations": "Eksporty / konwersje", "pc_checks": "Kontrole PC", "unlogged_packages": "Paczki bez wpisu eksportu"})
+                value.configure(text=f"{getattr(self, 'history_counts', {}).get(key, '—')}  {titles[key]}")
+        note = self.history_note_var.get()
+        important_note = any(word in note.casefold() for word in ("pominięto", "limit", "przekierow", "nieczytel", "zbyt", "nie uda"))
+        if compact and not important_note:
+            self.history_note_label.pack_forget()
+        elif not self.history_note_label.winfo_manager():
+            self.history_note_label.pack(before=self.event_tree.master, fill="x", pady=(0, 6))
+        width = max(200, self.shell.winfo_width() - 26)
+        for item in (self.intro, self.storage_label, self.status_label,
+                     self.history_info_label, self.history_note_label):
+            item.configure(wraplength=width)
+        # Measure actual themed/DPI-scaled widgets, not hardcoded text widths.
+        available = max(160, width - self.close_button.winfo_reqwidth() - 15)
+        if not hasattr(self, "_action_rows"):
+            self._action_rows = []
+        x, row, col = 0, 0, 0
+        for button in self.action_buttons:
+            need = button.winfo_reqwidth() + 8
+            if col and x + need > available:
+                x, row, col = 0, row + 1, 0
+            while len(self._action_rows) <= row:
+                self._action_rows.append(ttk.Frame(self.action_group, style=self._ui + ".TFrame"))
+            host = self._action_rows[row]
+            host.grid(row=row, column=0, sticky="w")
+            button.grid(in_=host, row=0, column=col, sticky="w", padx=(0, 7), pady=2)
+            button.lift()
+            x, col = x + need, col + 1
+        for unused in self._action_rows[row + 1:]:
+            unused.grid_remove()
+
+    def _state_view(self, row, *, validated=None, failed=None, running=None):
+        path = str(getattr(row, "path", ""))
+        failure = getattr(self, "_verification_error", None)
+        active = getattr(self, "_verification_active", None)
+        if validated is None:
+            validated = path == getattr(self, "_verified_selection_path", None)
+        if failed is None:
+            failed = isinstance(failure, dict) and failure.get("path") == path
+        if running is None:
+            running = bool(getattr(self, "busy", False) and isinstance(active, dict) and active.get("path") == path)
+        return artifact_state(row, validated=validated, failed=failed, running=running, history=self._previous_record(row))
+
+    def _render_sheet(self, sheet):
+        """Cache display data without opening a window or resizing the list."""
+        self._detail_sheet = sheet
+        self._detail_text = "\n".join([sheet.title, sheet.subtitle, sheet.state,
+            "Następny krok: " + sheet.next_step] + [f"{k}: {v}" for k, v in sheet.fields] + [sheet.note])
+
+    def _sync_actions(self):
+        if not hasattr(self, "validate_button"):
+            return
+        is_event = self._active_tab_source() == "event"
+        row = None if is_event else self.selected_artifact()
+        event = self.selected_event() if is_event else None
+        details = getattr(self, "details_button", None)
+        if details is not None:
+            details.configure(state="normal" if row is not None or event is not None else "disabled")
+        busy = bool(getattr(self, "busy", False))
+        path = self.active_path()
+        for button in (self.path_button, self.open_button):
+            button.configure(state="normal" if path else "disabled")
+        self.validate_button.configure(state="normal" if row is not None and row.kind in ("MODEL", "PACKAGE") and not busy else "disabled")
+        if self.choose_button is not None:
+            ready = row is not None and not busy and not self._choice_problem(row)
+            self.choose_button.configure(state="normal" if ready else "disabled")
+
+    def copy_evidence_sha(self):
+        if self._active_tab_source() != "event":
+            return self.copy_checkpoint_sha()
+        value = str((self.selected_event() or {}).get("artifact_sha256") or "")
+        if short_sha(value) == "—":
+            return
+        self.window.clipboard_clear()
+        self.window.clipboard_append(value)
+        self.status.set("Skopiowano pełne SHA pliku zapisane we wpisie — nie SHA checkpointu i nie nowy pomiar.")
+
+
+    def _details_double_click(self, event):
+        tree = getattr(event, "widget", None)
+        active = self.event_tree if self._active_tab_source() == "event" else self.art_tree
+        if tree is not active or tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+            return
+        iid = tree.identify_row(event.y)
+        lookup = self.events_by_iid if tree is self.event_tree else self.by_iid
+        if not iid or iid not in lookup:
+            return
+        tree.selection_set(iid)
+        tree.focus(iid)
+        self.show_details()
+        return "break"
+
+    def _details_key(self, event):
+        tree = self.event_tree if self._active_tab_source() == "event" else self.art_tree
+        if event.widget is tree and self.window.focus_get() is tree:
+            self.show_details()
+            return "break"
+
+    def show_details(self):
+        """Open a read-only, pinned snapshot for the active selection, once."""
+        if getattr(self, "_closed", False):
+            return None
+        previous = getattr(self, "_details_dialog", None)
+        if previous is not None and previous.is_open():
+            previous.raise_window()
+            return previous
+        source = self._active_tab_source()
+        item = self.selected_event() if source == "event" else self.selected_artifact()
+        if item is None:
+            return None
+        if source == "event":
+            self.event_selected()
+            path = str(item.get("artifact_path") or "")
+            name = file_name(path) if path else history_operation_label(item)
+            sha = str(item.get("artifact_sha256") or "")
+            sha = sha if short_sha(sha) != "—" else ""
+            sha_label = "Kopiuj SHA pliku z wpisu"
+            context = "Wpis historii · bez nowej kontroli pliku"
+            json_label = "Wpis źródłowy (JSON)"
+            identity = repr(self._history_selection_key(item, raw=bool(self.show_raw_events.get())))
+            tree = self.event_tree
+        else:
+            self.artifact_selected()
+            path, name = str(item.path), str(item.name)
+            hashes = checkpoint_sha_by_role(item)
+            sha = (hashes[0][1] if len(hashes) == 1 else "\n".join(f"{role}: {value}" for role, value in hashes))
+            sha_label = "Kopiuj SHA checkpointu"
+            context = "Model / pakiet · dane i kontrola PC"
+            json_label = "Manifest i źródła (JSON)"
+            identity = path
+            tree = self.art_tree
+        snapshot = DetailSnapshot(source=source, identity=identity, name=name, path=path,
+            context=context, json_label=json_label, sha_label=sha_label, sha_value=sha,
+            sheet=self._detail_sheet, summary_text=self._detail_text, raw_json=self._detail_json)
+        dialog = MobileArtifactDetailsDialog(self, snapshot, return_focus=tree)
+        self._details_dialog = dialog
+        return dialog
 
     def _choice_problem(self, row) -> str:
         """Fast, read-only selection gate. NOT equivalent to full graph validation."""
@@ -632,17 +1022,13 @@ class MobileArtifactLibrary:
         self.close()
 
     def show_text(self, value: str):
-        self.detail.configure(state="normal")
-        self.detail.delete("1.0", "end")
-        self.detail.insert("1.0", value)
-        self.detail.configure(state="disabled")
+        """Update the pending text only; never mutate an open snapshot modal."""
+        self._detail_sheet = None
+        self._detail_text = value
 
     def show_raw(self, value: str):
-        """Keep full manifest available, without overwhelming the readable summary."""
-        self.raw_detail.configure(state="normal")
-        self.raw_detail.delete("1.0", "end")
-        self.raw_detail.insert("1.0", value)
-        self.raw_detail.configure(state="disabled")
+        """Cache full source JSON. Table selection does not display a detail pane."""
+        self._detail_json = value
 
     def copy_checkpoint_sha(self):
         """Copy source SHA(s) only, never confuse with package or file SHA."""
@@ -685,18 +1071,19 @@ class MobileArtifactLibrary:
                 "child_metadata": row.child_metadata,
                 "child_metadata_authority": "SHA manifestu potomnego, nie pełna walidacja TFLite",
             }
-            self.show_text(format_artifact_card(
-                row, desktop_validated_this_selection=(
-                    str(row.path) == str(getattr(self, "_verified_selection_path", None))
-                ),
-                validation_failure=(
-                    str(getattr(self, "_verification_error", {}).get("detail") or "")
-                    if isinstance(getattr(self, "_verification_error", None), dict)
-                    and str(row.path) == self._verification_error.get("path") else ""
-                ),
-                history_entry=self._previous_record(row),
+            self._render_sheet(artifact_sheet(
+                row, validated=(str(row.path) == str(getattr(self, "_verified_selection_path", None))),
+                failed=bool(isinstance(failure, dict) and failure.get("path") == str(row.path)),
+                running=bool(getattr(self, "busy", False) and isinstance(getattr(self, "_verification_active", None), dict)
+                             and self._verification_active.get("path") == str(row.path)),
+                history=self._previous_record(row),
+                failure=str(failure.get("detail") or "") if isinstance(failure, dict) else "",
             ))
-            self.show_raw(json.dumps(data, ensure_ascii=False, indent=2)[:160000])
+            self.show_raw(json.dumps(data, ensure_ascii=False, indent=2))
+        else:
+            self.show_text("Wybierz paczkę i otwórz „Szczegóły…”.")
+            self.show_raw("")
+        self._sync_actions()
 
     def event_selected(self, _event=None):
         if self._active_tab_source() != "event":
@@ -704,8 +1091,12 @@ class MobileArtifactLibrary:
         self.active_source = "event"
         event = self.selected_event()
         if event:
-            self.show_text(format_event_card(event))
+            self._render_sheet(event_sheet(event))
             self.show_raw(json.dumps(event, ensure_ascii=False, indent=2))
+        else:
+            self.show_text("Wybierz wpis historii. Kontrola PC i odnaleziony plik nie są zdarzeniami eksportu.")
+            self.show_raw("")
+        self._sync_actions()
 
     def active_path(self) -> Path | None:
         if self._active_tab_source() == "event":
@@ -754,6 +1145,7 @@ class MobileArtifactLibrary:
         self._verified_selection_path = None
         self._verification_error = None
         self._refresh_artifact_status_cells()
+        self._sync_actions()
 
         def work():
             try:

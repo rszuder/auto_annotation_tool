@@ -1,3 +1,4 @@
+# Z4MOBREV032_FIX02_CURRENT_SHA_CANVAS_20261023
 # Z4MOBREV001_SIMPLE_REVIEW_20261016
 """Human annotations and reproducible mobile quality metrics; independent of Tk."""
 from __future__ import annotations
@@ -406,6 +407,8 @@ class MobileReviewSession:
         self._save_change(changed, allow_assisted_reveal=True)
 
     def annotate_invocation(self, key: str, *, visible_plate_count: str, evaluable: bool = True) -> None:
+        if "canvas_review_v1" in self.review.invocation_annotations.get(key, {}):
+            raise ValueError("Ten obraz jest weryfikowany na canvasie; liczba wynika z ramek")
         changed = copy.deepcopy(self.review)
         changed.invocation_annotations[key] = {"visible_plate_count": visible_plate_count, "evaluable": evaluable}
         changed.review_status = "IN_PROGRESS"
@@ -520,7 +523,14 @@ class MobileReviewSession:
         self.ready_for_evaluation_manifest = create_ready_snapshot(self)
 
     def statistics(self) -> dict:
-        return calculate_review_statistics(self)
+        result = calculate_review_statistics(self)
+        from .mobile_canvas_review import summary as canvas_summary
+        canvas = canvas_summary(self)
+        if canvas["scene_count"]:
+            result["canvas_review"] = canvas
+            result["summary"].update({"canvas_" + key: value for key, value in canvas.items()
+                if isinstance(value, (int, float, bool)) or value is None})
+        return result
 
     def export(self, directory: Path) -> list[Path]:
         self.verify_source(force=True)
@@ -545,6 +555,9 @@ class MobileReviewSession:
                 writer.writerow({key: json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
                                  for key, value in row.items()})
             _atomic_write(path, "\ufeff" + output.getvalue())
+        if "canvas_review" in stats:
+            from .mobile_canvas_review import export as export_canvas
+            paths.extend(export_canvas(self, directory))
         return paths
 
 
@@ -562,6 +575,7 @@ def _percentile(values, fraction):
 
 
 def calculate_review_statistics(session: MobileReviewSession) -> dict:
+    from .mobile_mt_postdedup import suppressed_subject, eligible_suppressed_id
     review = session.review
     summary = Counter()
     confusion = Counter()
@@ -572,10 +586,18 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
     summary.update(subject_count=len(session.subjects), attempt_count=len(session.attempts), crop_count=len(session.samples))
     for key, subject in session.subjects.items():
         decision = review.subjects.get(key, {})
+        raw_only = suppressed_subject(session, subject)
+        if raw_only:
+            # Keep original raw subject and any saved human GT intact;
+            # do not count this discarded source as a physical GT.
+            decision = dict(decision, evaluable=False)
+            summary["post_nms_raw_only_subjects"] += 1
         # multi_plate_scientific_guard_v1: never reuse one legacy subject GT
         # as ground truth for several distinct physical plates.
         from .mobile_multi_plate_verification import is_multi
-        if any(is_multi(session, session.invocation_by_attempt.get(aid, ""))
+        from .mobile_canvas_review import has_scene
+        if any(is_multi(session, session.invocation_by_attempt.get(aid, "")) or
+               has_scene(session, session.invocation_by_attempt.get(aid, ""))
                for aid in subject.get("attempts", ())):
             decision = dict(decision, ground_truth="", evaluable=False)
         gt = normalize_registration(decision.get("ground_truth"))
@@ -662,10 +684,12 @@ def calculate_review_statistics(session: MobileReviewSession) -> dict:
             false_detection = (not cancelled and status in {"VALID_QUAD", "DETECTION_INVALID_QUAD"}
                                and (annotation.get("is_plate") is False or linked_false))
             invocation = invocation_results[session.invocation_by_attempt[attempt_id]]
+            suppressed_raw = (eligible_suppressed_id(session, session.invocation_by_attempt[attempt_id]) == attempt_id)
             mt_rows.append({"attempt_id": attempt_id, "subject_key": key, "mt_status": status,
                             "mt_invocation_id": invocation["mt_invocation_id"], "invocation_included": invocation["included"],
-                            "false_detection": false_detection})
-            if (not cancelled and annotation.get("evaluable") is not False and not false_detection
+                            "false_detection": false_detection and not suppressed_raw,
+                            "post_nms_suppressed_raw": suppressed_raw})
+            if (not suppressed_raw and not cancelled and annotation.get("evaluable") is not False and not false_detection
                     and annotation.get("plate_visibility") not in {"invisible", "uncertain"}):
                 valid_attempts.append(row)
         result = {"subject_key": key, "ground_truth": gt, "evaluable": evaluable,
