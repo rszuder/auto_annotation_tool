@@ -34,6 +34,7 @@ from .mobile_report_sparse_axis import (
 )
 from .mobile_report_review_overlay import project_desktop_samples
 from .mobile_report_chart_styles import LATENCY_SERIES_STYLES, draw_chart_marker
+from .mobile_compare_review_gate import imported_verification
 from .z4_mobile_report_browser_ux import (desktop_status, matches_report_filter, report_identity, selected_report_caption)
 from .mobile_report_science_dashboard import ScientificDashboard, build_overview, science_from_verified_bundle
 from .mobile_report_scientific_comparability import assess_cohort
@@ -510,6 +511,7 @@ class _TreeTable:
         palette: dict[str, str],
         height: int = 10,
         stretch_last: bool = True,
+        selectmode: str = "browse",
     ):
         self.shell = tk.Frame(parent, bg=palette.get("panel", "#252526"))
         self.shell.grid_columnconfigure(0, weight=1)
@@ -538,7 +540,7 @@ class _TreeTable:
             columns=columns,
             show="headings",
             height=height,
-            selectmode="browse",
+            selectmode=selectmode,
             style=style_name,
         )
         for index, column in enumerate(columns):
@@ -802,6 +804,11 @@ class MobileReportBrowser:
         self._import_in_progress = False
         self._import_cancel_requested = False
         self._suppress_report_select = False
+        # AKT87: persistent checkbox selection keyed by verified report identity.
+        self._comparison_checked = set()
+        self._comparison_verification = {}
+        self._comparison_busy = False
+        self._comparison_dialogs = []
         self.window = tk.Toplevel(self.parent)
         try:
             setattr(self.window, "_aat_skip_window_recovery", True)
@@ -1332,7 +1339,7 @@ class MobileReportBrowser:
             highlightthickness=1,
             highlightbackground=self.border,
         )
-        workspace.add(left, width=332, minsize=292, padx=0, pady=0, stretch="never")
+        workspace.add(left, width=555, minsize=510, padx=0, pady=0, stretch="never")
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(3, weight=1)
         left_header = tk.Frame(left, bg=self.card_bg)
@@ -1363,12 +1370,28 @@ class MobileReportBrowser:
         tk.Label(left, textvariable=self.report_count_var, bg=self.card_bg, fg=self.muted,
                  font=("Segoe UI", 9), anchor=tk.W).grid(row=2, column=0, sticky="ew", pady=(0, 5))
         self.report_table = _TreeTable(
-            left, ("Data", "Wariant", "p95"), ("Data (lok.)", "Wariant", "P95"),
-            (82, 137, 72), palette={**self.palette, "panel": self.card_bg}, height=18)
+            left, ("Wybor", "Data", "Wariant", "Scena", "Powt.", "Weryfikacja", "p95"),
+            ("✓", "Data", "Wariant", "Materiał", "Powt.", "Ocena MT+MZ", "P95"),
+            (34, 68, 87, 89, 45, 116, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
+            selectmode="browse")
         self.report_table.shell.grid(row=3, column=0, sticky="nsew")
         self.report_table.tree.bind("<<TreeviewSelect>>", self._on_report_selected, add="+")
+        self.report_table.tree.bind("<Button-1>", self._toggle_comparison_checkbox, add="+")
         self.btn_import_reports = ttk.Button(left, text="Importuj raport z telefonu", command=self.import_report)
         self.btn_import_reports.grid(row=4, column=0, sticky="ew", pady=(9, 0), ipady=3)
+        # AKT87: one click per reviewed session. No duplicate selection basket.
+        self.compare_hint = tk.Label(left, text="✓: tylko zatwierdzone MT + MZ · GT asystowane",
+            bg=self.card_bg, fg=self.muted, anchor=tk.W, font=("Segoe UI", 8))
+        self.compare_hint.grid(row=5,column=0,sticky="ew",pady=(8,3))
+        self.btn_compare_open = ttk.Button(left,text="Porównaj wybrane (0)",
+            command=self._open_mobile_comparison,state="disabled")
+        self.btn_compare_open.grid(row=6,column=0,sticky="ew")
+        self.btn_compare_clear = ttk.Button(left,text="Odznacz wszystkie",
+            command=self._clear_comparison_checks)
+        self.btn_compare_clear.grid(row=7,column=0,sticky="ew",pady=(5,0))
+        self.btn_export_mobile_figures = ttk.Button(left,text="Wykresy tej sesji · PNG/SVG",
+            command=self._export_mobile_report_figures)
+        self.btn_export_mobile_figures.grid(row=8,column=0,sticky="ew",pady=(6,0))
         # Full model paths and identifiers are in 'Szczegóły', not in the session list.
         self.selected_report_info_var = tk.StringVar(value="")
 
@@ -1546,6 +1569,7 @@ class MobileReportBrowser:
             dashboard_host, palette=self.palette, on_review=self.open_sample_review,
             on_refresh=self.refresh_scientific_dashboard,
             on_details=lambda: self._open_technical_details(),
+            show_identity=False,
         )
         self.science_panel.grid(row=0, column=0, sticky="nsew")
         self.notebook.add(dashboard_host, text="Wyniki sesji")
@@ -1780,7 +1804,17 @@ class MobileReportBrowser:
             stamp = (stat.st_mtime_ns, stat.st_size)
         except OSError:
             stamp = (None, None)
-        return (str(report.report_id), sha, str(getattr(bundle, 'path', '')), stamp)
+        from .mobile_report_canvas_view import export_stamp
+        request = self._canvas_request(report, bundle)
+        return (str(report.report_id), sha, str(getattr(bundle, 'path', '')), stamp,
+                export_stamp(request["results_root"], request["session_id"]))
+
+    def _canvas_request(self, report, bundle):
+        from .mobile_report_canvas_view import results_root_for_source
+        return dict(session_id=report_identity(report, bundle)["session_id"],
+            source_sha=str(report.source_archive_sha256 or "").lower(),
+            results_root=results_root_for_source(getattr(bundle, "path", "") or stored_source(report)),
+            review_root=Path(getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS/"mobile_packages")))
 
     def refresh_scientific_dashboard(self) -> None:
         report = getattr(self, 'current_report', None)
@@ -1821,6 +1855,18 @@ class MobileReportBrowser:
             except Exception as exc:
                 science = None
                 error = str(exc)[:220]
+            # Keep protocols separate. Canvas comes only from the current
+            # export selected by the same SHA/revision gate as the checkboxes.
+            science = dict(science or {})
+            from .mobile_report_canvas_view import load_canvas_snapshot
+            request = self._canvas_request(report, bundle)
+            try:
+                science["_ui_canvas_snapshot"] = load_canvas_snapshot(**request)
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                science["_ui_canvas_snapshot"] = dict(session_id=request["session_id"],
+                    source_sha256=request["source_sha"], summary=None,
+                    verification=dict(state="UNREADABLE" if isinstance(exc, OSError) else "INVALID",
+                                      reason=str(exc)))
             self._run_on_ui(lambda: self._finish_scientific_dashboard(
                 report, bundle, cache_key, token, science, error))
 
@@ -1892,8 +1938,33 @@ class MobileReportBrowser:
         except Exception:
             pass
 
+    def _comparison_status_of(self, report):
+        key=self._comparison_key(report)
+        # Initial list is light-weight: use metadata + known original locator.
+        # Full manifests are checked here; original .alprsession is not read.
+        bundle=self._matching_cached_bundle(report)
+        info=report_identity(report,bundle)
+        sha=str(getattr(report,"source_archive_sha256","") or "").lower()
+        from .mobile_report_source_recovery import stored_source
+        source=str(getattr(bundle,"path","") or stored_source(report) or "")
+        path=Path(source)
+        results=None
+        for ancestor in path.parents:
+            if ancestor.name.lower()=="02_sesje":
+                candidate=ancestor.parent/"03_wyniki"
+                if candidate.is_dir():results=candidate
+                break
+        review_root=Path(getattr(CONFIG,"DIR_7_RANKINGS_MOBILE_PACKAGES",CONFIG.DIR_7_RANKINGS/"mobile_packages"))
+        diagnostic = dict(browser_module=__name__, browser_module_path=__file__,
+                          source_locator=source, report_id=str(report.report_id))
+        if not hasattr(self, "_comparison_diagnostics"):
+            self._comparison_diagnostics = {}
+        self._comparison_diagnostics[key] = diagnostic
+        return imported_verification(info["session_id"],sha,results,review_root,
+                                     diagnostics=diagnostic)
+
     def _refresh_report_list(self, select_report_id: str = "", *, auto_select: bool = True) -> None:
-        """Read store once; filtering afterward uses only compact report metadata."""
+        """Refresh operator verification and source-pinned export status."""
         try:
             self.store._load()
         except Exception:
@@ -1903,10 +1974,20 @@ class MobileReportBrowser:
         except Exception:
             pass
         self._ordered_reports = sorted(self.store.reports, key=lambda row: str(row.measured_at or ""), reverse=True)
+        self._comparison_verification = {
+            self._comparison_key(report):self._comparison_status_of(report)
+            for report in self._ordered_reports
+        }
+        # An edited GT revision or invalidated export *revokes* selection.
+        self._comparison_checked = {
+            key for key in self._comparison_checked
+            if key in self._comparison_verification and self._comparison_verification[key].ready
+        }
+        self._update_comparison_basket_status(silent=True)
         self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select)
 
     def _apply_report_filter(self, select_report_id: str = "", *, auto_select: bool = True) -> None:
-        """Filter without rescanning archives; keep selection when possible."""
+        """Filter without rescanning archives; selection survives filtering."""
         all_reports = getattr(self, "_ordered_reports", [])
         query = self.search_var.get().strip() if hasattr(self, "search_var") else ""
         if select_report_id and query and not any(
@@ -1916,13 +1997,32 @@ class MobileReportBrowser:
             self.search_var.set("")
             query = ""
         filtered = [r for r in all_reports if matches_report_filter(r, query, self._matching_cached_bundle(r))]
-        self.report_table.set_rows([
-            (local_measurement_time(r.measured_at, compact=True, show_offset=False),
-             report_identity(r, self._matching_cached_bundle(r))["variant_short"],
-             _format_ms(_pipeline_p95(r))) for r in filtered
-        ])
+        def table_line(r):
+            info=report_identity(r, self._matching_cached_bundle(r))
+            locator=str(getattr(r,"source_path","") or "").replace(chr(92),"/")
+            parts=locator.split("/")
+            folder_repeats=[part.lower() for part in parts if len(part)==3 and
+                            part[0].lower()=="r" and part[1:].isdigit()]
+            repeat=folder_repeats[-1] if "02_sesje" in parts and folder_repeats else ""
+            if not repeat:
+                rep=getattr(r,"experiment_index",{}) or {}
+                try:
+                    repeat=f"r{int(rep.get('replicate_index')):02d}"
+                except (TypeError,ValueError,OverflowError):
+                    repeat="—"
+            key=self._comparison_key(r)
+            state=self._comparison_verification.get(key)
+            status=state.label if state else "Nieustalona"
+            ready=bool(state and state.ready)
+            tick="☑" if key in self._comparison_checked else "☐" if ready else "—"
+            tag="success" if ready else "warning" if state and state.state in ("STALE","NEEDS_EXPORT","IN_PROGRESS") else "muted"
+            return (tick,local_measurement_time(r.measured_at, compact=True, show_offset=False),
+                    info["variant_short"],info["scenario"] or "—",repeat,
+                    status,_format_ms(_pipeline_p95(r)),{"tag":tag})
+        self.report_table.set_rows([table_line(r) for r in filtered])
         self.report_by_iid = {f"row_{i}": r for i, r in enumerate(filtered)}
-        self.report_count_var.set(f"{len(filtered)} z {len(all_reports)} raportów" if query else f"{len(all_reports)} zapisanych raportów")
+        ready_count=sum(1 for state in self._comparison_verification.values() if state.ready)
+        self.report_count_var.set(f"{len(filtered)} z {len(all_reports)} raportów · {ready_count} zatwierdzonych")
         if not filtered:
             if all_reports:
                 self._show_report_hint(len(all_reports))
@@ -2017,15 +2117,164 @@ class MobileReportBrowser:
     def _on_report_selected(self, _event=None) -> None:
         if self._suppress_report_select:
             return
-        try:
-            selected = self.report_table.tree.selection()
-        except Exception:
-            selected = ()
-        if not selected:
+        selection=self.report_table.tree.selection()
+        if not selection:
             return
-        report = self.report_by_iid.get(str(selected[0]))
+        report=self.report_by_iid.get(str(selection[0]))
         if report:
-            self._show_report(report, self._matching_cached_bundle(report))
+            self._show_report(report,self._matching_cached_bundle(report))
+
+    @staticmethod
+    def _comparison_key(report) -> tuple[str,str]:
+        return (str(report.report_id),str(report.source_archive_sha256).lower())
+
+    def _toggle_comparison_checkbox(self,event):
+        """Click only the first column to check an operator-verified import."""
+        tree=self.report_table.tree
+        if tree.identify_region(event.x,event.y)!="cell" or tree.identify_column(event.x)!="#1":
+            return None
+        iid=tree.identify_row(event.y)
+        report=self.report_by_iid.get(iid)
+        if report is None:
+            return "break"
+        key=self._comparison_key(report)
+        status=self._comparison_verification.get(key)
+        if not status or not status.ready:
+            self._set_status((status.reason if status else "Nieustalony stan MT+MZ")+" · Użyj «Odśwież» po eksporcie.","warning")
+            return "break"
+        if key in self._comparison_checked:
+            self._comparison_checked.discard(key)
+            tree.set(iid,"Wybor","☐")
+        else:
+            self._comparison_checked.add(key)
+            tree.set(iid,"Wybor","☑")
+        self._update_comparison_basket_status()
+        return "break"
+
+    def _clear_comparison_checks(self):
+        self._comparison_checked.clear()
+        for iid,report in self.report_by_iid.items():
+            key=self._comparison_key(report)
+            if self._comparison_verification.get(key) and self._comparison_verification[key].ready:
+                self.report_table.tree.set(iid,"Wybor","☐")
+        self._update_comparison_basket_status()
+
+    def _update_comparison_basket_status(self,*,silent=False):
+        count=len(self._comparison_checked)
+        self.btn_compare_open.configure(text=f"Porównaj wybrane ({count})",
+            state="normal" if count >= 2 and not self._comparison_busy else "disabled")
+        if not silent:
+            self._set_status(f"Zaznaczono {count} zatwierdzonych sesji MT+MZ. Porównanie wymaga co najmniej dwóch.")
+
+    def _open_mobile_comparison(self):
+        records=[r for r in self._ordered_reports if self._comparison_key(r) in self._comparison_checked]
+        if len(records)<2:
+            self._set_status("Zaznacz co najmniej 2 zatwierdzone sesje w kolumnie ✓.","warning")
+            return
+        # Never trust a stale list entry after GT was edited in another window.
+        for report in records:
+            state=self._comparison_status_of(report)
+            if not state.ready:
+                self._comparison_checked.discard(self._comparison_key(report))
+                self._update_comparison_basket_status()
+                self._set_status("Zmienił się status oceny: "+state.reason,"warning")
+                self._apply_report_filter(auto_select=True)
+                return
+        self._launch_mobile_comparison(records)
+
+    def _export_mobile_report_figures(self) -> None:
+        current=getattr(self,"current_report",None)
+        if current is None:
+            self._set_status("Wybierz pojedynczą sesję do eksportu wykresów.","warning")
+            return
+        self._launch_mobile_comparison([current])
+
+    def _launch_mobile_comparison(self, reports) -> None:
+        """Resolve source archives in a worker, only use verified imported identities."""
+        if self._comparison_busy:
+            return
+        if not reports:
+            self._set_status("Nie wybrano żadnej sesji do porównania.","warning")
+            return
+        self._comparison_busy=True
+        for name in ("btn_compare_open","btn_export_mobile_figures"):
+            getattr(self,name).configure(state="disabled")
+        self._set_status(f"Sprawdzam źródła {len(reports)} sesji i przygotowuję wykresy…")
+
+        from .mobile_report_source_recovery import restore_source, stored_source
+        from .mobile_import_comparison import record_from_import, infer_results_root
+
+        def worker() -> None:
+            try:
+                return prepare_worker()
+            except Exception as error:
+                description=f"Nie udało się przygotować porównania: {type(error).__name__}: {error}"
+                def failed():
+                    self._comparison_busy=False
+                    self.btn_export_mobile_figures.configure(state="normal")
+                    self._update_comparison_basket_status(silent=True)
+                    self._set_status(description[:220],"warning")
+                    messagebox.showerror("Błąd porównywarki",description[:500],parent=self.window)
+                self._run_on_ui(failed)
+
+        def prepare_worker() -> None:
+            resolved=[]; failures=[]
+            for report in reports:
+                if self._closing:
+                    return
+                bundle=self._matching_cached_bundle(report)
+                if bundle is None:
+                    path=stored_source(report)
+                    if not path:
+                        failures.append(f"{report.report_id}: nie podłączono źródłowego archiwum.")
+                        continue
+                    try:
+                        result=restore_source(report,path)
+                        if not result.ok or result.bundle is None:
+                            failures.append(f"{report.report_id}: {result.detail[:180]}")
+                            continue
+                        bundle=result.bundle
+                    except (OSError,ValueError,RuntimeError,KeyError) as exc:
+                        failures.append(f"{report.report_id}: {exc}")
+                        continue
+                resolved.append((report,bundle))
+            root=infer_results_root(resolved) if resolved else None
+            prepared=[]
+            for report,bundle in resolved:
+                try:
+                    session,traces,warnings=record_from_import(report,bundle,root)
+                    if len(reports)>1 and not session.canvas_ready:
+                        failures.append(f"{report.report_id}: brak kompletnej, zatwierdzonej oceny MT+MZ.")
+                        continue
+                    prepared.append((report,bundle,session,traces,warnings))
+                except (OSError,ValueError,RuntimeError,KeyError) as exc:
+                    failures.append(f"{report.report_id}: {exc}")
+            def done():
+                self._comparison_busy=False
+                self.btn_export_mobile_figures.configure(state="normal")
+                self._update_comparison_basket_status(silent=True)
+                if failures:
+                    messagebox.showwarning("Niepełne źródła porównania",
+                        "Wybór nie został otwarty. Uzupełnij/ponownie podłącz archiwa:\n\n"+"\n".join(failures[:8]),parent=self.window)
+                    self._set_status("Porównanie wstrzymane — brak potwierdzenia tożsamości wszystkich źródeł.","warning")
+                    return
+                if not prepared:
+                    self._set_status("Brak zweryfikowanych danych do wykresów.","warning")
+                    return
+                for report,bundle,_,_,_ in prepared:
+                    self.bundle_by_report_id[report.report_id]=bundle
+                from .mobile_import_comparison_gui import ImportedMobileComparisonWindow
+                dialog=ImportedMobileComparisonWindow(self.window,
+                    [v[2] for v in prepared],[v[3] for v in prepared],root,
+                    imported_sources=[(v[0],v[1]) for v in prepared])
+                self._comparison_dialogs.append(dialog)
+                all_warnings=[x for v in prepared for x in v[4]]
+                if all_warnings:
+                    self._set_status("Porównywarka otwarta. Uwagi źródłowe: "+"; ".join(all_warnings[:2]),"warning")
+                else:
+                    self._set_status(f"Porównywarka: {len(prepared)} sesji. Wyniki źródłowe bez zmian.","success")
+            self._run_on_ui(done)
+        threading.Thread(target=worker,daemon=True,name="alpr-mobile-compare-source-read").start()
 
     def import_report(self) -> None:
         if self._import_in_progress:
@@ -2419,8 +2668,11 @@ class MobileReportBrowser:
         if not trace_total:
             trace_total = _safe_int(_nested_value(report.raw, "summary.processed_frames"), 0)
         info = report_identity(report, bundle)
-        self.hero_title_var.set(f"{info['variant']}  •  {local_measurement_time(report.measured_at, compact=True)}")
-        meta = f"{info['device']}  ·  {info['scenario'] or info['technical_variant'] or 'Pomiar mobilny'}"
+        from .mobile_model_identity import identity_from_bundle
+        models = identity_from_bundle(bundle)
+        self.hero_title_var.set("Pakiet: " + models["caption"])
+        meta = (f"{info['variant']} · {info['scenario'] or 'Scenariusz: brak danych'} · "
+                f"{models['repeat_label']} · {models['variant_caption']} · {local_measurement_time(report.measured_at, compact=True)}")
         if bundle and bundle.validation.warnings:
             meta += f"  ·  {len(bundle.validation.warnings)} uwaga o archiwum (Szczegóły)"
         self.hero_meta_var.set(meta)
@@ -2517,6 +2769,15 @@ class MobileReportBrowser:
             ("GT z telefonu", phone_status, "Dotyczy tylko jakości zapisanej w źródłowym archiwum Androida."),
             ("Weryfikacja Desktop", review.get("title", "Nieustalone"), review.get("detail", "Brak odczytu sidecara.")),
         ] + rows
+        from .mobile_model_identity import identity_from_bundle
+        identity = identity_from_bundle(bundle)
+        rows.append(("Nazwa pakietu MT+MZ", identity["package_name"] or "brak danych źródłowych",
+                     "Metadane zapisane w źródłowym pomiarze telefonu."))
+        for role, title in (("plate", "MT"), ("character", "MZ")):
+            model = identity["models"][role]
+            for key in ("model_display_id", "model_id", "variant_id", "checkpoint_sha256", "package_sha256"):
+                rows.append((f"{title} · {key}", model[key] if model["verified"] and model[key] else
+                             "brak danych źródłowych", "Zapisane odniesienie modelu telefonu."))
         self.summary_table.set_rows(validation_rows + rows[:2] + summary_measure_rows(report, bundle) + rows[2:])
 
     def _report_experiment_index(

@@ -126,4 +126,20 @@ def test_gui_list_is_compact_and_main_action_is_prominent():
  assert '_observation_list_label' not in block
  assert 'Przejdź do weryfikacji próbek' in dash and 'Oceń zdjęcia' not in dash
  assert 'command=on_review' in dash and 'action_button.grid(row=0, column=0, sticky="ew")' in dash
- assert 'columns = 2 if width >= 800 else 1' in dash
+ # AKT89F: the 1180px Browser leaves about 560px for results. Verify the
+ # visible two-column layout instead of requiring the obsolete 800px cutoff.
+ import tkinter as tk
+ from auto_annotation_tool.gui.mobile_report_science_dashboard import ScientificDashboard
+ window=tk.Tk();window.geometry('560x680+0+0')
+ panel=ScientificDashboard(window,palette={},on_review=lambda:None,
+                           on_refresh=lambda:None,on_details=lambda:None)
+ panel.pack(fill='both',expand=True)
+ try:
+  window.update()
+  positions={(int(w.grid_info()['row']),int(w.grid_info()['column'])) for w in panel._card_frames}
+  assert positions=={(0,0),(0,1),(1,0),(1,1)}
+  assert all(w.winfo_ismapped() and w.winfo_rootx()>=panel.winfo_rootx()
+             and w.winfo_rootx()+w.winfo_width()<=panel.winfo_rootx()+panel.winfo_width()
+             for w in panel._card_frames)
+ finally:
+  window.destroy()

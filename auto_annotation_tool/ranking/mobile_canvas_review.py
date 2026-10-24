@@ -603,7 +603,8 @@ def subject_issues(session, subject_key):
 def summary(session):
     from .mobile_human_review import align_plate_text
     result = dict(schema=SCHEMA, provenance=PROVENANCE,
-        independent_gt=False, source_archive_sha256=session.review.source_archive_sha256,
+        independent_gt=False, session_id=getattr(session, "session_id", None),
+        source_archive_sha256=session.review.source_archive_sha256,
         review_revision=session.review.review_revision, scene_count=0, checked_scenes=0,
         inspected_scenes=0, incomplete_checked_scenes=0,
         pending_scenes=0, excluded_scenes=0, expected_plates=0, linked_plates=0,

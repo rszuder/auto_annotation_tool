@@ -687,25 +687,24 @@ class MobileSampleReviewWindow:
             pass
         self.window.columnconfigure(0, weight=1)
         self.window.rowconfigure(2, weight=1)
-        header = tk.Frame(self.window, bg=self.bg, padx=12, pady=8)
+        header = tk.Frame(self.window, bg=self.bg, padx=10, pady=4)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        self.session_label = self._label(header, "Wczytywanie sesji…", font=("Segoe UI", 12, "bold"))
+        self.session_label = self._label(header, "Wczytywanie sesji…", font=("Segoe UI", 11, "bold"), width=1)
         self.session_label.grid(row=0, column=0, sticky="ew")
-        self.progress_label = self._label(header, font=("Segoe UI", 9))
-        self.progress_label.grid(row=1, column=0, sticky="ew")
-        self.form_status_label = self._label(header, "Weryfikacja: wczytywanie…", font=("Segoe UI", 9))
-        self.form_status_label.grid(row=2, column=0, sticky="ew", pady=(2, 0))
-        # Visible in both canvas and legacy review; purely diagnostic.
-        self.mt_postnms_info = self._label(header, "", font=("Segoe UI", 9),
-                                              fg=self.muted, wraplength=1050)
-        self.mt_postnms_info.grid(row=3, column=0, sticky="ew", pady=(2, 1))
-        self.mt_postnms_info.grid_remove()
-        self._button(header, "Eksport wyników", self.export, row=0, column=1)
-        self.complete_button = self._button(header, "Zatwierdź weryfikację", self.complete,
+        self.session_label.bind("<Configure>", lambda e:
+                                self.session_label.configure(wraplength=max(1, e.width)))
+        self.progress_label = self._label(header, font=("Segoe UI", 14, "bold"))
+        self.progress_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        actions = tk.Frame(header, bg=self.bg)
+        actions.grid(row=0, column=1, sticky="e")
+        export_button = self._button(actions, "Eksport wyników", self.export, row=0, column=0)
+        self.form_status_label = self._label(actions, "W TOKU", font=("Segoe UI", 9, "bold"))
+        self.form_status_label.grid(row=0, column=1, sticky="e", padx=(10, 7))
+        self.complete_button = self._button(actions, "Zatwierdź weryfikację", self.complete,
                                             primary=True, row=0, column=2)
-        self.notice_label = self._label(self.window, wraplength=1150, font=("Segoe UI", 9))
-        self.notice_label.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 6))
+        for button in (export_button, self.complete_button):
+            button.configure(font=("Segoe UI", 9, "bold"), padx=8, pady=4)
 
         tabs = ttk.Notebook(self.window)
         tabs.grid(row=2, column=0, sticky="nsew", padx=10)
@@ -718,16 +717,11 @@ class MobileSampleReviewWindow:
 
         left = tk.Frame(review, bg=self.review_card_bg, padx=8, pady=8,
                         highlightthickness=1, highlightbackground=self.review_border)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
         left.columnconfigure(0, weight=1)
         left.rowconfigure(2, weight=1)
-        self._label(left, "STATUS WERYFIKACJI", font=("Segoe UI", 10, "bold")).grid(
+        self._label(left, "OBRAZY", font=("Segoe UI", 10, "bold")).grid(
             row=0, column=0, sticky="w", pady=(3, 3))
-        self._label(left, "✓ decyzja/GT zapisane  ·  ○ brak  ·  — nie dotyczy\n"
-                   "MT: liczba tablic · Wsk.: wskazanie modelu\n"
-                   "GT: numer · Rogi: ręczny GT (opc.) · Form.: komplet",
-                    font=("Segoe UI", 8), fg=self.muted, wraplength=280).grid(
-                        row=1, column=0, sticky="ew", pady=(0, 8))
         cols = ("Nr", "MT", "Wsk.", "GT", "Rogi", "Form.")
         widths = (36, 42, 49, 39, 46, 49)
         frame, self.subject_tree = self._table(left, cols, widths, height=18)
@@ -773,7 +767,7 @@ class MobileSampleReviewWindow:
                      primary=True, row=3, column=0, sticky="ew")
 
         viewer = tk.Frame(review, bg=self.bg)
-        viewer.grid(row=0, column=1, sticky="nsew", padx=(0, 9))
+        viewer.grid(row=0, column=1, sticky="nsew", padx=(0, 3))
         viewer.columnconfigure(0, weight=1)
         viewer.rowconfigure(4, weight=1)
         image_bar = tk.Frame(viewer, bg=self.bg)
@@ -824,7 +818,7 @@ class MobileSampleReviewWindow:
         # removes only the operator correction. The original MT stays read-only.
         self.mt_quad_mode_bar = None  # deprecated widget name for older probes
         self.canvas = tk.Canvas(viewer, height=520, bg="#101820", highlightthickness=0, cursor="hand2")
-        self.canvas.grid(row=4, column=0, sticky="nsew", pady=3)
+        self.canvas.grid(row=4, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", lambda event: self._paint_image())
         self.canvas.bind("<MouseWheel>", self._wheel_zoom)
         self.canvas.bind("<Button-4>", self._wheel_zoom)
@@ -1242,6 +1236,15 @@ class MobileSampleReviewWindow:
             "Pokaż pełną proweniencję techniczną", self._toggle_provenance_details,
             compact=True)
         self.details_toggle.grid(row=2, column=0, sticky="w", pady=(9, 5))
+        # Source warnings and post-NMS diagnostics belong with the sources,
+        # not in the two-row working header. Keep the existing update targets.
+        self.notice_label = self._label(details_top, wraplength=1050, font=("Segoe UI", 9))
+        self.notice_label.grid(row=3, column=0, sticky="ew", pady=3)
+        self.notice_label.grid_remove()
+        self.mt_postnms_info = self._label(details_top, "", font=("Segoe UI", 9),
+                                         fg=self.muted, wraplength=1050)
+        self.mt_postnms_info.grid(row=4, column=0, sticky="ew", pady=3)
+        self.mt_postnms_info.grid_remove()
         frame, self.details_tree = self._table(details, ("Pole", "Wartość"), (340, 750), height=20)
         self._provenance_raw_host = frame
         self._provenance_raw_open = False
@@ -1356,14 +1359,18 @@ class MobileSampleReviewWindow:
             notices.insert(0, "Sesja niekompletna. Wyniki obejmują wyłącznie zapisane dowody.")
         self._source_notices = notices
         self.notice_label.configure(
-            text="\n".join(notices) if notices else "Wybierz obraz. Ramki i numery GT weryfikuj bezpośrednio na canvasie. Zapis jest automatyczny.",
+            text="\n".join(notices),
             fg=self.browser.warning if notices else self.muted)
+        if notices:
+            self.notice_label.grid()
+        else:
+            self.notice_label.grid_remove()
         self._subject_ids = {f"subject-{index}": key for index, key in enumerate(session.subjects)}
         self._refresh_subject_rows()
         self._refresh_stats()
         self._populate_details()
         self._sync_review_controls()
-        self.status_var.set("Weryfikacja asystowana: GT zapisuje się automatycznie. MT i MZ weryfikuj na wybranym obrazie."
+        self.status_var.set(f"Zapis automatyczny • rewizja {session.review.review_revision}"
                             + (" Przełączono wcześniejszą weryfikację na tryb asystowany; GT zachowano." if self._review_was_converted else ""))
         if self._subject_ids:
             first = next(iter(self._subject_ids))
@@ -4362,7 +4369,7 @@ class MobileSampleReviewWindow:
             self._leave_pose_gt_edit_on_navigation()
             self.subject_key, self._pending_subject = self._pending_subject, ""
         self._render_subject()
-        self.status_var.set(warning or f"Zapisano automatycznie • rewizja {self.session.review.review_revision} • {REVIEW_LABELS[self.session.review.review_status]}")
+        self.status_var.set(warning or f"Zapisano automatycznie • rewizja {self.session.review.review_revision}")
         if updated_report is not None and self.browser.window.winfo_exists():
             self.browser.store.add_report(updated_report, save=False)
             for iid, report in self.browser.report_by_iid.items():
@@ -4420,7 +4427,7 @@ class MobileSampleReviewWindow:
             return
         state = verification_progress(self.session)
         if state["status"] == "READY_FOR_EVALUATION":
-            self.status_var.set("Formularz jest już zatwierdzony — materiał READY_FOR_EVALUATION.")
+            self.status_var.set(f"Zapisano automatycznie • rewizja {self.session.review.review_revision}")
             return
         if state["issues"]:
             self.status_var.set(f"Weryfikacja niekompletna: {len(state['issues'])} brakujących decyzji. "
@@ -4437,7 +4444,7 @@ class MobileSampleReviewWindow:
             return
         self._change(self.session.complete,
                      after=lambda: self.status_var.set(
-                         "Weryfikacja zatwierdzona • READY_FOR_EVALUATION • zapisano niezmienny dokument źródłowy"))
+                         f"Zapisano automatycznie • rewizja {self.session.review.review_revision}"))
 
 
     def next_pending(self):
@@ -4540,7 +4547,8 @@ class MobileSampleReviewWindow:
 
     def _refresh_stats(self):
         form = verification_progress(self.session)
-        if hasattr(self, "form_status_label"):
+        canvas_editor = getattr(self, "_canvas_editor", None)
+        if hasattr(self, "form_status_label") and canvas_editor is None:
             titles = {"IN_PROGRESS": "Weryfikacja w toku", "READY_TO_APPROVE": "Obrazy sprawdzone — zatwierdź weryfikację",
                       "READY_FOR_EVALUATION": "Weryfikacja zatwierdzona — gotowa do ewaluacji",
                       "APPROVED_PENDING_SNAPSHOT": "Zatwierdzone decyzje — pakiet do weryfikacji",
@@ -4551,11 +4559,12 @@ class MobileSampleReviewWindow:
                 f"pozostałe decyzje: {len(form['issues'])} • oryginał MT i korekta są osobnymi ramkami"))
         summary = self.stats["summary"]
         progress = self._science_data["progress"]
-        self.progress_label.configure(text=(
-            f"Obserwacje: {progress['subjects_total']} • "
-            f"Liczba tablic MT: {progress['mt_invocations_cardinality_reviewed']}/{progress['mt_executed_active']} "
-            f"wywołań z decyzją operatora • "
-            f"Weryfikacja: {REVIEW_LABELS[self.session.review.review_status]}"))
+        if canvas_editor is None:
+            self.progress_label.configure(text=(
+                f"Obserwacje: {progress['subjects_total']} • "
+                f"Liczba tablic MT: {progress['mt_invocations_cardinality_reviewed']}/{progress['mt_executed_active']} "
+                f"wywołań z decyzją operatora • "
+                f"Weryfikacja: {REVIEW_LABELS[self.session.review.review_status]}"))
         self.stats_tree.delete(*self.stats_tree.get_children())
         sections = {
             "Tablice / ALPR": {"evaluable_subjects": "Tablice do weryfikacji", "subjects_with_exact_read": "Z poprawnym odczytem", "subjects_without_exact_read": "Bez poprawnego odczytu", "subject_success_rate": "Skuteczność systemu dla tablic"},

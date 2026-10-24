@@ -10,6 +10,7 @@ from typing import Callable
 
 from .mobile_science_viewmodel import STATUS_DISPLAY, make_science_dashboard
 from .mobile_canvas_ui import palette, Disclosure
+from ..ranking.mobile_canvas_presentation import summary_caption
 
 
 class MobileScienceSummaryPanel:
@@ -42,6 +43,7 @@ class MobileScienceSummaryPanel:
         self.item = self.canvas.create_window((0, 0), window=self.body, anchor="nw")
         self.canvas.bind("<Configure>", self._fit_body_width, add="+")
         self.body.bind("<Configure>", self._refresh_scroll_region, add="+")
+        self._canvas_args = None
         self._bind_wheel(self.canvas)
         self._bind_wheel(self.body)
         for key, amount in (("<Up>", -1), ("<Down>", 1),
@@ -101,6 +103,7 @@ class MobileScienceSummaryPanel:
     def _section_title(self, text):
         w = self._text(self.body, text, size=10, bold=True, padx=0)
         w.pack(fill="x", padx=18, pady=(13, 5))
+        return w
         return w
 
     def _card(self, host, card: dict, row: int, col: int):
@@ -220,12 +223,48 @@ class MobileScienceSummaryPanel:
             item.bind("<Configure>", lambda e,w=item: w.configure(wraplength=max(120,e.width-10)))
         return row
 
+    def render_canvas(self, data, inventory, *, refreshing=False, review_status="IN_PROGRESS"):
+        self._canvas_args = (data, inventory, refreshing, review_status)
+        if not hasattr(self, "canvas_caption") or not self.canvas_caption.winfo_exists():
+            return
+        state = "zatwierdzona" if review_status == "COMPLETED" else "w toku"
+        self.canvas_title.configure(text="Ocena operatora (Canvas · asystowana) · " + state)
+        text = ("Aktualizowanie oceny Canvas…" if refreshing else
+                summary_caption(data, inventory) if data else
+                "Ocena Canvas niedostępna dla tej rewizji")
+        self.canvas_caption.configure(text=text)
+
     def render(self, report: dict, form: dict | None = None, *, source_verified=True):
         model = make_science_dashboard(report, form, source_verified=source_verified)
         preserved = self.canvas.yview()[0]
         for child in self.body.winfo_children():
             child.destroy()
         self.model = model
+        banner = tk.Frame(self.body, bg=self.ui_p["blue_bg"], padx=10, pady=8)
+        banner.pack(fill="x", padx=18, pady=(10, 3))
+        self.canvas_title = self._text(banner, "Ocena operatora (Canvas · asystowana)",
+                                      bold=True, bg=self.ui_p["blue_bg"], wrap=1000)
+        self.canvas_title.pack(fill="x")
+        self.canvas_caption = self._text(banner, "Ocena Canvas niedostępna dla tej rewizji",
+                                        bg=self.ui_p["blue_bg"], wrap=1000)
+        self.canvas_caption.pack(fill="x", pady=(3, 0))
+        for item in (self.canvas_title, self.canvas_caption):
+            item.bind("<Configure>", lambda e, w=item: w.configure(wraplength=max(120, e.width - 8)))
+        if self._canvas_args:
+            data, inventory, refreshing, status = self._canvas_args
+            if data and (not source_verified or any(data.get(k) != report.get(k)
+                    for k in ("session_id", "source_archive_sha256", "review_revision"))):
+                data, refreshing = None, True
+            self.render_canvas(data, inventory, refreshing=refreshing, review_status=status)
+        independent_missing = not model["pose_pair_count"] and not model["mz_reviewed_count"]
+        explanation = ("Osobnej oceny niezależnej nie przeprowadzono. "
+                       "Wyniki weryfikacji operatora są dostępne powyżej."
+                       if independent_missing else
+                       "Poniższy raport historyczny używa odrębnego protokołu. "
+                       "Ocena asystowana Canvas nie jest niezależną próbą ślepą.")
+        info = self._text(self.body, explanation, size=9, muted=True, wrap=1000)
+        info.pack(fill="x", padx=19, pady=(3, 7))
+        info.bind("<Configure>", lambda e: info.configure(wraplength=max(120, e.width - 8)))
         header = tk.Frame(self.body, bg=self.background)
         header.pack(fill="x", padx=18, pady=(10, 4))
         header.columnconfigure(0, weight=1)
@@ -240,8 +279,11 @@ class MobileScienceSummaryPanel:
                       activebackground=self.ui_p["blue_bg"], activeforeground=self.ui_p["blue"],
                       relief="flat", bd=0, cursor="hand2", padx=12, pady=7,
                       font=("Segoe UI", 9, "bold")).grid(row=0,column=1,rowspan=2,sticky="ne",padx=(12,0))
-        self._section_title("01  POSTĘP • PROTOKÓŁ HISTORYCZNY")
-        progress_box = tk.Frame(self.body, bg=self.background)
+        self.history_progress = Disclosure(self.body, "01  Postęp protokołu historycznego · osobna ocena", p=self.ui_p,
+            opened=self._sections_open.get("history_progress", not independent_missing),
+            command=lambda opened: self._sections_open.update(history_progress=opened))
+        self.history_progress.pack(fill="x", padx=18, pady=(6, 7))
+        progress_box = tk.Frame(self.history_progress.body, bg=self.background)
         progress_box.pack(fill="x", padx=14)
         progress_box.columnconfigure(0, weight=1, uniform="science_progress")
         progress_box.columnconfigure(1, weight=1, uniform="science_progress")
@@ -251,9 +293,12 @@ class MobileScienceSummaryPanel:
                    "Niezależne porównania Pose: brak danych")
         mz_info = (f"Odczyty MZ z GT: {model['mz_reviewed_count']}" if model["mz_reviewed_count"] is not None else
                    "Odczyty MZ z GT: brak danych")
-        self._text(self.body, gt_info + "    ·    " + mz_info, size=9, muted=True).pack(fill="x", padx=19, pady=(7, 2))
-        self._section_title("02  WYNIKI • PROTOKÓŁ HISTORYCZNY")
-        top = tk.Frame(self.body, bg=self.background)
+        self._text(self.history_progress.body, gt_info + "    ·    " + mz_info, size=9, muted=True).pack(fill="x", padx=9, pady=(7, 2))
+        historical = Disclosure(self.body, "02  Wyniki protokołu historycznego · osobna ocena", p=self.ui_p,
+                                opened=self._sections_open.get("historical", not independent_missing),
+                                command=lambda opened: self._sections_open.update(historical=opened))
+        historical.pack(fill="x", padx=18, pady=(2, 7))
+        top = tk.Frame(historical.body, bg=self.background)
         top.pack(fill="x", padx=14, pady=(2, 7))
         top.columnconfigure(0, weight=1, uniform="science_card")
         top.columnconfigure(1, weight=1, uniform="science_card")
@@ -264,9 +309,10 @@ class MobileScienceSummaryPanel:
                                    command=lambda opened: self._sections_open.update(metrics=opened))
         table_section.pack(fill="x", padx=18, pady=(6, 7))
         self._table(model, parent=table_section.body)
-        self._section_title("03  CZASY TELEFONU • NIEZALEŻNE OD GT")
+        times_heading = self._section_title("CZASY TELEFONU • NIEZALEŻNE OD GT")
+        times_heading.pack_configure(before=self.history_progress)
         times = tk.Frame(self.body, bg=self.background)
-        times.pack(fill="x", padx=14)
+        times.pack(fill="x", padx=14, before=self.history_progress)
         for i, item in enumerate(model["latencies"]):
             times.columnconfigure(i, weight=1, uniform="science_times")
             cell = tk.Frame(times, bg=self.surface, padx=10, pady=7,
@@ -278,7 +324,7 @@ class MobileScienceSummaryPanel:
             self._text(cell, item["value"], bg=self.surface, size=9,
                        wrap=320).pack(fill="x", pady=(4, 0))
         self._text(self.body, "Czasy z raportu telefonu (p50, P95, n), nie pomiary kamera→ekran.",
-                   size=9, muted=True).pack(fill="x", padx=19, pady=(5, 7))
+                   size=9, muted=True).pack(fill="x", padx=19, pady=(5, 7), before=self.history_progress)
         self._section_title("SZCZEGÓŁY BADANIA")
         self._expand("why", "Braki danych i status wyników", model["why"])
         self._expand("caveats", "Ograniczenia", model["caveats"])

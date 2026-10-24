@@ -32,6 +32,10 @@ def load_editor():
     sys.modules[prefix+'.ranking.mobile_pose_metrics'].validate_mt_quad=lambda *a,**kw:None
     sys.modules[prefix+'.ranking.mobile_canvas_presentation'].build_inventory=lambda session:session.inventory
     sys.modules[prefix+'.ranking.mobile_canvas_presentation'].subject_groups=lambda session,key:session.group_keys.get(key,[])
+    # The overlay now shares the pure per-object provenance view-model. Keep
+    # the existing event assertions and exercise that production helper too.
+    from auto_annotation_tool.ranking.mobile_canvas_presentation import plate_review_state
+    sys.modules[prefix+'.ranking.mobile_canvas_presentation'].plate_review_state=plate_review_state
     ui=types.ModuleType(prefix+'.gui.mobile_canvas_ui')
     ui.palette=lambda *a,**k:{}
     ui.label=lambda *a,**k:None

@@ -288,13 +288,18 @@ def make_science_dashboard(report: dict, form: dict | None = None, *, source_ver
         ("Rewizja weryfikacji", str(report.get("review_revision") if report.get("review_revision") is not None else "—")),
         ("Archiwum SHA-256", str(report.get("source_archive_sha256") or "Brak danych")),
     ]
+    def condition_value(key, title):
+        value = str(condition.get(key) or "").strip()
+        return f"{title}: nie podano w raporcie" if value.lower() in ("", "brak danych", "—") else value
+
     return {
         "title": "Podsumowanie wyników sesji",
         "subtitle": "Wyniki, stan weryfikacji i ograniczenia pomiaru",
         "form_status": form_label,
         "science_status": science_label,
         "review_mode": "GT asystowany" if assisted else "GT zaślepiony" if mode == "blinded_gt_v1" else "GT: tryb nieustalony",
-        "conditions": f"{condition.get('scenario') or 'Brak scenariusza'} · {condition.get('variant') or 'Brak wariantu'} · {condition.get('device') or 'Brak telefonu'}",
+        "conditions": " · ".join(condition_value(key, title) for key, title in
+                                   (("scenario", "Scenariusz"), ("variant", "Wariant"), ("device", "Telefon"))),
         "cards": cards,
         "rows": tuple(rows),
         "progress": checks,

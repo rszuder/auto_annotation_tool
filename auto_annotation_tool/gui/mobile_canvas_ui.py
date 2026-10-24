@@ -68,6 +68,55 @@ class MetricCard(tk.Frame):
             self.note.pack_forget()
 
 
+class PlateAssessment(tk.Frame):
+    """Compact read-only MT/MZ result; GT editing stays on the canvas."""
+    def __init__(self, parent, *, p):
+        super().__init__(parent, bg=p["surface"], padx=9, pady=7,
+                         highlightbackground=p["border"], highlightthickness=1)
+        self.p = p
+        self.fields = {}
+        for key, text, bold, tone in (
+            ("execution", "", True, "blue"), ("focus", "", False, "muted"),
+            ("image_frames", "", False, "muted"), ("frame", "", True, "fg"),
+            ("geometry_title", "DOPASOWANIE RAMKI MT", True, "muted"),
+            ("geometry", "", False, "fg"),
+            ("text_title", "ODCZYT ZNAKÓW MZ ↔ GT", True, "muted"),
+            ("mz", "", True, "fg"), ("gt", "", True, "fg"),
+            ("gt_note", "", False, "amber"),
+            ("text", "", False, "fg"), ("outcome", "", False, "muted"),
+            ("draft", "", False, "amber"),
+            ("correction_history", "", False, "muted"),
+        ):
+            item = label(self, text, p=p, bold=bold, fg=p[tone], size=9, wrap=260)
+            item.configure(width=1)
+            item.pack(fill="x", pady=(5 if key.endswith("title") else 0, 0))
+            self.fields[key] = item
+        self.bind("<Configure>", self._wrap)
+
+    def _wrap(self, event):
+        for item in self.fields.values():
+            item.configure(wraplength=max(80, event.width - 24))
+
+    def render(self, model):
+        self.model = model
+        self.fields["execution"].configure(text=model["execution"]["title"])
+        self.fields["focus"].configure(text=model.get("focus", ""))
+        for key in ("frame", "image_frames", "gt_note", "correction_history"):
+            self.fields[key].configure(text=model.get(key, ""))
+        for key, before in (("gt_note", "text"), ("correction_history", None)):
+            item = self.fields[key]
+            if not model.get(key):
+                item.pack_forget()
+            elif before:
+                item.pack(fill="x", before=self.fields[before])
+            else:
+                item.pack(fill="x")
+        for key in ("outcome", "geometry", "mz", "gt", "text"):
+            self.fields[key].configure(text=model[key])
+        self.fields["draft"].configure(text=("Poza metrykami jakości" if model["execution"]["state"] != "MT_EXECUTED" else
+                                            "Roboczo · poza agregatami" if model["draft"] else "Ocena asystowana"))
+
+
 class Disclosure(tk.Frame):
     """A full-width section header, not an action-looking CTA button."""
     def __init__(self, parent, title, *, p, opened=False, command=None):

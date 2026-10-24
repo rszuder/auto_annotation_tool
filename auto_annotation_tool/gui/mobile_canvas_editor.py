@@ -11,7 +11,7 @@ import math
 import sys
 from types import SimpleNamespace
 import tkinter as tk
-from tkinter import ttk, simpledialog, messagebox
+from tkinter import ttk, simpledialog, messagebox, font as tkfont
 
 from ..ranking import mobile_canvas_review as core
 from ..ranking.mobile_source_frame_roi import quad_contains_point
@@ -21,6 +21,26 @@ from .mobile_canvas_ui import palette, label as ui_label, MetricCard, Disclosure
 from .mobile_canvas_results_panel import CanvasResultsPanel
 
 TAG = "p2b2_canvas_overlay"
+
+
+def overlay_label_position(bounds, size, viewport, obstacles, *, above=False):
+    """Find free screen space without placing text over any MT/GT polygon box."""
+    l, t, r, b = bounds
+    w, h = size
+    vw, vh = viewport
+    if w + 16 > vw or h + 16 > vh:
+        return None
+    x = (l + r - w) / 2 if above else l
+    preferred = [(x, t-h-16), (x, b+16)] if above else [(x, b+16), (x, t-h-16)]
+    preferred += [(r+16, t), (l-w-16, t), (8, 8), (vw-w-8, 8),
+                  (8, vh-h-8), (vw-w-8, vh-h-8)]
+    preferred += [(x, 8 + i * (vh-h-16) / 8) for i in range(9)]
+    for px, py in preferred:
+        px, py = max(8, min(vw-w-8, px)), max(8, min(vh-h-8, py))
+        if not any(px < q[2]+8 and px+w > q[0]-8 and py < q[3]+8 and py+h > q[1]-8
+                   for q in obstacles):
+            return px, py
+    return None
 
 
 def reconciliation_story(scene, tally):
@@ -166,14 +186,14 @@ class CanvasReviewEditor:
                               358 if screen_width >= 1250 else 318)
         # The operator's left panel lists images only. Technical records,
         # candidate boxes and source IDs belong to the audit/report view.
-        self.left_width = (364 if screen_width >= 1500 else
-                           338 if screen_width >= 1250 else 310)
+        self.left_width = 310
         review.columnconfigure(0, weight=0, minsize=self.left_width)
         review.columnconfigure(1, weight=1, minsize=430 if screen_width >= 1250 else 350)
         review.columnconfigure(2, weight=0, minsize=self.sidebar_width + 12)
         host.window.minsize(min(1150, max(900, screen_width - 60)), 670)
         host.review_sidebar_scroll.configure(width=self.sidebar_width)
         self.p = palette(host.window, host.bg)
+        self._badge_font = tkfont.Font(root=host.window, family="Segoe UI", size=9, weight="bold")
         self.tree_targets = {}
         self.linked_tree_rows = {}  # hidden aliases, used only for navigation
         self.pending_tree_target = None
@@ -182,15 +202,40 @@ class CanvasReviewEditor:
         self.tree_refreshing = False
         self._active_tree_iid = ""
         self._build_panel(right)
+        review.bind("<Configure>", self._fit_review_columns, add="+")
         self._configure_tree()
         # The former binding pass ran BEFORE this panel existed.
         host._bind_sidebar_wheel(self.panel)
         host.review_sidebar_scroll.configure(yscrollincrement=22)
-        for widget in viewer.grid_slaves(row=5):
-            widget.grid_remove()
+        # Keep toolbar objects alive for existing configure() callers, but
+        # let Canvas occupy all their space. V retains the source-view action.
+        for row in (0, 1, 2, 5):
+            for widget in viewer.grid_slaves(row=row):
+                widget.grid_remove()
         host.target_nav.grid_remove()
         host.image_help.configure(text="Turkusowa ramka: wynik telefonu • pomarańczowo-żółta: korekta operatora • czerwone ×: błędne wskazanie • półprzezroczysty obszar: miejsce analizy")
         self.bindings()
+
+    def _fit_review_columns(self, event):
+        """Keep the inspector and its scrollbar inside a narrow window."""
+        width = event.width
+        left = min(self.left_width, max(250, int(width * .21)))
+        right = min(self.sidebar_width, max(280, int(width * .27)))
+        layout = (left, right)
+        if getattr(self, "_review_columns", None) == layout:
+            return
+        self._review_columns = layout
+        event.widget.columnconfigure(0, minsize=left)
+        event.widget.columnconfigure(1, minsize=300)
+        event.widget.columnconfigure(2, minsize=right + 12)
+        # A minsize alone cannot shrink a Treeview's requested column width.
+        self.h.subject_tree.column("#0", width=left - 38, minwidth=200)
+        self.h.review_sidebar_scroll.configure(width=right)
+        self.approve.configure(wraplength=right - 35)
+        self.exclude.configure(wraplength=right - 35)
+        for item in (self.status, self.exclude_hint, self.tally, self.selection,
+                     self.selection_hint, self.metrics, self.reconciliation_body):
+            item.configure(wraplength=right - 42)
 
     def label(self, text, bold=False, small=False):
         return tk.Label(self.panel, text=text, anchor="w", justify="left",
@@ -259,6 +304,8 @@ class CanvasReviewEditor:
             self.c.bind("<KeyPress-" + k + ">", self.roi_hotkey)
         for k in ("f","F"):
             self.c.bind("<KeyPress-"+k+">", lambda e:self.fit())
+        for k in ("v", "V"):
+            self.c.bind("<KeyPress-"+k+">", self.source_view_hotkey)
         for k in ("q","Q"):
             self.c.bind("<KeyPress-"+k+">", lambda e:self.navigate(-1))
         for k in ("e","E"):
@@ -289,6 +336,11 @@ class CanvasReviewEditor:
     def focus_canvas(self, event=None):
         if self.entry is None:
             self.c.focus_set()
+
+    def source_view_hotkey(self, event=None):
+        if event is None or not getattr(event, "state", 0) & 4:
+            self.h._toggle_source_frame_view()
+        return "break"
 
     def _start_windows_s_watch(self):
         if sys.platform != "win32" or getattr(self, "_win_s_poll_id", None) is not None:
@@ -559,6 +611,7 @@ class CanvasReviewEditor:
         return self.cached
 
     def sync(self):
+        from ..ranking.mobile_canvas_presentation import execution_state, focused_assessment
         h = self.h
         for widget in self.old_right:
             widget.grid_remove()
@@ -583,6 +636,11 @@ class CanvasReviewEditor:
             self.mode = "edit" if self.selected else "select"
             self.pending_tree_target = None
         s = self._read()
+        obj = next((o for o in (s or {}).get("objects", ()) if o["object_id"] == self.selected), None)
+        if self.selected and (obj is None or obj.get("post_nms_suppressed", False)):
+            self.selected = self.hover = ""
+            obj = None
+            if self.mode == "edit": self.mode = "select"
         available = bool(s and h._image is not None and h._image_entry == s["image_entry"]
             and tuple(h._image_source_size or ()) == tuple(s["image_size"]))
         enabled = available and not h._saving and not self.busy
@@ -592,6 +650,14 @@ class CanvasReviewEditor:
         self.exclude.configure(state="normal" if enabled else "disabled")
         self.reason_entry.configure(state="normal" if enabled else "disabled")
         self.crop.configure(state="disabled")
+        execution = execution_state(h.session, h.current_invocation,
+                                    image_entry=h._image_entry,
+                                    image_size=h._image_source_size)
+        self._canvas_execution = execution
+        self._guard_gt_entry()
+        text_edit_id = (self.entry_target[1] if self.entry is not None
+                        and self.entry_target[0] == h.current_invocation else None)
+        self.assessment.render(focused_assessment(s, self.selected, execution, text_edit_id=text_edit_id))
         if not s:
             self.checked_var.set(False); self.excluded_var.set(False)
             self.reconciliation_box.pack_forget()
@@ -623,7 +689,9 @@ class CanvasReviewEditor:
         if not available: title += "\nPodgląd wejścia MT"
         self.status.configure(text=title, bg=self.p[tone+"_bg"], fg=self.p[tone])
         tally = core.counts(s)
-        for key, card in self.tally_cards.items(): card.set(str(tally[key]))
+        for key, card in self.tally_cards.items():
+            card.set(str(tally[key]) if execution["state"] == "MT_EXECUTED" else "—")
+        self.tally_cards["mt"].set(str(execution["detections"]) if execution["detections"] is not None else "—")
         self._sync_reconciliation_story(s, tally, enabled)
         notes = []
         if tally["operator_errors"]:
@@ -635,11 +703,6 @@ class CanvasReviewEditor:
         elif not s["checked"]:
             notes.append("Liczby robocze — obraz niepotwierdzony.")
         self.tally.configure(text="\n".join(notes))
-        obj = next((o for o in s["objects"] if o["object_id"] == self.selected), None)
-        if self.selected and (obj is None or obj.get("post_nms_suppressed", False)):
-            self.selected = self.hover = ""
-            obj = None
-            if self.mode == "edit": self.mode = "select"
         parent = next((p for p in s["parents"] if obj and p["parent_id"] == obj["parent_id"]), None)
         if obj:
             title = f"MT {int(parent['detection_index'])+1} · nakładka" if parent else "Ramka ręczna"
@@ -712,6 +775,7 @@ class CanvasReviewEditor:
         self.paint_after = self.c.after_idle(repaint)
 
     def overlay(self):
+        from ..ranking.mobile_canvas_presentation import plate_review_state
         self.c.delete(TAG)
         s = self._read()
         if not s or self.h._image is None or self.h._image_entry != s["image_entry"] or self.h._view_center is None:
@@ -719,6 +783,9 @@ class CanvasReviewEditor:
         width,height = self.c.winfo_width(),self.c.winfo_height()
         self.badges = {}
         self.card_positions = {}
+        self.card_widths = {}
+        self.card_heights = {}
+        self.card_header_heights = {}
 
         def draw_contour(points, *, color, width, tags=()):
             # A SINGLE fine contour. The old dark halo looked like a second box.
@@ -746,6 +813,7 @@ class CanvasReviewEditor:
             pts = [self.to_canvas(p) for p in parent["quad"]]
             draw_contour(pts, color="#00E5FF", width=1.5,
                          tags=(TAG,"mt_original","mt_accepted",parent["parent_id"]))
+        protected = self._overlay_plate_bounds(s)
         placed=[]
         for index,obj in enumerate(s["objects"],1):
             if obj.get("post_nms_suppressed", False):
@@ -774,35 +842,54 @@ class CanvasReviewEditor:
                     self.c.create_oval(x-6,y-6,x+6,y+6,fill="#FFFFFF",outline=color,width=1.4,
                         tags=(TAG,"corner_handle",oid))
             parent = parents.get(obj["parent_id"])
-            pred = parent["mz_prediction"] if parent else ""
-            caption = obj["gt_text"] or ("nieczytelna" if obj["text_exclusion_reason"] else "wpisz GT")
+            state = plate_review_state(s, obj, getattr(self, "_canvas_execution", None))
+            editing = self.entry is not None and self.entry_target == (self.h.current_invocation, oid)
+            number = self.entry_var.get() if editing else obj.get("gt_text", "")
+            caption = "GT: " + (number or ("wpisz numer" if state["gt_editable"] else "— (edycja niedostępna)"))
+            mz_label = state["canvas_frame"]
+            if parent:
+                mz_label = mz_label.replace("MT ·", f"MT {int(parent['detection_index'])+1} ·", 1)
             if obj["error"]:
-                caption = "× BŁĄD · " + (obj["gt_text"] or "ramka zachowana")
-            cw=194; ch=48
-            xx = max(4,min(width-cw-4,min(xs)))
-            yy = max(4,min(height-ch-4,max(ys)+10))
-            candidates=[(xx,yy),(xx,min(ys)-ch-12),(max(xs)+14,min(ys)),(min(xs)-cw-14,min(ys))]
-            candidates += [(xx,yy+step*54) for step in range(1,8)]
-            for px,py in candidates:
-                px=max(4,min(width-cw-4,px)); py=max(4,min(height-ch-4,py))
-                if not any(px<q[2]+4 and px+cw>q[0]-4 and py<q[3]+4 and py+ch>q[1]-4 for q in placed):
-                    xx,yy=px,py
-                    break
+                mz_label = "× " + mz_label
+            font = getattr(self, "_badge_font", None)
+            measure = font.measure if font else lambda text: len(text) * 7
+            line_height = font.metrics("linespace") if font else 17
+            cw = min(max(150, measure(caption)+14, measure(mz_label)+14, 194 if editing else 0), max(40, min(300, width-16)))
+            header_h = line_height * max(1, math.ceil(measure(mz_label) / max(1, cw-14))) + 6
+            gt_lines = (1 if measure(caption) <= cw-14 else
+                        1 + math.ceil(measure(number or caption) / max(1, cw-14)))
+            gt_h = line_height * gt_lines + 6
+            entry_h = line_height + 8 if editing else 0
+            ch = header_h + 2 + gt_h + entry_h
+            position = overlay_label_position((min(xs), min(ys), max(xs), max(ys)),
+                (cw, ch), (width, height), protected + placed)
+            if position is None:
+                # Keep the complete GT at the viewport edge even at extreme
+                # zoom. Prefer the corner obscuring the least outline area.
+                candidates = [(8,8), (max(8,width-cw-8),8),
+                              (8,max(8,height-ch-8)), (max(8,width-cw-8),max(8,height-ch-8))]
+                def overlap_area(point):
+                    x,y = point
+                    return sum(max(0, min(x+cw,r)-max(x,l)) * max(0, min(y+ch,b)-max(y,t))
+                               for l,t,r,b in protected + placed)
+                position = min(candidates, key=overlap_area)
+            xx, yy = position
             placed.append((xx,yy,xx+cw,yy+ch))
             self.card_positions[oid]=(xx,yy)
+            self.card_widths[oid]=cw
+            self.card_heights[oid]=ch
+            self.card_header_heights[oid]=header_h
             center=(sum(xs)/4,sum(ys)/4)
             tx=max(xx,min(xx+cw,center[0])); ty=max(yy,min(yy+ch,center[1]))
             self.c.create_line(tx,ty,*center,fill="#DDE7EF",width=1.0,tags=(TAG,"badge_tether",oid))
-            self.c.create_rectangle(xx,yy,xx+cw,yy+23,fill="#0F2230",outline="#00E5FF",width=1.0,tags=(TAG,"mz_badge",oid))
-            # Empty prediction intentionally stays empty: no OCR placeholder.
-            mz_label = (f"MZ / MT {int(parent['detection_index'])+1}: " + pred
-                        if parent else "Ręczna GT · MZ nie uruchomiono")
-            self.c.create_text(xx+6,yy+11,anchor="w",text=mz_label,fill="#F2FBFF",font=("Segoe UI",10,"bold"),width=cw-12,tags=(TAG,"mz_badge",oid))
-            self.c.create_rectangle(xx,yy+25,xx+cw,yy+48,fill="#302618",outline=color,width=1.0,tags=(TAG,"gt_badge",oid))
-            self.c.create_text(xx+6,yy+36,anchor="w",text="GT: "+caption,fill=color,font=("Segoe UI",10,"bold"),width=cw-12,tags=(TAG,"gt_badge",oid))
-            self.badges[oid]=(xx,yy+25,xx+cw,yy+48)
+            self.c.create_rectangle(xx,yy,xx+cw,yy+header_h,fill="#0F2230",outline="#00E5FF",width=1.0,tags=(TAG,"mz_badge",oid))
+            self.c.create_text(xx+6,yy+3,anchor="nw",text=mz_label,fill="#F2FBFF",font=("Segoe UI",9,"bold"),width=cw-12,tags=(TAG,"mz_badge",oid))
+            gt_top = yy+header_h+2
+            self.c.create_rectangle(xx,gt_top,xx+cw,gt_top+gt_h,fill="#302618",outline=color,width=1.0,tags=(TAG,"gt_badge",oid))
+            self.c.create_text(xx+6,gt_top+3,anchor="nw",text=caption,fill=color,font=("Segoe UI",9,"bold"),width=cw-12,tags=(TAG,"gt_badge",oid))
+            self.badges[oid]=(xx,gt_top,xx+cw,gt_top+gt_h)
             if self.entry is not None and self.entry_target==(self.h.current_invocation,oid):
-                self.entry.place(x=xx+1,y=yy+25,width=cw-2,height=23)
+                self.entry.place(x=xx+1,y=gt_top+gt_h,width=cw-2,height=entry_h)
                 self.entry.lift()
         if self.points:
             pts=[self.to_canvas(p) for p in self.points]
@@ -819,6 +906,18 @@ class CanvasReviewEditor:
                "N: następna tablica  •  Spacja: sprawdzony/nie  •  PPM: błąd jednym kliknięciem  •  "
                "turkus: MT  •  żółty: GT/korekta"))
         self.c.configure(cursor="crosshair" if self.mode=="draw" else "arrow")
+
+    def _overlay_plate_bounds(self, scene):
+        suppressed = {o["parent_id"] for o in scene["objects"] if o.get("post_nms_suppressed")}
+        quads = [self._current_quad(o) for o in scene["objects"] if not o.get("post_nms_suppressed")]
+        quads += [p["quad"] for p in scene["parents"] if p["parent_id"] not in suppressed]
+        bounds = []
+        for quad in quads:
+            if quad:
+                points = [self.to_canvas(p) for p in quad]
+                bounds.append((min(x for x, y in points), min(y for x, y in points),
+                               max(x for x, y in points), max(y for x, y in points)))
+        return bounds
 
     def _paint_live_overlap_hud(self, scene):
         """On-canvas badge next to corrected quad; per-drag assisted metrics.
@@ -864,10 +963,14 @@ class CanvasReviewEditor:
         top = min(y for _, y in pts)
         badge_w = min(338, cw - 16)
         badge_h = 69 if len(lines) == 3 else 51
-        left = max(8, min(cw-badge_w-8, px-badge_w/2))
-        # Prefer immediately ABOVE the active frame. If the frame touches the
-        # viewport top, keep the badge visible, not at a fixed upper-left HUD.
-        badge_y = max(8, min(ch-badge_h-8, top-badge_h-10))
+        bounds = (min(x for x,y in pts), top, max(x for x,y in pts), max(y for x,y in pts))
+        cards = [(x, y, x+getattr(self, "card_widths", {}).get(oid, 194), y+getattr(self, "card_heights", {}).get(oid,48))
+                 for oid, (x,y) in self.card_positions.items()]
+        position = overlay_label_position(bounds, (badge_w, badge_h), (cw, ch),
+                                          self._overlay_plate_bounds(scene) + cards, above=True)
+        if position is None:
+            return
+        left, badge_y = position
         # A small connector identifies which quad the values describe.
         if top > badge_y+badge_h+1:
             self.c.create_line(px, badge_y+badge_h, px, min(top, ch),
@@ -900,7 +1003,7 @@ class CanvasReviewEditor:
                 if l <= x <= r and t <= y <= b:
                     return oid, "badge", None
             for oid, (l, t) in reversed(list(self.card_positions.items())):
-                if l <= x <= l + 194 and t <= y <= t + 23:
+                if l <= x <= l + getattr(self, "card_widths", {}).get(oid, 194) and t <= y <= t + getattr(self, "card_header_heights", {}).get(oid,23):
                     return oid, "mz_badge", None
         def near_edge(quad):
             pts = [self.to_canvas(p) for p in quad]
@@ -1328,6 +1431,16 @@ class CanvasReviewEditor:
     def start_entry(self,oid):
         if not self.available():
             return
+        policy = self._gt_policy(oid)
+        if not policy["gt_editable"]:
+            self.message(policy["gt_reason"])
+            return
+        if self.entry is not None:
+            if self.entry_target == (self.h.current_invocation, oid):
+                self.entry.focus_set()
+                return
+            if not self.finish_entry():
+                return
         obj=next(o for o in self._read()["objects"] if o["object_id"]==oid)
         if obj["error"]:
             self.message("Ramka ma flagę błędu. Jeden klik PPM na ramce cofa tę flagę.")
@@ -1350,10 +1463,40 @@ class CanvasReviewEditor:
         x,y=self.card_positions.get(oid,(4,4))
         self.entry.place(x=x+1,y=y+25,width=192,height=23)
         self.entry.focus_set();self.entry.selection_range(0,"end")
+        self.sync()
         self.message("GT na badge: Enter lub wyjście zapisuje; Esc cofa do ostatniego zapisu. PPM w polu: nieczytelna tablica.")
+
+    def _gt_policy(self, oid):
+        from ..ranking.mobile_canvas_presentation import execution_state, plate_review_state
+        h = self.h
+        try:
+            # Re-read the source binding on entry and save, not only the cached
+            # UI revision. Cancellation/NMS can invalidate an already open field.
+            scene = core.scene(h.session, h.current_invocation)
+            execution = execution_state(h.session, h.current_invocation,
+                image_entry=h._image_entry, image_size=h._image_source_size)
+            obj = next((o for o in scene["objects"] if o["object_id"] == oid), None)
+            return plate_review_state(scene, obj, execution)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return dict(gt_editable=False, gt_reason="Nie potwierdzono końcowej detekcji MT. Historyczne GT zachowano; edycja niedostępna.")
+
+    def _guard_gt_entry(self):
+        if self.entry is None:
+            return True
+        gid, oid = self.entry_target
+        policy = self._gt_policy(oid) if gid == self.h.current_invocation else dict(
+            gt_editable=False, gt_reason="Zmieniono obraz. Niezapisany tekst zamknięto; wcześniejsze GT zachowano.")
+        if policy["gt_editable"]:
+            return True
+        self.destroy_entry()  # cancels autosave; never clears persisted GT
+        self.message(policy["gt_reason"])
+        return False
 
     def entry_typed(self,event=None):
         if self.entry is None:
+            return
+        if not self._guard_gt_entry():
+            self.sync()
             return
         val=self.entry_var.get()
         if val != val.upper():
@@ -1362,6 +1505,7 @@ class CanvasReviewEditor:
         if self.entry_after:
             self.c.after_cancel(self.entry_after)
         self.entry_after=self.c.after(650,self.autosave_entry)
+        self.request_overlay()
 
     def autosave_entry(self):
         self.entry_after=None
@@ -1370,6 +1514,9 @@ class CanvasReviewEditor:
 
     def save_entry(self,close=True):
         if self.entry is None:
+            return True
+        if not self._guard_gt_entry():
+            self.sync()
             return True
         gid,oid=self.entry_target
         if gid!=self.h.current_invocation:
@@ -1382,6 +1529,7 @@ class CanvasReviewEditor:
             self.entry_original=value
         if close:
             self.destroy_entry()
+            self.sync()
         return True
 
     def finish_entry(self):
@@ -1404,10 +1552,17 @@ class CanvasReviewEditor:
     def unreadable(self):
         if self.entry is None:
             return "break"
+        if not self._guard_gt_entry():
+            self.sync()
+            return "break"
         gid,oid=self.entry_target
         reason=simpledialog.askstring("Nieczytelny numer", "Przyczyna nieczytelności tej tablicy:",parent=self.h.window)
+        if self.entry_target != (gid, oid) or not self._guard_gt_entry():
+            self.sync()
+            return "break"
         if reason and self._commit(lambda:core.set_text(self.h.session,gid,oid,"",reason),"Zapisano przyczynę nieczytelności"):
             self.destroy_entry()
+            self.sync()
         return "break"
 
     def prepare_navigation(self):
@@ -1647,16 +1802,20 @@ class CanvasReviewEditor:
         self.h.science_toggle.configure(text="Tabela techniczna")
 
     def update_report(self):
+        from ..ranking.mobile_canvas_presentation import current_summary
         if not hasattr(self,"report_host") or self.h.session is None:
             return
         inv=self.inventory()
         self.update_header(inv)
         data = self.h.stats.get("canvas_review") or {}
-        current = (data.get("review_revision") == self.h.session.review.review_revision
-                   and data.get("source_archive_sha256") == self.h.session.review.source_archive_sha256)
-        self.report_host.render(data if current else {}, inv, refreshing=not current)
+        current = current_summary(data, self.h.session)
+        refreshing = not current and bool(data or self.in_refresh or self.refresh_after or self.h._saving)
+        self.report_host.render(data if current else {}, inv, refreshing=refreshing)
+        self.h.science_dashboard.render_canvas(data if current else None, inv,
+            refreshing=refreshing, review_status=self.h.session.review.review_status)
 
     def _build_panel(self, right):
+        from .mobile_canvas_ui import PlateAssessment
         p = self.p
         self.panel = tk.Frame(right, bg=p["bg"], padx=1, pady=3)
         self.panel.grid(row=0, column=0, sticky="new")
@@ -1664,6 +1823,8 @@ class CanvasReviewEditor:
         self.status = ui_label(self.panel, "Wczytywanie…", p=p, bg=p["blue_bg"], fg=p["blue"],
                                bold=True, wrap=self.sidebar_width - 48)
         self.status.pack(fill="x", ipady=6)
+        self.assessment = PlateAssessment(self.panel, p=p)
+        self.assessment.pack(fill="x", pady=(7, 0))
         # Explain the causal chain *before* presenting a confirmation action.
         # Shown only if this scene contains a trace-backed 2->1 NMS result.
         self.reconciliation_box = tk.Frame(self.panel, bg=p["surface"], padx=11, pady=11,
@@ -1689,10 +1850,11 @@ class CanvasReviewEditor:
         self.exclude = tk.Checkbutton(controls, text="Nie można ocenić całego obrazu", variable=self.excluded_var,
                                       command=self.toggle_excluded, **options)
         self.exclude.pack(fill="x", pady=(2, 0))
-        ui_label(controls,
+        self.exclude_hint = ui_label(controls,
                  "Ta opcja wyłącza z oceny cały obraz, nie jedno wskazanie telefonu.",
                  p=p, bg=p["bg"], fg=p["muted"], size=9,
-                 wrap=self.sidebar_width - 48).pack(fill="x", pady=(1, 3))
+                 wrap=self.sidebar_width - 48)
+        self.exclude_hint.pack(fill="x", pady=(1, 3))
         self.reason_host = tk.Frame(controls, bg=p["bg"])
         ui_label(self.reason_host, "Przyczyna (opcjonalnie)", p=p, bg=p["bg"], size=9, fg=p["muted"]).pack(fill="x")
         self.reason_var = tk.StringVar(value="")
@@ -1708,7 +1870,7 @@ class CanvasReviewEditor:
         counts.columnconfigure(0, weight=1, uniform="count")
         counts.columnconfigure(1, weight=1, uniform="count")
         self.tally_cards = {}
-        for i, (key, title, tone) in enumerate((("expected", "Tablice", "blue"), ("mt", "Wstępne wskazania", "blue"),
+        for i, (key, title, tone) in enumerate((("expected", "Tablice", "blue"), ("mt", "Detekcje MT", "blue"),
                     ("missed", "Pominięte tablice", "amber"), ("false_positive", "Błędne wykrycia", "red"))):
             card = MetricCard(counts, title, p=p, tone=tone, compact=True)
             card.grid(row=i//2, column=i%2, sticky="nsew", padx=2, pady=3)
@@ -1746,6 +1908,7 @@ class CanvasReviewEditor:
                           ("PPM", "Jedno kliknięcie na ramce: oznacz błąd lub cofnij"),
                           ("GT", "Kliknij dolny badge"), ("A · Q/E", "Zbliż tablicę · poprzedni/następny obraz"),
                           ("Rolka · F", "Zoom · dopasuj obraz"), ("Ctrl+Z/Y", "Cofnij / ponów zmianę"),
+                          ("V", "Przełącz: cała klatka / wejście MT"),
                           ("Esc", "Anuluj bieżącą edycję")):
             ui_label(self.help_section.body, key, p=p, bold=True, size=9, fg=p["blue"]).pack(fill="x", pady=(4, 0))
             ui_label(self.help_section.body, text, p=p, size=9,
@@ -1944,14 +2107,7 @@ class CanvasReviewEditor:
         # with the report presenter, but none are displayed in this operator list.
         tree.configure(show="tree headings", displaycolumns=())
         tree.heading("#0", text="Obraz  ·  Co zrobić", anchor="w")
-        tree.column("#0", width=self.left_width - 36, minwidth=240, stretch=True)
-        for widget in tree.master.master.winfo_children():
-            if isinstance(widget, tk.Label) and "MT: liczba tablic" in str(widget.cget("text")):
-                widget.configure(
-                    text="Wybierz obraz, obejrzyj wszystkie widoczne tablice, "
-                         "sprawdź ramki i numery, a następnie potwierdź obraz. "
-                         "Dane techniczne znajdziesz w raporcie.",
-                    wraplength=self.left_width - 38)
+        tree.column("#0", width=self.left_width - 38, minwidth=200, stretch=True)
         tree.tag_configure("canvas_error", background=self.p["red_bg"], foreground=self.p["red"])
         tree.tag_configure("canvas_pending", background=self.p["surface"], foreground=self.p["fg"])
         tree.tag_configure("canvas_ready", background=self.p["green_bg"], foreground=self.p["green"])
@@ -2041,15 +2197,26 @@ class CanvasReviewEditor:
 
     def update_header(self, inv=None):
         inv = inv or self.inventory()
+        extra = f"  •  {inv['excluded']} poza oceną" if inv['excluded'] else ""
+        if inv['incomplete']:
+            extra += f"  •  braki danych: {inv['incomplete']}"
+        if inv['unavailable']:
+            extra += f"  •  tylko podgląd: {inv['unavailable']}"
         self.h.progress_label.configure(text=(
-            f"Sprawdzone obszary (wspólne liczone raz): {inv['inspected']}/{inv['total']}  ·  "
-            f"gotowe do oceny: {inv['assessed']}  ·  "
-            f"nie do oceny: {inv['excluded']}  ·  pozostało: {inv['remaining']}"))
+            f"{inv['inspected']}/{inv['total']} sprawdzonych  •  "
+            f"pozostało: {inv['remaining']}{extra}"))
         if hasattr(self.h, "form_status_label"):
-            extra = f"  ·  braki danych po sprawdzeniu: {inv['incomplete']}" if inv["incomplete"] else ""
-            extra += f"  ·  tylko podgląd: {inv['unavailable']}" if inv["unavailable"] else ""
-            status = "Weryfikacja zatwierdzona" if self.h.session and self.h.session.review.review_status == "COMPLETED" else "Weryfikacja w toku"
-            self.h.form_status_label.configure(text=f"{status}{extra}  ·  GT i korekty zapisują się automatycznie")
+            from ..ranking.mobile_verification_policy import verification_issues
+            session = self.h.session
+            complete = bool(session and not verification_issues(session))
+            if complete and session.review.review_status == "COMPLETED":
+                status, tone = "WERYFIKACJA ZATWIERDZONA", "green"
+            elif complete:
+                status, tone = "GOTOWA DO ZATWIERDZENIA", "amber"
+            else:
+                status, tone = "W TOKU", "blue"
+            self.h.form_status_label.configure(text=status, fg=self.p[tone],
+                                               font=("Segoe UI", 9, "bold"))
 
     def clear_tree_selection(self):
         """Explicit S-off/Escape only; never deletes rows or changes review data."""

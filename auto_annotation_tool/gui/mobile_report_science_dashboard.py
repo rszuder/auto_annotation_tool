@@ -79,6 +79,12 @@ def science_from_verified_bundle(bundle: Any) -> dict:
     result = make_scientific_summary(session, session.statistics(), _pose_geometry_rows(session))
     # Distinguish mandatory form completeness from MT scientific denominators.
     result["form_verification"] = verification_progress(session)
+    from ..ranking.mobile_canvas_presentation import build_inventory
+    inventory = build_inventory(session)
+    result["_ui_canvas_progress"] = {k:inventory[k] for k in
+        ("total", "inspected", "remaining", "excluded")}
+    result["_ui_canvas_progress"].update(session_id=session.session_id,
+        source_sha256=session.review.source_archive_sha256, review_revision=session.review.review_revision)
     return result
 
 
@@ -91,9 +97,17 @@ def build_overview(report: Any, bundle: Any = None, science: Any = None, *, load
     visible but are explicitly distinguished from verified source measurements.
     """
     source_hash = str(getattr(report, "source_archive_sha256", "") or "").lower()
+    from .mobile_report_canvas_view import canvas_overview
+    from .mobile_model_identity import identity_from_bundle
+    from .z4_mobile_report_browser_ux import report_identity
+    info = report_identity(report, bundle)
+    canvas = canvas_overview(_dict(science).get("_ui_canvas_snapshot"),
+        session_id=info["session_id"], source_sha=source_hash,
+        progress=_dict(science).get("_ui_canvas_progress"), loading=loading)
     validated = bool(bundle is not None and getattr(getattr(bundle, "validation", None), "ok", False)
                      and str(getattr(bundle, "source_archive_sha256", "") or "").lower() == source_hash
                      and str(getattr(getattr(bundle, "report", None), "report_id", "")) == str(getattr(report, "report_id", "")))
+    identity = identity_from_bundle(bundle if validated else None)
     if not validated or str(_dict(science).get("source_archive_sha256") or "").lower() != source_hash:
         science = None
     blocks = [
@@ -223,13 +237,16 @@ def build_overview(report: Any, bundle: Any = None, science: Any = None, *, load
     return {"status": status, "progress": progress, "progress_subtitle": progress_subtitle,
             "progress_ratio": progress_ratio, "cards": tuple(blocks), "performance": speed,
             "frames": frames, "warnings": tuple(warnings[:2]), "source": source_text,
-            "quality_verified": science is not None, "source_verified": validated}
+            "quality_verified": science is not None, "source_verified": validated,
+            "canvas": canvas, "model_identity": identity,
+            "package_caption": "Pakiet: " + identity["caption"],
+            "model_context": f"{info['scenario'] or 'Scenariusz: brak danych'} · {identity['repeat_label']} · {identity['variant_caption']}"}
 
 
 class ScientificDashboard(tk.Frame):
     """Accessible, compact Tk panel; all views are populated from build_overview."""
     def __init__(self, master, *, palette: dict, on_review: Callable, on_refresh: Callable,
-                 on_details: Callable):
+                 on_details: Callable, show_identity: bool = True):
         bg = palette.get("panel", "#252526")
         fg = palette.get("fg", "#eeeeee")
         muted = palette.get("muted", "#bbbbbb")
@@ -250,6 +267,12 @@ class ScientificDashboard(tk.Frame):
             canvas.itemconfigure(window_id, width=event.width)
             if hasattr(self, "caveat_label"):
                 self.caveat_label.configure(wraplength=max(230, event.width - 48))
+            for name in ("package_label", "model_context_label", "history_progress_label", "progress_info_label",
+                         "time_title_label", "time_description_label", "frame_label"):
+                if hasattr(self, name):
+                    getattr(self, name).configure(wraplength=max(230, event.width - 52))
+            if hasattr(self, "history"):
+                self.history.header.configure(wraplength=max(200, event.width-76))
         canvas.bind("<Configure>", on_canvas_width)
         self.content.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
         self.canvas = canvas
@@ -260,11 +283,13 @@ class ScientificDashboard(tk.Frame):
         self.frame_var = tk.StringVar(value="")
         self.source_var = tk.StringVar(value="")
         self.caveat_var = tk.StringVar(value="")
+        self.package_var = tk.StringVar(value="Pakiet/MT/MZ: brak danych źródłowych")
+        self.model_context_var = tk.StringVar(value="")
         header = tk.Frame(self.content, bg=bg)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 7))
         header.grid_columnconfigure(0, weight=1)
-        tk.Label(header, text="Wyniki modeli uruchomionych na telefonie", bg=bg, fg=fg,
-                 font=("Segoe UI", 14, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
+        tk.Label(header, text="Ocena operatora — Canvas · ASSISTED", bg=bg, fg=fg,
+                 font=("Segoe UI", 12, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
         tk.Label(header, textvariable=self.status_var, bg=bg, fg=muted, font=("Segoe UI", 9),
                  anchor="w", justify="left").grid(row=1, column=0, sticky="ew", pady=(3, 0))
         # One unmistakable main action: verification is not an auxiliary detail.
@@ -275,26 +300,33 @@ class ScientificDashboard(tk.Frame):
                   bg=bg, fg=accent, activebackground=bg, activeforeground=fg,
                   relief=tk.FLAT, bd=0, highlightthickness=0,
                   font=("Segoe UI", 9, "underline"), cursor="hand2").pack(side="left")
+        self.package_label = tk.Label(header, textvariable=self.package_var, bg=bg, fg=fg,
+            font=("Segoe UI", 10, "bold"), anchor="w", justify="left", wraplength=600)
+        self.package_label.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.model_context_label = tk.Label(header, textvariable=self.model_context_var, bg=bg, fg=muted,
+            font=("Segoe UI", 9), anchor="w", justify="left", wraplength=600)
+        self.model_context_label.grid(row=3, column=0, columnspan=2, sticky="ew")
+        # Browser already presents this identity in its persistent report header.
+        if not show_identity:
+            self.package_label.grid_remove()
+            self.model_context_label.grid_remove()
         action = tk.Frame(self.content, bg=bg)
         action.grid(row=1, column=0, sticky="ew", pady=(2, 11))
         action.grid_columnconfigure(0, weight=1)
         action_button = tk.Button(action, text="Przejdź do weryfikacji próbek  →",
                                   command=on_review, bg=accent, fg="#ffffff",
                                   activebackground=accent, activeforeground="#ffffff",
-                                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
-                                  bd=0, padx=22, pady=12, cursor="hand2")
+                                  font=("Segoe UI", 9, "bold"), relief=tk.FLAT,
+                                  bd=0, padx=12, pady=5, cursor="hand2")
         action_button.grid(row=0, column=0, sticky="ew")
-        tk.Label(action, text="Tutaj zapisujesz i zatwierdzasz decyzje operatora. Wyniki poniżej są odrębnym podsumowaniem pomiaru.",
-                 bg=bg, fg=muted, font=("Segoe UI", 9),
-                 anchor="w", justify="left", wraplength=950).grid(
-                     row=1, column=0, sticky="ew", pady=(5, 0))
         progress = tk.Frame(self.content, bg=bg)
         progress.grid(row=2, column=0, sticky="ew", pady=(1, 10))
         progress.grid_columnconfigure(0, weight=1)
         tk.Label(progress, textvariable=self.progress_var, bg=bg, fg=fg, font=("Segoe UI", 10, "bold"),
                  anchor="w").grid(row=0, column=0, sticky="ew")
-        tk.Label(progress, textvariable=self.progress_info_var, bg=bg, fg=muted, font=("Segoe UI", 9),
-                 anchor="w").grid(row=1, column=0, sticky="ew", pady=(2, 5))
+        self.progress_info_label = tk.Label(progress, textvariable=self.progress_info_var, bg=bg,
+            fg=muted, font=("Segoe UI", 9), anchor="w", justify="left", width=1)
+        self.progress_info_label.grid(row=1, column=0, sticky="ew", pady=(2, 5))
         self.progress_bar = ttk.Progressbar(progress, mode="determinate", maximum=100, value=0)
         self.progress_bar.grid(row=2, column=0, sticky="ew")
         self.card_vars = []
@@ -303,12 +335,13 @@ class ScientificDashboard(tk.Frame):
         self._card_titles = []
         self._card_columns = 2
         cards = tk.Frame(self.content, bg=bg)
+        self.cards_host = cards
         cards.grid(row=3, column=0, sticky="ew")
         cards.grid_columnconfigure(0, weight=1, uniform="science_cards")
         cards.grid_columnconfigure(1, weight=1, uniform="science_cards")
         cards.bind("<Configure>", lambda event: self._reflow_cards(event.width), add="+")
-        titles = ("MT (telefon) · lokalizacja tablicy", "Pose MT (telefon) · dokładność obrysu",
-                  "MZ (telefon) · odczyt z wycięcia", "ALPR (telefon) · rozpoznanie numeru")
+        titles = ("MT — wykrycie tablic", "MT — dopasowanie obrysu",
+                  "MZ — pełne zgodne odczyty", "MZ — błędy znaków")
         for i, name in enumerate(titles):
             box = tk.Frame(cards, bg=bg, highlightbackground=border, highlightthickness=1, padx=10, pady=7)
             box.grid(row=i // 2, column=i % 2, sticky="nsew", padx=(0 if i % 2 == 0 else 5, 5 if i % 2 == 0 else 0), pady=(0, 7))
@@ -330,11 +363,13 @@ class ScientificDashboard(tk.Frame):
         timebox = tk.Frame(self.content, bg=bg)
         timebox.grid(row=4, column=0, sticky="ew", pady=(6, 0))
         timebox.grid_columnconfigure(0, weight=1)
-        tk.Label(timebox, text="Czas wykonywania na telefonie (bez weryfikacji operatora)",
+        self.time_title_label = tk.Label(timebox, text="Czas wykonywania na telefonie (bez weryfikacji operatora)",
                  bg=bg, fg=fg, font=("Segoe UI", 11, "bold"),
-                 anchor="w").grid(row=0, column=0, sticky="ew")
-        tk.Label(timebox, text="Czas w sekundach · mediana i P95 z pomiarów Androida; n = liczba wywołań etapu",
-                 bg=bg, fg=muted, font=("Segoe UI", 8), anchor="w").grid(row=1, column=0, sticky="ew", pady=(2, 4))
+                 anchor="w", justify="left", width=1)
+        self.time_title_label.grid(row=0, column=0, sticky="ew")
+        self.time_description_label = tk.Label(timebox, text="Czas w sekundach · mediana i P95 z pomiarów Androida; n = liczba wywołań etapu",
+                 bg=bg, fg=muted, font=("Segoe UI", 8), anchor="w", justify="left", width=1)
+        self.time_description_label.grid(row=1, column=0, sticky="ew", pady=(2, 4))
         self.speed_vars = {}
         speedgrid = tk.Frame(timebox, bg=bg)
         speedgrid.grid(row=2, column=0, sticky="ew")
@@ -343,12 +378,15 @@ class ScientificDashboard(tk.Frame):
             item = tk.Frame(speedgrid, bg=bg, highlightthickness=1, highlightbackground=border, padx=7, pady=5)
             item.grid(row=0, column=idx, sticky="ew", padx=(0 if idx == 0 else 5, 0))
             title = {"mt": "Model MT · lokalizacja", "mz": "Model MZ · odczyt", "pipeline": "Potok ALPR · przetwarzanie"}[key]
-            tk.Label(item, text=title, bg=bg, fg=muted, font=("Segoe UI", 9), anchor="w").pack(fill="x")
+            label = tk.Label(item, text=title, bg=bg, fg=muted, font=("Segoe UI", 9), anchor="w", justify="left", width=1)
+            label.pack(fill="x")
+            label.bind("<Configure>", lambda e: e.widget.configure(wraplength=max(80,e.width-4)))
             text = tk.StringVar(value="—")
             self.speed_vars[key] = text
             tk.Label(item, textvariable=text, bg=bg, fg=fg, font=("Segoe UI", 9), justify="left", anchor="w").pack(fill="x", pady=(2, 0))
-        tk.Label(timebox, textvariable=self.frame_var, bg=bg, fg=muted, font=("Segoe UI", 8),
-                 anchor="w").grid(row=3, column=0, sticky="ew", pady=(5, 0))
+        self.frame_label = tk.Label(timebox, textvariable=self.frame_var, bg=bg, fg=muted, font=("Segoe UI", 8),
+                 anchor="w", justify="left", width=1)
+        self.frame_label.grid(row=3, column=0, sticky="ew", pady=(5, 0))
         self.caveat_label = tk.Label(self.content, textvariable=self.caveat_var,
                                     bg=bg, fg=muted, font=("Segoe UI", 9),
                                     anchor="w", justify="left", wraplength=900)
@@ -358,12 +396,30 @@ class ScientificDashboard(tk.Frame):
         bottom.grid_columnconfigure(0, weight=1)
         tk.Label(bottom, textvariable=self.source_var, bg=bg, fg=muted, font=("Segoe UI", 8),
                  anchor="w").grid(row=0, column=0, sticky="ew")
+        from .mobile_canvas_ui import Disclosure, palette as local_palette
+        self.history = Disclosure(self.content,
+            "Oddzielny protokół historyczny / niezależna ocena nieprzeprowadzona",
+            p=local_palette(self, bg))
+        self.history.grid(row=7, column=0, sticky="ew", pady=(10, 2))
+        self.history_progress_var = tk.StringVar(value="")
+        self.history_progress_label = tk.Label(self.history.body, textvariable=self.history_progress_var,
+            bg=self.history.body.cget("bg"), fg=fg, justify="left", anchor="w", wraplength=600)
+        self.history_progress_label.pack(fill="x", pady=(0, 8))
+        self.history_vars = []
+        for _ in range(4):
+            value = tk.StringVar(value="")
+            box = tk.Label(self.history.body, textvariable=value, justify="left", anchor="w",
+                bg=bg, fg=muted, padx=8, pady=8, wraplength=550,
+                highlightthickness=1, highlightbackground=border)
+            box.pack(fill="x", pady=3)
+            box.bind("<Configure>", lambda e: e.widget.configure(wraplength=max(100, e.width-20)))
+            self.history_vars.append(value)
         # All source data and methods are accessible via the already visible
         # 'Szczegóły' tab; a second navigation button would only duplicate it.
 
     def _reflow_cards(self, width: int) -> None:
-        """Four compact cards on wide windows, two on laptop widths, one on narrow."""
-        columns = 2 if width >= 800 else 1
+        """Keep the four cards in two rows in the laptop report pane."""
+        columns = 2 if width >= 450 else 1
         width_each = max(145, int(width / columns) - 34)
         for idx, frame in enumerate(self._card_frames):
             col = idx % columns
@@ -379,12 +435,25 @@ class ScientificDashboard(tk.Frame):
         self._card_columns = columns
 
     def render(self, data: dict):
-        self.status_var.set(str(data.get("status", "")))
-        self.progress_var.set(str(data.get("progress", "")))
-        self.progress_info_var.set(str(data.get("progress_subtitle", "")))
-        ratio = data.get("progress_ratio")
+        primary = data.get("canvas") or {}
+        self.status_var.set(str(primary.get("status", "BRAK · Do weryfikacji")))
+        self.progress_var.set(str(primary.get("progress", "")))
+        self.progress_info_var.set(str(primary.get("progress_subtitle", "")))
+        self.package_var.set(data.get("package_caption", "Pakiet/MT/MZ: brak danych źródłowych"))
+        self.model_context_var.set(data.get("model_context", ""))
+        self.history_progress_var.set(str(data.get("status", ""))+"\n"+
+            str(data.get("progress", ""))+"\n"+str(data.get("progress_subtitle", "")))
+        for variable, row in zip(self.history_vars, data.get("cards", ())):
+            variable.set(f"{row['title']}\n{row['value']}\n{row['note']}")
+        if data.get("quality_verified") and any(row.get("value") not in ("Brak wyniku", "Brak pomiaru", "—") for row in data.get("cards", ())):
+            self.history.title = "Oddzielny protokół historyczny · ocena i własne mianowniki"
+        else:
+            self.history.title = "Oddzielny protokół historyczny / niezależna ocena nieprzeprowadzona"
+        self.history._sync()
+        self.cards_host.grid() if primary.get("ready") else self.cards_host.grid_remove()
+        ratio = primary.get("progress_ratio")
         self.progress_bar.configure(value=round(100 * ratio, 1) if isinstance(ratio, (int, float)) and 0 <= ratio <= 1 else 0)
-        cards = data.get("cards", ())
+        cards = primary.get("cards", ())
         for i, variables in enumerate(self.card_vars):
             values = cards[i] if i < len(cards) else {}
             variables[0].set(str(values.get("value", "Brak wyniku")))
@@ -394,5 +463,5 @@ class ScientificDashboard(tk.Frame):
             n = _count(item.get("n"))
             value.set(f"Mediana: {item.get('median', '—')}\nP95: {item.get('p95', '—')} · n={n if n is not None else '—'}")
         self.frame_var.set(str(data.get("frames", "")))
-        self.caveat_var.set("   •   ".join(data.get("warnings", ())))
+        self.caveat_var.set(primary.get("methodology", ""))
         self.source_var.set(str(data.get("source", "")))
