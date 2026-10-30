@@ -125,10 +125,10 @@ def _read_all_traces(bundle):
         return [], f"INCOMPLETE_TRACE_SOURCE: {type(exc).__name__} ({len(preview)}/{total})"
 
 
-def _discover_review(root: Path | None, session_id: str, source_sha: str):
+def _discover_review(root: Path | None, session_id: str, source_sha: str, review_root=None):
     from ..config import CONFIG
     from .mobile_report_canvas_view import selected_canvas_export
-    review_root = Path(getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS/"mobile_packages"))
+    review_root = Path(review_root or getattr(CONFIG, "DIR_7_RANKINGS_MOBILE_PACKAGES", CONFIG.DIR_7_RANKINGS/"mobile_packages"))
     gate, review = selected_canvas_export(session_id, source_sha, root, review_root)
     return review, [] if gate.ready or gate.state == "NONE" else [gate.reason]
 
@@ -184,7 +184,7 @@ def _identity(report, bundle):
                 recorded_repeat=recorded_repeat)
 
 
-def record_from_import(report, bundle, results_root=None):
+def record_from_import(report, bundle, results_root=None, *, review_root=None):
     """Return (verified or incomplete Session, trace rows, explicit warnings)."""
     if bundle is None:
         raise ValueError("Raport nie ma podłączonego oryginalnego archiwum.")
@@ -210,7 +210,7 @@ def record_from_import(report, bundle, results_root=None):
         warnings.append(f"Telefon zapisuje powtórzenie {recorded_repeat}, folder źródła wskazuje {ident['repeat_label']} — zachowano oba odniesienia.")
     if source_state!="complete":
         warnings.append(source_state + ": pominięto niepełne statystyki czasów.")
-    review, more=_discover_review(results_root,ident["session_id"],sha)
+    review, more=_discover_review(results_root,ident["session_id"],sha,review_root)
     warnings.extend(more)
     if review is not None:
         if ident["apk_sha256"] and review.apk_sha256 and review.apk_sha256 != ident["apk_sha256"]:
@@ -256,22 +256,13 @@ def _safe_output_name(name):
     return name
 
 
-def export_imported_charts(records, row_sets, results_root):
+def export_imported_charts(records, row_sets, results_root, *, comparison_scope=None):
     """Versioned export, staging + atomic rename, no source/session mutations."""
     import matplotlib.pyplot as plt
+    from .mobile_comparison_scope import validate_comparison, comparison_warnings
     records=list(records); rows=[list(x) for x in row_sets]
-    if not records or len(records)!=len(rows):raise ValueError("Nie wybrano kompletu raportów do eksportu.")
-    if len({r.session_id for r in records}) != len(records) or len({r.source_sha256 for r in records}) != len(records):
-        raise ValueError("Nie można zliczać tej samej sesji ani tej samej kopii dwa razy.")
-    if len(records)>1:
-        if any(not r.canvas_ready for r in records):
-            raise ValueError("Do porównania jakości dopuszczamy tylko zatwierdzone i kompletne oceny MT+MZ (Canvas ASSISTED).")
-        if len({r.scenario for r in records}) > 1:
-            raise ValueError("Rozdziel scenariusze DAY i NIGHT — nie są jednym kontrolowanym porównaniem.")
-        if len({r.apk_sha256 for r in records})>1 or len({r.device for r in records})>1:
-            raise ValueError("Różne APK lub telefony: kontrolowane porównanie wymaga zgodnego urządzenia i aplikacji.")
-        if len({r.mt_checkpoint for r in records})>1 or len({r.mz_checkpoint for r in records})>1:
-            raise ValueError("Zmieniono checkpoint MT/MZ; różnicy nie można przypisać samej kwantyzacji.")
+    scope=validate_comparison(records,rows,comparison_scope=comparison_scope,require_sources=comparison_scope is not None)
+    warnings=comparison_warnings(records,scope)
     root=Path(results_root)
     if not root.is_dir() or root.name.lower()!="03_wyniki":
         raise ValueError("Wskaż istniejący katalog 03_wyniki.")
@@ -289,7 +280,7 @@ def export_imported_charts(records, row_sets, results_root):
     dest=None
     try:
         outputs=[]
-        for title,fig in figures(records):
+        for title,fig in figures(records,comparison_scope=scope):
             try:
                 safe=_safe_output_name(title)
                 for ext in ("png","svg"):
@@ -312,50 +303,62 @@ def export_imported_charts(records, row_sets, results_root):
         with data.open("w",encoding="utf-8-sig",newline="") as handle:
             writer=csv.writer(handle,delimiter=';')
             writer.writerow(["session_id","scenario","repeat","precision","apk_sha256","source_sha256","review_revision",
-                             "stage","n","p50_ms","p95_ms","canvas_assisted","exact_pct","micro_cer_pct","geometry_n","polygon_iou_pct"])
+                             "stage","n","p50_ms","p95_ms","canvas_assisted","exact_pct","micro_cer_pct","geometry_n","polygon_iou_pct",
+                             "comparison_scope","quality_availability","report_id"])
             for s in records:
                 for stage_name,met in s.latency.items():
                     c=s.canvas or {}
+                    quality=scope!='performance' and s.canvas_ready
                     writer.writerow([s.session_id,s.scenario,s.repeat_label,s.precision,s.apk_sha256,s.source_sha256,
-                                     s.review_revision,stage_name,met.n,met.p50_ms,met.p95_ms,s.canvas_ready,
-                                     s.canvas_exact_pct,s.canvas_cer_pct,c.get('geometry_n') if s.canvas_ready else '',
-                                     c.get('polygon_iou_mean_pct') if s.canvas_ready else ''])
+                                     s.review_revision,stage_name,met.n,met.p50_ms,met.p95_ms,quality if scope!='performance' else '',
+                                     s.canvas_exact_pct if quality else '',s.canvas_cer_pct if quality else '',c.get('geometry_n') if quality else '',
+                                     c.get('polygon_iou_mean_pct') if quality else '',scope,
+                                     'ASSISTED' if quality else 'N/A — poza zakresem lub brak pełnej oceny',
+                                     (s.comparison_source or {}).get('report',{}).get('report_id','')])
         outputs.append(data)
         # This is the essential scientific link: original MT geometry and the
         # MZ error concern exactly the same annotated plate. No synthetic
         # re-inference on the operator-corrected ROI is implied.
-        paired = stage / "geometria_MT_a_odczyt_MZ.csv"
-        with paired.open("w",encoding="utf-8-sig",newline="") as handle:
-            writer=csv.writer(handle,delimiter=';')
-            writer.writerow(["session_id","source_archive_sha256","review_revision","scenario",
-                "precision","repeat","image_entry","object_id","polygon_iou_pct",
-                "nmce_pct","cer_pct","exact_match","review_origin"])
-            for sess in records:
-                if not sess.canvas_ready:
-                    continue
-                for row in paired_geometry_text(sess.canvas):
-                    writer.writerow([sess.session_id,sess.source_sha256,sess.review_revision,
-                        sess.scenario,sess.precision,sess.repeat_label,row["image_entry"],
-                        row["object_id"],row["iou_pct"],row["nmce_pct"],row["cer_pct"],
-                        int(row["exact"]),"ASSISTED_CANVAS_SOURCE_ROI"])
-        outputs.append(paired)
+        if scope!='performance':
+            paired = stage / "geometria_MT_a_odczyt_MZ.csv"
+            with paired.open("w",encoding="utf-8-sig",newline="") as handle:
+                writer=csv.writer(handle,delimiter=';')
+                writer.writerow(["session_id","source_archive_sha256","review_revision","scenario",
+                    "precision","repeat","image_entry","object_id","polygon_iou_pct",
+                    "nmce_pct","cer_pct","exact_match","review_origin"])
+                for sess in records:
+                    if not sess.canvas_ready:
+                        continue
+                    for row in paired_geometry_text(sess.canvas):
+                        writer.writerow([sess.session_id,sess.source_sha256,sess.review_revision,
+                            sess.scenario,sess.precision,sess.repeat_label,row["image_entry"],
+                            row["object_id"],row["iou_pct"],row["nmce_pct"],row["cer_pct"],
+                            int(row["exact"]),"ASSISTED_CANVAS_SOURCE_ROI"])
+            outputs.append(paired)
         manifest={
             "schema":"alpr.mobile.import_charts.v1",
             "generated_utc":datetime.now(timezone.utc).isoformat(),
             "scope":"single_session" if single else "comparison",
-            "warnings":validate_selection(records),
+            "comparison_scope":scope,
+            "quality_availability":"N/A — poza zakresem" if scope=='performance' else 'Wyłącznie kompletne oceny ASSISTED',
+            "comparison_kind":"descriptive",
+            "warnings":warnings,
             "sources":[{"session_id":s.session_id,"source_archive_sha256":s.source_sha256,
                         "apk_sha256":s.apk_sha256,"scenario":s.scenario,"variant":s.precision,
                         "review_revision":s.review_revision,"review_export_manifest_sha256":s.manifest_sha256,
                         "canvas_assisted_ready":s.canvas_ready,
+                        "report_id":(s.comparison_source or {}).get('report',{}).get('report_id'),
+                        "source_path":(s.comparison_source or {}).get('path'),
+                        "trace_sha256":(s.comparison_source or {}).get('trace_sha256'),
+                        "latency":{k:dict(n=v.n,p50_ms=v.p50_ms,p95_ms=v.p95_ms,
+                            availability='MEASURED' if v.n else 'N/A') for k,v in s.latency.items()},
                         "package_and_models":s.model_identity} for s in records],
             "files":[{"name":p.name,"bytes":p.stat().st_size,"sha256":_sha_file(p)} for p in outputs],
-            "limitations":["Canvas ASSISTED nie jest niezależnym GT.",
+            "limitations":["Pełna jakość MT/MZ poza zakresem; pola jakości pozostają puste." if scope=='performance' else "Canvas ASSISTED nie jest niezależnym GT.",
                            "DAY/NIGHT rozdzielono. Brak wartości nie jest zerem.",
                            "Porównania p95 między sesjami opisowe; nie są sparowanym testem klatek.",
                            "MZ dotyczy sumy czasu w śladzie, nie pojedynczego wywołania MZ.",
-                           "IoU/NMCE i CER w parach dotyczą tej samej tablicy, ale ich związek jest opisowy.",
-                           "Wpływ korekty ramki na MZ wymaga kontrolowanego ponownego uruchomienia MZ."],
+                           "Zgodność scenariusza i różne SHA nie dowodzą identyczności zdjęć ani kontrolowanych warunków."],
         }
         (stage/"wykresy_manifest.json").write_text(json.dumps(manifest,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
         for number in range(1,100000):
@@ -365,6 +368,8 @@ def export_imported_charts(records, row_sets, results_root):
                 break
         if dest is None:
             raise RuntimeError("Brak wolnego numeru eksportu.")
+        # Rendering can take time. Do not publish an export invalidated meanwhile.
+        validate_comparison(records,rows,comparison_scope=scope,require_sources=comparison_scope is not None)
         stage.rename(dest)
         return dest
     finally:

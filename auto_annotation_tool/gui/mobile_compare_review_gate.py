@@ -316,6 +316,10 @@ def imported_verification(session_id: str, source_sha: str, results_root: Path |
                 if "manifest_source_sha256" in diagnostic else None)
         if row.session_id == session_id and row.source_sha256 == source_sha:
             exports.append((row, directory, ""))
+        else:
+            error=InvalidExport('Eksport w katalogu sesji ma sprzeczny session_id lub SHA źródła.')
+            _export_failure(error,diagnostic)
+            exports.append((None,directory,(error,diagnostic)))
     good=[e for e in exports if e[0] is not None]
     if good:
         selected=max(good, key=lambda e: (e[0].review_revision, e[1].name))

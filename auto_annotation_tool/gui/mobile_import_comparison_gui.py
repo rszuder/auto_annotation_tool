@@ -15,12 +15,15 @@ from .mobile_plot_choices import plot_choices
 class ImportedMobileComparisonWindow(tk.Toplevel):
     """No reimport: records originate in verified bundles supplied by Browser."""
 
-    def __init__(self, parent, records, rows_by_record, results_root=None, imported_sources=None):
+    def __init__(self, parent, records, rows_by_record, results_root=None, imported_sources=None, *, comparison_scope=None):
         super().__init__(parent)
         self.title("ALPR Desktop — porównaj importowane raporty")
         self.geometry("1210x760")
         self.minsize(940,610)
         self.records=list(records)
+        from .mobile_comparison_scope import scope_value
+        self._comparison_scope=scope_value(comparison_scope,len(self.records))
+        self._strict_scope=comparison_scope is not None
         self.traces=list(rows_by_record)
         self.root_path=Path(results_root) if results_root else None
         self.imported_sources=list(imported_sources or [])
@@ -31,6 +34,10 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         self._build()
         self._make_charts()
         self.protocol("WM_DELETE_WINDOW",self._close)
+
+    @property
+    def comparison_scope(self):
+        return self._comparison_scope
 
     def _build(self):
         top=ttk.Frame(self,padding=12)
@@ -121,14 +128,15 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         if not self.records:
             self._set_notes("Wybierz przynajmniej jedną sesję.")
             return
-        notes=validate_selection(self.records)
+        from .mobile_comparison_scope import validate_comparison, comparison_warnings
+        notes=comparison_warnings(self.records,self.comparison_scope)
         self._set_notes("\n".join("• "+n for n in notes) if notes else "Sprawdzone wspólne warunki według dostępnych metadanych. Parowanie pojedynczych zdjęć wymaga osobnego manifestu.")
-        if len(self.records)>1 and (any(not s.canvas_ready for s in self.records) or
-                                   len({s.scenario for s in self.records})>1):
-            self.status.set("Zablokowano porównanie: wymagana kompletna ocena MT+MZ i ten sam scenariusz.")
-            return
         try:
-            plots=list(figures(self.records))
+            validate_comparison(self.records,self.traces,comparison_scope=self.comparison_scope,require_sources=self._strict_scope)
+        except (ValueError,OSError) as exc:
+            self.status.set('Zablokowano porównanie: '+str(exc));return
+        try:
+            plots=list(figures(self.records,comparison_scope=self.comparison_scope) if self._strict_scope else figures(self.records))
             if len(self.records)==1:
                 plots += [("oś czasu · "+title,fig) for title,fig in trace_figures(self.traces[0],session_label=self.records[0].label)]
             choices=plot_choices(plots)
@@ -146,7 +154,8 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
             keys=[key for key,_ in self.figure_items]
             self.plot_choice.current(keys.index(selected_key) if selected_key in keys else 0)
             self.show_plot()
-        self.status.set(f"Wybrane sesje: {len(self.records)}. Wykresy czasu są opisowe; Canvas ASSISTED nie jest niezależnym GT.")
+        self.status.set(f"Wybrane sesje: {len(self.records)}. Porównanie opisowe; MZ może sumować wywołania w śladzie. "
+            + ('Pełna jakość poza zakresem.' if self.comparison_scope=='performance' else 'Canvas ASSISTED nie jest niezależnym GT.'))
 
     def current_plot_key(self):
         index=self.plot_choice.current()
@@ -154,9 +163,12 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
 
     def _update_heading(self, scatter=False):
         scenarios=list(dict.fromkeys(str(s.scenario) for s in self.records))
-        title="Porównanie raportów z telefonu"
+        from .mobile_comparison_scope import SCOPES
+        title=SCOPES.get(self.comparison_scope,"Wykresy sesji z telefonu")
         if scenarios:title+=" · "+" / ".join(scenarios)
-        if self.records and not scatter:title+="\n"+chart_identity_caption(self.records)
+        if self.records and not scatter:
+            from .mobile_measurement_availability import polish_model_caption
+            title+="\n"+polish_model_caption(chart_identity_caption(self.records))
         self.heading.configure(text=title)
 
     def show_plot(self):
@@ -186,8 +198,9 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
             if scatter:
                 for row in fig._alpr_geometry_scatter['records']:counts[row['session_id']]+=1
             for s in self.records:
-                self.selected_list.insert(tk.END,
-                    f"{s.repeat_label} · n={counts[s.session_id]} · {s.session_id}" if scatter else s.label.replace('\n',' · '))
+                label=(f"{s.repeat_label} · n={counts[s.session_id]} · {s.session_id}" if scatter else
+                    f'{s.repeat_label} · {s.precision.upper()} · {s.session_id[-8:]}' if self.comparison_scope=='performance' else s.label.replace('\n',' · '))
+                self.selected_list.insert(tk.END,label)
             for selected in selection:self.selected_list.selection_set(selected)
             if not hasattr(fig,"_alpr_preview_dpi"):
                 fig._alpr_preview_dpi=fig.dpi
@@ -299,7 +312,12 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
                 revised=[]; traces=[]
                 try:
                     for report,bundle in self.imported_sources:
-                        record,rows,_=record_from_import(report,bundle,self.root_path)
+                        if self._strict_scope and self.comparison_scope!='single':
+                            from .mobile_comparison_scope import assess_import
+                            access=assess_import(report,bundle.path,self.root_path)
+                            if not access.allowed(self.comparison_scope):raise ValueError(access.reason(self.comparison_scope))
+                            record,rows=access.record,list(access.traces)
+                        else:record,rows,_=record_from_import(report,bundle,self.root_path)
                         revised.append(record);traces.append(rows)
                 except (ValueError,OSError,RuntimeError,KeyError) as exc:
                     messagebox.showerror("Nie uzgodniono raportów","Nie można wczytać ocen Canvas: "+str(exc),parent=self)
@@ -317,7 +335,8 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         if self.root_path is None:
             return
         try:
-            destination=export_imported_charts(self.records,self.traces,self.root_path)
+            destination=export_imported_charts(self.records,self.traces,self.root_path,
+                comparison_scope=self.comparison_scope if self._strict_scope else None)
         except (ImportError,OSError,ValueError,RuntimeError,PermissionError) as exc:
             messagebox.showerror("Nie zapisano wykresów",str(exc),parent=self);return
         self.status.set("Zapisano wykresy: "+str(destination))

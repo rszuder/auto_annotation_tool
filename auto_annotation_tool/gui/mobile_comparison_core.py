@@ -69,6 +69,7 @@ class Session:
     model_identity: dict[str, Any] = field(default_factory=dict)
     operator_approved: bool = False
     mt_evaluation: dict[str, Any] | None = None
+    comparison_source: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -330,16 +331,23 @@ def validate_selection(records: Iterable[Session]) -> list[str]:
     return warnings
 
 
-def _plot(record_pairs, *, title: str, y_label: str, value_fn, note: str, bounds=None):
+def _plot(record_pairs, *, title: str, y_label: str, value_fn, note: str, bounds=None, compact_labels=False):
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(12, max(5.2, 1.1*len(record_pairs)+3)))
     fig.subplots_adjust(left=.37, right=.965, top=.85, bottom=.25)
     fig.suptitle(chart_identity_caption(record_pairs), fontsize=9, y=.98)
+    if compact_labels:
+        from .mobile_measurement_availability import polish_model_caption
+        fig.subplots_adjust(left=.22)
+        caption=polish_model_caption(chart_identity_caption(record_pairs))
+        fig.suptitle('\n'.join(textwrap.wrap(caption,95)),fontsize=8,y=.98)
     names=[];values=[];notes=[]
     for rec in record_pairs:
         value, detail = value_fn(rec)
         if value is not None and math.isfinite(value):
-            names.append(rec.label);values.append(value);notes.append(detail)
+            name=(f'{rec.scenario} · {rec.repeat_label}\n{rec.precision.upper()} · {rec.session_id[-8:]}'
+                  if compact_labels else rec.label)
+            names.append(name);values.append(value);notes.append(detail)
     if not names:
         ax.text(.5,.5,"Brak ocenialnych danych (nie zastępujemy ich zerem)",ha="center",va="center",transform=ax.transAxes)
         ax.set_xlim(0, 1);ax.set_yticks([])
@@ -446,11 +454,13 @@ def _geometry_spread_figure(group: list[Session], *, scenario: str, measure: str
     return fig
 
 
-def figures(records: Iterable[Session]):
+def figures(records: Iterable[Session], *, comparison_scope=None):
     """Each figure is independent and captioned. No pseudo-comparison if n=1."""
     rows=list(records)
     if not rows:
         raise ValueError("Select at least one session")
+    from .mobile_comparison_scope import scope_value
+    scope = scope_value(comparison_scope, len(rows))
     for scenario in sorted({r.scenario for r in rows}):
         group=[r for r in rows if r.scenario==scenario]
         tag=re.sub(r"[^a-zA-Z0-9_-]","_",scenario)
@@ -461,9 +471,9 @@ def figures(records: Iterable[Session]):
                     value_fn=lambda r, stage=stage,pct=pct: (getattr(r.latency[stage],pct),f"(n={r.latency[stage].n} śladów)"),
                     note=("Czasy natywne Mobile: MT to czas inferencji, MZ to suma w obrębie śladu; "
                           "potok to czas rejestrowany na ślad. p95 liczony per sesja. "
-                          "Różna liczba śladów nie oznacza porównania sparowanego."))
+                          "Różna liczba śladów nie oznacza porównania sparowanego."),compact_labels=scope=='performance')
                 yield f"{tag}_{stage}_{pct}",fig
-        if any(r.canvas_ready for r in group):
+        if scope != 'performance' and any(r.canvas_ready for r in group):
             yield f"{tag}_assisted_exact",_plot(group,title=f"Dokładny odczyt MZ — Canvas ASSISTED · {scenario}",
                 y_label="Exact Match [% ocenionych odczytów MZ]",
                 value_fn=lambda r: (r.canvas_exact_pct,f"(n={r.canvas['evaluated_reads']})" if r.canvas_ready else ""),
