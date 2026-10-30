@@ -26,20 +26,21 @@ def test_compact_layout_has_two_header_rows_and_unobstructed_canvas(gui, width, 
     left = h.subject_tree.master.master
     assert 250 <= left.winfo_width() <= 315
     assert h.canvas.winfo_height() > height * .68
-    assert h.canvas.winfo_rooty() == h.canvas.master.winfo_rooty()
+    assert 0 < h.canvas.winfo_rooty()-h.canvas.master.winfo_rooty() <= 36
+    assert ed.clean_bar.winfo_rooty()+ed.clean_bar.winfo_height()<=h.canvas.winfo_rooty()
     assert int(h.canvas.cget("highlightthickness")) <= 1
     assert not h.record_label.winfo_ismapped()
     assert not h.image_help.winfo_ismapped()
     assert not h.zoom_value.winfo_ismapped()
     assert not h.source_frame_button.winfo_ismapped()
     header = h.session_label.master
-    assert {int(w.grid_info()["row"]) for w in header.grid_slaves()} == {0, 1}
+    assert {int(w.grid_info()["row"]) for w in header.grid_slaves()} == {0}
     actions = h.complete_button.master
     assert h.form_status_label.master is actions
     assert h.form_status_label.winfo_rootx() < h.complete_button.winfo_rootx()
-    for widget in (h.complete_button, h.form_status_label, h.review_sidebar_scroll):
+    for widget in (h.complete_button, ed.contexts):
         assert widget.winfo_rootx() + widget.winfo_width() <= h.window.winfo_rootx() + width
-    assert tkfont.Font(root=root, font=h.progress_label.cget("font")).actual("size") >= 13
+    assert not h.progress_label.winfo_ismapped() and not h.form_status_label.winfo_ismapped()
     assert h.subject_tree.cget("displaycolumns") == ""
     assert h.subject_tree.xview() == (0.0, 1.0)
 
@@ -53,7 +54,8 @@ def test_approval_is_explicit_and_edit_revokes_green_status(gui, monkeypatch):
         ed.entry_enter()
     ed.approve.invoke()
     base.pump(root)
-    assert "1/1 sprawdzonych" in h.progress_label.cget("text")
+    assert "Przejrzane: 1/1" in h.progress_label.cget("text")
+    assert 'Decyzje do podjęcia: 0' in h.progress_label.cget('text')
     assert s.review.review_status != "COMPLETED"
     assert h.form_status_label.cget("text") == "GOTOWA DO ZATWIERDZENIA"
     assert h.form_status_label.cget("fg") == ed.p["amber"]
@@ -80,15 +82,15 @@ def test_approval_is_explicit_and_edit_revokes_green_status(gui, monkeypatch):
     assert h.form_status_label.cget("fg") != ed.p["green"]
     assert h.form_status_label.cget("text") == "W TOKU"
     # Existing data semantics require rechecking an edited image.
-    assert "0/1 sprawdzonych" in h.progress_label.cget("text")
+    assert "Przejrzane: 0/1" in h.progress_label.cget("text")
     assert not core.scene(s, "mt-one")["checked"]
     ed.undo()
     base.pump(root)
     assert core.scene(s, "mt-one")["objects"][0]["gt_text"] == "WA01234"
     assert s.review.review_status == "IN_PROGRESS"
     assert h.form_status_label.cget("fg") != ed.p["green"]
-    assert h.form_status_label.cget("text") == "W TOKU"
-    assert not core.scene(s, "mt-one")["checked"]
+    assert h.form_status_label.cget("text") == "GOTOWA DO ZATWIERDZENIA"
+    assert core.scene(s,'mt-one')['checked']  # persistent Undo restores the image, never session approval
     ed.undo(redo=True)
     base.pump(root)
     assert core.scene(s, "mt-one")["objects"][0]["gt_text"] == "WA01235"
@@ -107,8 +109,9 @@ def test_progress_does_not_certify_an_incomplete_form(gui):
     frozen = s.review.to_dict()
     for checked in (16, 19):
         ed.update_header(dict(inv, inspected=checked, total=19, remaining=19-checked))
-        assert f"{checked}/19 sprawdzonych" in h.progress_label.cget("text")
-        assert f"pozostało: {19-checked}" in h.progress_label.cget("text")
+        assert f"Przejrzane: {checked}/19" in h.progress_label.cget("text")
+        assert f"Decyzje do podjęcia: {inv['decisions']}" in h.progress_label.cget("text")
+        assert f"Braki dowodów modelu: {inv['evidence_gaps']}" in h.progress_label.cget("text")
         assert h.form_status_label.cget("text") == "W TOKU"
     assert s.review.to_dict() == frozen
 
@@ -147,20 +150,21 @@ def test_hidden_toolbar_preserves_zoom_source_view_and_gt(gui, monkeypatch):
     base.key(h, "a", xy=(x, y))
     assert ed.plate_fit_active
     base.key(h, "a", xy=(x, y))
-    assert not ed.plate_fit_active
+    assert ed.plate_fit_active
+    base.key(h, "f")
+    assert not ed.plate_fit_active and h._view_zoom==1
     base.key(h, "t", xy=(100, 100))
     assert not ed.show_roi_overlay
     base.key(h, "t", xy=(100, 100))
     assert ed.show_roi_overlay
+    base.pump(root,lambda:not h._saving and not ed.in_refresh and not ed.busy)
+    h.canvas.event_generate('<Motion>',x=100,y=100,warp=True);base.pump(root)
     base.key(h, "n", xy=(100, 100))
     assert ed.selected == "GT:a1"
     assert s.sidecar_path.read_bytes() == frozen
     assert core.scene(s, "mt-one")["parents"] == parents
-    ed.help_section.toggle()
-    h.review_sidebar_scroll.yview_moveto(1)
-    base.pump(root)
-    assert ed.help_section.body.winfo_ismapped()
-    assert h.review_sidebar_scroll.yview()[0] > 0
+    assert ed.clean_menu.entrycget(1,'label')=='Skróty i obsługa'
+    assert not ed.help_section.body.winfo_ismapped() and not h.review_sidebar_scroll.winfo_ismapped()
 
 
 def test_narrow_image_list_keeps_next_pending_navigation(tmp_path, monkeypatch):
@@ -175,7 +179,7 @@ def test_narrow_image_list_keeps_next_pending_navigation(tmp_path, monkeypatch):
         h.window.geometry("1180x760+0+0")
         base.pump(root)
         frozen = s.sidecar_path.read_bytes()
-        assert "1/2 sprawdzonych" in h.progress_label.cget("text")
+        assert "Przejrzane: 1/2" in h.progress_label.cget("text")
         button = next(w for w in h.subject_tree.master.master.winfo_children()
                       if isinstance(w, tk.Button))
         assert button.cget("text") == "Następna do weryfikacji"

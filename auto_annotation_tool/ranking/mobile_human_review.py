@@ -325,9 +325,11 @@ class MobileReviewSession:
             if subject.get("evaluable") is True and not normalize_registration(subject.get("ground_truth")):
                 raise ValueError("Oceniana tablica wymaga niepustego GT.")
 
-    def _save_change(self, changed: MobileHumanReview, *, allow_assisted_reveal: bool = False) -> None:
+    def _save_change(self, changed: MobileHumanReview, *, allow_assisted_reveal: bool = False, _gtr_history_restore: bool = False, _gtr_merge=None) -> None:
         self.verify_source()
         self._validate_decisions(changed)
+        from .mobile_gt_link_contract import validate_review
+        validate_review(self,changed,history=_gtr_history_restore,merge=_gtr_merge)
         if self.review.review_mode_locked and changed.review_mode != self.review.review_mode:
             allowed = (allow_assisted_reveal and self.review.review_mode == "blinded_gt_v1"
                        and changed.review_mode == "assisted")
@@ -530,10 +532,16 @@ class MobileReviewSession:
             result["canvas_review"] = canvas
             result["summary"].update({"canvas_" + key: value for key, value in canvas.items()
                 if isinstance(value, (int, float, bool)) or value is None})
+        from .mobile_mt_detection_evaluation import evaluate_session
+        result['mt_detection_evaluation_v1'] = evaluate_session(self)
+        from .mobile_session_metrics import from_results
+        result['live_session_metrics_v1'] = from_results(self, canvas, result['mt_detection_evaluation_v1'])
         return result
 
     def export(self, directory: Path) -> list[Path]:
         self.verify_source(force=True)
+        from .mobile_gt_link_contract import validate_review
+        validate_review(self,self.review)
         directory = Path(directory)
         paths = [directory / name for name in ("review.json", "summary.csv", "subjects.csv", "character_confusion.csv")]
         if self.path in {path.resolve() for path in paths}:

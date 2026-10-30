@@ -31,6 +31,8 @@ def gui(tmp_path, monkeypatch):
 
 def test_native_selection_gt_edit_undo_redo_and_revision_gate(gui):
     root, h, ed, s = gui
+    assert not ed.assessment.technical.opened
+    ed.assessment.technical.toggle()
     h.window.geometry("1649x896+20+20"); base.pump(root)
     base.click(h, ed, (225, 175)); base.pump(root)
     assert ed.selected == "GT:a0" and ed.assessment.model["state"] == "GT_MISSING"
@@ -42,7 +44,14 @@ def test_native_selection_gt_edit_undo_redo_and_revision_gate(gui):
     base.click(h, ed, (445, 175)); base.pump(root)
     assert ed.assessment.model["gt"] == "GT: WA11235"
     assert ed.assessment.model["edit_distance"] == 1
+    # A seeded copy is not yet a geometry reference. Explicitly accept the
+    # original before testing numeric correction and undo/redo against it.
+    assert ed.assessment.model["polygon_iou_pct"] is None
+    assert ed.assessment.model["geometry_status"] == "UNCONFIRMED"
+    ed._commit(lambda: core.check_scene(s, "mt-one"), "Potwierdzenie oryginalnych ramek")
+    base.pump(root)
     original_iou = ed.assessment.model["polygon_iou_pct"]
+    assert original_iou == 100 and "ASSISTED" in ed.assessment.model["reference"]
     quad = core.scene(s, "mt-one")["objects"][1]["quad"]
     changed = [list(p) for p in quad]; changed[0][0] += 10
     ed._commit(lambda: core.correct_plate(s, "mt-one", "GT:a1", changed), "Test korekty")
@@ -50,6 +59,9 @@ def test_native_selection_gt_edit_undo_redo_and_revision_gate(gui):
     assert ed.assessment.model["polygon_iou_pct"] < original_iou
     ed.undo(); base.pump(root)
     assert ed.assessment.model["polygon_iou_pct"] == original_iou
+    ed.undo(); base.pump(root)
+    assert ed.assessment.model["geometry_status"] == "UNCONFIRMED"
+    assert ed.assessment.model["edit_distance"] == 1
     ed.undo(); base.pump(root)
     assert ed.assessment.model["state"] == "GT_MISSING"
     ed.undo(redo=True); base.pump(root)
@@ -67,9 +79,9 @@ def test_native_selection_gt_edit_undo_redo_and_revision_gate(gui):
     assert not ed.assessment.model["draft"]
     assert ed.report_host.cards["exact"].value.cget("text") == "1/2"
     assert "1/14" in h.science_dashboard.canvas_caption.cget("text")
-    ed.h.review_sidebar_scroll.yview_moveto(0); base.pump(root)
-    bottom = ed.assessment.fields["text"].winfo_rooty() + ed.assessment.fields["text"].winfo_height()
-    assert bottom < h.review_sidebar_scroll.winfo_rooty() + h.review_sidebar_scroll.winfo_height()
+    base.pump(root)
+    bottom = ed.contexts.winfo_rooty() + ed.contexts.winfo_height()
+    assert bottom < h.window.winfo_rooty() + h.window.winfo_height()
     capture(h, "01_selection.png")
     tabs = ed.report_host.master
     tabs.select(ed.report_host); base.pump(root)
@@ -78,12 +90,13 @@ def test_native_selection_gt_edit_undo_redo_and_revision_gate(gui):
     capture(h, "03_history.png")
     tabs.select(0); h.window.geometry("1180x760+20+20"); base.pump(root)
     assert ed.assessment.fields["mz"].cget("text") == "MZ: WA11234"
-    assert ed.assessment.fields["gt"].winfo_reqheight() <= ed.assessment.fields["gt"].winfo_height()
-    assert ed.assessment.winfo_rootx() + ed.assessment.winfo_width() < h.window.winfo_rootx() + h.window.winfo_width()
+    assert ed.contexts.fields['object'].winfo_reqheight() <= ed.contexts.fields['object'].winfo_height()
+    assert ed.contexts.winfo_rootx() + ed.contexts.winfo_width() < h.window.winfo_rootx() + h.window.winfo_width()
     ed.start_entry("GT:a1"); ed.entry_var.set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"); ed.entry_enter()
     base.pump(root)
     assert ed.assessment.fields["gt"].cget("text") == "GT: ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    assert ed.assessment.fields["gt"].winfo_height() > ed.assessment.fields["mz"].winfo_height()
+    assert ed.clean_gt_label.cget('text') == 'Numer: ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    assert h.canvas.find_withtag('gt_badge') and not ed.clean_gt_slot.winfo_ismapped()
     capture(h, "04_narrow.png")
 
 

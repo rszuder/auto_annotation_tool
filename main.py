@@ -23,6 +23,11 @@ if sys.platform.startswith("linux"):
 
 def main():
     try:
+        # The dependency bootstrap can itself create Tk windows. Select native
+        # Windows pixels before that happens, not only in the Canvas test host.
+        from windows_dpi import enable_windows_dpi_awareness
+        enable_windows_dpi_awareness()
+
         from dependency_bootstrap import ensure_runtime_dependencies, get_last_probe_terminal_entries
         if not ensure_runtime_dependencies(app_argv=list(sys.argv)):
             return

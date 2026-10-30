@@ -131,8 +131,9 @@ def detected_gui(tmp_path, monkeypatch):
 
 
 def canvas_gt(h, oid):
-    return [h.canvas.itemcget(i, "text") for i in h.canvas.find_withtag(oid)
-            if h.canvas.type(i) == "text" and "gt_badge" in h.canvas.gettags(i)]
+    ed=h._canvas_editor
+    if ed.entry is not None and ed.entry_target[1]==oid:return ['Numer: '+ed.entry_var.get()]
+    return [ed.clean_gt_label.cget('text')] if ed.selected==oid else []
 
 
 def capture(h, name):
@@ -144,9 +145,12 @@ def capture(h, name):
 
 
 def badge_click(h, ed, oid):
-    l,t,r,b = ed.badges[oid]
-    for seq in ("<ButtonPress-1>", "<ButtonRelease-1>"):
-        h.canvas.event_generate(seq, x=round((l+r)/2), y=round((t+b)/2))
+    ed._choose_plate(oid);h.window.update()
+    native.focus_canvas(h)
+    box=ed.badges.get(oid) or ed.stack_badges[oid][:4]
+    l,t,r,b=box
+    h.canvas.event_generate('<ButtonPress-1>',x=round((l+r)/2),y=round((t+b)/2))
+    h.canvas.event_generate('<ButtonRelease-1>',x=round((l+r)/2),y=round((t+b)/2))
     h.window.update()
 
 
@@ -155,7 +159,8 @@ def test_manual_gt_blocked_from_badge_direct_and_host_actions(manual_gui, monkey
     root,h,ed,s = manual_gui
     obj = core.scene(s, "mt-one")["objects"][0]; oid=obj["object_id"]
     before = s.sidecar_path.read_bytes()
-    assert canvas_gt(h, oid) == ["GT: " + (obj["gt_text"] or "— (edycja niedostępna)")]
+    ed._choose_plate(oid);native.pump(root)
+    assert canvas_gt(h, oid) == ["Numer: " + (obj["gt_text"] or "nie dotyczy")]
     for _ in range(2):  # single/double-click dispatch reaches the same guarded action
         badge_click(h, ed, oid)
         assert ed.entry is None
@@ -187,7 +192,7 @@ def test_native_multiplate_gate_does_not_disable_detected_plate(detected_gui):
     badge_click(h, ed, oid); assert ed.entry is None
     badge_click(h, ed, "GT:a0"); assert ed.entry is not None
     ed.entry_var.set("WA01235"); ed.entry_typed(); native.pump(root)
-    assert canvas_gt(h, "GT:a0") == ["GT: WA01235"]
+    assert canvas_gt(h, "GT:a0") == ["Numer: WA01235"]
     ed.entry_enter(); native.pump(root)
     assert core._object(core.scene(s, "mt-one"), oid)["gt_text"] == "GXW9"
     assert core._object(core.scene(s, "mt-one"), "GT:a0")["gt_text"] == "WA01235"
@@ -240,10 +245,13 @@ def test_native_provenance_r_undo_redo_preserve_gt(detected_gui):
     ed.remove_selected(); native.pump(root)
     assert ed.assessment.model["frame_state"] == "MT_ORIGINAL"
     capture(h, "synthetic_reset.png")
-    assert canvas_gt(h,"GT:a0") == ["GT: WA01234"]
+    assert canvas_gt(h,"GT:a0") == ["Numer: WA01234"]
     ed.start_entry("GT:a0"); ed.entry_var.set("UNSAVED"); ed.entry_typed(); ed.escape()
     native.pump(root)
-    assert canvas_gt(h,"GT:a0") == ["GT: WA01234"]
+    assert canvas_gt(h,'GT:a0')==[] and not ed.selected
+    assert core._object(core.scene(s,'mt-one'),'GT:a0')['gt_text']=='WA01234'
+    ed._choose_plate('GT:a0');native.pump(root)
+    assert canvas_gt(h,"GT:a0") == ["Numer: WA01234"]
 
 
 @pytest.mark.parametrize("size", ["1920x1043", "1180x760"])
@@ -253,14 +261,16 @@ def test_full_gt_remains_on_canvas_with_zoom_and_without_selection(detected_gui,
     for zoom in (1.0, 1.7, 8.0):
         ed.h._view_zoom=zoom; ed.h._paint_image(); native.pump(root)
         ed._choose_plate(""); native.pump(root)
-        # Centre the visible object when deliberately zoomed beyond the image.
-        if not canvas_gt(h,"GT:a0"):
-            h._view_center=(225,175); h._paint_image(); native.pump(root)
-        assert canvas_gt(h,"GT:a0") == ["GT: WA01234"]
-        assert ed.selected == ""
+        h._view_center=(225,175);h._paint_image();native.pump(root)
+        labels=[h.canvas.itemcget(i,'text') for i in h.canvas.find_withtag('GT:a0') if h.canvas.type(i)=='text']
+        assert any('WA01234' in label for label in labels) and h.canvas.find_withtag('gt_badge')
+        assert core._object(core.scene(s,'mt-one'),'GT:a0')['gt_text']=='WA01234'
+        ed._choose_plate('GT:a0');native.pump(root)
+        assert canvas_gt(h,"GT:a0") == ["Numer: WA01234"]
+        assert not ed.clean_gt_slot.winfo_ismapped()  # the editable number is beside the plate
     h.fit_image(); native.pump(root)
     protected=ed._overlay_plate_bounds(core.scene(s,"mt-one"))
-    for tag in ("gt_badge","mz_badge"):
+    for tag in ("clean_label_text",):
         for i in h.canvas.find_withtag(tag):
             if h.canvas.type(i)=="text":
                 x,y,r,b=h.canvas.bbox(i)

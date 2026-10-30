@@ -48,6 +48,13 @@ def source_session(tmp_path, n=2, *, mz=True, no_read=False):
     img=Image.new("RGB",(1000,700),(80,95,105));b=io.BytesIO();img.save(b,format="JPEG")
     with zipfile.ZipFile(path,"a") as z:
         z.writestr("samples/frames/source.jpg",b.getvalue())
+        # This fixture represents final MT detections. Supply their source-
+        # bound final/raw proof so Canvas candidate selection does not need to
+        # guess FINAL from a Pose or an OCR result.
+        z.writestr('telemetry/traces.jsonl',json.dumps(dict(source_sequence=17,source_timestamp_ns=100000,
+            scene_generation=1,visual_epoch=1,camera_transform_generation=1,
+            counters=dict(mt_runs_this_frame=1,plate_detections_raw=n,plate_detections_after_dedup=n,
+                          plate_detections_suppressed=0,mz_runs=n if mz else 0))))
     session=load(path,tmp_path)
     session.set_review_mode("assisted")
     return session
@@ -71,7 +78,7 @@ def test_seeding_has_two_overlapping_copies_but_not_confirmed_gt(tmp_path):
     assert initial["parents"][0]["quad"]==initial["objects"][0]["quad"]
     assert initial["objects"][0]["geometry_state"]=="unconfirmed"
     assert not initial["checked"]
-    assert core.counts(initial)["expected"]==2
+    assert core.counts(initial)["expected"]==0  # two predictions, no operator GT
     assert not core.has_scene(s,"mt-one") and s.review.to_dict()==before
 
 
@@ -79,7 +86,7 @@ def test_add_four_corners_is_plus_one_and_does_not_create_mz_prediction(tmp_path
     s=source_session(tmp_path)
     oid=core.add_plate(s,"mt-one",MANUAL)
     scene=core.scene(s,"mt-one"); obj=core._object(scene,oid)
-    assert core.counts(scene)["expected"]==3
+    assert core.counts(scene)["expected"]==1  # D adds one, not the two unresolved MT copies
     assert obj["parent_id"] is None and obj["attempt_id"]==""
     row=next(r for r in core.summary(s)["rows"] if r["object_id"]==oid)
     assert row["mz_prediction"]=="" and row["mz_status"]=="NOT_RUN" and row["cer"] is None
@@ -92,7 +99,7 @@ def test_invalid_incomplete_or_outside_roi_never_changes_count(tmp_path,points):
     s=source_session(tmp_path);before=s.review.to_dict()
     with pytest.raises((ValueError,TypeError)):
         core.add_plate(s,"mt-one",points)
-    assert s.review.to_dict()==before and core.counts(core.scene(s,"mt-one"))["expected"]==2
+    assert s.review.to_dict()==before and core.counts(core.scene(s,"mt-one"))["expected"]==0
 
 
 def test_correction_retains_original_parent_count_and_order(tmp_path):
@@ -103,7 +110,7 @@ def test_correction_retains_original_parent_count_and_order(tmp_path):
     after=core.scene(s,"mt-one")
     assert after["parents"]==before["parents"]
     assert after["objects"][0]["quad"]==points
-    assert core.counts(after)["expected"]==2
+    assert core.counts(after)["expected"]==1
     assert after["objects"][0]["parent_id"]=="MT:a0"
 
 
@@ -119,9 +126,11 @@ def test_flags_keep_geometry_and_gt_and_distinguish_model_vs_operator(tmp_path):
     s=source_session(tmp_path);text_all(s)
     manual=core.add_plate(s,"mt-one",MANUAL)
     before=core.scene(s,"mt-one")
-    core.toggle_error(s,"mt-one","GT:a0");core.toggle_error(s,"mt-one",manual)
+    core.toggle_error(s,"mt-one","GT:a0")
+    with pytest.raises(ValueError,match='Ręczna GT'):core.toggle_error(s,"mt-one",manual)
+    core.remove_operator_geometry(s,"mt-one",manual)
     after=core.scene(s,"mt-one");c=core.counts(after)
-    assert c==dict(expected=1,mt=2,linked=1,missed=0,false_positive=1,operator_errors=1,raw_suppressed=0)
+    assert c==dict(expected=2,mt=2,linked=1,missed=1,false_positive=1,operator_errors=0,raw_suppressed=0)
     assert len(after["objects"])==3
     assert after["objects"][0]["quad"]==before["objects"][0]["quad"]
     assert after["objects"][0]["gt_text"]==before["objects"][0]["gt_text"]
@@ -171,9 +180,11 @@ def test_correcting_gt_invalidates_checked_scene(tmp_path):
 
 
 def test_zero_detection_requires_whole_roi_confirmation(tmp_path):
+    from auto_annotation_tool.ranking.mobile_canvas_resolution import confirm_no_plates
     s=source_session(tmp_path,n=0,mz=False)
     assert core.counts(core.scene(s,"mt-one"))["expected"]==0
-    core.check_scene(s,"mt-one")
+    assert not core.scene(s,"mt-one")['checked']
+    core.check_scene(s,"mt-one")  # the explicit whole-image inspection suffices
     assert not verification_issues(s) and core.summary(s)["checked_scenes"]==1
     assert core.summary(s)["mt_recall_operator"] is None
     core.add_plate(s,"mt-one",MANUAL);core.check_scene(s,"mt-one")
@@ -182,9 +193,10 @@ def test_zero_detection_requires_whole_roi_confirmation(tmp_path):
 
 
 def test_all_predictions_false_can_be_complete_without_fabricated_gt(tmp_path):
+    from auto_annotation_tool.ranking.mobile_canvas_resolution import confirm_no_plates
     s=source_session(tmp_path)
     for obj in core.scene(s,"mt-one")["objects"]:core.toggle_error(s,"mt-one",obj["object_id"])
-    core.check_scene(s,"mt-one")
+    confirm_no_plates(s,"mt-one")
     assert not verification_issues(s)
     assert core.summary(s)["expected_plates"]==0 and core.summary(s)["false_positive_mt"]==2
     assert core.summary(s)["evaluated_reads"]==0
@@ -219,7 +231,7 @@ def test_bad_text_write_is_atomic(tmp_path,text,reason):
 
 def test_reopen_preserves_source_hash_parents_gt_flags_and_audit(tmp_path):
     s=source_session(tmp_path);sha=_file_sha256(s.path)
-    text_all(s);manual=core.add_plate(s,"mt-one",MANUAL);core.toggle_error(s,"mt-one",manual)
+    text_all(s);manual=core.add_plate(s,"mt-one",MANUAL);core.remove_operator_geometry(s,"mt-one",manual)
     core.check_scene(s,"mt-one")
     reopened=MobileReviewSession.open(s.path,sidecar_path=s.sidecar_path)
     assert core.scene(reopened,"mt-one")==core.scene(s,"mt-one")

@@ -20,7 +20,7 @@ def method(name, **extra):
     tree=ast.parse(SRC)
     cls=next(x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='MobileSampleReviewWindow')
     func=next(x for x in cls.body if isinstance(x,ast.FunctionDef) and x.name==name)
-    namespace=dict(extra)
+    namespace=dict(__name__='auto_annotation_tool.gui.z4_mobile_sample_review',__package__='auto_annotation_tool.gui',**extra)
     module=ast.Module(body=[func], type_ignores=[])
     ast.fix_missing_locations(module)
     exec(compile(module, str(GUI), 'exec'), namespace)
@@ -115,9 +115,10 @@ def test_unmodified_drag_draft_does_not_publish_misleading_iou_100():
     assert not any('100.00%' in m for m in h.image_help.messages)
     assert any('Korekta jeszcze niezmieniona' in m for m in h.image_help.messages)
 
-def test_wheel_routes_from_focused_other_widget_if_pointer_is_over_image():
+def test_wheel_routes_from_focused_other_widget_if_pointer_is_over_image(monkeypatch):
+    from auto_annotation_tool.gui import mobile_canvas_zoom
     h=SimpleNamespace(canvas=Canvas(),_image=object())
-    zoom=[];h.zoom_image=lambda fac,at:zoom.append((fac,at))
+    zoom=[];monkeypatch.setattr(mobile_canvas_zoom,'request_zoom',lambda host,fac,at:zoom.append((fac,at)))
     h._wheel_zoom=lambda event:method('_wheel_zoom')(h,event)
     route=method('_route_image_wheel')
     assert route(h,SimpleNamespace(widget=object(),delta=120,num=0))=='break'
@@ -129,7 +130,9 @@ def test_wheel_routes_from_focused_other_widget_if_pointer_is_over_image():
     assert route(h,SimpleNamespace(widget=h.canvas,delta=120,num=0)) is None
     assert len(zoom)==1
 
-def test_wheel_event_has_linux_and_windows_directions_and_no_fake_delta():
+def test_wheel_event_has_linux_and_windows_directions_and_no_fake_delta(monkeypatch):
+    from auto_annotation_tool.gui import mobile_canvas_zoom
+    monkeypatch.setattr(mobile_canvas_zoom,'request_zoom',lambda host,fac,at:states.append((fac,at)))
     h=SimpleNamespace(_image=object(),zoom_image=lambda fac,at:states.append((fac,at)))
     states=[];zoom=method('_wheel_zoom')
     assert zoom(h,SimpleNamespace(delta=-120,num=0,x=30,y=40))=='break'

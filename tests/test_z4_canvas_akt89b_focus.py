@@ -124,8 +124,10 @@ def single_gui(tmp_path, monkeypatch):
 def assert_unselected_preview(h, ed, expected):
     assert ed.selected == "" and ed.mode == "select"
     assert not h.canvas.find_withtag("corner_handle")
-    assert ed.assessment.model["focus_mode"] == "AUTO"
-    assert ed.assessment.model["gt"] == "GT: " + expected
+    assert ed.assessment.model["focus_mode"] == "NONE"
+    assert not ed.assessment.model["focus_id"]
+    assert 'Wybierz ramkę' in ed.contexts.data['object']
+    assert expected in [o['gt_text'] for o in core.scene(h.session,h.current_invocation)['objects']]
 
 
 def test_native_auto_focus_and_gt_badge_edit_leave_geometry_unselected(single_gui):
@@ -134,15 +136,15 @@ def test_native_auto_focus_and_gt_badge_edit_leave_geometry_unselected(single_gu
     assert_unselected_preview(h, ed, "WA01234")
     ed.sync(); ed.request_overlay(); native.pump(root)
     assert s.sidecar_path.read_bytes() == before
-    l,t,r,b = ed.badges["GT:a0"]
-    h.canvas.event_generate("<ButtonPress-1>", x=round((l+r)/2), y=round((t+b)/2))
-    h.canvas.event_generate("<ButtonRelease-1>", x=round((l+r)/2), y=round((t+b)/2))
+    native.click(h,ed,(225,175));native.pump(root)
+    ed.clean_gt_label.event_generate('<Button-1>')
     native.pump(root)
     assert ed.entry is not None and ed.assessment.model["focus_mode"] == "TEXT_EDIT"
-    assert ed.selected == "" and not h.canvas.find_withtag("corner_handle")
+    assert ed.selected == 'GT:a0' and not ed.gt_focus_id
     ed.entry_var.set("WA01235"); ed.entry_enter(); native.pump(root)
-    assert_unselected_preview(h, ed, "WA01235")
-    assert ed.assessment.model["edit_distance"] == 1
+    ed._choose_plate('');native.pump(root);assert_unselected_preview(h, ed, "WA01235")
+    assert ed.assessment.model["edit_distance"] is None  # no selected object
+    assert focus(s, "GT:a0")["edit_distance"] == 1  # persisted result is unchanged
     ed.undo(); native.pump(root); assert_unselected_preview(h, ed, "WA01234")
     ed.undo(redo=True); native.pump(root); assert_unselected_preview(h, ed, "WA01235")
 
@@ -169,18 +171,19 @@ def test_native_overlay_text_never_covers_plate_and_numbers_wrap(single_gui, siz
         if selected:
             native.click(h, ed, (225, 175)); native.pump(root)
         protected = ed._overlay_plate_bounds(core.scene(s, "mt-one"))
-        ids = set(h.canvas.find_withtag("gt_badge") + h.canvas.find_withtag("mz_badge")
-                  + h.canvas.find_withtag("overlap_hud_text"))
+        ids = set(h.canvas.find_withtag("clean_label_text"))
         text_boxes = [h.canvas.bbox(i) for i in ids if h.canvas.type(i) == "text"]
         assert text_boxes
         for x,y,r,b in text_boxes:
             assert all(not (x < qr and r > ql and y < qb and b > qt) for ql,qt,qr,qb in protected)
     ed.start_entry("GT:a0"); ed.entry_var.set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"); ed.entry_enter()
     native.pump(root)
-    label = ed.assessment.fields["gt"]
-    assert label.cget("text") == "GT: ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-    assert label.winfo_rootx()+label.winfo_width() < h.window.winfo_rootx()+h.window.winfo_width()
-    assert label.winfo_reqheight() <= label.winfo_height()
+    ed.start_entry('GT:a0');native.pump(root)
+    assert ed.entry.get() == "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    assert ed.entry.place_info()['in'] is h.canvas
+    assert ed.entry.winfo_rootx()+ed.entry.winfo_width() <= h.canvas.winfo_rootx()+h.canvas.winfo_width()
+    assert ed.entry.winfo_reqheight() <= ed.entry.winfo_height()
+    ed.entry_enter();native.pump(root)
 
 
 def test_native_navigation_resolves_current_scene_without_selection(tmp_path, monkeypatch):

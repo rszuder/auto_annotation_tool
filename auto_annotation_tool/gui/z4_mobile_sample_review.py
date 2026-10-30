@@ -612,18 +612,13 @@ class MobileSampleReviewWindow:
             if expected_hash and fresh.source_archive_sha256 != expected_hash:
                 raise ValueError("Plik źródłowy nie odpowiada SHA-256 zapisanego raportu. Zaimportuj właściwą sesję.")
             session = MobileReviewSession(fresh)
-            # Operator wybrał jednolitą ocenę asystowaną.
-            # Historyczne decyzje i GT zostają; blokowany tryb przechodzi przez
-            # audytowaną, jednostronną migrację (review_mode_origin).
+            # Viewing must not migrate a saved review or create a sidecar.
+            # Canvas provenance is ASSISTED; a fresh review adopts that mode
+            # atomically with its first explicit annotation in core._store.
             converted = False
-            if session.review.review_mode == "blinded_gt_v1":
-                if session.review.review_mode_locked:
-                    session.reveal_predictions_for_review()
-                else:
-                    session.set_review_mode("assisted")
-                converted = True
-            store = MobilePackageExperimentStore(browser.store.root_dir)
-            store.apply_human_review(session)
+            from ..ranking.mobile_canvas_review import context as canvas_context
+            session._history_inspection_only = not any(canvas_context(session,gid)
+                for gid in session.mt_invocations)
             return session, session.statistics(), converted
         self._submit(load, self._loaded)
 
@@ -801,7 +796,7 @@ class MobileSampleReviewWindow:
             compact=True, width=3).pack(side="left", padx=2)
         CanvasReviewEditor.make_action_button(zoom_bar, "Dopasuj", self.fit_image,
             compact=True).pack(side="left", padx=(5, 3))
-        self.plate_fit_button = CanvasReviewEditor.make_action_button(zoom_bar, "Zbliż do tablicy (A)",
+        self.plate_fit_button = CanvasReviewEditor.make_action_button(zoom_bar, "Następna tablica (A)",
             self.zoom_to_mt_detection, compact=True)
         self.plate_fit_button.pack(side="left", padx=(4, 8))
 
@@ -1345,6 +1340,8 @@ class MobileSampleReviewWindow:
         self.session, self.stats, self._review_was_converted = result
         for button in self.actions:
             button.configure(state="normal")
+        if getattr(self.session,'_history_inspection_only',False):
+            self.complete_button.configure(state='disabled')
         session = self.session
         self.reviewer_var.set(session.review.reviewer_id)
         self.session_label.configure(text=f"Sesja: {session.session_id}")
@@ -1372,6 +1369,8 @@ class MobileSampleReviewWindow:
         self._sync_review_controls()
         self.status_var.set(f"Zapis automatyczny • rewizja {session.review.review_revision}"
                             + (" Przełączono wcześniejszą weryfikację na tryb asystowany; GT zachowano." if self._review_was_converted else ""))
+        if getattr(session,'_history_inspection_only',False):
+            self.status_var.set('Tylko inspekcja historii · bez zapisu danych')
         if self._subject_ids:
             first = next(iter(self._subject_ids))
             self.subject_tree.selection_set(first)
@@ -3650,9 +3649,14 @@ class MobileSampleReviewWindow:
 
     def _paint_image(self, message=""):
         """Jedna transformacja dla pikseli i overlay MT: zoom/pan nie rozjezdza ramki."""
-        self.canvas.delete("all")
+        from .mobile_canvas_zoom import cancel_zoom
+        if not getattr(self, '_viewport_paint', False):
+            cancel_zoom(self)
+            from .mobile_canvas_pan import cancel_pan
+            cancel_pan(self)
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         if self._image is None:
+            self.canvas.delete("all")
             self._photo = None
             self._view_fit_scale = 1.0
             self._view_pixel_scale = 1.0
@@ -3662,6 +3666,16 @@ class MobileSampleReviewWindow:
             if hasattr(self, "zoom_value"):
                 self.zoom_value.configure(text="—")
             return
+        image_items = self.canvas.find_withtag('evidence_image')
+        image_item = image_items[0] if len(image_items) == 1 else None
+        if image_item is None:
+            self.canvas.delete('all')
+        else:
+            # Keep the bitmap item/PhotoImage alive across viewport frames.
+            # Recreating its Tk image instance was the largest remaining cost.
+            self.canvas.addtag_all('viewport_overlay_cleanup')
+            self.canvas.dtag(image_item, 'viewport_overlay_cleanup')
+            self.canvas.delete('viewport_overlay_cleanup')
         iw, ih = self._image.size
         self._view_fit_scale = max(0.0001, min((width - 16) / iw, (height - 16) / ih))
         self._view_pixel_scale = self._view_fit_scale * self._view_zoom
@@ -3677,11 +3691,26 @@ class MobileSampleReviewWindow:
         # Renderowanie TYLKO widocznego obszaru, bez tworzenia olbrzymich PhotoImage przy zoomie.
         # Obraz PIL jest tylko do odczytu; piksele poza nim wypelnia ciemne tlo.
         inv = 1.0 / scale
-        rendered = self._image.transform((width, height), Image.Transform.AFFINE,
-            (inv, 0, cx - width * inv / 2, 0, inv, cy - height * inv / 2),
-            resample=Image.Resampling.BICUBIC, fillcolor=(16, 24, 32))
-        self._photo = ImageTk.PhotoImage(rendered, master=self.canvas)
-        self.canvas.create_image(0, 0, anchor="nw", image=self._photo, tags=("evidence_image",))
+        box = (cx-width*inv/2, cy-height*inv/2, cx+width*inv/2, cy+height*inv/2)
+        preview = getattr(self, '_zoom_preview', False)
+        if preview and 0 <= box[0] < box[2] <= iw and 0 <= box[1] < box[3] <= ih:
+            # Axis-aligned viewport: separable resize is faster than affine.
+            rendered = self._image.resize((width, height), Image.Resampling.BILINEAR, box=box)
+        else:
+            rendered = self._image.transform((width, height), Image.Transform.AFFINE,
+                (inv, 0, box[0], 0, inv, box[1]),
+                resample=Image.Resampling.BILINEAR if preview else Image.Resampling.BICUBIC,
+                fillcolor=(16, 24, 32))
+        if (image_item is not None and self._photo is not None
+                and (self._photo.width(), self._photo.height()) == (width, height)):
+            self._photo.paste(rendered)
+        else:
+            photo = ImageTk.PhotoImage(rendered, master=self.canvas)
+            if image_item is None:
+                self.canvas.create_image(0, 0, anchor="nw", image=photo, tags=("evidence_image",))
+            else:
+                self.canvas.itemconfigure(image_item, image=photo)
+            self._photo = photo
         if hasattr(self, "zoom_value"):
             self.zoom_value.configure(text=f"×{self._view_zoom:.1f}")
         if hasattr(self, "image_help"):
@@ -3902,14 +3931,16 @@ class MobileSampleReviewWindow:
         prev = max(0.0001, self._view_fit_scale * self._view_zoom)
         img_x = self._view_center[0] + (ax - width / 2) / prev
         img_y = self._view_center[1] + (ay - height / 2) / prev
-        newer = max(1.0, min(24.0, self._view_zoom * float(factor)))
+        from .mobile_canvas_zoom import cancel_zoom, paint_viewport, MAX_ZOOM
+        cancel_zoom(self)
+        newer = max(1.0, min(MAX_ZOOM, self._view_zoom * float(factor)))
         if abs(newer - self._view_zoom) < 0.0001:
             return
         self._view_zoom = newer
         next_scale = max(0.0001, self._view_fit_scale * self._view_zoom)
         self._view_center = (img_x - (ax - width / 2) / next_scale,
                              img_y - (ay - height / 2) / next_scale)
-        self._paint_image()
+        paint_viewport(self)
 
     def _wheel_zoom(self, event):
         if (getattr(self, "_canvas_editor", None) is not None
@@ -3917,14 +3948,10 @@ class MobileSampleReviewWindow:
             return "break"
         if self._image is None:
             return "break"
-        delta = getattr(event, "delta", 0)
-        if delta == 0:
-            num = getattr(event, "num", 0)
-            if num not in (4, 5):
-                return "break"
-            delta = 120 if num == 4 else -120
-        self.zoom_image(1.25 if delta > 0 else 1.0 / 1.25,
-                        (event.x, event.y))
+        from .mobile_canvas_zoom import wheel_factor, request_zoom
+        factor = wheel_factor(event)
+        if factor is not None:
+            request_zoom(self, factor, (event.x, event.y))
         return "break"
 
     def _focus_image_for_wheel(self, _event=None):
@@ -4362,6 +4389,14 @@ class MobileSampleReviewWindow:
         self._submit(work, done, saving=True)
 
     def _changed(self, result):
+        from ..ranking.mobile_session_metrics import current, result_key
+        snapshot=result[0].get('live_session_metrics_v1')
+        if snapshot and not current(snapshot,result_key(self.session)):
+            # A delayed worker must not replace a newer revision/session. The
+            # existing debounce schedules the current saved state once idle.
+            editor=getattr(self,'_canvas_editor',None)
+            if editor is not None:editor.schedule_refresh()
+            return
         self.stats, warning, updated_report = result
         self._refresh_subject_rows()
         self._refresh_stats()
@@ -4421,6 +4456,9 @@ class MobileSampleReviewWindow:
 
 
     def complete(self):
+        if getattr(self.session,'_history_inspection_only',False):
+            self.status_var.set('Wyłącznie historia — brak wywołań dopuszczonych do weryfikacji.')
+            return
         if getattr(self, "_canvas_editor", None) is not None and not self._canvas_editor.prepare_navigation():
             return
         if not self.session or self._saving:
@@ -4535,6 +4573,13 @@ class MobileSampleReviewWindow:
                     if temp_multi.exists():
                         temp_multi.unlink()
                 paths.append(multi_path)
+                # New diagnostic population, separate/versioned files. The
+                # existing final MT+MZ report and its definitions are untouched.
+                from ..ranking.mobile_candidate_stacks import export as export_candidates
+                candidate_dir = export_candidates(self.session, target)
+                paths.extend(sorted(p for p in candidate_dir.iterdir() if p.is_file()))
+                from ..ranking.mobile_mt_detection_evaluation import export as export_detection
+                paths.extend(export_detection(self.session, target))
                 paths.append(finalize_export_manifest(self.session, target, paths))
                 result_dir["file_count"] = sum(1 for path in target.rglob("*") if path.is_file())
             except Exception as error:
@@ -4661,6 +4706,8 @@ class MobileSampleReviewWindow:
     def close(self):
         if self._closed:
             return
+        from .mobile_canvas_zoom import cancel_zoom
+        cancel_zoom(self)
         if getattr(self, "_canvas_editor", None) is not None and not self._canvas_editor.prepare_navigation():
             return
         self.save_gt()

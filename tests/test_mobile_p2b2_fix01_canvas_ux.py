@@ -83,13 +83,13 @@ def test_reset_child_preserves_parent_gt_and_false_positive_decision(tmp_path):
     core.toggle_error(s,"mt-one","GT:a0")
     prior=core._object(core.scene(s,"mt-one"),"GT:a0")
     before=core.counts(core.scene(s,"mt-one"))
-    core.remove_operator_geometry(s,"mt-one","GT:a0")
+    frozen=s.sidecar_path.read_bytes()
+    with pytest.raises(ValueError,match='wspólnej GT'):core.remove_operator_geometry(s,"mt-one","GT:a0")
     scene=core.scene(s,"mt-one");obj=core._object(scene,"GT:a0")
-    assert scene["parents"]==original and obj["quad"]==original[0]["quad"]
-    assert obj["geometry_state"]=="unconfirmed" and not scene["checked"]
+    assert scene["parents"]==original and not scene["checked"]
     assert obj["gt_text"]==prior["gt_text"] and obj["error"] is True
-    assert core.counts(scene)==before and len(scene["objects"])==2
-    assert scene["events"][-1]["object_before"]["quad"]==quad
+    assert core.counts(scene)==before and s.sidecar_path.read_bytes()==frozen
+    assert scene['physical_gt_v1']['plates'][0]['quad']==quad
 
 
 @pytest.mark.parametrize("oid",["unknown","MT:a0",""])
@@ -311,21 +311,19 @@ def test_left_child_selection_selects_canvas_overlay_not_historical_form(gui):
 
 def test_sidebar_wheel_on_new_child_and_focus_misdelivery_do_not_zoom_image(gui):
     root,h,ed,s=gui
-    h.window.geometry("1150x670+0+0");ed.help_section.toggle();pump(root)
-    h.review_sidebar_scroll.yview_moveto(0);pump(root)
-    assert h.review_sidebar_scroll.bbox("all")[3]>h.review_sidebar_scroll.winfo_height()
+    h.window.geometry("1180x760+0+0");pump(root)
+    assert not h.review_sidebar_scroll.winfo_ismapped() and ed.contexts.winfo_ismapped()
     zoom=h._view_zoom
-    ed.help_section.header.event_generate("<MouseWheel>",delta=-120);pump(root)
-    assert h.review_sidebar_scroll.yview()[0]>0 and h._view_zoom==zoom
+    ed.contexts.fields['image'].event_generate("<MouseWheel>",delta=-120);pump(root)
+    assert h._view_zoom==zoom
     # Windows can deliver wheel to focused canvas while pointer is over sidebar.
-    h.review_sidebar_scroll.yview_moveto(0)
-    x=h.review_sidebar_scroll.winfo_rootx()+20-h.canvas.winfo_rootx()
-    y=h.review_sidebar_scroll.winfo_rooty()+50-h.canvas.winfo_rooty()
+    x=ed.contexts.winfo_rootx()+20-h.canvas.winfo_rootx()
+    y=ed.contexts.winfo_rooty()+50-h.canvas.winfo_rooty()
     h.canvas.event_generate("<Motion>",x=x,y=y,warp=True);pump(root)
     try:
         h.canvas.focus_force()
         h.canvas.event_generate("<MouseWheel>",x=x,y=y,delta=-120);pump(root)
-        assert h.review_sidebar_scroll.yview()[0]>0 and h._view_zoom==zoom
+        assert h._view_zoom==zoom
     finally:
         h.canvas.event_generate("<Motion>",x=25,y=25,warp=True);pump(root)
 

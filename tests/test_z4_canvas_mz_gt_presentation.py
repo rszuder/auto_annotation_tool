@@ -148,14 +148,14 @@ def test_nms_header_uses_final_count_and_raw_is_never_separate_fp(tmp_path, monk
 
 
 def test_invalid_model_quad_is_not_not_run(tmp_path):
-    s = source_session(tmp_path, n=1)
-    row = s.mt_invocations["mt-one"].records[0]
-    row.update(mt_status="DETECTION_INVALID_QUAD", mt_pose_status="DETECTION_INVALID_QUAD")
+    from test_z4_akt89lm_resolution import invalid_source
+    s = invalid_source(tmp_path, mz=True)
     core.correct_plate(s, "mt-one", "GT:a0", MANUAL)
     core.set_text(s, "mt-one", "GT:a0", "WA01234")
     m = preview(s)
     assert m["execution"]["detections"] == 1 and m["exact"]
-    assert m["polygon_iou_pct"] is None and "źródłowy" in m["geometry"]
+    assert m["polygon_iou_pct"] is m['nmce_pct'] is None
+    assert m['geometry_status'] == 'NOT_AVAILABLE' and 'źródłowy' in m['reference']
 
 
 def test_summary_requires_session_source_revision_and_micro_cer(tmp_path):

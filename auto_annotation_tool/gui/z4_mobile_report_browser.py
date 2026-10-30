@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, font as tkfont
 
-from ..config import CONFIG, logger
+from ..config import CONFIG, SESSION, logger
 from ..ranking import (
     MobileBenchmarkReport,
     MobilePackageExperimentStore,
@@ -35,7 +35,10 @@ from .mobile_report_sparse_axis import (
 from .mobile_report_review_overlay import project_desktop_samples
 from .mobile_report_chart_styles import LATENCY_SERIES_STYLES, draw_chart_marker
 from .mobile_compare_review_gate import imported_verification
+from . import mobile_import_preferences
 from .z4_mobile_report_browser_ux import (desktop_status, matches_report_filter, report_identity, selected_report_caption)
+from .z4_mobile_report_browser_ux import (SORT_COLUMNS, report_measurement_time, report_repeat,
+    report_view_key, report_sort_value, sorted_report_view, report_sort_preference, save_report_sort_preference)
 from .mobile_report_science_dashboard import ScientificDashboard, build_overview, science_from_verified_bundle
 from .mobile_report_scientific_comparability import assess_cohort
 # Z4MOBREP019_NO_UNGROUNDED_SCIENTIFIC_COMPARABILITY_20261018
@@ -809,6 +812,7 @@ class MobileReportBrowser:
         self._comparison_verification = {}
         self._comparison_busy = False
         self._comparison_dialogs = []
+        self._report_sort_column,self._report_sort_descending=report_sort_preference(SESSION)
         self.window = tk.Toplevel(self.parent)
         try:
             setattr(self.window, "_aat_skip_window_recovery", True)
@@ -988,9 +992,8 @@ class MobileReportBrowser:
         machines, so report import uses a small Tk picker instead.
         """
 
-        start_dir = Path(initial_dir or Path.home())
-        if not start_dir.exists() or not start_dir.is_dir():
-            start_dir = Path.home()
+        default_dir = mobile_import_preferences.readable_directory(Path(initial_dir or Path.home())) or Path.home()
+        start_dir = mobile_import_preferences.initial_directory(default_dir)
 
         selected_paths: list[Path] = []
         state: dict[str, Any] = {"dir": start_dir}
@@ -1058,6 +1061,13 @@ class MobileReportBrowser:
             font=("Segoe UI", 9),
         )
         path_entry.grid(row=0, column=1, sticky="ew", ipady=5)
+        remember_var = tk.BooleanVar(value=mobile_import_preferences.remember_enabled())
+        tk.Checkbutton(
+            path_row, text="Zapamiętaj folder ostatniego importu", variable=remember_var,
+            command=lambda: mobile_import_preferences.set_remember_enabled(remember_var.get()),
+            bg=self.bg, fg=self.fg, activebackground=self.bg, activeforeground=self.fg,
+            selectcolor=self.panel, font=("Segoe UI", 9),
+        ).grid(row=0, column=2, sticky="e", padx=(10, 0))
 
         list_shell = tk.Frame(
             shell,
@@ -1146,16 +1156,16 @@ class MobileReportBrowser:
             except Exception:
                 pass
 
-        def _load_dir(path: Path | str) -> None:
+        def _load_dir(path: Path | str) -> bool:
             try:
                 target = Path(str(path or "")).expanduser()
                 if not target.exists() or not target.is_dir():
                     _set_status("Ten folder nie istnieje albo nie jest dostępny.", "error")
-                    return
+                    return False
                 target = target.resolve()
             except Exception as exc:
                 _set_status(f"Nie udało się otworzyć folderu: {exc}", "error")
-                return
+                return False
 
             entries.clear()
             listbox.delete(0, tk.END)
@@ -1166,7 +1176,7 @@ class MobileReportBrowser:
                 children = list(target.iterdir())
             except Exception as exc:
                 _set_status(f"Nie udało się odczytać folderu: {exc}", "error")
-                return
+                return False
 
             if target.parent != target:
                 entries.append({"path": target.parent, "dir": True, "report": False})
@@ -1191,6 +1201,7 @@ class MobileReportBrowser:
                 f"Folder: {target} | Raporty: {len(files)} | Podfoldery: {len(dirs)}",
                 "info",
             )
+            return True
 
         def _selected_report_paths() -> list[Path]:
             result: list[Path] = []
@@ -1241,7 +1252,7 @@ class MobileReportBrowser:
                 _load_dir(current.parent)
 
         quick_dirs = [
-            ("Raporty", start_dir),
+            ("Raporty", default_dir),
             ("Pobrane", Path.home() / "Downloads"),
             ("Pulpit", Path.home() / "Desktop"),
         ]
@@ -1272,14 +1283,17 @@ class MobileReportBrowser:
         dialog.bind("<Escape>", lambda _event: (_close(), "break")[-1], add="+")
         dialog.protocol("WM_DELETE_WINDOW", _close)
 
-        _load_dir(start_dir)
+        if not _load_dir(start_dir) and start_dir != default_dir:
+            _load_dir(default_dir)
         try:
             dialog.update_idletasks()
+            minimum_width = max(760, int(actions.winfo_reqwidth()) + 28)
+            dialog.minsize(minimum_width, 500)
             parent_x = int(self.window.winfo_rootx())
             parent_y = int(self.window.winfo_rooty())
             parent_w = int(self.window.winfo_width() or 920)
             parent_h = int(self.window.winfo_height() or 620)
-            width = min(940, max(760, int(parent_w * 0.86)))
+            width = max(minimum_width, min(940, max(760, int(parent_w * 0.86))))
             height = min(660, max(500, int(parent_h * 0.82)))
             x = parent_x + max(18, int((parent_w - width) / 2))
             y = parent_y + max(18, int((parent_h - height) / 2))
@@ -1339,7 +1353,7 @@ class MobileReportBrowser:
             highlightthickness=1,
             highlightbackground=self.border,
         )
-        workspace.add(left, width=555, minsize=510, padx=0, pady=0, stretch="never")
+        workspace.add(left, width=600, minsize=580, padx=0, pady=0, stretch="never")
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(3, weight=1)
         left_header = tk.Frame(left, bg=self.card_bg)
@@ -1372,9 +1386,23 @@ class MobileReportBrowser:
         self.report_table = _TreeTable(
             left, ("Wybor", "Data", "Wariant", "Scena", "Powt.", "Weryfikacja", "p95"),
             ("✓", "Data", "Wariant", "Materiał", "Powt.", "Ocena MT+MZ", "P95"),
-            (34, 68, 87, 89, 45, 116, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
+            (30, 112, 87, 96, 45, 116, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
             selectmode="browse")
         self.report_table.shell.grid(row=3, column=0, sticky="nsew")
+        self.report_table.tree.column('Wybor',width=30,minwidth=30)
+        tree=self.report_table.tree
+        style=ttk.Style(tree)
+        row_font=tkfont.Font(root=tree,font=style.lookup(tree.cget('style'),'font'))
+        # Date/material can occupy two lines. Leave a visible gap at the
+        # actual DPI rather than squeezing 40 px of text into a 42 px row.
+        row_gap=max(8,round(tree.winfo_fpixels('6p')))
+        style.configure(tree.cget('style'),rowheight=max(46,2*row_font.metrics('linespace')+row_gap))
+        tree.tag_configure('session_even',background=self.card_bg)
+        tree.tag_configure('session_odd',background=blend_hex_colors(self.card_bg,self.fg,0.07))
+        style.map(tree.cget('style'),
+            background=[('selected',self.palette.get('selection_bg',self.accent))],
+            foreground=[('selected',self.palette.get('selection_fg',self.fg))])
+        self._update_sort_headings()
         self.report_table.tree.bind("<<TreeviewSelect>>", self._on_report_selected, add="+")
         self.report_table.tree.bind("<Button-1>", self._toggle_comparison_checkbox, add="+")
         self.btn_import_reports = ttk.Button(left, text="Importuj raport z telefonu", command=self.import_report)
@@ -1984,9 +2012,25 @@ class MobileReportBrowser:
             if key in self._comparison_verification and self._comparison_verification[key].ready
         }
         self._update_comparison_basket_status(silent=True)
-        self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select)
+        self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select, refresh_preview=True)
 
-    def _apply_report_filter(self, select_report_id: str = "", *, auto_select: bool = True) -> None:
+    def _update_sort_headings(self):
+        titles=dict(Data='Data',Wariant='Wariant',Scena='Materiał',Weryfikacja='Ocena MT+MZ',p95='P95',**{'Powt.':'Powt.'})
+        for column in SORT_COLUMNS:
+            arrow=(' ↓' if self._report_sort_descending else ' ↑') if column==self._report_sort_column else ''
+            self.report_table.tree.heading(column,text=titles[column]+arrow,command=lambda c=column:self._sort_reports(c))
+
+    def _sort_reports(self,column):
+        if column not in SORT_COLUMNS:return
+        if column==self._report_sort_column:self._report_sort_descending=not self._report_sort_descending
+        else:self._report_sort_column,self._report_sort_descending=column,column=='Data'
+        try:save_report_sort_preference(SESSION,self._report_sort_column,self._report_sort_descending)
+        except Exception:logger.exception('Nie udało się zapisać kolejności widoku importów')
+        self._update_sort_headings()
+        self._apply_report_filter(auto_select=False,preserve_preview=True)
+
+    def _apply_report_filter(self, select_report_id: str = "", *, auto_select: bool = True,
+                             refresh_preview: bool = False, preserve_preview: bool = False) -> None:
         """Filter without rescanning archives; selection survives filtering."""
         all_reports = getattr(self, "_ordered_reports", [])
         query = self.search_var.get().strip() if hasattr(self, "search_var") else ""
@@ -1997,47 +2041,68 @@ class MobileReportBrowser:
             self.search_var.set("")
             query = ""
         filtered = [r for r in all_reports if matches_report_filter(r, query, self._matching_cached_bundle(r))]
+        column=getattr(self,'_report_sort_column','Data');descending=getattr(self,'_report_sort_descending',True)
+        filtered=sorted_report_view(filtered,lambda r:report_sort_value(r,column,
+            report_identity(r,self._matching_cached_bundle(r)),self._comparison_verification.get(self._comparison_key(r)),_pipeline_p95(r)),descending)
         def table_line(r):
             info=report_identity(r, self._matching_cached_bundle(r))
-            locator=str(getattr(r,"source_path","") or "").replace(chr(92),"/")
-            parts=locator.split("/")
-            folder_repeats=[part.lower() for part in parts if len(part)==3 and
-                            part[0].lower()=="r" and part[1:].isdigit()]
-            repeat=folder_repeats[-1] if "02_sesje" in parts and folder_repeats else ""
-            if not repeat:
-                rep=getattr(r,"experiment_index",{}) or {}
-                try:
-                    repeat=f"r{int(rep.get('replicate_index')):02d}"
-                except (TypeError,ValueError,OverflowError):
-                    repeat="—"
+            repeat=report_repeat(r)[0]
             key=self._comparison_key(r)
             state=self._comparison_verification.get(key)
             status=state.label if state else "Nieustalona"
             ready=bool(state and state.ready)
             tick="☑" if key in self._comparison_checked else "☐" if ready else "—"
             tag="success" if ready else "warning" if state and state.state in ("STALE","NEEDS_EXPORT","IN_PROGRESS") else "muted"
-            return (tick,local_measurement_time(r.measured_at, compact=True, show_offset=False),
-                    info["variant_short"],info["scenario"] or "—",repeat,
+            stamp=report_measurement_time(r)
+            if stamp and stamp.tzinfo:
+                offset=stamp.strftime('%z');offset=offset[:3]+':'+offset[3:]
+                date=stamp.strftime('%d.%m.%Y\n%H:%M ')+offset
+            else:date=stamp.strftime('%d.%m.%Y\n%H:%M bez strefy') if stamp else '—'
+            scenario=info['scenario'] or '—'
+            if len(scenario)>11 and '_' in scenario:scenario='\n'.join(scenario.rsplit('_',1))
+            return (tick,date,
+                    info["variant_short"],scenario,repeat,
                     status,_format_ms(_pipeline_p95(r)),{"tag":tag})
-        self.report_table.set_rows([table_line(r) for r in filtered])
-        self.report_by_iid = {f"row_{i}": r for i, r in enumerate(filtered)}
+        tree=self.report_table.tree
+        mapping={'report_'+hashlib.sha256(json.dumps(report_view_key(r),ensure_ascii=False).encode()).hexdigest():r for r in filtered}
+        self._suppress_report_select=True
+        try:
+            for iid in tree.get_children():
+                if iid not in mapping:tree.delete(iid)
+            self.report_by_iid=mapping
+            for index,(iid,r) in enumerate(mapping.items()):
+                row=table_line(r);values=tuple(str(v) for v in row[:-1])
+                tags=(row[-1]['tag'],'session_odd' if index%2 else 'session_even')
+                if tree.exists(iid):tree.item(iid,values=values,tags=tags)
+                else:tree.insert('',tk.END,iid=iid,values=values,tags=tags)
+                tree.move(iid,'',index)
+        finally:self._suppress_report_select=False
         ready_count=sum(1 for state in self._comparison_verification.values() if state.ready)
         self.report_count_var.set(f"{len(filtered)} z {len(all_reports)} raportów · {ready_count} zatwierdzonych")
         if not filtered:
+            if getattr(self,'current_report',None) is not None and all_reports:
+                self.report_count_var.set(self.report_count_var.get()+' · podgląd poza filtrem')
+                return
             if all_reports:
                 self._show_report_hint(len(all_reports))
                 self.summary_table.set_rows([("Brak dopasowań", query or "—", "Wyczyść filtr, aby wrócić do pełnej listy.")])
             else:
                 self._show_empty()
             return
-        if not (auto_select or select_report_id):
+        current=getattr(self,'current_report',None)
+        if not (auto_select or select_report_id or preserve_preview or current):
             self._show_report_hint(len(all_reports))
             return
-        old_id = str(getattr(getattr(self, "current_report", None), "report_id", "") or "")
-        selected = next((i for i, r in enumerate(filtered) if r.report_id == select_report_id), None)
-        if selected is None:
-            selected = next((i for i, r in enumerate(filtered) if r.report_id == old_id), 0)
-        selected_iid = f"row_{selected}"
+        selected_iid=next((iid for iid,r in mapping.items() if select_report_id and r.report_id==select_report_id),None)
+        if selected_iid is None and current is not None:
+            selected_iid=next((iid for iid,r in mapping.items() if report_view_key(r)==report_view_key(current)),None)
+            if selected_iid is None:
+                selected_iid=next((iid for iid,r in mapping.items() if self._comparison_key(r)==self._comparison_key(current)),None)
+            if selected_iid is None:
+                self.report_count_var.set(self.report_count_var.get()+' · podgląd poza filtrem');return
+        if selected_iid is None:
+            if preserve_preview or not auto_select:return
+            selected_iid=next(iter(mapping))
         self._suppress_report_select = True
         try:
             self.report_table.tree.selection_set(selected_iid)
@@ -2047,8 +2112,9 @@ class MobileReportBrowser:
             pass
         finally:
             self._suppress_report_select = False
-        selected_report = filtered[selected]
-        self._show_report(selected_report, self._matching_cached_bundle(selected_report))
+        selected_report=mapping[selected_iid]
+        if refresh_preview or select_report_id or current is None or report_view_key(selected_report)!=report_view_key(current):
+            self._show_report(selected_report,self._matching_cached_bundle(selected_report))
 
     def _ux_reset_selection(self) -> None:
         for name, text in (("hero_title_var", "Wybierz raport z listy"),
@@ -2122,6 +2188,8 @@ class MobileReportBrowser:
             return
         report=self.report_by_iid.get(str(selection[0]))
         if report:
+            current=getattr(self,'current_report',None)
+            if current is not None and self._comparison_key(current)==self._comparison_key(report):return
             self._show_report(report,self._matching_cached_bundle(report))
 
     @staticmethod
@@ -2310,6 +2378,7 @@ class MobileReportBrowser:
             bundles: list[tuple[Path, MobileReportBundle]] = []
             invalid: list[tuple[Path, MobileReportBundle]] = []
             failures: list[tuple[Path, str]] = []
+            successful_paths: list[Path] = []
             saved = 0
             last_saved_report_id = ""
             save_error = ""
@@ -2339,6 +2408,7 @@ class MobileReportBrowser:
                                     failures.append((report_path, f"Raport odczytany, ale nie udało się go przygotować do zapisu: {exc}"))
                                     continue
                                 saved += 1
+                                successful_paths.append(report_path)
                                 last_saved_report_id = bundle.report.report_id
                             else:
                                 invalid.append((report_path, bundle))
@@ -2376,6 +2446,7 @@ class MobileReportBrowser:
                         return
 
                     if saved:
+                        mobile_import_preferences.remember_successful_import(successful_paths)
                         self._refresh_report_list(last_saved_report_id)
                     elif bundles:
                         self._show_report(bundles[-1][1].report, bundles[-1][1])

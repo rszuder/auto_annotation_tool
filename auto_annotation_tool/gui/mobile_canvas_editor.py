@@ -55,6 +55,17 @@ def reconciliation_story(scene, tally):
     # cannot report the post-filter total until the explicit migration.
     pending = bool(scene.get("_post_nms_pending"))
     final = raw - (1 if pending else suppressed)
+    if raw > 2 and (pending or suppressed):
+        aid=scene.get('_post_nms_pending') or next((o['attempt_id'] for o in scene['objects'] if o.get('post_nms_suppressed')),None)
+        parent=next((p for p in scene['parents'] if p['attempt_id']==aid),None)
+        label=f"MT {int(parent['detection_index'])+1}" if parent else 'Dodatkowy kandydat'
+        from ..ranking.mobile_candidate_stacks import physical_count_view
+        physical_n,known=physical_count_view(scene)
+        physical_text=str(physical_n) if known else 'do ustalenia'
+        return dict(title='CO ZAPISAŁ TELEFON?',
+            body=f'Wskazania: {raw} surowe → {final} końcowe.\n{label}: odrzucony przez filtr; bez osobnej tablicy i bez końcowego błędu.\nTablice na zdjęciu: {physical_text}.',
+            action=f'Uwzględnij wynik telefonu: {raw} → {final}' if pending else None,
+            state='pending' if pending else 'resolved')
     if pending:
         return {
             "title": "DLACZEGO PROGRAM PROSI O POPRAWIENIE OCENY?",
@@ -134,6 +145,7 @@ class CanvasReviewEditor:
         self.h = host
         self.c = host.canvas
         self.selected = ""
+        self._bad_mt_selection = None
         self.pointer_canvas = None
         self.selection_key_down = False
         self.selection_release_after = None
@@ -149,6 +161,8 @@ class CanvasReviewEditor:
         self.tree_branch = ""
         self.mode = "select"
         self.points = []
+        self.draw_reference_target = None
+        self.draw_target = None
         self.pointer = None
         self.drag = None
         self._click_candidate = None  # click selects; drag pans unless a corner is grabbed
@@ -193,6 +207,12 @@ class CanvasReviewEditor:
         host.window.minsize(min(1150, max(900, screen_width - 60)), 670)
         host.review_sidebar_scroll.configure(width=self.sidebar_width)
         self.p = palette(host.window, host.bg)
+        from .mobile_canvas_collision_warning import CollisionWarning
+        self.collision_warning = CollisionWarning(self)
+        from .mobile_canvas_corner_pulse import CornerPulse
+        self.corner_pulse = CornerPulse(self)
+        from .mobile_canvas_shift_preview import ShiftPreview
+        self.shift_preview = ShiftPreview(self)
         self._badge_font = tkfont.Font(root=host.window, family="Segoe UI", size=9, weight="bold")
         self.tree_targets = {}
         self.linked_tree_rows = {}  # hidden aliases, used only for navigation
@@ -215,6 +235,8 @@ class CanvasReviewEditor:
         host.target_nav.grid_remove()
         host.image_help.configure(text="Turkusowa ramka: wynik telefonu • pomarańczowo-żółta: korekta operatora • czerwone ×: błędne wskazanie • półprzezroczysty obszar: miejsce analizy")
         self.bindings()
+        from .mobile_canvas_clean_view import install
+        install(self,viewer)
 
     def _fit_review_columns(self, event):
         """Keep the inspector and its scrollbar inside a narrow window."""
@@ -230,7 +252,8 @@ class CanvasReviewEditor:
         event.widget.columnconfigure(2, minsize=right + 12)
         # A minsize alone cannot shrink a Treeview's requested column width.
         self.h.subject_tree.column("#0", width=left - 38, minwidth=200)
-        self.h.review_sidebar_scroll.configure(width=right)
+        scrollbar_width=getattr(self,'_sidebar_bar_width',None)
+        self.h.review_sidebar_scroll.configure(width=max(1,right+12-scrollbar_width) if scrollbar_width is not None else right)
         self.approve.configure(wraplength=right - 35)
         self.exclude.configure(wraplength=right - 35)
         for item in (self.status, self.exclude_hint, self.tally, self.selection,
@@ -290,7 +313,9 @@ class CanvasReviewEditor:
         self.c.bind("<ButtonRelease-3>", self.pan_release)
         self.c.unbind("<Control-ButtonPress-3>")
         self.c.bind("<Motion>", self.hover_motion)
-        self.c.bind("<Double-Button-1>", lambda e:"break")
+        self.c.bind("<Double-Button-1>", self.double_press)
+        for key in ('Up','Down'):
+            self.c.bind('<KeyPress-'+key+'>',self.stack_arrow_hotkey)
         for k in ("d","D"):
             self.c.bind("<KeyPress-"+k+">", self.draw_toggle)
         # Register shortcuts on the actual review canvas and its early bindtag.
@@ -311,6 +336,8 @@ class CanvasReviewEditor:
         for k in ("e","E"):
             self.c.bind("<KeyPress-"+k+">", lambda e:self.navigate(1))
         self.c.bind("<space>", self.confirm)
+        self.c.bind("<KeyRelease-space>", self.release_frame_space)
+        self.c.bind("<FocusOut>", self.release_frame_space, add='+')
         self.c.bind("<Control-s>", self.confirm)
         self.c.bind("<Control-S>", self.confirm)
         self.c.bind("<Control-z>", lambda e:self.undo())
@@ -424,8 +451,16 @@ class CanvasReviewEditor:
             self.c.bind_class(tag, "<KeyRelease-" + key + ">", self.fit_key_release)
         for key, handler in (("r", self.remove_hotkey), ("R", self.remove_hotkey),
                              ("t", self.roi_hotkey), ("T", self.roi_hotkey),
-                             ("n", self.cycle_hotkey), ("N", self.cycle_hotkey)):
+                             ("n", self.cycle_hotkey), ("N", self.cycle_hotkey),
+                             ("z", self.stack_hotkey), ("Z", self.stack_hotkey),
+                             ("x", self.stack_hotkey), ("X", self.stack_hotkey),
+                             ("Up", self.stack_arrow_hotkey), ("Down", self.stack_arrow_hotkey)):
             self.c.bind_class(tag, "<KeyPress-" + key + ">", handler)
+        self.c.bind_class(tag, '<KeyPress-space>', self.confirm)
+        self.c.bind_class(tag, '<KeyRelease-space>', self.release_frame_space)
+        self.c.bind_class(tag, '<FocusOut>', self.release_frame_space, add='+')
+        for key in ('z','Z','y','Y'):
+            self.c.bind_class(tag, '<Control-KeyPress-'+key+'>', self.history_hotkey)
         self._tag_canvas_shortcut_widgets()
         # A newly created focusable widget (e.g. a button in an expanded
         # panel) gets the same tag when it first receives focus.
@@ -522,14 +557,10 @@ class CanvasReviewEditor:
             return None
         if self._is_typing_shortcut(getattr(event, "widget", None)):
             return None
-        # A also works from the image list if a frame is already selected or
-        # the current scene contains exactly one evaluable plate. S remains a
-        # true hover-only selection shortcut.
+        # A cycles the current image's plates also from the image list.
+        # S remains a true hover-only selection shortcut.
         scene = self._read()
-        target_exists = bool(self.selected or (scene and sum(
-            bool(self._current_quad(obj)) for obj in scene["objects"]
-            if not obj.get("post_nms_suppressed", False)) == 1))
-        if self._canvas_hotkey_pointer(event) is None and not target_exists:
+        if not scene:
             return None
         token = getattr(self, "fit_release_after", None)
         if token:
@@ -590,6 +621,24 @@ class CanvasReviewEditor:
             return None
         return self.cycle(event)
 
+    def stack_hotkey(self, event):
+        if (not self._event_in_review_window(event)
+                or self._is_typing_shortcut(event.widget)
+                or getattr(event, 'state', 0) & 4):
+            return None
+        from .mobile_canvas_navigator import cycle_layer,scope
+        return cycle_layer(self,back=event.keysym.lower()=='z') if scope(self,event.widget) else None
+
+    def history_hotkey(self,event):
+        if not self._event_in_review_window(event) or self._is_typing_shortcut(event.widget):return None
+        return self.undo(redo=event.keysym.lower()=='y')
+
+    def stack_arrow_hotkey(self,event):
+        # Image-list arrows and Entry navigation retain their own meaning.
+        from .mobile_canvas_navigator import cycle_result,scope
+        if not scope(self,event.widget) or getattr(event,'state',0)&5:return None
+        return cycle_result(self,back=event.keysym=='Up')
+
     def no_delete(self, event=None):
         self.message("Najazd + S zaznacza. R usuwa ramkę ręczną lub cofa korektę MT. T pokazuje/ukrywa ROI. PPM jednym kliknięciem zmienia flagę błędu.")
         return "break"
@@ -599,7 +648,10 @@ class CanvasReviewEditor:
 
     def _read(self):
         h = self.h
-        key = (h.current_invocation, getattr(getattr(h.session,"review",None),"review_revision",None))
+        review = getattr(h.session, 'review', None)
+        key = (id(h.session), getattr(h.session, 'session_id', None),
+               getattr(review, 'source_archive_sha256', None), h.current_invocation,
+               getattr(review, 'review_revision', None))
         if self.cache_key != key:
             self.cache_key = key
             try:
@@ -611,7 +663,7 @@ class CanvasReviewEditor:
         return self.cached
 
     def sync(self):
-        from ..ranking.mobile_canvas_presentation import execution_state, focused_assessment
+        from ..ranking.mobile_canvas_presentation import execution_state, focused_assessment, operator_context, review_progress
         h = self.h
         for widget in self.old_right:
             widget.grid_remove()
@@ -620,24 +672,48 @@ class CanvasReviewEditor:
             h.mt_visual_overlay.place_forget()
         except tk.TclError:
             pass
-        if self.skey != h.current_invocation:
+        context = (id(h.session), getattr(getattr(h.session, 'review', None), 'source_archive_sha256', None), h.current_invocation)
+        previous_context = getattr(self, '_selection_context', None)
+        if previous_context != context:
+            self.collision_warning.clear()
+            self.corner_pulse.clear()
+            self.shift_preview.clear()
+            self.gt_focus_id=''
+            self.destroy_entry()
+            if previous_context and previous_context[:2] != context[:2]:
+                self.pending_tree_target = None
+            self._selection_context = context
+            self._geometry_layer_state = None
+            self._idle_badge = None
             self.skey = h.current_invocation
             self.selected = self.hover = ""
+            self._bad_mt_selection = None
             self.pointer_canvas = None
             self.points = []
+            self.draw_reference_target = None
+            self.draw_target = None
             self.drag = None
             self._click_candidate = None
             self.mode = "select"
             self.plate_fit_previous = None
             self.plate_fit_active = False
             self.plate_fit_gid = ""
+            self.history_selected = ""
+            self.model_location_target = ''
         if self.pending_tree_target and self.pending_tree_target[0] == h.current_invocation:
             self.selected = self.pending_tree_target[1]
             self.mode = "edit" if self.selected else "select"
             self.pending_tree_target = None
         s = self._read()
+        if getattr(self,'_bad_mt_selection',None)!=(id(h.session),h.current_invocation,self.selected):
+            self._bad_mt_selection=None
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_navigator import ensure_selection
+            ensure_selection(self)
+            from .mobile_canvas_clean_view import prune
+            prune(self)
         obj = next((o for o in (s or {}).get("objects", ()) if o["object_id"] == self.selected), None)
-        if self.selected and (obj is None or obj.get("post_nms_suppressed", False)):
+        if self.selected and obj is None:
             self.selected = self.hover = ""
             obj = None
             if self.mode == "edit": self.mode = "select"
@@ -646,7 +722,8 @@ class CanvasReviewEditor:
         enabled = available and not h._saving and not self.busy
         # The previously reviewed 2->1 scene must first be reconciled; checking
         # the image must not imply approval of unresolved historical GT.
-        self.approve.configure(state="normal" if enabled and not (s and s.get("_post_nms_pending")) else "disabled")
+        self.approve.configure(state="normal" if enabled and not hasattr(self, 'clean_bar')
+                               and not (s and s.get("_post_nms_pending")) else "disabled")
         self.exclude.configure(state="normal" if enabled else "disabled")
         self.reason_entry.configure(state="normal" if enabled else "disabled")
         self.crop.configure(state="disabled")
@@ -657,19 +734,44 @@ class CanvasReviewEditor:
         self._guard_gt_entry()
         text_edit_id = (self.entry_target[1] if self.entry is not None
                         and self.entry_target[0] == h.current_invocation else None)
-        self.assessment.render(focused_assessment(s, self.selected, execution, text_edit_id=text_edit_id))
+        operator = operator_context(h.session, h.current_invocation, s, self.selected, execution)
+        model = focused_assessment(s, self.selected, execution, text_edit_id=text_edit_id, allow_auto=False)
+        model['operator'] = operator
+        history = self._history() if not s else None
+        if history:
+            from ..ranking.mobile_mt_history import history_assessment
+            if not any(d['attempt_id']==getattr(self,'history_selected','') for d in history['detections']):
+                self.history_selected = ''
+            model = history_assessment(model,history,getattr(self,'history_selected',''))
+        from .mobile_canvas_stacks import present
+        self.assessment.render(present(self,model))
+        from ..ranking.mobile_canvas_resolution import missing_mt_geometry
+        missing_pose = missing_mt_geometry(s)
+        self.decision_panel.refresh(s, self.selected, enabled, execution)
+        # Decisions belong to the selected Canvas object (Ctrl+PPM). Keep the
+        # legacy adapter/API for stored evidence, without a second sidebar form.
+        self.decision_panel.pack_forget()
+        self.decision_panel.fp.pack_forget()  # PPM already owns this candidate action.
+        from .mobile_canvas_stacks import enhanced
+        if enhanced(self):
+            if not any(option[0]!=h.current_invocation for option in getattr(self.decision_panel,'physical_options',())):
+                self.decision_panel.physical_same.pack_forget()
+                self.decision_panel.physical_pick.pack_forget()
+            # Explicit GT=0 remains an image-level action, never an MT action.
+            if self.selected:self.decision_panel.negative.pack_forget()
         if not s:
             self.checked_var.set(False); self.excluded_var.set(False)
             self.reconciliation_box.pack_forget()
             self.nms_action.pack_forget()
             self.reason_host.pack_forget()
             self.status.configure(text="Tylko podgląd", bg=self.p["amber_bg"], fg=self.p["amber"])
-            self.tally.configure(text=getattr(self, "read_error", "") or "Wybierz obraz z pełną klatką i ROI.")
-            self.selection.configure(text="Brak aktywnej ramki")
-            self.selection_hint.configure(text="Edycja wymaga zgodnych współrzędnych źródłowych.")
+            self.tally.configure(text=history['reason'] if history else getattr(self, "read_error", "") or "Wybierz obraz z pełną klatką i ROI.")
+            self.selection.configure(text="Inspekcja historii" if history else "Brak aktywnej ramki")
+            self.selection_hint.configure(text="Kliknięcie nie tworzy GT ani rewizji." if history else "Edycja wymaga zgodnych współrzędnych źródłowych.")
             for card in self.tally_cards.values(): card.set("—")
             return
-        self.checked_var.set(s["checked"])
+        from ..ranking.mobile_canvas_partial_review import progress as frame_progress
+        self.checked_var.set(frame_progress(s)['complete'])
         self.excluded_var.set(bool(s.get("exclusion_reason")))
         # The explanatory decision panel is synced after reading final/raw counts.
         reason = s.get("exclusion_reason", "")
@@ -682,16 +784,22 @@ class CanvasReviewEditor:
         else:
             self.reason_host.pack_forget()
         issues = core._content_issues(s)
-        tone, title = (("purple", "SPRAWDZONY · NIE DO OCENY") if reason else
-                       ("green", "SPRAWDZONY · GOTOWY") if s["checked"] and not issues else
-                       ("amber", "SPRAWDZONY · BRAKI DANYCH") if s["checked"] else
-                       ("blue", "DO SPRAWDZENIA"))
+        progress = review_progress(s)
+        tone, title = progress['tone'], progress['title']
         if not available: title += "\nPodgląd wejścia MT"
         self.status.configure(text=title, bg=self.p[tone+"_bg"], fg=self.p[tone])
         tally = core.counts(s)
         for key, card in self.tally_cards.items():
             card.set(str(tally[key]) if execution["state"] == "MT_EXECUTED" else "—")
-        self.tally_cards["mt"].set(str(execution["detections"]) if execution["detections"] is not None else "—")
+        from ..ranking.mobile_candidate_stacks import physical_count_view
+        physical_n,known=physical_count_view(s)
+        self.tally_cards['expected'].title.configure(text='GT fizyczne')
+        self.tally_cards['expected'].set(str(physical_n) if known else 'do ustalenia')
+        self.tally_cards["missed"].title.configure(text="Ręczne bez MT" if missing_pose else "Pominięte tablice")
+        raw_count=tally['mt']; final_count=raw_count-(1 if s.get('_post_nms_pending') else tally['raw_suppressed'])
+        self.tally_cards['mt'].title.configure(text='Wskazania: surowe / końcowe')
+        self.tally_cards['mt'].set(f'{raw_count} / {final_count}' if not s.get('_post_nms_unknown') else f'{raw_count} / ?')
+        self.approve.configure(text='Obraz zweryfikowany')
         self._sync_reconciliation_story(s, tally, enabled)
         notes = []
         if tally["operator_errors"]:
@@ -699,7 +807,8 @@ class CanvasReviewEditor:
         if reason:
             notes.append("Sprawdzony; poza mianownikami oceny.")
         elif s["checked"] and issues:
-            notes.append(f"Do uzupełnienia: {len(issues)}. Szczegóły w statusach po lewej.")
+            notes.append("Liczba rzeczywistych tablic wymaga decyzji. Ten obraz nie jest liczony do podsumowania."
+                         if missing_pose else "Do uzupełnienia: " + "; ".join(issues))
         elif not s["checked"]:
             notes.append("Liczby robocze — obraz niepotwierdzony.")
         self.tally.configure(text="\n".join(notes))
@@ -725,6 +834,24 @@ class CanvasReviewEditor:
             self.message("Rysowanie jest możliwe na zweryfikowanej pełnej klatce z ROI, nie na cropie ani innym obrazie.")
             return False
         return True
+
+    def open_resolution(self):
+        """Compatibility entry point: reveal context inline, never open a dialog."""
+        if not self.prepare_navigation() or not self.available():
+            return None
+        self.sync()
+        return self.decision_panel
+
+    def show_model_location(self, object_id):
+        """Inspect source location without selecting/editing a reference or saving."""
+        from ..ranking.mobile_canvas_resolution import model_location
+        s = self._read()
+        try:
+            model_location(self.h.session,self.h.current_invocation,s,core._object(s,object_id))
+        except (ValueError,TypeError,KeyError) as exc:
+            self.message(str(exc)); return
+        self.model_location_target = object_id
+        self.overlay()
 
     def to_canvas(self, point):
         s = self._read()
@@ -752,6 +879,12 @@ class CanvasReviewEditor:
     def paint(self, width, height):
         s = self._read()
         if not s or self.h._image_entry != s["image_entry"]:
+            if self.mode=='draw':
+                for item in self.c.find_all():
+                    if 'evidence_image' not in self.c.gettags(item):self.c.delete(item)
+                return True
+            if not s and self._paint_history():
+                return True
             # Old evidence remains visible, without legacy counting/drawing CTA.
             if self.h._is_source_frame_view():
                 self.h._paint_source_frame_overlays(width,height)
@@ -762,6 +895,59 @@ class CanvasReviewEditor:
             return True
         self.overlay()
         return True
+
+    def _history(self):
+        from ..ranking.mobile_mt_history import history_evidence
+        h=self.h
+        return history_evidence(h.session,h.current_invocation,
+            image_entry=h._image_entry,image_size=h._image_source_size)
+
+    def _history_to_canvas(self, point):
+        h=self.h;w,hh=h._image_source_size;cx,cy=h._view_center;z=h._view_pixel_scale
+        return ((point[0]*h._image.width/w-cx)*z+self.c.winfo_width()/2,
+                (point[1]*h._image.height/hh-cy)*z+self.c.winfo_height()/2)
+
+    def _paint_history(self):
+        self.c.delete('mt_history_inspection')
+        history=self._history()
+        if not history:
+            return False
+        if self.h._image is None or self.h._view_center is None:
+            return True
+        tags=('mt_history_inspection',)
+        if history['view_bound'] and history['roi'] and self.show_roi_overlay:
+            l,t,r,b=history['roi'];a=self._history_to_canvas((l,t));b=self._history_to_canvas((r,b))
+            self.c.create_rectangle(*a,*b,outline='#FFD16C',dash=(7,4),width=1,tags=tags)
+        for item in history['detections']:
+            points=[self._history_to_canvas(p) for p in item['image_quad']]
+            selected=item['attempt_id']==getattr(self,'history_selected','')
+            self.c.create_polygon(*[v for p in points for v in p],fill='',outline='#36DDFB',
+                width=2.8 if selected else 1.5,tags=tags+('mt_history_frame',))
+            x,y=min(points,key=lambda p:(p[1],p[0]))
+            label=self.c.create_text(max(6,min(self.c.winfo_width()-210,x)),max(8,y-23),anchor='nw',
+                text=f"MT {item['detection_index']+1} · tylko inspekcja",fill='#E3FAFF',
+                font=('Segoe UI',9,'bold'),tags=tags)
+            box=self.c.bbox(label)
+            if box:
+                bg=self.c.create_rectangle(box[0]-3,box[1]-2,box[2]+3,box[3]+2,fill='#13313D',outline='#36DDFB',tags=tags)
+                self.c.tag_lower(bg,label)
+        self.h.image_help.configure(text=history['image_status']+' · '+history['reason'])
+        return True
+
+    def _inspect_history(self,event):
+        history=self._history()
+        if not history or not history['view_bound'] or self.h._image is None or self.h._view_center is None:
+            return
+        selected=''
+        for item in history['detections']:
+            if quad_contains_point([self._history_to_canvas(p) for p in item['image_quad']],event.x,event.y):
+                selected=item['attempt_id'];break
+        self.history_selected=selected
+        self.selected=self.hover=''
+        self.c.focus_set()
+        self.h._view_drag_at=(event.x,event.y,self.h._view_center)
+        self.sync();self._paint_history()
+        self.message(history['reason'])
 
     def request_overlay(self):
         if self.paint_scheduled or self.h._closed:
@@ -775,17 +961,43 @@ class CanvasReviewEditor:
         self.paint_after = self.c.after_idle(repaint)
 
     def overlay(self):
-        from ..ranking.mobile_canvas_presentation import plate_review_state
+        from ..ranking.mobile_canvas_presentation import execution_state, geometry_assessment, plate_review_state
+        if self.drag and hasattr(self,'navigator'):
+            from .mobile_canvas_corner_drag import paint as paint_drag
+            if paint_drag(self):return
         self.c.delete(TAG)
+        if self.mode=='draw':
+            # Drawing owns the overlay, including remnants from older renderers.
+            for item in self.c.find_all():
+                if 'evidence_image' not in self.c.gettags(item):self.c.delete(item)
         s = self._read()
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_clean_view import paint
+            paint(self)
+            self.collision_warning.paint()
+            if s:
+                if self.drag:self._render_drag_geometry(s)
+                elif not getattr(self.h, '_viewport_paint', False):self._render_contexts(self.assessment.model)
+            self.corner_pulse.paint()
+            return
+        if not s:
+            self._paint_history()
+            return
         if not s or self.h._image is None or self.h._image_entry != s["image_entry"] or self.h._view_center is None:
             return
+        from .mobile_canvas_stacks import paint
+        if self.mode!='draw' and paint(self):return
+        # Image loading can paint before sync(). Never borrow the execution
+        # state of the previously selected image for provenance or GT badges.
+        execution = execution_state(self.h.session, self.h.current_invocation,
+            image_entry=self.h._image_entry, image_size=self.h._image_source_size)
         width,height = self.c.winfo_width(),self.c.winfo_height()
         self.badges = {}
         self.card_positions = {}
         self.card_widths = {}
         self.card_heights = {}
         self.card_header_heights = {}
+        self.stack_badges = {}
 
         def draw_contour(points, *, color, width, tags=()):
             # A SINGLE fine contour. The old dark halo looked like a second box.
@@ -807,13 +1019,35 @@ class CanvasReviewEditor:
         for parent in s["parents"]:
             if not parent["quad"] or parent["parent_id"] in suppressed_parent_ids:
                 continue
-            # During GT correction the original is hidden, not deleted.
-            if self.mode == "edit" and self.selected:
-                continue
+            # Keep the immutable prediction visible beside the editable GT.
             pts = [self.to_canvas(p) for p in parent["quad"]]
             draw_contour(pts, color="#00E5FF", width=1.5,
                          tags=(TAG,"mt_original","mt_accepted",parent["parent_id"]))
         protected = self._overlay_plate_bounds(s)
+        target_id = getattr(self, 'model_location_target', '')
+        if target_id:
+            from ..ranking.mobile_canvas_resolution import model_location
+            try:
+                target = core._object(s,target_id)
+                location = model_location(self.h.session,self.h.current_invocation,s,target)
+            except (ValueError,KeyError,TypeError):
+                location = None
+            if location:
+                parent = parents[target['parent_id']]
+                if location['kind'] == 'BBOX':
+                    l,t,r,b = location['bbox']
+                    x1,y1 = self.to_canvas((l,t)); x2,y2 = self.to_canvas((r,b))
+                    self.c.create_rectangle(x1,y1,x2,y2,outline='#00E5FF',width=2,dash=(6,3),
+                        tags=(TAG,'model_location_bbox',target_id))
+                else:
+                    points = [self.to_canvas(p) for p in location['quad']]
+                    x1,y1 = min(p[0] for p in points),min(p[1] for p in points)
+                    x2,y2 = max(p[0] for p in points),max(p[1] for p in points)
+                    draw_contour(points,color='#00E5FF',width=2,tags=(TAG,'model_location_pose',target_id))
+                caption = f"Model — wskazanie {int(parent['detection_index'])+1}"
+                self.c.create_text(max(8,x1),max(8,y1-5),anchor='sw',text=caption,fill='#00E5FF',
+                    font=('Segoe UI',9,'bold'),tags=(TAG,'model_location_label',target_id))
+                protected.append((x1,y1,x2,y2))
         placed=[]
         for index,obj in enumerate(s["objects"],1):
             if obj.get("post_nms_suppressed", False):
@@ -826,7 +1060,7 @@ class CanvasReviewEditor:
             if max(xs)<0 or min(xs)>width or max(ys)<0 or min(ys)>height:
                 continue
             oid = obj["object_id"]
-            if obj["error"]:
+            if obj["error"] or obj.get('duplicate_of'):
                 color, contour_width = "#FF3B5C", 1.8
             elif oid == self.selected:
                 color, contour_width = "#FFD400", 2.0
@@ -842,13 +1076,25 @@ class CanvasReviewEditor:
                     self.c.create_oval(x-6,y-6,x+6,y+6,fill="#FFFFFF",outline=color,width=1.4,
                         tags=(TAG,"corner_handle",oid))
             parent = parents.get(obj["parent_id"])
-            state = plate_review_state(s, obj, getattr(self, "_canvas_execution", None))
+            live = (quad if self.drag and self.drag.get("oid") == oid
+                    and quad != self.drag.get("before") else None)
+            state = (geometry_assessment(s, obj, execution, live_quad=live) if live is not None
+                     else plate_review_state(s, obj, execution))
             editing = self.entry is not None and self.entry_target == (self.h.current_invocation, oid)
             number = self.entry_var.get() if editing else obj.get("gt_text", "")
-            caption = "GT: " + (number or ("wpisz numer" if state["gt_editable"] else "— (edycja niedostępna)"))
+            caption = "Numer: " + (number or ("wpisz numer" if state["gt_editable"] else "wyjaśnienie w panelu"))
+            if not number and parent and parent["mz_status"] == "NOT_RUN" and state["gt_editable"]:
+                caption = "Numer niewymagany · brak odczytu"
             mz_label = state["canvas_frame"]
+            from .mobile_canvas_stacks import view as stack_view,members as stack_members
+            sv=stack_view(self);pid=(sv or {}).get('links',{}).get(oid,{}).get('plate_id')
             if parent:
                 mz_label = mz_label.replace("MT ·", f"MT {int(parent['detection_index'])+1} ·", 1)
+            if pid in (sv or {}).get('plates',{}):
+                number_in_view=list(sv['plates']).index(pid)+1
+                count_in_view=len(stack_members(sv,pid))
+                active_label=f' · {number_in_view}.1/{count_in_view}' if oid==self.selected and count_in_view else ''
+                mz_label=f'Tablica {number_in_view} · {count_in_view} MT{active_label} · '+mz_label
             if obj["error"]:
                 mz_label = "× " + mz_label
             font = getattr(self, "_badge_font", None)
@@ -879,11 +1125,12 @@ class CanvasReviewEditor:
             self.card_widths[oid]=cw
             self.card_heights[oid]=ch
             self.card_header_heights[oid]=header_h
+            self.stack_badges[oid]=(xx,yy,xx+cw,yy+header_h+gt_h+2,pid)
             center=(sum(xs)/4,sum(ys)/4)
             tx=max(xx,min(xx+cw,center[0])); ty=max(yy,min(yy+ch,center[1]))
             self.c.create_line(tx,ty,*center,fill="#DDE7EF",width=1.0,tags=(TAG,"badge_tether",oid))
             self.c.create_rectangle(xx,yy,xx+cw,yy+header_h,fill="#0F2230",outline="#00E5FF",width=1.0,tags=(TAG,"mz_badge",oid))
-            self.c.create_text(xx+6,yy+3,anchor="nw",text=mz_label,fill="#F2FBFF",font=("Segoe UI",9,"bold"),width=cw-12,tags=(TAG,"mz_badge",oid))
+            self.c.create_text(xx+6,yy+3,anchor="nw",text=mz_label,fill="#F2FBFF",font=("Segoe UI",9,"bold"),width=cw-12,tags=(TAG,"mz_badge","stack_badge_text",oid))
             gt_top = yy+header_h+2
             self.c.create_rectangle(xx,gt_top,xx+cw,gt_top+gt_h,fill="#302618",outline=color,width=1.0,tags=(TAG,"gt_badge",oid))
             self.c.create_text(xx+6,gt_top+3,anchor="nw",text=caption,fill=color,font=("Segoe UI",9,"bold"),width=cw-12,tags=(TAG,"gt_badge",oid))
@@ -899,11 +1146,11 @@ class CanvasReviewEditor:
                 self.c.create_line(*[v for p in pts for v in p],fill="#FFF2A8",width=2.6,tags=(TAG,"drawing_line"))
             for x,y in pts[:len(self.points)]:
                 self.c.create_oval(x-5,y-5,x+5,y+5,fill="#FFD400",outline="#FFFFFF",width=1.4,tags=(TAG,"drawing_corner"))
-        self._paint_live_overlap_hud(s)
+        self._paint_live_overlap_hud(s, execution)
         self.c.tag_raise("corner_handle")
         mode="D: wskaż róg %d/4"%(len(self.points)+1) if self.mode=="draw" else "S: odznacz/wybierz · LPM: narożnik · R: usuń/cofnij · PPM: błąd 1 klik" if self.mode=="edit" else "Najedź + S: zaznacz · D: dodaj"
-        self.h.image_help.configure(text=("A: zbliż/powrót  •  R: usuń/cofnij ramkę  •  T: pokaż/ukryj ROI  •  "
-               "N: następna tablica  •  Spacja: sprawdzony/nie  •  PPM: błąd jednym kliknięciem  •  "
+        self.h.image_help.configure(text=("A: następna tablica + dopasowanie  •  F: cały obraz  •  R: usuń/cofnij ramkę  •  T: pokaż/ukryj ROI  •  "
+               "N: następna tablica  •  Spacja: zatwierdź ramki tablicy  •  PPM: błąd  •  Ctrl+PPM: decyzje GT  •  "
                "turkus: MT  •  żółty: GT/korekta"))
         self.c.configure(cursor="crosshair" if self.mode=="draw" else "arrow")
 
@@ -919,7 +1166,7 @@ class CanvasReviewEditor:
                                max(x for x, y in points), max(y for x, y in points)))
         return bounds
 
-    def _paint_live_overlap_hud(self, scene):
+    def _paint_live_overlap_hud(self, scene, execution):
         """On-canvas badge next to corrected quad; per-drag assisted metrics.
 
         Compare original MT with live operator quad (not independent truth).
@@ -934,26 +1181,33 @@ class CanvasReviewEditor:
         quad = self._current_quad(obj)
         if not quad:
             return
-        parent = next((p for p in scene["parents"]
-                       if p["parent_id"] == obj["parent_id"]), None)
-        if not parent or not parent.get("quad"):
-            lines = ("RAMKA RĘCZNA", "Brak oryginalnej ramki MT do porównania.")
+        from ..ranking.mobile_canvas_presentation import geometry_assessment, focused_assessment, operator_context
+        live = (quad if self.drag and self.drag.get("oid") == obj["object_id"]
+                and quad != self.drag.get("before") else None)
+        model = geometry_assessment(scene, obj, execution, live_quad=live)
+        mt = model["mt_label"] or "RAMKA OPERATORA"
+        status = model["geometry_status"]
+        if status in {"ASSESSED", "LIVE"}:
+            lines = (f"{mt} ↔ REFERENCJA · ASSISTED", model["geometry"],
+                     "Korekta na żywo · niezapisana" if status == "LIVE" else
+                     "Oryginał MT zaakceptowany" if model["frame_state"] == "MT_ORIGINAL" else "Referencja po korekcie operatora")
+        elif status == "FP":
+            lines = (f"{mt} — błędne wykrycie (FP)", model["geometry"], "Brak referencji rzeczywistej tablicy")
+        elif status == "UNCONFIRMED":
+            lines = (f"{mt} · referencja niepotwierdzona", model["geometry"], "Sprawdź ramkę i potwierdź obraz")
+        elif status == 'NOT_AVAILABLE':
+            lines = ('Wskazanie powiązane z tablicą', 'Brak narożników modelu — obrys bez oceny')
         else:
-            try:
-                metric = core.compare_mt_pose_to_gt(parent["quad"], quad,
-                                                    *scene["image_size"])
-                overlap = float(metric["polygon_iou_pct"])
-                corner_err = float(metric["nmce_pct"])
-                if not (math.isfinite(overlap) and math.isfinite(corner_err)):
-                    raise ValueError("Nieprawidłowy wynik")
-                overlap = max(0.0, min(100.0, overlap))
-                live = " · na żywo" if self.drag else ""
-                lines = ("MT ↔ KOREKTA OPERATORA" + live,
-                         f"Pokrycie (IoU): {overlap:.1f}% · różnica: {100.0-overlap:.1f}%",
-                         f"Błąd narożników (NMCE): {corner_err:.2f}%")
-            except (ValueError, TypeError, KeyError, IndexError,
-                    ZeroDivisionError, OverflowError):
-                lines = ("MT ↔ KOREKTA OPERATORA", "Obrys wymaga poprawnego ustawienia.")
+            lines = (mt, model["geometry"])
+        # Live and saved previews use the same pair and qualification as the
+        # panel, including FP and unconfirmed copies. No intermediate writes.
+        if self.assessment.model.get("focus_id") == obj["object_id"]:
+            panel = focused_assessment(scene, self.selected, execution,
+                text_edit_id=self.entry_target[1] if self.entry is not None else None, live_quad=live)
+            panel['operator'] = operator_context(self.h.session,self.h.current_invocation,scene,self.selected,execution)
+            if status == "LIVE":
+                panel.update(summary_note="Podgląd niezapisanej korekty — jeszcze nie liczony do podsumowania", summary_tone="muted")
+            self.assessment.render(panel)
         cw = int(self.c.winfo_width())
         ch = int(self.c.winfo_height())
         if cw < 180 or ch < 100:
@@ -977,7 +1231,7 @@ class CanvasReviewEditor:
                                fill="#F9CE55", width=1.4,
                                tags=(TAG,"overlap_hud","overlap_hud_tether"))
         self.c.create_rectangle(left, badge_y, left+badge_w, badge_y+badge_h,
-                                fill="#081925", outline="#FFD400", width=1.5,
+                                fill="#081925", outline="#FF3B5C" if status == "FP" else "#FFD400", width=1.5,
                                 tags=(TAG,"overlap_hud","overlap_hud_badge"))
         for i, line in enumerate(lines):
             self.c.create_text(left+9, badge_y+12+i*21, text=line, anchor="w",
@@ -985,11 +1239,17 @@ class CanvasReviewEditor:
                                fill="#FFFFFF" if i==0 else "#E7F2FF",
                                tags=(TAG,"overlap_hud","overlap_hud_text"))
 
-    def hit(self, x, y, badge=True):
+    def hit(self, x, y, badge=True, *, prefer_stack=False):
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_clean_view import hit
+            return hit(self,x,y,prefer_stack=prefer_stack)
+        from .mobile_canvas_stacks import enhanced,hit as stack_hit
+        if self.mode!='draw' and enhanced(self):return stack_hit(self,x,y)
         s = self._read()
         if not s or self.h._image_entry != s["image_entry"] or self.h._view_center is None:
             return None
         objects = [o for o in s["objects"] if not o.get("post_nms_suppressed", False)]
+        objects.sort(key=lambda o:o['object_id']==self.selected)  # reversed body hit gives explicit selection priority
         # Only the explicitly selected child has draggable handles. Their
         # outside half and paint/hit priority are retained; hover owns no handle.
         if self.mode == "edit" and self.selected:
@@ -1034,15 +1294,27 @@ class CanvasReviewEditor:
             return False
         gid=self.h.current_invocation
         before=copy.deepcopy(self._read())
+        revision_before=self.h.session.review.review_revision
         self.busy=True
         try:
             value=action()
         except (ValueError, OSError, KeyError, TypeError) as e:
+            from ..ranking.mobile_manual_frame_guard import GTRCollisionError
+            if isinstance(e,GTRCollisionError):
+                if len(self.points)==4:self.points.pop()
+                from .mobile_canvas_reservation import handle
+                self.busy=False;handle(self,e.reference)
+                return False
             self.message("Nie zapisano: "+str(e))
             return False
         finally:
             self.busy=False
+        if self.h.session.review.review_revision==revision_before:
+            self.message('Nie zmieniono zapisanej oceny.')
+            return value if value is not None else True
+        self.collision_warning.clear()
         if remember:
+            self.shift_preview.clear()
             self.undo_stack.setdefault(gid,[]).append(before)
             self.undo_stack[gid]=self.undo_stack[gid][-30:]
             self.redo_stack[gid]=[]
@@ -1067,7 +1339,7 @@ class CanvasReviewEditor:
         h=self.h
         if h._closed:
             return
-        if self.entry is not None or self.points or self.drag or h._saving or self.in_refresh:
+        if self.entry is not None or self.mode=='draw' or self.points or self.drag or h._saving or self.in_refresh:
             self.refresh_after=self.c.after(650,self.refresh_results)
             return
         self.in_refresh=True
@@ -1082,11 +1354,27 @@ class CanvasReviewEditor:
         h._change(lambda:None, save_draft=False, after=after)
 
     def draw_toggle(self,event=None):
+        if event is not None and self._is_typing_shortcut(getattr(event,'widget',None)):
+            return None
         if event is not None and getattr(event,"state",0)&4:
             return "break"
         if not self.finish_entry() or not self.available():
             return "break"
+        self.shift_preview.clear()
+        from .mobile_canvas_draw_target import resolve
+        try:target=resolve(self) if self.mode!='draw' else None
+        except (ValueError,KeyError,TypeError,OSError) as exc:
+            self.message(str(exc));return 'break'
+        if target and target['kind']=='focus':
+            from .mobile_canvas_reservation import handle
+            handle(self,target['reference']);return 'break'
+        self.collision_warning.clear()
+        self.draw_target=target
+        self.draw_reference_target=((target['gid'],target['oid'],target['plate_id'])
+                                    if target and target['kind']=='complete' else None)
         self.mode="select" if self.mode=="draw" else "draw"
+        self._geometry_layer_state=None
+        self.gt_focus_id=''
         self.selected=self.hover=""
         self.points=[]; self.pointer=None; self.drag=None
         self._click_candidate = None
@@ -1153,32 +1441,45 @@ class CanvasReviewEditor:
             return tuple(hover)
         return actual
 
-    def _choose_plate(self, oid, *, toggle=False):
+    def _choose_plate(self, oid, *, toggle=False, source=False):
+        if oid!=self.selected or toggle:self._geometry_layer_state=None
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_clean_view import eligible
+            if not eligible(self,oid):return False
+            if oid!=self.selected or toggle:self.gt_focus_id=''
+            self._s_hover_hit=None
         """Select one operator quad without editing its saved GT or MT."""
         scene = self._read()
-        if oid and not any(o["object_id"] == oid and
-                           not o.get("post_nms_suppressed", False)
+        if oid and not any(o["object_id"] == oid
                            for o in (scene or {}).get("objects", ())):
             return False
         self.selected = "" if toggle and oid == self.selected else oid
+        self._bad_mt_selection=((id(self.h.session),self.h.current_invocation,self.selected)
+                                if source and self.selected else None)
+        self.model_location_target = ''
         self.mode = "edit" if self.selected else "select"
         self.hover = ""
         self.h._view_drag_at = None
         if not self.selected:
             self.clear_tree_selection()
+        elif not source and hasattr(self,'navigator'):
+            # Existing S/N/explicit object selection targets the operator's
+            # reference; source inspection uses select_layer(..., BBOX/POSE).
+            from .mobile_canvas_geometry_layers import model as layer_model
+            value=layer_model(self)
+            if value and any(l['kind']=='GTR' for l in value['layers']):
+                self._geometry_layer_state=(value['identity'],'GTR')
         self.sync()
         self.request_overlay()
-        self.message("Ramka wybrana. Cztery białe uchwyty można przeciągać LPM. "
-                     "Środek obrazu przeciągnij, aby go przesunąć."
+        self.message("Wybrano ramkę — przeciągnij biały uchwyt, aby poprawić narożnik GT."
                      if self.selected else
-                     "Ramka odznaczona. Kliknij obrys lub najedź na ramkę i naciśnij S.")
+                     "Wybierz obrys kliknięciem lub klawiszem S.")
         return True
 
     def select_mode(self, event=None):
         """S at the real pointer location toggles the editable quad."""
         # The real Windows session recorded S with Tk state=8 (Mod1).
-        # S and A share this guard: reject Ctrl (bit 4) only, while
-        # still requiring an eligible pointer and no active GT input.
+        # Reject Ctrl (bit 4) and leave typing in the GT field untouched.
         if event is not None and getattr(event, "state", 0) & 4:
             return "break"
         if self.drag:
@@ -1205,17 +1506,27 @@ class CanvasReviewEditor:
         # avoids Windows DPI offsets turning S into a silent miss on thin quads.
         cached = getattr(self, "_s_hover_hit", None)
         target = None
+        if hasattr(self,'navigator'):
+            from .mobile_canvas_navigator import selection_hit
+            target=selection_hit(self,*xy)
         if cached is not None:
             group_id, oid, hover_xy = cached
             if (group_id == self.h.current_invocation
                     and math.dist(xy, hover_xy) <= 36
                     and any(o["object_id"] == oid and not o.get("post_nms_suppressed", False)
                             for o in scene["objects"])):
-                target = (oid, "body", None)
+                if hasattr(self,'navigator') and (target is None or target[1]!='layer:GTR'):
+                    hover_target=selection_hit(self,*hover_xy)
+                    if hover_target and hover_target[1]=='layer:GTR':target=hover_target
+                if target is None:target = (oid, "body", None)
         if target is None:
             target = self.hit(*xy, badge=True)
         if target:
-            self._choose_plate(target[0], toggle=True)
+            toggle=True
+            if hasattr(self,'navigator') and target[1]=='layer:GTR':
+                from .mobile_canvas_geometry_layers import editable
+                toggle=target[0]==self.selected and self.mode=='edit' and editable(self)
+            self._choose_plate(target[0], toggle=toggle)
         else:
             self.message("Najedź kursorem na ramkę tablicy i naciśnij S.")
         return "break"
@@ -1250,47 +1561,125 @@ class CanvasReviewEditor:
             self.selection_release_after = None
         self.selection_key_down = False
 
+    def double_press(self,event):
+        from .mobile_canvas_stacks import control_hit
+        from .mobile_canvas_geometry_layers import contains
+        return self.press(event) if self.mode=='draw' or control_hit(self,event.x,event.y) or contains(self,event.x,event.y) else 'break'
+
     def press(self,event):
         self._click_candidate = None
-        if not self.finish_entry() or not self.available():
+        self._click_layer = None
+        from .mobile_canvas_geometry_layers import click as layer_click
+        if layer_click(self,event):return 'break'
+        from .mobile_canvas_stacks import control_hit,cycle
+        control=control_hit(self,event.x,event.y)
+        if control and self.mode!='draw' and not self.gt_focus_id:
+            # Navigation never commits an open GT text edit or changes history.
+            if self.entry is not None:return 'break'
+            self.c.focus_set()
+            cycle(self,event,back=control[1],oid=control[0])
+            return 'break'
+        if not self.finish_entry():
             return "break"
+        if not self.available():
+            self._inspect_history(event)
+            return "break"
+        from .mobile_canvas_stacks import associate_click
+        if associate_click(self,event):return 'break'
         self.c.focus_set()
         if self.mode=="draw":
+            self.pointer_canvas=(event.x,event.y)
             p=self.to_source(event.x,event.y)
             l,t,r,b=self._read()["roi"]
             if not (l<=p[0]<=r and t<=p[1]<=b):
                 self.message("Brakujące ramki rysujemy tylko w analizowanym ROI.")
+                return "break"
+            from ..ranking.mobile_manual_frame_guard import find_point_collision,require_free_manual_area,GTRCollisionError
+            exclude=self.draw_target['plate_id'] if self.draw_target else None
+            other=self.to_source(event.x+1,event.y)
+            tolerance=math.hypot(other[0]-p[0],other[1]-p[1])
+            conflict=find_point_collision(self._read(),p,exclude_plate_id=exclude,tolerance=tolerance,
+                                          session=self.h.session,gid=self.h.current_invocation)
+            if conflict:
+                from .mobile_canvas_reservation import handle
+                handle(self,conflict)
+                from .mobile_canvas_guides import update_draft
+                update_draft(self)
                 return "break"
             if len(self.points)<4:
                 self.points.append(p)
             if len(self.points)==4:
                 try:
                     quad=core.ordered_quad(self.points,self._read()["image_size"],self._read()["roi"])
+                    require_free_manual_area(self._read(),quad,exclude_plate_id=exclude,session=self.h.session,gid=self.h.current_invocation)
                 except (ValueError,TypeError) as e:
                     self.points.pop()
-                    self.message(str(e)+" · popraw czwarty punkt albo Esc.")
+                    if isinstance(e,GTRCollisionError):
+                        from .mobile_canvas_reservation import handle
+                        handle(self,e.reference)
+                    else:self.message(str(e)+" · popraw czwarty punkt albo Esc.")
                     self.request_overlay()
                     return "break"
-                oid=self._commit(lambda:core.add_plate(self.h.session,self.h.current_invocation,quad),"Dodano tablicę pominiętą przez MT")
+                target=self.draw_reference_target
+                if self.draw_target and self.draw_target['kind']=='create':
+                    from ..ranking.mobile_mt_geometry_layers import create_reference
+                    intent=self.draw_target
+                    oid=self._commit(lambda:create_reference(self.h.session,intent['gid'],intent['oid'],quad,
+                        expected_binding=intent['binding'],expected_revision=intent['revision']),
+                        'Utworzono jedną GTR dla wybranego MT')
+                elif self.draw_target and self.draw_target['kind']=='replace':
+                    from ..ranking.mobile_candidate_stacks import redraw_reference
+                    intent=self.draw_target
+                    oid=self._commit(lambda:redraw_reference(self.h.session,self.h.current_invocation,intent,quad),
+                                     'Zastąpiono obrys wybranej GTR')
+                elif target:
+                    from ..ranking.mobile_candidate_stacks import complete_bbox_reference
+                    gid,oid,pid=target
+                    if gid!=self.h.current_invocation:
+                        self.message('Zmieniono obraz; anuluj szkic przez Esc. Nie zapisano GT.')
+                        return 'break'
+                    oid=self._commit(lambda:complete_bbox_reference(self.h.session,gid,oid,quad,expected_plate_id=pid,operator_draw=True),
+                                     'Uzupełniono obrys istniejącej GT przy BBOX MT')
+                else:
+                    oid=self._commit(lambda:core.add_plate(self.h.session,self.h.current_invocation,quad,
+                                      partial_review=True),"Dodano poprawną ramkę tablicy operatora")
                 if oid:
                     self.selected=oid
+                    self.draw_reference_target=None
+                    self.draw_target=None
                     self.points=[];self.pointer=None;self.mode="edit"
                     self.sync()
             self.request_overlay()
             return "break"
         self.pointer_canvas = (event.x, event.y)
-        target=self.hit(event.x,event.y)
+        target=self.hit(event.x,event.y,prefer_stack=True)
         if target:
             oid,kind,index=target
             if kind=="badge":
                 # A text editor owns its target; it does not change geometry selection.
+                from .mobile_canvas_info_badge import activate_inspection
+                if not activate_inspection(self,oid):return 'break'
+                self._bad_mt_selection=None
                 self.start_entry(oid)
             elif kind=="corner" and self.mode=="edit" and oid==self.selected:
+                self._bad_mt_selection=None
+                self.gt_focus_id=oid
+                self._s_hover_hit=None
+                self.message('Korekta GTR — przeciągnij narożnik; GTZ edytujesz na badge. Esc kończy korektę.')
                 obj=next(o for o in self._read()["objects"] if o["object_id"]==oid)
-                self.drag=dict(oid=oid,index=index,quad=copy.deepcopy(obj["quad"]),before=copy.deepcopy(obj["quad"]))
-            elif kind in ("body", "mz_badge"):
+                from .mobile_canvas_reservation import focused_row
+                from .mobile_canvas_clean_view import records
+                reserved=focused_row(self,records(self));q=reserved['gt'] if reserved else obj['quad']
+                self.drag=dict(oid=oid,index=index,quad=copy.deepcopy(q),before=copy.deepcopy(q))
+                if hasattr(self,'navigator'):
+                    self.collision_warning.clear();self.corner_pulse.clear()
+                    from .mobile_canvas_corner_drag import paint as paint_drag
+                    if paint_drag(self,publish=False):
+                        self.request_overlay();return 'break'
+            elif kind in ("body", "mz_badge") or kind.startswith('layer:'):
                 # A short click selects; a genuine drag pans the image.
                 self._click_candidate = (oid, event.x, event.y)
+                self._click_layer=kind.split(':',1)[1] if kind.startswith('layer:') else None
                 self.h._view_drag_at=(event.x,event.y,self.h._view_center)
             else:
                 self.h._view_drag_at=(event.x,event.y,self.h._view_center)
@@ -1303,12 +1692,15 @@ class CanvasReviewEditor:
 
     def motion(self,event):
         if self.drag:
+            self.pointer_canvas=(event.x,event.y)
             p=self.to_source(event.x,event.y)
             s=self._read(); w,h=s["image_size"]
             obj=next(o for o in s["objects"] if o["object_id"]==self.drag["oid"])
             l,t,r,b=s["roi"] if not obj["parent_id"] else (0,0,w,h)
             p=(max(l,min(r,p[0])),max(t,min(b,p[1])))
             self.drag["quad"][self.drag["index"]]=list(p)
+            from .mobile_canvas_corner_drag import paint as paint_drag
+            paint_drag(self,publish=False)
             self.request_overlay()
             return "break"
         if self._click_candidate is not None:
@@ -1324,11 +1716,14 @@ class CanvasReviewEditor:
         if self.drag:
             state=self.drag
             if state["quad"] != state["before"]:
-                ok=self._commit(lambda:core.correct_plate(self.h.session,self.h.current_invocation,state["oid"],state["quad"]),"Zapisano korektę ramki potomnej")
+                from .mobile_canvas_stacks import write_reference
+                ok=self._commit(lambda:write_reference(self,state['oid'],quad=state['quad']),"Zapisano korektę referencji GT")
                 if not ok:
                     self.message("Nie zapisano nieprawidłowego obrysu. Przywrócono ostatnią poprawną ramkę.")
             self.drag=None
             self.request_overlay()
+        if not was_dragging_corner:
+            self.pan_release(event)
         self.h._view_drag_at=None
         # Select only after a stationary click. Moving the contour itself
         # continues to pan without changing the selected tablicę.
@@ -1336,7 +1731,15 @@ class CanvasReviewEditor:
                 and event is not None):
             oid, x0, y0 = click_candidate
             if math.hypot(event.x-x0, event.y-y0) <= 5:
-                self._choose_plate(oid)
+                kind=getattr(self,'_click_layer',None)
+                if kind:
+                    from .mobile_canvas_navigator import select_layer
+                    from .mobile_canvas_clean_view import records
+                    row=next((r for r in records(self) if r['oid']==oid),None)
+                    if row and row['candidate'] and select_layer(self,kind,oid):return 'break'
+                boxes=[getattr(self,'mt_source_badge_hits',{}).get(oid),getattr(self,'mt_stack_badges',{}).get(oid)]
+                source=any(box and box[0]<=x0<=box[2] and box[1]<=y0<=box[3] for box in boxes)
+                self._choose_plate(oid,source=source)
         return "break"
 
     def hover_motion(self, event):
@@ -1348,37 +1751,93 @@ class CanvasReviewEditor:
         if self.mode == "draw":
             self._s_hover_hit = None
             self.pointer = self.to_source(event.x, event.y)
-            self.request_overlay()
+            if hasattr(self,'clean_bar'):
+                from .mobile_canvas_guides import update_draft
+                update_draft(self)
+            else:self.request_overlay()
         elif not self.drag:
             target = self.hit(event.x, event.y, badge=True)
-            self._s_hover_hit = ((self.h.current_invocation, target[0],
-                                  (event.x, event.y)) if target else None)
-            cursor = "fleur" if target and target[1] == "corner" else "hand2" if target and target[1] in ("badge", "body", "mz_badge") else "arrow"
+            selection_target=target
+            if hasattr(self,'navigator'):
+                from .mobile_canvas_navigator import selection_hit
+                selection_target=selection_hit(self,event.x,event.y)
+            self._s_hover_hit = ((self.h.current_invocation, selection_target[0],
+                                  (event.x, event.y)) if selection_target else None)
+            cursor = "fleur" if target and target[1] == "corner" else "hand2" if target and (target[1] in ("badge", "body", "mz_badge") or target[1].startswith('layer:')) else "arrow"
             if self.c.cget("cursor") != cursor:
                 self.c.configure(cursor=cursor)
 
     def right_press(self, event):
         """One right-click on a plate toggles its error flag immediately.
 
-        PPM does not require a previous S/LPM selection. Empty canvas still
-        pans as before. Suppressed RAW is not selectable or mutable.
+        PPM directly targets the visible FINAL contour. Empty canvas still
+        pans; correcting GT does not expose hidden inference frames.
         """
+        # Refuse a GTR hit before finishing text, clearing D, selecting an MT,
+        # or touching undo/redo. Shared relation IDs do not identify a layer.
+        clean_oid=None
+        from .mobile_canvas_geometry_layers import contains as layer_badge_hit
+        if layer_badge_hit(self,event.x,event.y):return 'break'
+        if hasattr(self,'clean_bar') and not getattr(event,'state',0)&4:
+            from .mobile_canvas_clean_view import right_hit
+            try:clean_oid=right_hit(self,event.x,event.y)
+            except ValueError as exc:
+                self.message(str(exc));return 'break'
         if not self.finish_entry():
             return "break"
+        if getattr(event,'state',0)&4:
+            from .mobile_canvas_stacks import context_menu
+            context_menu(self,event)
+            return 'break'
         if self.mode == "draw":
             return self.escape()
         if not self.available():
             return "break"
         self.pointer_canvas = (event.x, event.y)
+        if hasattr(self,'clean_bar'):
+            oid=clean_oid
+            if oid:
+                from ..ranking.mobile_candidate_stacks import toggle_unassociated
+                self._click_candidate=None;self.h._view_drag_at=None
+                self.selected=oid;self.mode='edit';self.show_fp_var.set(True)
+                self._bad_mt_selection=(id(self.h.session),self.h.current_invocation,oid)
+                self._commit(lambda:toggle_unassociated(self.h.session,self.h.current_invocation,oid,
+                             partial_review=True),'Zmieniono decyzję wskazania MT FINAL')
+            else:self.h._view_drag_at=(event.x,event.y,self.h._view_center)
+            return 'break'
         target = self.hit(event.x, event.y)
+        from .mobile_canvas_stacks import ambiguous
+        if target and ambiguous(self,event.x,event.y,target):
+            self.message('Wybierz podramkę (Z/X lub badge) przed decyzją PPM.')
+            return 'break'
+        from .mobile_canvas_stacks import enhanced,view,members
+        if target and enhanced(self):
+            v=view(self)
+            candidate=next((c for c in v['candidates'] if c['object_id']==target[0]),None)
+            if candidate:
+                try:core.require_source_final(self.h.session,self.h.current_invocation,candidate['object_id'])
+                except ValueError as exc:
+                    self.message(str(exc));return 'break'
+                if not self.selected and candidate['plate_id'] and len(members(v,candidate['plate_id']))>1:
+                    self.message('Wybierz podramkę (Z/X) przed decyzją PPM.');return 'break'
+                oid= self.selected if self.selected==target[0] else target[0]
+                from ..ranking.mobile_candidate_stacks import toggle_unassociated
+                self.selected=oid;self.mode='edit'
+                self._bad_mt_selection=(id(self.h.session),self.h.current_invocation,oid)
+                self._commit(lambda:toggle_unassociated(self.h.session,self.h.current_invocation,oid),'Zmieniono powiązanie wskazania z tablicą')
+                return 'break'
         if target:
             oid = target[0]
             obj = next((o for o in self._read()["objects"]
                         if o["object_id"] == oid and not o.get("post_nms_suppressed", False)), None)
             if obj is not None:
+                try:core.require_source_final(self.h.session,self.h.current_invocation,oid)
+                except ValueError as exc:
+                    self.message(str(exc));return 'break'
                 self._click_candidate = None
                 self.h._view_drag_at = None  # PPM on a frame must not initiate pan.
                 self.selected = oid
+                self._bad_mt_selection=(id(self.h.session),self.h.current_invocation,oid)
                 self.mode = "edit"
                 description = ("Cofnięto oznaczenie błędnej ramki" if obj["error"] else
                                "Oznaczono wskazaną ramkę jako błędną")
@@ -1397,11 +1856,15 @@ class CanvasReviewEditor:
             x,y,center=state
             if center:
                 z=max(self.h._view_pixel_scale,1e-12)
-                self.h._view_center=(center[0]-(event.x-x)/z,center[1]-(event.y-y)/z)
-                self.h._paint_image()
+                from .mobile_canvas_pan import request_pan
+                request_pan(self.h,(center[0]-(event.x-x)/z,center[1]-(event.y-y)/z))
         return "break"
 
     def pan_release(self,event=None):
+        from .mobile_canvas_pan import finish_pan
+        if event is not None:
+            self.pan_motion(event)  # Include the last pointer position before release.
+        finish_pan(self.h)
         self.h._view_drag_at=None
         return "break"
 
@@ -1413,10 +1876,21 @@ class CanvasReviewEditor:
         return "break"
 
     def escape(self,event=None):
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_info_badge import remember_on_escape
+            remember_on_escape(self)
+        self.collision_warning.clear()
+        self.corner_pulse.clear()
+        self.shift_preview.clear()
+        self.gt_focus_id='';self._reserved_edit=None;self._geometry_layer_state=None
+        self.history_selected = ''
         if self.entry is not None:
             self.entry_var.set(self.entry_original)
             self.destroy_entry()
+            self.c.focus_set()
         self.points=[];self.pointer=None;self.drag=None;self.mode="select"
+        self.draw_reference_target=None
+        self.draw_target=None
         self._click_candidate = None
         self.selected=self.hover=""
         self.pending_tree_target = None
@@ -1429,6 +1903,16 @@ class CanvasReviewEditor:
         return "break"
 
     def start_entry(self,oid):
+        requested_oid=oid
+        from .mobile_canvas_stacks import enhanced,view
+        if enhanced(self):
+            v=view(self);candidate=next((c for c in v['candidates'] if c['object_id']==oid),None)
+            if candidate and candidate['plate_id']:
+                p=v['plates'][candidate['plate_id']]
+                registry=self._read().get('physical_gt_v1',{})
+                ref=next((plate['reference_object_id'] for plate in registry.get('plates',[]) if plate['gt_id']==candidate['plate_id']),None)
+                oid=ref or p.get('primary_object_id') or p['origin_object_id']
+        if self.gt_focus_id not in ('',requested_oid,oid):self.gt_focus_id=''
         if not self.available():
             return
         policy = self._gt_policy(oid)
@@ -1448,7 +1932,7 @@ class CanvasReviewEditor:
         self.entry_target=(self.h.current_invocation,oid)
         self.entry_original=obj["gt_text"]
         self.entry_var=tk.StringVar(value=obj["gt_text"])
-        self.entry=tk.Entry(self.c,textvariable=self.entry_var,font=("Segoe UI",11,"bold"),
+        self.entry=tk.Entry(self.c.master if hasattr(self,'clean_bar') else self.c,textvariable=self.entry_var,font=("Segoe UI",11,"bold"),
             bg="#302618",fg="#FFE2AE",insertbackground="#FFFFFF",relief="flat")
         # Widget+class only: ordinary text editing remains, global Z2/app
         # shortcuts cannot consume D/S/Q/E typed as a plate number.
@@ -1457,14 +1941,28 @@ class CanvasReviewEditor:
         self.entry.bind("<KP_Enter>",lambda e:self.entry_enter())
         self.entry.bind("<Escape>",self.escape)
         self.entry.bind("<FocusOut>",lambda e:self.finish_entry())
+        self.entry.bind('<Tab>',lambda e:self.entry_tab(bool(e.state & 1)))
+        self.entry.bind('<Shift-Tab>',lambda e:self.entry_tab(True))
+        self.entry.bind('<ISO_Left_Tab>',lambda e:self.entry_tab(True))
         self.entry.bind("<KeyRelease>",self.entry_typed)
         self.entry.bind("<Button-3>",lambda e:self.unreadable())
         self.request_overlay()
         x,y=self.card_positions.get(oid,(4,4))
-        self.entry.place(x=x+1,y=y+25,width=192,height=23)
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_clean_view import place_entry
+            self.overlay();place_entry(self)
+        else:self.entry.place(x=x+1,y=y+25,width=192,height=23)
         self.entry.focus_set();self.entry.selection_range(0,"end")
         self.sync()
-        self.message("GT na badge: Enter lub wyjście zapisuje; Esc cofa do ostatniego zapisu. PPM w polu: nieczytelna tablica.")
+        self.message("Edytujesz GTZ · Enter lub wyjście zapisuje; Esc cofa do ostatniego zapisu. PPM w polu: nieczytelna tablica.")
+
+    def entry_tab(self, backwards=False):
+        if self.entry is None:return 'break'
+        target=self.entry.tk_focusPrev() if backwards else self.entry.tk_focusNext()
+        if self.finish_entry() and target is not None:
+            try:target.focus_set()
+            except tk.TclError:pass
+        return 'break'
 
     def _gt_policy(self, oid):
         from ..ranking.mobile_canvas_presentation import execution_state, plate_review_state
@@ -1476,7 +1974,12 @@ class CanvasReviewEditor:
             execution = execution_state(h.session, h.current_invocation,
                 image_entry=h._image_entry, image_size=h._image_source_size)
             obj = next((o for o in scene["objects"] if o["object_id"] == oid), None)
-            return plate_review_state(scene, obj, execution)
+            policy=plate_review_state(scene, obj, execution)
+            if policy['gt_editable'] and obj and not obj.get('quad'):
+                policy=dict(policy,gt_editable=False,gt_reason=
+                    'MT nie ma poprawnych narożników, a wskazanie nie ma obrysu GT. '
+                    'Wybierz poprawny BBOX i naciśnij D, aby uzupełnić obrys GT; istniejącą ramkę powiąż przez Ctrl+PPM.')
+            return policy
         except (ValueError, KeyError, TypeError, AttributeError):
             return dict(gt_editable=False, gt_reason="Nie potwierdzono końcowej detekcji MT. Historyczne GT zachowano; edycja niedostępna.")
 
@@ -1524,7 +2027,8 @@ class CanvasReviewEditor:
             return False
         value=self.entry_var.get()
         if value!=self.entry_original:
-            if not self._commit(lambda:core.set_text(self.h.session,gid,oid,value),"Zapisano GT wybranej tablicy"):
+            from .mobile_canvas_stacks import write_reference
+            if not self._commit(lambda:write_reference(self,oid,text=value),"Zapisano GT wybranej tablicy"):
                 return False
             self.entry_original=value
         if close:
@@ -1560,12 +2064,17 @@ class CanvasReviewEditor:
         if self.entry_target != (gid, oid) or not self._guard_gt_entry():
             self.sync()
             return "break"
-        if reason and self._commit(lambda:core.set_text(self.h.session,gid,oid,"",reason),"Zapisano przyczynę nieczytelności"):
+        from .mobile_canvas_stacks import write_reference
+        if reason and self._commit(lambda:write_reference(self,oid,text='',reason=reason),"Zapisano przyczynę nieczytelności"):
             self.destroy_entry()
             self.sync()
         return "break"
 
     def prepare_navigation(self):
+        from .mobile_canvas_pan import cancel_pan
+        cancel_pan(self.h)
+        self.collision_warning.clear()
+        self.shift_preview.clear()
         if self.in_refresh:
             return True
         if self.points:
@@ -1578,11 +2087,63 @@ class CanvasReviewEditor:
         return self._flush_exclusion_reason()
 
     def confirm(self, event=None):
+        if event is not None:
+            if (not self._event_in_review_window(event)
+                    or self._is_typing_shortcut(getattr(event, 'widget', self.c))):
+                return None
+            if getattr(event, 'keysym', '') == 'space' and getattr(event, 'state', 0) & 4:
+                return None
+        if getattr(event, 'keysym', '') == 'space':
+            if getattr(self, '_frame_space_down', False):
+                return 'break'
+            self._frame_space_down = True
+        if self.mode=='draw':
+            self.message('Dokończ ramkę lub anuluj szkic przed zatwierdzeniem.')
+            return 'break'
         if not self.prepare_navigation() or not self.available():
             return "break"
-        self.checked_var.set(not bool(self.checked_var.get()))
-        self.toggle_checked()
+        from ..ranking import mobile_canvas_partial_review as partial
+        current = partial.progress(self._read())
+        from .mobile_canvas_clean_view import selected,records
+        row=selected(self)
+        oid = self.selected
+        if not oid:
+            xy = self._canvas_hotkey_pointer(event)
+            target = self.hit(*xy,prefer_stack=True) if xy is not None else None
+            oid = target[0] if target else ''
+            if target:
+                badge=getattr(self,'_context_badge',None)
+                reference=target[1] in ('badge','corner','layer:GTR')
+                pid=badge['plate_id'] if reference and badge and badge['oid']==oid and badge['kind']=='GTR' else None
+                rows=records(self)
+                row=next((r for r in rows if r['pid']==pid and r['gt']),None) if pid else next(
+                    (r for r in rows if r['oid']==oid and (r['gt'] if reference else r['candidate'])),None)
+        if not oid:
+            if current['empty_eligible']:
+                return self.confirm_empty_image()
+            self.message('Wybierz ramkę tablicy lub najedź na nią i naciśnij Spację: zatwierdź skojarzone ramki.')
+            return 'break'
+        pid=row['pid'] if row and row['gt'] else None
+        if not pid and oid not in current['object_decisions']:
+            self.message('Wybierz GTR albo końcowe wskazanie modelu tej tablicy.')
+            return 'break'
+        self._commit(lambda:partial.confirm_stack(self.h.session,self.h.current_invocation,oid=oid if not pid else None,plate_id=pid),
+                     'Potwierdzono skojarzone ramki tablicy')
         return "break"
+
+    def release_frame_space(self, event=None):
+        self._frame_space_down = False
+        if getattr(event, 'keysym', '') == 'space' and not self._is_typing_shortcut(event.widget):
+            return 'break'
+
+    def confirm_empty_image(self):
+        if not self.prepare_navigation() or not self.available():
+            return 'break'
+        from ..ranking.mobile_canvas_partial_review import confirm_empty, progress
+        confirmed = progress(self._read())['empty_confirmed']
+        self._commit(lambda: confirm_empty(self.h.session, self.h.current_invocation),
+                     'Cofnięto potwierdzenie braku tablic' if confirmed else 'Potwierdzono: na obrazie nie ma tablic')
+        return 'break'
 
     def exclude_image(self):
         self.excluded_var.set(True)
@@ -1592,7 +2153,16 @@ class CanvasReviewEditor:
         if not self.prepare_navigation() or not self.available():
             return "break"
         ids=[o["object_id"] for o in self._read()["objects"] if not o.get("post_nms_suppressed", False)]
+        from .mobile_canvas_stacks import enhanced,view,active
+        if enhanced(self):
+            v=view(self)
+            ids=[(active(self,v,pid) or {}).get('object_id') or p['origin_object_id'] for pid,p in v['plates'].items()]
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_clean_view import records
+            ids=[r['oid'] for r in records(self)]
+            self.gt_focus_id=''
         if ids:
+            self._bad_mt_selection=None
             self.selected=ids[(ids.index(self.selected)+1)%len(ids)] if self.selected in ids else ids[0]
             self.mode="edit"
             self.plate_fit_previous=None
@@ -1642,15 +2212,14 @@ class CanvasReviewEditor:
         return "break"
 
     def fit_plate_toggle(self, event=None):
-        """A / toolbar: fit hovered or selected GT quad, then restore view.
+        """A / toolbar: cycle physical plates and fit the next one, as in Z2.
 
         Same approach as Z2: bbox in original image pixels, 20% horizontal /
         25% vertical margin (at least 16 px), centering via actual renderer's
         _view_zoom / _view_center, no GT or prediction modification.
         """
         # The real Windows session recorded S with Tk state=8 (Mod1).
-        # S and A share this guard: reject Ctrl (bit 4) only, while
-        # still requiring an eligible pointer and no active GT input.
+        # A accepts Windows Mod1, but leaves Ctrl+A and GT typing untouched.
         if event is not None and getattr(event, "state", 0) & 4:
             return "break"
         if event is not None and self._is_typing_shortcut(getattr(event, "widget", self.c)):
@@ -1661,32 +2230,14 @@ class CanvasReviewEditor:
                 or tuple(getattr(self.h,"_image_source_size", ()) or ()) != tuple(scene["image_size"])):
             self.message("A: zbliżenie wymaga pełnej klatki z prawidłową geometrią.")
             return "break"
-        if self.plate_fit_active and self.plate_fit_gid == self.h.current_invocation:
-            previous = self.plate_fit_previous
-            self.plate_fit_active = False
-            self.plate_fit_gid = ""
-            self.plate_fit_previous = None
-            if previous:
-                self.h._view_zoom, self.h._view_center = previous
-                self.h._paint_image()
-            else:
-                self.h.fit_image()
-            self.message("Przywrócono widok sprzed zbliżenia (A).")
+        if self.drag or self.points or self.mode=='draw' or self.entry is not None:
+            self.message("A: najpierw zakończ lub anuluj edycję numeru, narożnika albo szkic.")
             return "break"
-        if self.drag:
-            self.message("A: najpierw zakończ przeciąganie narożnika.")
-            return "break"
-        xy = self._canvas_hotkey_pointer(event)
-        hovered = self.hit(*xy, badge=False) if xy is not None else None
-        qualified = [o for o in scene["objects"]
-                     if not o.get("post_nms_suppressed", False) and self._current_quad(o)]
-        oid = hovered[0] if hovered else self.selected
-        obj = next((o for o in qualified if o["object_id"] == oid), None)
-        if obj is None and len(qualified) == 1:
-            obj = qualified[0]
-        quad = self._current_quad(obj) if obj is not None else None
+        from . import mobile_canvas_plate_cycle as cycle
+        choices=cycle.targets(self);target=cycle.next_target(self,choices)
+        quad=target['quad'] if target else None
         if not quad:
-            self.message("A: wybierz ramkę (hover + S). Na zdjęciu jest kilka tablic.")
+            self.message("A: na tym obrazie nie ma ramek tablic do przełączania.")
             return "break"
         try:
             try:
@@ -1719,27 +2270,39 @@ class CanvasReviewEditor:
         except (TypeError, ValueError, IndexError, OverflowError, ZeroDivisionError):
             self.message("A: nie można dopasować tablicy. Sprawdź współrzędne jej narożników.")
             return "break"
-        self.plate_fit_previous = (self.h._view_zoom, tuple(self.h._view_center))
+        if not cycle.select(self,target):return 'break'
+        if not self.plate_fit_active or self.plate_fit_gid!=self.h.current_invocation:
+            self.plate_fit_previous = (self.h._view_zoom, tuple(self.h._view_center))
         self.plate_fit_active = True
         self.plate_fit_gid = self.h.current_invocation
         self.h._view_zoom = zoom
         self.h._view_center = center
         self.h._paint_image()
-        self.message("Dopasowano tablicę z marginesem jak w Z2. Ponowne A przywróci widok.")
+        self.message(f"Tablica {choices.index(target)+1}/{len(choices)} · A: następna tablica · F: cały obraz")
         return "break"
 
     def show_crop(self):
-        s=self._read()
-        obj=next((o for o in s["objects"] if o["object_id"]==self.selected),None) if s else None
-        if obj and obj["attempt_id"]:
-            self.h._source_frame_keep_on_selection=s["image_entry"]
-            self.h._multi_focus_attempt(obj["attempt_id"])
-            self.h._show_crop_preview()
+        # Resolve the selected source directly. Navigating the hidden record
+        # tree can load asynchronously and leave a different crop in its cache.
+        if not self._read() or self.mode=='draw' or self.drag:return
+        try:core.require_source_final(self.h.session,self.h.current_invocation,self.selected)
+        except (ValueError,KeyError,TypeError):return
+        obj=core._object(self._read(),self.selected)
+        attempt=self.h.session.attempts[obj['attempt_id']]
+        self.h._sync_crop_preview_source(attempt)
+        self.h._show_crop_preview()
 
     def undo(self,redo=False):
+        self.collision_warning.clear()
         if not self.prepare_navigation() or not self.available():
             return "break"
+        if self.mode=='draw':
+            self.mode='select';self.draw_target=None;self.draw_reference_target=None
         gid=self.h.current_invocation
+        from ..ranking.mobile_candidate_stacks import HISTORY,restore_history
+        if HISTORY in self.h.session.invocation_annotation(gid).get(core.KEY,{}):
+            self._commit(lambda:restore_history(self.h.session,gid,redo=redo),'Ponowiono wspólną GT' if redo else 'Cofnięto wspólną GT',remember=False)
+            return 'break'
         src=self.redo_stack if redo else self.undo_stack
         dst=self.undo_stack if redo else self.redo_stack
         stack=src.setdefault(gid,[])
@@ -1758,6 +2321,11 @@ class CanvasReviewEditor:
         return "break"
 
     def dispose(self):
+        from .mobile_canvas_pan import cancel_pan
+        cancel_pan(self.h)
+        self.collision_warning.clear()
+        self.corner_pulse.clear()
+        self.shift_preview.dispose()
         """Stop controller callbacks before the window and its Tcl commands die."""
         for name in ("entry_after", "refresh_after", "paint_after", "selection_release_after", "fit_release_after"):
             callback = getattr(self, name, None)
@@ -1790,6 +2358,9 @@ class CanvasReviewEditor:
                         self.c.unbind_class(tag, "<" + action + "-" + key + ">")
                     except (tk.TclError, AttributeError):
                         pass
+            for key in ('z','Z','y','Y'):
+                try:self.c.unbind_class(tag,'<Control-KeyPress-'+key+'>')
+                except (tk.TclError,AttributeError):pass
             self.shortcut_original_tags.clear()
             self.shortcut_tag = None
 
@@ -1803,28 +2374,102 @@ class CanvasReviewEditor:
 
     def update_report(self):
         from ..ranking.mobile_canvas_presentation import current_summary
+        from ..ranking.mobile_session_metrics import result_key
+        if hasattr(self.contexts,'live_metrics'):
+            self.contexts.live_metrics.render(self.h.stats.get('live_session_metrics_v1'),result_key(self.h.session))
         if not hasattr(self,"report_host") or self.h.session is None:
             return
         inv=self.inventory()
         self.update_header(inv)
         data = self.h.stats.get("canvas_review") or {}
+        mt = self.h.stats.get('mt_detection_evaluation_v1') or {}
+        if not data and (mt.get('session_id')==self.h.session.session_id
+                and mt.get('source_archive_sha256')==self.h.session.review.source_archive_sha256
+                and mt.get('review_revision')==self.h.session.review.review_revision):
+            data = core.summary(self.h.session)
         current = current_summary(data, self.h.session)
+        if current:
+            data = dict(data, mt_detection_evaluation_v1=mt)
         refreshing = not current and bool(data or self.in_refresh or self.refresh_after or self.h._saving)
         self.report_host.render(data if current else {}, inv, refreshing=refreshing)
         self.h.science_dashboard.render_canvas(data if current else None, inv,
             refreshing=refreshing, review_status=self.h.session.review.review_status)
 
+    def _render_contexts(self, model):
+        if hasattr(self,'clean_bar'):
+            from .mobile_canvas_clean_view import context,sync_image_actions
+            from ..ranking.mobile_session_metrics import result_key
+            value=context(self,model)
+            value.update(session_metrics=self.h.stats.get('live_session_metrics_v1'),
+                         session_metrics_key=result_key(self.h.session))
+            self.contexts.render(value)
+            sync_image_actions(self)
+            return
+        from ..ranking.mobile_canvas_presentation import review_contexts
+        data = review_contexts(self.h.session, self._read(), model, self.inventory())
+        if model.get('stack_caption'):data['object']=model['stack_caption']
+        from .mobile_canvas_stacks import view as stack_view
+        v=stack_view(self)
+        if v and v['conflicts']:data['object']+='\nKonflikt historycznych GT — zachowano dawny widok; wspólna edycja zablokowana.'
+        report = getattr(self.h, 'report', None)
+        session = self.h.session
+        if session and report and report.source_archive_sha256.lower() == session.review.source_archive_sha256.lower():
+            key = (str(report.report_id), report.source_archive_sha256.lower())
+            state = getattr(self.h.browser, '_comparison_verification', {}).get(key)
+            if state and state.state == 'STALE':data['session'] += ' · eksport nieaktualny'
+        self.contexts.render(data)
+
+    def _render_drag_geometry(self,scene):
+        """Only the selected four-corner preview changes before the save.
+
+        Do not rebuild diagnostics/history, MT totals or session widgets for
+        mouse pixels. The existing sync/worker publishes those after commit.
+        """
+        from ..ranking.mobile_canvas_presentation import geometry_assessment,percent
+        obj=next((o for o in scene['objects'] if o['object_id']==self.drag['oid']),None)
+        if obj is None:return
+        preview=getattr(self,'_clean_geometry_preview',None)
+        row=preview[2] if preview and preview[:2]==(self.cache_key,self.drag['oid']) else None
+        if row and not row['not_measurable_reason']:
+            # Keep the exact canonical diagnostic pair, including a secondary
+            # FINAL sharing this GT. Its detector duplicate status does not
+            # remove the existing, separate diagnostic geometry measurement.
+            try:
+                value=core.compare_mt_pose_to_gt(row['mt_quad'],self.drag['quad'],*scene['image_size'])
+                caption=f"Polygon IoU {percent(value['polygon_iou_pct'])} · NMCE {percent(value['nmce_pct'])} · niezapisana korekta"
+            except (ValueError,TypeError,KeyError,OverflowError):
+                caption='IoU / NMCE — nieocenialny obrys operatora'
+        else:
+            model=geometry_assessment(scene,obj,self._canvas_execution,live_quad=self.drag['quad'])
+            caption=model['geometry']
+            if model['geometry_status']=='LIVE':caption+=' · niezapisana korekta'
+        text='\n'.join('Położenie: '+caption if line.startswith('Położenie: ') else line
+                       for line in self.contexts.data.get('object','').split('\n'))
+        label=self.contexts.fields['object']
+        if label.cget('text')!=text:label.configure(text=text)
+
     def _build_panel(self, right):
-        from .mobile_canvas_ui import PlateAssessment
+        from .mobile_canvas_ui import PlateAssessment, CanvasDecisionPanel, ReviewContexts
         p = self.p
+        scroll = right.master
+        header_host = scroll.master
+        header_host.rowconfigure(0, weight=0)
+        header_host.rowconfigure(1, weight=1)
+        for child in header_host.winfo_children():
+            if child.winfo_manager() == 'grid':child.grid_configure(row=1)
+        self.contexts = ReviewContexts(header_host, p=p)
+        self.contexts.grid(row=0, column=0, columnspan=2, sticky='ew')
         self.panel = tk.Frame(right, bg=p["bg"], padx=1, pady=3)
         self.panel.grid(row=0, column=0, sticky="new")
-        ui_label(self.panel, "OCENA OBRAZU", p=p, bg=p["bg"], bold=True, size=10).pack(fill="x", pady=(0, 8))
+        ui_label(self.panel, "DZIAŁANIA I SZCZEGÓŁY", p=p, bg=p["bg"], bold=True, size=9).pack(fill="x", pady=(0, 4))
         self.status = ui_label(self.panel, "Wczytywanie…", p=p, bg=p["blue_bg"], fg=p["blue"],
                                bold=True, wrap=self.sidebar_width - 48)
         self.status.pack(fill="x", ipady=6)
+        self.decision_panel = CanvasDecisionPanel(self.panel, self, p=p)
         self.assessment = PlateAssessment(self.panel, p=p)
         self.assessment.pack(fill="x", pady=(7, 0))
+        self.assessment.plain.pack_forget()
+        self.assessment.on_render = self._render_contexts
         # Explain the causal chain *before* presenting a confirmation action.
         # Shown only if this scene contains a trace-backed 2->1 NMS result.
         self.reconciliation_box = tk.Frame(self.panel, bg=p["surface"], padx=11, pady=11,
@@ -1844,9 +2489,10 @@ class CanvasReviewEditor:
         options = dict(bg=p["bg"], fg=p["fg"], activebackground=p["bg"], activeforeground=p["fg"],
                        selectcolor=p["surface"], font=("Segoe UI", 10), anchor="w", bd=0,
                        highlightthickness=1, highlightbackground=p["bg"], highlightcolor=p["blue"])
-        self.approve = tk.Checkbutton(controls, text="Sprawdziłem tablice, ramki i numery GT", variable=self.checked_var,
+        self.approve = tk.Checkbutton(controls, text="Przejrzałem tablice, ramki i numery", variable=self.checked_var,
                                       command=self.toggle_checked, **options)
         self.approve.pack(fill="x")
+        self.approve.bind('<Configure>',lambda e:self.approve.configure(wraplength=max(120,e.width-36)))
         self.exclude = tk.Checkbutton(controls, text="Nie można ocenić całego obrazu", variable=self.excluded_var,
                                       command=self.toggle_excluded, **options)
         self.exclude.pack(fill="x", pady=(2, 0))
@@ -1865,7 +2511,7 @@ class CanvasReviewEditor:
         self.reason_entry.bind("<Return>", self.save_exclusion_reason)
         self.reason_entry.bindtags((str(self.reason_entry), self.reason_entry.winfo_class(), str(self.h.window)))
         self.reason_gid = ""
-        counts = tk.Frame(self.panel, bg=p["bg"])
+        counts = tk.Frame(self.assessment.technical.body, bg=p["bg"])
         counts.pack(fill="x", pady=(0, 6))
         counts.columnconfigure(0, weight=1, uniform="count")
         counts.columnconfigure(1, weight=1, uniform="count")
@@ -1901,12 +2547,15 @@ class CanvasReviewEditor:
         self.help_section = Disclosure(self.panel, "Skróty i obsługa", p=p)
         self.help_section.pack(fill="x", pady=(10, 6))
         for key, text in (("D", "Nowa tablica: 4 punkty"), ("Klik lub S", "Zaznacz ramkę; S również odznacza"),
+                          ('Z / X', 'W dół / w górę stosu ramek jednej tablicy; bez zapisu oceny'),
+                          ('Ctrl+klik badge MT', 'Przyjmij wybrany końcowy obrys jako referencję GT (ASSISTED)'),
+                          ('Ctrl+klik badge GT', 'Powiąż aktywny kandydat z tą tablicą; GT edytujesz tylko raz'),
                           ("LPM", "Przeciągnij zaznaczony narożnik"),
                           ("R", "Usuń ręczną ramkę / cofnij korektę MT"),
                           ("T", "Pokaż lub ukryj granicę ROI (tylko widok)"),
                           ("N", "Przejdź do następnej tablicy"),
                           ("PPM", "Jedno kliknięcie na ramce: oznacz błąd lub cofnij"),
-                          ("GT", "Kliknij dolny badge"), ("A · Q/E", "Zbliż tablicę · poprzedni/następny obraz"),
+                          ("GT", "Kliknij dolny badge"), ("A · Q/E", "Następna tablica + dopasowanie · poprzedni/następny obraz"),
                           ("Rolka · F", "Zoom · dopasuj obraz"), ("Ctrl+Z/Y", "Cofnij / ponów zmianę"),
                           ("V", "Przełącz: cała klatka / wejście MT"),
                           ("Esc", "Anuluj bieżącą edycję")):
@@ -1924,9 +2573,21 @@ class CanvasReviewEditor:
         self.pointer_canvas = None
         self._s_hover_hit = None
         self.hover = ""
+        from .mobile_canvas_guides import clear
+        clear(self)
         # Selection survives leaving the canvas; pointer motion never owns it.
 
     def remove_selected(self, event=None):
+        from .mobile_canvas_geometry_layers import editable
+        if hasattr(self,'navigator') and not editable(self):
+            self.message('BBOX i Pose są źródłowymi wynikami MT. Wybierz GTR (Z/X), aby cofnąć lub usunąć obrys operatora.')
+            return 'break'
+        from .mobile_canvas_stacks import view,members
+        v=view(self)
+        candidate=next((c for c in (v or {}).get('candidates',[]) if c['object_id']==self.selected),None)
+        if candidate and candidate['plate_id'] and len(members(v,candidate['plate_id']))>1:
+            self.message('R nie usuwa wspólnej GT. Skoryguj jej narożniki albo cofnij konkretną zmianę Ctrl+Z.')
+            return 'break'
         # Windows sends state=8 for normal hotkeys; only Ctrl inhibits R.
         if event is not None and getattr(event, "state", 0) & 4:
             return "break"
@@ -1953,6 +2614,12 @@ class CanvasReviewEditor:
         if not story:
             self.nms_action.pack_forget()
             self.reconciliation_box.pack_forget()
+            return
+        from .mobile_canvas_stacks import enhanced
+        if enhanced(self) and not scene.get('_post_nms_pending'):
+            self.reconciliation_box.pack_forget();self.nms_action.pack_forget()
+            self.assessment.fields['correction_history'].configure(text=story['title']+'\n'+story['body'])
+            self.assessment.fields['correction_history'].pack(fill='x')
             return
         self.reconciliation_title.configure(text=story["title"])
         self.reconciliation_body.configure(text=story["body"])
@@ -2042,7 +2709,7 @@ class CanvasReviewEditor:
         s = self._read()
         if not s or not s.get("_post_nms_pending"):
             return
-        if not self._confirm_reconciliation():
+        if len(s['parents']) == 2 and not self._confirm_reconciliation():
             return
         self._commit(lambda: core.accept_post_nms_raw_only(self.h.session, self.h.current_invocation),
             "Poprawiono wcześniejszą ocenę. Drugie wstępne wskazanie zachowano "
@@ -2119,13 +2786,22 @@ class CanvasReviewEditor:
     def _image_action(rows):
         """Human task, derived only from existing persisted review states."""
         if not rows:
-            return "Brak obrazu", "canvas_excluded"
+            return "Poza oceną", "canvas_excluded"
         if all(row["status"] == "EXCLUDED" for row in rows):
             return "Poza oceną", "canvas_excluded"
         if all(row["status"] == "READY" for row in rows):
-            return "Gotowe", "canvas_ready"
+            return "Zweryfikowany", "canvas_ready"
+        if all(row.get('progress', {}).get('complete') or row['status'] == 'EXCLUDED' for row in rows):
+            return "Zweryfikowany", "canvas_ready"
         if any(row.get("scene") and row["scene"].get("_post_nms_pending") for row in rows):
             return "Wyjaśnij rozbieżność", "canvas_error"
+        from ..ranking.mobile_canvas_presentation import review_progress
+        progress = [review_progress(row['scene']) for row in rows if row.get('scene')]
+        decisions = sum(p['decisions'] for p in progress)
+        if decisions:
+            return f'Decyzje: {decisions}', 'canvas_pending'
+        if any(p['unresolved'] for p in progress):
+            return 'Nie można ustalić', 'canvas_pending'
         if any(row.get("scene") and row["scene"].get("checked")
                and row["cells"][-1] != "✓" for row in rows):
             return "Uzupełnij dane", "canvas_pending"
@@ -2163,6 +2839,12 @@ class CanvasReviewEditor:
                 rows = [inv["groups"][gid] for gid in gids]
                 cells = core.merge_review_cells(row["cells"] for row in rows)
                 action, tag = self._image_action(rows)
+                if not rows or all(row.get('scene') is None for row in rows):
+                    from ..ranking.mobile_mt_history import history_evidence
+                    histories=[history_evidence(h.session,gid) for gid in subject_groups(h.session,key)]
+                    histories=[item for item in histories if item]
+                    if len(histories)==1:
+                        action=histories[0]['list_label']
                 label = f"Obraz {display_index:02d}  ·  {action}"
                 values = (f"{display_index:02d}",) + cells
                 desired.add(iid)
@@ -2196,20 +2878,20 @@ class CanvasReviewEditor:
         self.sync_tree_selection()
 
     def update_header(self, inv=None):
+        from ..ranking.mobile_canvas_presentation import progress_caption
         inv = inv or self.inventory()
         extra = f"  •  {inv['excluded']} poza oceną" if inv['excluded'] else ""
-        if inv['incomplete']:
-            extra += f"  •  braki danych: {inv['incomplete']}"
         if inv['unavailable']:
             extra += f"  •  tylko podgląd: {inv['unavailable']}"
-        self.h.progress_label.configure(text=(
-            f"{inv['inspected']}/{inv['total']} sprawdzonych  •  "
-            f"pozostało: {inv['remaining']}{extra}"))
+        self.h.progress_label.configure(text=progress_caption(inv)+extra)
         if hasattr(self.h, "form_status_label"):
             from ..ranking.mobile_verification_policy import verification_issues
             session = self.h.session
             complete = bool(session and not verification_issues(session))
-            if complete and session.review.review_status == "COMPLETED":
+            if getattr(session,'_history_inspection_only',False):
+                status, tone = "TYLKO HISTORIA", "amber"
+                self.h.progress_label.configure(text='Historia · brak obrazów dopuszczonych do oceny')
+            elif complete and session.review.review_status == "COMPLETED":
                 status, tone = "WERYFIKACJA ZATWIERDZONA", "green"
             elif complete:
                 status, tone = "GOTOWA DO ZATWIERDZENIA", "amber"
@@ -2316,6 +2998,11 @@ class CanvasReviewEditor:
         """Handle a Windows wheel delivered to the focused image over a side panel."""
         try:
             x,y=self.h.window.winfo_pointerxy()
+            if hasattr(self,'clean_bar'):
+                panel=self.h.review_sidebar_scroll
+                if (panel.winfo_ismapped() and panel.winfo_rootx()<=x<panel.winfo_rootx()+panel.winfo_width()
+                        and panel.winfo_rooty()<=y<panel.winfo_rooty()+panel.winfo_height()):
+                    return self.h._on_sidebar_wheel(event)
             areas=[(self.h.review_sidebar_scroll,self.h._on_sidebar_wheel),
                    (self.report_host.canvas,self.report_host.wheel)]
             if hasattr(self.h,"science_dashboard"):

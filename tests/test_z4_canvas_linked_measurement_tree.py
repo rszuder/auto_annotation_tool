@@ -36,6 +36,22 @@ def load_editor():
     # the existing event assertions and exercise that production helper too.
     from auto_annotation_tool.ranking.mobile_canvas_presentation import plate_review_state
     sys.modules[prefix+'.ranking.mobile_canvas_presentation'].plate_review_state=plate_review_state
+    # This isolated tree fixture has no archive/evidence contract. Historical
+    # inspection is covered by the native/real-source AKT89G tests.
+    history=types.ModuleType(prefix+'.ranking.mobile_mt_history')
+    history.history_evidence=lambda *a,**kw:None
+    sys.modules[history.__name__]=history
+    # This minimal legacy fixture intentionally has no session/source binding,
+    # so it cannot construct candidate stacks. Stack behavior is exercised on
+    # source-backed sessions by T01–T28; keep these event assertions unchanged.
+    stacks=types.ModuleType(prefix+'.gui.mobile_canvas_stacks')
+    stacks.view=lambda *a,**k:None
+    stacks.enhanced=stacks.paint=stacks.ambiguous=stacks.associate_click=lambda *a,**k:False
+    stacks.hit=stacks.cycle=lambda *a,**k:None
+    stacks.members=lambda *a,**k:[]
+    stacks.present=lambda editor,model:model
+    stacks.write_reference=lambda editor,oid,quad=None,text=None,reason='':core.correct_plate(editor.h.session,editor.h.current_invocation,oid,quad) if quad is not None else core.set_text(editor.h.session,editor.h.current_invocation,oid,text,reason)
+    sys.modules[stacks.__name__]=stacks
     ui=types.ModuleType(prefix+'.gui.mobile_canvas_ui')
     ui.palette=lambda *a,**k:{}
     ui.label=lambda *a,**k:None

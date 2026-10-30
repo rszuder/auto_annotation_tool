@@ -112,8 +112,9 @@ def test_hover_s_then_a_actual_native_renderer():
         assert 0 < min(p[1] for p in projected) < max(p[1] for p in projected) < canvas.winfo_height()
         tree.event_generate('<KeyRelease-a>');root.update()
         tree.event_generate('<KeyPress-a>');root.update()
-        assert not editor.plate_fit_active
-        assert (host._view_zoom,host._view_center)==start
+        assert editor.plate_fit_active and host._view_zoom > start[0]
+        editor.fit();root.update()
+        assert not editor.plate_fit_active and host._view_zoom==1
     finally:
         editor.dispose();root.destroy()
 
@@ -137,7 +138,9 @@ def test_global_fallback_from_new_focus_widget_and_toolbar_action():
         toggle.invoke();root.update()
         assert editor.plate_fit_active and host._view_zoom > start[0]
         toggle.invoke();root.update()
-        assert not editor.plate_fit_active and (host._view_zoom,host._view_center)==start
+        assert editor.plate_fit_active and host._view_zoom > start[0]
+        editor.fit();root.update()
+        assert not editor.plate_fit_active and host._view_zoom==1
     finally:
         editor.dispose();root.destroy()
 

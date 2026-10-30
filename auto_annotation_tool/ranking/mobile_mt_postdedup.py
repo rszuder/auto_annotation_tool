@@ -156,6 +156,81 @@ def eligible_suppressed_id(session, invocation_id):
     return evidence["suppressed_id"]
 
 
+def canvas_post_nms_proof(session, invocation_id):
+    """Keep historical 2->1 evidence stable; additionally prove one RAW rejection.
+
+    MZ can run only on retained post-dedup candidates in the archived static
+    pipeline. If every retained candidate has its own executed MZ/crop record,
+    the single remaining raw record is uniquely identified by subtraction.
+    NOT_RUN or overlap alone is never sufficient. No NMS is rerun here.
+    """
+    old = post_nms_proof(session, invocation_id)
+    if old:
+        return old
+    if getattr(session,'path',None) is None:return None
+    group = session.mt_invocations.get(invocation_id)
+    if not group or not group.executed or group.cancelled or group.execution_failed:
+        return None
+    from .mobile_source_frame_roi import source_invocation_context
+    if not source_invocation_context(group.records, invocation_id, session.entry_names):
+        return None
+    rows = list(group.records)
+    raw = len(rows)
+    if raw < 2 or group.detection_count != raw:
+        return None
+    indices=[_source_integer(r.get('mt_detection_index')) for r in rows]
+    if any(i is None for i in indices) or sorted(indices) != list(range(raw)):
+        return None
+    key = tuple(_source_integer(rows[0].get(k)) for k in ('source_sequence','source_timestamp_nanos','scene_generation'))
+    if any(v is None for v in key):return None
+    if any(tuple(_source_integer(r.get(k)) for k in ('source_sequence','source_timestamp_nanos','scene_generation')) != key for r in rows):
+        return None
+    stat = session.path.stat()
+    matches = _trace_index(str(session.path),session.bundle.source_archive_sha256,stat.st_size,stat.st_mtime_ns).get(key,[])
+    if len(matches) != 1:return None
+    trace = matches[0]; counters = trace.get('counters',{})
+    expected = dict(plate_detections_raw=raw,plate_detections_after_dedup=raw-1,
+                    plate_detections_suppressed=1,mt_runs_this_frame=1,mz_runs=raw-1)
+    if any(_source_integer(counters.get(k)) != v for k,v in expected.items()):return None
+    if any(_source_integer(r.get(k)) != _source_integer(trace.get(k)) or _source_integer(r.get(k)) is None
+           for r in rows for k in ('visual_epoch','camera_transform_generation')):return None
+    kept=[];rejected=[]
+    for row in rows:
+        aid=str(row.get('id') or row.get('attempt_id') or '')
+        if row.get('mt_status') not in DETECTION_STATUSES or str(row.get('mt_executed')).lower() != 'true':return None
+        samples=[session.samples[sid] for sid in session.sample_ids_by_attempt.get(aid,()) if sid in session.samples]
+        ran=str(row.get('mz_executed')).lower() == 'true'
+        if (ran and row.get('rectification_status') == 'OK' and row.get('mz_status') in {'READ','NO_CHARACTERS'}
+                and samples and all(str(s.get('attempt_id')) == aid and not session.cancelled(s) for s in samples)):
+            kept.append(aid)
+        elif not ran and row.get('mz_status') == 'NOT_RUN' and row.get('rectification_status') == 'NOT_RUN' and not samples:
+            rejected.append(aid)
+        else:return None
+    if len(kept) != raw-1 or len(rejected) != 1:return None
+    return dict(schema='alpr.postdedup.executed_complement.v1',mt_invocation_id=invocation_id,
+                source_archive_sha256=session.bundle.source_archive_sha256,trace_frame_id=trace.get('frame_id'),
+                source_sequence=key[0],source_timestamp_nanos=key[1],scene_generation=key[2],
+                final_ids=sorted(kept),suppressed_id=rejected[0],raw=raw,after_dedup=raw-1,suppressed=1)
+
+
+def unresolved_filter_reason(session,gid):
+    """Known suppression without attributable IDs must not become a new READY."""
+    if getattr(session,'path',None) is None:return ''
+    group=session.mt_invocations[gid];row=group.records[0];stat=session.path.stat()
+    key=tuple(_source_integer(row.get(k)) for k in ('source_sequence','source_timestamp_nanos','scene_generation'))
+    matches=_trace_index(str(session.path),session.bundle.source_archive_sha256,stat.st_size,stat.st_mtime_ns).get(key,[])
+    research='session.json' in getattr(session,'entry_names',())
+    if len(matches)!=1 and research:
+        return 'Brak jednoznacznego śladu końcowych wyników MT dla tej klatki.'
+    if len(matches)==1:
+        c=matches[0].get('counters',{});raw=_source_integer(c.get('plate_detections_raw'));final=_source_integer(c.get('plate_detections_after_dedup'))
+        if research and (raw is None or final is None):
+            return 'Brak liczników RAW i końcowych wskazań w śladzie klatki.'
+        if raw is not None and final is not None and raw>final and not canvas_post_nms_proof(session,gid):
+            return 'Źródło potwierdza odrzucone wskazania, ale nie pozwala ustalić ich identyfikatorów.'
+    return ''
+
+
 def suppressed_subject(session, subject):
     """A raw-only record contributes no separate physical-plate denominator."""
     ids=subject.get("attempts",())

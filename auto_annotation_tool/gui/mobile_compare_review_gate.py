@@ -66,6 +66,28 @@ def _edit_distance(a: str, b: str) -> int:
     return previous[-1]
 
 
+def _unavailable_pose_match(row, canvas):
+    """Only an explicit source-bound v2 object decision permits absent Pose."""
+    import re
+    evidence = row.get("identity_decision")
+    if (canvas.get("decision_contract") != "mt_object_pose_v2" or not isinstance(evidence, dict)
+            or evidence.get("decision") != "SAME_PLATE" or row.get("geometry_availability") != "NOT_AVAILABLE"
+            or row.get("original_mt_quad") is not None
+            or row.get("polygon_iou_pct") is not None or row.get("nmce_pct") is not None):
+        return False
+    if any(not row.get(k) or row[k] != evidence.get(k) for k in ("mt_invocation_id", "image_entry", "parent_id", "attempt_id")):
+        return False
+    if (evidence.get("source_archive_sha256") != canvas.get("source_archive_sha256")
+            or not re.fullmatch(r"[a-f0-9]{64}", str(evidence.get("source_binding") or ""))
+            or not re.fullmatch(r"[a-f0-9]{64}", str(evidence.get("source_archive_sha256") or ""))):
+        return False
+    pose = row.get("pose_status")
+    if pose != evidence.get("pose_status") or evidence.get("mt_status") not in ("VALID_QUAD", "DETECTION_INVALID_QUAD"):
+        return False
+    invalid = evidence["mt_status"] == "DETECTION_INVALID_QUAD" or evidence.get("source_pose_status") in ("INVALID_QUAD", "DETECTION_INVALID_QUAD")
+    return (pose == "INVALID" and invalid) or (pose == "EVIDENCE_UNAVAILABLE" and not invalid)
+
+
 def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[bool, str]:
     """Check *both* MT corners and MZ GT on the same reviewed plates.
 
@@ -73,6 +95,9 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
     a fake geometry score or a CER=1.  Rejected raw NMS candidates never count.
     """
     c = canvas if isinstance(canvas, dict) else {}
+    from ..ranking.mobile_canvas_physical_gt import inspect_export
+    physical_ok,physical_reason=inspect_export(c)
+    if not physical_ok:return False,physical_reason
     if review_status != "COMPLETED":
         return False, "Operator nie zatwierdził weryfikacji."
     if c.get("provenance") != "ASSISTED_CANVAS_SOURCE_ROI" or c.get("independent_gt") is not False:
@@ -89,11 +114,14 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
         return False, "Niespójny licznik obrazów GT."
     if c["expected_plates"] != c["linked_plates"] + c["missed_plates"]:
         return False, "Nie rozliczono wykryć i pominięć MT."
-    if c["expected_plates"] <= 0:
-        return False, "Brak referencyjnych tablic w materiale."
+    v2 = c.get("decision_contract") == "mt_object_pose_v2"
     scenes = c.get("scenes")
     if not isinstance(scenes, list) or len(scenes) != c["scene_count"]:
         return False, "Brak kompletnej listy obrazów."
+    if v2 and (any(not isinstance(s, dict) or not s.get("mt_invocation_id") for s in scenes)
+               or len({s["mt_invocation_id"] for s in scenes}) != len(scenes)):
+        return False, "Powielona lub nieustalona jednostka klatka/wywołanie MT."
+    negatives = tn = alarms = 0
     for scene in scenes:
         if not isinstance(scene, dict):
             return False, "Nieprawidłowy wpis obrazu."
@@ -102,10 +130,25 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
                 return False, "Wyłączony obraz nie ma uzasadnienia."
         elif scene.get("status") != "CHECKED":
             return False, "Obraz nie ma statusu CHECKED."
+        if v2 and scene.get("status") == "CHECKED" and scene.get("roi_presence") == "NO_PLATES":
+            tally = scene.get("counts", {})
+            if any(tally.get(k) != 0 for k in ("expected", "linked", "missed")):
+                return False, "Negatywny obraz zawiera tablice GT."
+            n = tally.get("false_positive")
+            if _integer(n) is None or _integer(tally.get("mt")) is None or _integer(tally.get("raw_suppressed")) is None:
+                return False, "Brak liczników negatywnego obrazu."
+            if n != tally["mt"] - tally["raw_suppressed"]:
+                return False, "Nierozliczone wskazania MT w negatywnym obrazie."
+            if scene.get("frame_outcome") != ("NEGATIVE_WITH_FP" if n else "TN"):
+                return False, "Niespójny wynik negatywnej klatki."
+            negatives += 1; tn += int(n == 0); alarms += int(n > 0)
+    if c["expected_plates"] <= 0 and not (v2 and negatives == c["checked_scenes"] and negatives > 0):
+        return False, "Brak referencyjnych tablic lub jawnie potwierdzonych negatywnych obrazów."
     rows = c.get("rows")
     if not isinstance(rows, list):
         return False, "Nie zapisano oceny poszczególnych tablic."
     linked = missed = geometry = read = exact = chars = false_positive = raw_suppressed = errors = 0
+    invalid_pose = unavailable_pose = 0
     for row in rows:
         if not isinstance(row, dict):
             return False, "Nieprawidłowy rekord tablicy."
@@ -118,6 +161,8 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
         if outcome not in ("LINKED_MT", "MISSED_MT", "FALSE_POSITIVE_MT"):
             return False, "Nieznany wynik przypisania MT."
         if outcome == "FALSE_POSITIVE_MT":
+            if any(row.get(k) is not None for k in ("cer", "polygon_iou_pct", "nmce_pct")):
+                return False, "FP ma nieuprawnioną ocenę geometrii lub tekstu."
             false_positive += 1
             continue
         if not _quad(row.get("operator_quad")):
@@ -133,14 +178,22 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
                     _clean_text(row.get("mz_prediction")) or row.get("cer") is not None):
                 return False, "Niewykryta tablica ma nieuprawniony wynik MZ/CER."
             continue
-        if not gt and not str(row.get("text_exclusion_reason") or "").strip():
+        mz_status = str(row.get("mz_status") or "").upper()
+        pred = _clean_text(row.get("mz_prediction"))
+        if mz_status == "NOT_RUN" and (pred or row.get("cer") is not None):
+            return False, "Nieuruchomione MZ ma predykcję lub CER."
+        if mz_status != "NOT_RUN" and not gt and not str(row.get("text_exclusion_reason") or "").strip():
             return False, "Brak GT znaków lub jawnego wyłączenia odczytu."
         linked += 1
         if not _quad(row.get("original_mt_quad")):
-            return False, "Brak oryginalnych narożników MT."
-        if _number(row.get("polygon_iou_pct"), ceiling=100) is None or _number(row.get("nmce_pct")) is None:
-            return False, "Brak ocenionego IoU/NMCE ramki MT."
-        geometry += 1
+            if not _unavailable_pose_match(row, c):
+                return False, "Brak oryginalnych narożników MT lub jawnej decyzji o tożsamości bez Pose."
+            invalid_pose += int(row["pose_status"] == "INVALID")
+            unavailable_pose += int(row["pose_status"] == "EVIDENCE_UNAVAILABLE")
+        else:
+            if _number(row.get("polygon_iou_pct"), ceiling=100) is None or _number(row.get("nmce_pct")) is None:
+                return False, "Brak ocenionego IoU/NMCE ramki MT."
+            geometry += 1
         mz_status = str(row.get("mz_status") or "").upper()
         pred = _clean_text(row.get("mz_prediction"))
         cer = _number(row.get("cer"))
@@ -172,6 +225,9 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
         return False, "Mianowniki MT/MZ nie zgadzają się z rekordami tablic."
     if "raw_suppressed_mt" in c and c["raw_suppressed_mt"] != raw_suppressed:
         return False, "Niespójny licznik kandydatów odrzuconych przez NMS."
+    if v2 and any(c.get(k) != v for k,v in dict(negative_frames=negatives,true_negative_frames=tn,
+            negative_frames_with_fp=alarms,pose_invalid_matches=invalid_pose,pose_evidence_unavailable_matches=unavailable_pose).items()):
+        return False, "Niespójne liczniki negatywnych klatek lub dostępności Pose."
     if "cer" in c and chars and not math.isclose(float(c["cer"]), errors/chars, rel_tol=1e-6, abs_tol=1e-6):
         return False, "Micro-CER nie zgadza się z ocenionymi odczytami."
     return True, f"MT: {linked} ramki i {missed} pominięć; MZ: {read} odczytów; obrazy {c['checked_scenes']}/{c['scene_count']}"

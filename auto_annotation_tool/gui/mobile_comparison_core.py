@@ -354,6 +354,9 @@ def _geometry_text_figure(group: list[Session], *, scenario: str, measure: str):
     Descriptive only: the MT pose was not experimentally changed in this view.
     GT was corrected while seeing predictions, so no causal claims.
     """
+    if measure == "nmce_pct":
+        from .mobile_geometry_scatter import nmce_cer_figure
+        return nmce_cer_figure(group, scenario=scenario)
     import matplotlib.pyplot as plt
     fig, ax = plt.subplots(figsize=(10.2, 6.2))
     fig.subplots_adjust(left=.12, right=.96, top=.84, bottom=.28)

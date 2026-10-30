@@ -124,9 +124,9 @@ def test_native_d_four_clicks_draws_lines_and_increments_only_at_four(gui):
     assert not ed.prepare_navigation() and len(ed.points)==1
     for p in MANUAL[1:]:click(h,ed,p)
     assert not ed.points
-    assert core.counts(core.scene(s,"mt-one"))["expected"]==3
+    assert core.counts(core.scene(s,"mt-one"))["expected"]==1
     manual=next(o for o in core.scene(s,"mt-one")["objects"] if not o["parent_id"])
-    assert manual["object_id"] in ed.badges
+    assert manual["object_id"] in ed.stack_badges
     row=next(r for r in core.summary(s)["rows"] if r["object_id"]==manual["object_id"])
     assert row["mz_prediction"]==""
 
@@ -159,7 +159,7 @@ def test_native_corner_drag_keeps_original_and_does_not_add_a_plate(gui):
     scene=core.scene(s,"mt-one")
     assert scene["parents"]==original
     assert scene["objects"][0]["quad"] != original[0]["quad"]
-    assert core.counts(scene)["expected"]==2
+    assert core.counts(scene)["expected"]==1
 
 
 def test_badge_enter_focusout_and_letters_do_not_trigger_canvas_shortcuts(gui):
@@ -195,14 +195,19 @@ def test_manual_wrong_flag_does_not_count_as_mt_false_positive(gui):
     root,h,ed,s=gui
     key(h,"d")
     for p in MANUAL:click(h,ed,p)
+    frozen=s.sidecar_path.read_bytes()
     click(h,ed,(720,385),button=3)  # D completed: its new frame is already selected.
     c=core.counts(core.scene(s,"mt-one"))
-    assert c["operator_errors"]==1 and c["false_positive"]==0 and c["expected"]==2
+    assert c["operator_errors"]==0 and c["false_positive"]==0 and c["expected"]==1
+    assert s.sidecar_path.read_bytes()==frozen  # a physical manual GT is not an MT candidate
+    ed.remove_selected();pump(root)
+    assert core.counts(core.scene(s,'mt-one'))['expected']==0
 
 
 def test_undo_redo_preserves_original_and_flags(gui):
     root,h,ed,s=gui
     before=copy.deepcopy(core.scene(s,"mt-one")["parents"])
+    x,y=ed.to_canvas((225,175));h.canvas.event_generate('<Motion>',x=round(x),y=round(y),warp=True);pump(root)
     select(h,ed,(225,175));click(h,ed,(225,175),3)
     assert core._object(core.scene(s,"mt-one"),"GT:a0")["error"]
     ed.undo();pump(root)
@@ -224,8 +229,10 @@ def test_mismatched_bitmap_size_is_readonly(gui):
 def test_s_right_click_flags_directly_without_prior_left_click(gui):
     root,h,ed,s=gui
     ed.selected=""
+    x,y=ed.to_canvas((225,175));h.canvas.event_generate('<Motion>',x=round(x),y=round(y),warp=True);pump(root)
     select(h,ed,(225,175));click(h,ed,(225,175),3)
     assert core._object(core.scene(s,"mt-one"),"GT:a0")["error"]
-    assert ed.selected=="GT:a0"
+    assert ed.selected=='GT:a0' and h.canvas.find_withtag('fp_diagonal')
+    ed._choose_plate('');pump(root)  # no prior selection is needed to reverse the flag
     click(h,ed,(225,175),3)
     assert not core._object(core.scene(s,"mt-one"),"GT:a0")["error"]

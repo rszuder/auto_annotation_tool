@@ -8,10 +8,83 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
+import math
+import unicodedata
 from pathlib import Path
 from typing import Any
 
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
+
+SORT_COLUMNS = ('Data','Wariant','Scena','Powt.','Weryfikacja','p95')
+
+
+def report_measurement_time(report):
+    """Use source measurement metadata, never the ingest clock or a filename."""
+    index=_get(report,'experiment_index') or {}
+    raw=_get(report,'raw') or {}
+    value=index.get('measured_at') or raw.get('measured_at')
+    if not value:return None
+    try:return datetime.fromisoformat(str(value).replace('Z','+00:00'))
+    except (ValueError,TypeError,OverflowError):return None
+
+
+def report_repeat(report):
+    parts=str(_get(report,'source_path') or '').replace('\\','/').split('/')
+    folders=[p.lower() for p in parts if re.fullmatch(r'r\d+',p,re.IGNORECASE)]
+    if any(p.lower()=='02_sesje' for p in parts) and folders:
+        return folders[-1],int(folders[-1][1:])
+    value=(_get(report,'experiment_index') or {}).get('replicate_index')
+    if not isinstance(value,bool) and re.fullmatch(r'\d+',str(value)):
+        return f'r{int(value):02d}',int(value)
+    return '—',None
+
+
+def report_view_key(report):
+    """Stable source identity, independent of its Treeview position."""
+    return tuple(str(_get(report,k) or '') for k in
+        ('report_id','source_archive_sha256','source_path','package_id','variant_id','measured_at'))
+
+
+def report_sort_value(report,column,identity,verification,p95):
+    if column=='Data':
+        stamp=report_measurement_time(report)
+        # Without an offset the absolute instant is unknown; keep it after
+        # comparable timestamps and retain the literal date in the table.
+        try:return stamp.timestamp() if stamp and stamp.tzinfo is not None else None
+        except (ValueError,OverflowError,OSError):return None
+    if column=='Powt.':return report_repeat(report)[1]
+    if column=='p95':
+        try:value=float(p95)
+        except (ValueError,TypeError,OverflowError):return None
+        return value if math.isfinite(value) else None
+    value=(identity.get('variant') if column=='Wariant' else identity.get('scenario') if column=='Scena'
+           else getattr(verification,'label',None) if column=='Weryfikacja' else None)
+    if value in (None,'','—','Wariant nieokreślony'):return None
+    return unicodedata.normalize('NFKC',str(value)).casefold()
+
+
+def sorted_report_view(reports,value,descending):
+    tied=sorted(reports,key=report_view_key)
+    known=[];missing=[]
+    for report in tied:
+        key=value(report)
+        (missing if key is None else known).append(report if key is None else (key,report))
+    known.sort(key=lambda item:item[0],reverse=descending)
+    return [report for _,report in known]+missing
+
+
+def report_sort_preference(settings):
+    if settings is None:return 'Data',True
+    column=settings.get('mobile_report_browser','sort_column','Data')
+    descending=settings.get('mobile_report_browser','sort_descending',True)
+    return (column,descending) if column in SORT_COLUMNS and isinstance(descending,bool) else ('Data',True)
+
+
+def save_report_sort_preference(settings,column,descending):
+    if settings is None:return
+    settings.set('mobile_report_browser','sort_column',column)
+    settings.set('mobile_report_browser','sort_descending',bool(descending))
+    settings.save_session()
 
 
 def _text(value: Any) -> str:

@@ -9,6 +9,7 @@ from .mobile_comparison_core import figures, validate_selection
 from .mobile_import_comparison import export_imported_charts
 from .mobile_import_trace_charts import trace_figures
 from .mobile_model_identity import chart_identity_caption
+from .mobile_plot_choices import plot_choices
 
 
 class ImportedMobileComparisonWindow(tk.Toplevel):
@@ -25,6 +26,7 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         self.imported_sources=list(imported_sources or [])
         self.figure_items=[]
         self.drawn=None
+        self.point_inspector=None
         self.configure(background="#f1f5f9")
         self._build()
         self._make_charts()
@@ -39,9 +41,11 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         heading = ttk.Label(top,text="Porównanie raportów z telefonu\n" + chart_identity_caption(self.records),
             font=("Segoe UI",10,"bold"), wraplength=1120, justify="left")
         heading.grid(row=0,column=0,columnspan=2,sticky="ew",pady=(0,10))
+        self.heading=heading
         self.bind("<Configure>", lambda e: heading.configure(wraplength=max(600,e.width-40))
                   if e.widget is self else None, add="+")
         left=ttk.Frame(top)
+        self.left_panel=left
         left.grid(row=1,column=0,sticky="nsew",padx=(0,12))
         left.columnconfigure(0,weight=1)
         left.rowconfigure(1,weight=1)
@@ -68,12 +72,19 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         ttk.Label(right,text="Kontrola porównywalności",font=("Segoe UI",10,"bold")).grid(row=0,column=0,sticky="w")
         self.notes=tk.Text(right,height=6,wrap="word",state="disabled",font=("Segoe UI",9),relief="flat")
         self.notes.grid(row=1,column=0,sticky="ew",pady=(5,8))
+        self.notes_toggle=ttk.Button(right,text="Rozwiń kontrolę",command=self._toggle_notes)
+        self.notes_toggle.grid(row=0,column=0,sticky="e")
+        self.notes_toggle.grid_remove()
         plot=ttk.Frame(right)
         plot.grid(row=2,column=0,sticky="nsew")
         plot.columnconfigure(0,weight=1)
         plot.rowconfigure(1,weight=1)
-        self.plot_choice=ttk.Combobox(plot,state="readonly")
-        self.plot_choice.grid(row=0,column=0,sticky="ew",pady=(0,6))
+        selector=ttk.Frame(plot)
+        selector.grid(row=0,column=0,sticky="ew",pady=(0,6))
+        selector.columnconfigure(1,weight=1)
+        ttk.Label(selector,text="Wybierz wykres",font=("Segoe UI",9,"bold")).grid(row=0,column=0,sticky="w",padx=(0,8))
+        self.plot_choice=ttk.Combobox(selector,state="readonly",height=8)
+        self.plot_choice.grid(row=0,column=1,sticky="ew")
         self.plot_choice.bind("<<ComboboxSelected>>",lambda _ev:self.show_plot())
         self.chart_host=ttk.Frame(plot)
         self.chart_host.grid(row=1,column=0,sticky="nsew")
@@ -87,6 +98,9 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         self.notes.configure(state="disabled")
 
     def _close_charts(self):
+        if self.point_inspector is not None:
+            self.point_inspector.destroy()
+            self.point_inspector=None
         try:
             if self.drawn is not None:
                 self.drawn.get_tk_widget().destroy()
@@ -99,33 +113,51 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         self.figure_items=[]
 
     def _make_charts(self):
+        selected_key=self.current_plot_key()
         self._close_charts()
+        self.plot_choice.configure(values=[])
+        self.plot_choice.set("")
+        self._update_heading()
         if not self.records:
-            self.plot_choice.configure(values=[])
-            self.plot_choice.set("")
             self._set_notes("Wybierz przynajmniej jedną sesję.")
             return
         notes=validate_selection(self.records)
         self._set_notes("\n".join("• "+n for n in notes) if notes else "Sprawdzone wspólne warunki według dostępnych metadanych. Parowanie pojedynczych zdjęć wymaga osobnego manifestu.")
         if len(self.records)>1 and (any(not s.canvas_ready for s in self.records) or
                                    len({s.scenario for s in self.records})>1):
-            self.plot_choice.configure(values=[])
-            self.plot_choice.set("")
             self.status.set("Zablokowano porównanie: wymagana kompletna ocena MT+MZ i ten sam scenariusz.")
             return
         try:
             plots=list(figures(self.records))
             if len(self.records)==1:
                 plots += [("oś czasu · "+title,fig) for title,fig in trace_figures(self.traces[0],session_label=self.records[0].label)]
-            self.figure_items=plots
+            choices=plot_choices(plots)
+            kept={id(choice.figure) for choice in choices}
+            import matplotlib.pyplot as plt
+            for _,fig in plots:
+                if id(fig) not in kept:
+                    plt.close(fig)
+            self.figure_items=[(choice.key,choice.figure) for choice in choices]
         except (ImportError,ValueError,RuntimeError,TypeError) as exc:
             self.status.set("Nie udało się przygotować wykresu (sprawdź matplotlib): "+str(exc)[:180]);return
-        labels=[name.replace("_"," ") for name,_ in self.figure_items]
+        labels=[choice.label for choice in choices]
         self.plot_choice.configure(values=labels)
         if labels:
-            self.plot_choice.current(0)
+            keys=[key for key,_ in self.figure_items]
+            self.plot_choice.current(keys.index(selected_key) if selected_key in keys else 0)
             self.show_plot()
         self.status.set(f"Wybrane sesje: {len(self.records)}. Wykresy czasu są opisowe; Canvas ASSISTED nie jest niezależnym GT.")
+
+    def current_plot_key(self):
+        index=self.plot_choice.current()
+        return self.figure_items[index][0] if 0<=index<len(self.figure_items) else None
+
+    def _update_heading(self, scatter=False):
+        scenarios=list(dict.fromkeys(str(s.scenario) for s in self.records))
+        title="Porównanie raportów z telefonu"
+        if scenarios:title+=" · "+" / ".join(scenarios)
+        if self.records and not scatter:title+="\n"+chart_identity_caption(self.records)
+        self.heading.configure(text=title)
 
     def show_plot(self):
         i=self.plot_choice.current()
@@ -133,14 +165,39 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
             return
         try:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+            if self.point_inspector is not None:
+                self.point_inspector.destroy()
+                self.point_inspector=None
             if self.drawn is not None:
                 self.drawn.get_tk_widget().destroy()
             fig=self.figure_items[i][1]
+            scatter=hasattr(fig,"_alpr_geometry_scatter")
+            self._update_heading(scatter)
+            self.notes.configure(height=2 if scatter else 6)
+            self.notes_toggle.configure(text="Rozwiń kontrolę")
+            if scatter:self.notes_toggle.grid()
+            else:self.notes_toggle.grid_remove()
+            self.left_panel.rowconfigure(1,weight=0 if scatter else 1)
+            self.left_panel.rowconfigure(8,weight=1 if scatter else 0)
+            self.selected_list.configure(height=3 if scatter else 12)
+            selection=self.selected_list.curselection()
+            self.selected_list.delete(0,tk.END)
+            counts={s.session_id:0 for s in self.records}
+            if scatter:
+                for row in fig._alpr_geometry_scatter['records']:counts[row['session_id']]+=1
+            for s in self.records:
+                self.selected_list.insert(tk.END,
+                    f"{s.repeat_label} · n={counts[s.session_id]} · {s.session_id}" if scatter else s.label.replace('\n',' · '))
+            for selected in selection:self.selected_list.selection_set(selected)
             if not hasattr(fig,"_alpr_preview_dpi"):
                 fig._alpr_preview_dpi=fig.dpi
             # Reattaching the same figure must not multiply Windows DPI again.
             fig.set_dpi(fig._alpr_preview_dpi)
             self.drawn=FigureCanvasTkAgg(fig,master=self.chart_host)
+            if scatter:
+                from .mobile_geometry_scatter import PointInspector
+                self.point_inspector=PointInspector(self.left_panel,self.drawn)
+                self.point_inspector.grid(row=8,column=0,sticky="nsew")
             self.drawn.get_tk_widget().pack(fill="both",expand=True)
             self.drawn.get_tk_widget().bind("<Configure>", self._fit_preview_text, add="+")
             # TkAgg updates DPI on Map; a constrained host need not emit another
@@ -151,6 +208,11 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
             self.drawn.draw()
         except (RuntimeError,ValueError,tk.TclError) as exc:
             self.status.set("Błąd podglądu: "+str(exc)[:160])
+
+    def _toggle_notes(self):
+        expanded=int(self.notes.cget('height'))>2
+        self.notes.configure(height=2 if expanded else 6)
+        self.notes_toggle.configure(text="Rozwiń kontrolę" if expanded else "Zwiń kontrolę")
 
     def _fit_preview_text(self, event=None):
         """Wrap preview annotations after Tk resizes the existing figure."""
@@ -163,6 +225,11 @@ class ImportedMobileComparisonWindow(tk.Toplevel):
         w, h = widget.winfo_width(), widget.winfo_height()
         if min(w,h)>1 and (abs(fig.bbox.width-w)>1 or abs(fig.bbox.height-h)>1):
             self.drawn.resize(SimpleNamespace(width=w,height=h))
+        if hasattr(fig,"_alpr_geometry_scatter"):
+            from .mobile_geometry_scatter import fit_geometry_scatter
+            fit_geometry_scatter(fig)
+            self.drawn.draw_idle()
+            return
         width = fig.bbox.width
         fig.subplots_adjust(top=.72)
         for ax in fig.axes:

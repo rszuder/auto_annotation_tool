@@ -79,7 +79,7 @@ def test_no_trace_proof_does_not_suppress_even_with_overlapping_boxes(setup):
     s,state=setup
     state["proof"]=None
     scene=core.scene(s,"G")
-    assert core.counts(scene)["expected"]==2
+    assert core.counts(scene)["expected"]==0  # no operator GT, regardless of overlap
     assert not scene.get("post_nms_evidence")
     assert not any(o.get("post_nms_suppressed",False) for o in scene["objects"])
 
