@@ -137,7 +137,10 @@ def paint(ed):
     if ed.show_roi_overlay:
         l,t,r,b=s['roi'];a=ed.to_canvas((l,t));z=ed.to_canvas((r,b))
         c.create_rectangle(*a,*z,outline='#FFD16C',tags=(TAG,'analyzed_roi'))
-    for n,(pid,p) in enumerate(v['plates'].items(),1):
+    from ..ranking.mobile_canvas_operator_view import reference_numbers
+    numbers=reference_numbers(v)
+    for index,(pid,p) in enumerate(v['plates'].items(),1):
+        n=numbers.get(pid,index)
         candidate=active(ed,v,pid);choices=members(v,pid)
         oid=candidate['object_id'] if candidate else p['origin_object_id']
         quad=copy.deepcopy(p['gt_quad'])
@@ -260,7 +263,10 @@ def context_menu(ed,event=None,*,show=True):
     if candidate:
         if candidate['role']=='FINAL' and not candidate['plate_id'] and not obj['error'] and candidate['mt_quad']:
             add('Ustanów GT z tego obrysu MT',lambda:stacks.accept_reference(session,gid,oid))
-        for n,(pid,p) in enumerate(((pid,p) for pid,p in v['plates'].items() if p['gt_quad']),1):
+        from ..ranking.mobile_canvas_operator_view import reference_numbers
+        numbers=reference_numbers(v)
+        for pid,p in ((pid,p) for pid,p in v['plates'].items() if p['gt_quad']):
+            n=numbers[pid]
             if pid==candidate['plate_id']:continue
             manual=next((o for o in s['objects'] if o['object_id']==p['origin_object_id'] and not o.get('parent_id')),None)
             if manual and candidate['role']=='FINAL':

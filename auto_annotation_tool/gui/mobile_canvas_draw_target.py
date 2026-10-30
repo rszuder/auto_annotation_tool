@@ -32,7 +32,7 @@ def resolve(editor):
         plate_id=row['pid'],oid=row['reference_id'],number=row['n'],quad=copy.deepcopy(p['gt_quad']),
         revision=editor.h.session.review.review_revision,binding=copy.deepcopy(s['source_binding']))
     if target['kind']=='complete':
-        if not c or c['role']!='FINAL' or not location or location['kind']!='BBOX':
+        if not c or c['role']!='FINAL' or not location or (location['kind']!='BBOX' and p['geometry_state']!='operator_removed'):
             raise ValueError('Nie ustalono jednoznacznej referencji do uzupełnienia.')
         target['oid']=c['object_id']
     if target['plate_id'] not in v['active_plate_ids']:raise ValueError('Wybrana GTR nie jest aktywna.')

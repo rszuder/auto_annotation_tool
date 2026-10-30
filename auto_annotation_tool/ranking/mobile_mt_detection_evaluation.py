@@ -165,7 +165,7 @@ def _input(session, gid):
     unit['execution_status']='COMPLETED'
     try:
         session.verify_source()
-        scene=core.scene(session,gid);v=stacks.snapshot(session,gid,scene)
+        scene=core.scene(session,gid,include_history=False);v=stacks.snapshot(session,gid,scene)
         stat=session.path.stat()
         frame_key=(sha,stat.st_size,stat.st_mtime_ns,gid,scene['image_entry'],tuple(scene['image_size']))
         with _cache_lock:verified=frame_key in _verified_frames.get(session,set())

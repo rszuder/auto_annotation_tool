@@ -209,7 +209,7 @@ def source_context(ed,value):
             if values['bbox_reason']=='LOCALIZATION_CRITERION_NOT_MET':text+=' · poniżej progu'
         if not values['outcome']:text+='\n'+str(values['bbox_reason'] or 'Brak ukończonej oceny')
     else:
-        diagnostic=next((r for r in data.diagnostics(ed.h.session,[ed.h.current_invocation])['rows'] if r['object_id']==ed.selected),{})
+        diagnostic=values
         f=lambda v:'—' if v is None else f'{v:.1f}%'.replace('.',',')
         text+='\nPolygon IoU: '+f(diagnostic.get('polygon_iou_pct'))+'\nNMCE: '+f(diagnostic.get('nmce_pct'))+'\nNarożniki źródłowe · tylko inspekcja'
         if values['pose_reason']:
@@ -218,6 +218,9 @@ def source_context(ed,value):
                         {'UNASSOCIATED':'Brak powiązanej referencji GTR','GT_UNCONFIRMED':'Referencja GTR niepotwierdzona',
                          'SCENE_EXCLUDED':'Obraz wyłączony z oceny','LEGACY_CONFLICT':'Konflikt referencji GTR'}.get(reason,'Nie można porównać geometrii z referencją'))
     text+='\nReferencja operatora: '+(f"GTR {row['n']}" if value['gtr_count'] else 'brak powiązania')
+    if row['plate'] and row['plate']['geometry_state']=='operator_removed' and not row['gt']:
+        text=text.replace('Referencja operatora: brak powiązania','Obrys operatora: usunięty; ID i GTZ zachowane')
+        text+='\nD: narysuj nowy obrys · Ctrl+Z: przywróć usunięty'
     text+='\nMZ: '+('nie wykonano (NOT_RUN) · N/A' if c['mz_status']=='NOT_RUN' else c['mz_prediction'] or 'brak odczytu')
     return label(ed,kind).upper(),text
 

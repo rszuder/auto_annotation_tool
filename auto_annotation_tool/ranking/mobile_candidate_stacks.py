@@ -118,7 +118,7 @@ def _legacy(s):
 
 def snapshot(session,gid,s=None):
     from . import mobile_canvas_review as core
-    s=s or core._legacy_scene(session,gid)
+    s=s or core._legacy_scene(session,gid,include_history=False)
     state=copy.deepcopy(s.get(KEY) or _legacy(s))
     if state.get('schema')!=SCHEMA or state.get('source_binding')!=s['source_binding']:
         raise ValueError('Stos GT dotyczy innego źródła/wywołania.')
@@ -383,14 +383,15 @@ def complete_bbox_reference(session,gid,oid,points,*,expected_plate_id=None,oper
     parent=next((p for p in s['parents'] if p['parent_id']==obj.get('parent_id')),None)
     link=state['links'].get(oid,{})
     pid=link.get('plate_id');plate=state['plates'].get(pid)
-    if (parent is None or parent['quad'] is not None or obj.get('error')
+    removed=bool(plate and plate['geometry_state']=='operator_removed')
+    if (parent is None or (parent['quad'] is not None and not removed) or obj.get('error')
             or roles(session,gid,s).get(obj.get('attempt_id'))!='FINAL'
             or (partial.progress(s)['object_decisions'].get(oid)!=partial.PLATE and not operator_draw)
             or link.get('status')!='ASSOCIATED_FOR_GEOMETRY' or not plate
             or not plate['confirmed'] or plate['gt_quad'] is not None
             or (expected_plate_id is not None and pid!=expected_plate_id)):
-        raise ValueError('Wskazanie zmieniło stan lub ma już obrys GT; zachowano zapisane dane. Wybierz poprawny BBOX bez obrysu i użyj D.')
-    if model_location(session,gid,s,obj)['kind']!='BBOX':
+        raise ValueError('Wskazanie zmieniło stan lub ma już obrys GT; zachowano zapisane dane. Wybierz MT bez obrysu operatora i użyj D.')
+    if model_location(session,gid,s,obj)['kind']!='BBOX' and not removed:
         raise ValueError('Brak wiarygodnego źródłowego BBOX MT.')
     quad=core.ordered_quad(points,s['image_size'],s['roi'])
     from .mobile_manual_frame_guard import require_free_manual_area
@@ -477,18 +478,23 @@ def toggle_unassociated(session,gid,oid,*,partial_review=False):
     _write(session,gid,s,state,'operator_candidate_no_plate',oid)
 
 
-def reset_single_reference(session,gid,oid):
-    from . import mobile_canvas_review as core
+def remove_linked_geometry(session,gid,oid):
+    """Remove operator corners, retaining identity/GTZ and immutable MT source."""
+    from . import mobile_canvas_review as core,mobile_canvas_partial_review as partial
+    from .mobile_canvas_operator_view import reference_numbers
     s=core._legacy_scene(session,gid);state=_state(s);pid=state['links'].get(oid,{}).get('plate_id')
     p=state['plates'].get(pid)
     linked=[key for key,link in state['links'].items() if link.get('plate_id')==pid]
     if not p or p['origin_object_id']!=oid or len(linked)!=1:
         raise ValueError('R nie usuwa ani nie zastępuje wspólnej GT; użyj korekty lub Undo.')
-    obj=core._object(s,oid);parent=next(x for x in s['parents'] if x['parent_id']==obj['parent_id'])
-    core.validate_mt_quad(parent['quad'],*s['image_size'])
-    p.update(gt_quad=copy.deepcopy(parent['quad']),geometry_state='unconfirmed')
-    _write(session,gid,s,state,'reset_child_to_mt_original',oid)
-    return 'reset_child_to_mt_original'
+    core.require_source_final(session,gid,oid)
+    if p['gt_quad'] is None:return False
+    before=copy.deepcopy(p)
+    state['reference_numbers']=reference_numbers(state)
+    partial.enable(session,gid,s,state)
+    p.update(gt_quad=None,geometry_state='operator_removed')
+    _write(session,gid,s,state,'remove_operator_reference_geometry',oid,object_before=before)
+    return 'remove_operator_reference_geometry'
 
 def confirm_negative(session,gid):
     from . import mobile_canvas_review as core
@@ -514,7 +520,7 @@ def diagnostics(session, invocation_ids=None):
     rows=[];plates=set();calls=set();conflicts=[];unavailable=[]
     for gid in (session.mt_invocations if invocation_ids is None else invocation_ids):
         try:
-            s=core.scene(session,gid);raw=core._legacy_scene(session,gid);v=snapshot(session,gid,raw)
+            s=core.scene(session,gid,include_history=False);raw=core._legacy_scene(session,gid,include_history=False);v=snapshot(session,gid,raw)
         except (ValueError,KeyError,TypeError) as error:
             unavailable.append(dict(mt_invocation_id=gid,reason=str(error),attempt_ids=[r.get('id') or r.get('attempt_id') for r in session.mt_invocations[gid].records]))
             continue
@@ -523,7 +529,7 @@ def diagnostics(session, invocation_ids=None):
         calls.add(gid)
         for c in v['candidates']:
             p=v['plates'].get(c['plate_id']);conflict=any(x['plate_id']==c['plate_id'] for x in v['conflicts'])
-            reason='UNASSOCIATED' if not p else 'LEGACY_CONFLICT' if conflict else 'GT_UNCONFIRMED' if not p['confirmed'] or p['geometry_state']=='unconfirmed' else 'MT_POSE_NOT_AVAILABLE' if not c['mt_quad'] else ''
+            reason='UNASSOCIATED' if not p else 'LEGACY_CONFLICT' if conflict else 'GT_GEOMETRY_REMOVED' if p['geometry_state']=='operator_removed' else 'GT_UNCONFIRMED' if not p['confirmed'] or p['geometry_state']=='unconfirmed' else 'MT_POSE_NOT_AVAILABLE' if not c['mt_quad'] else ''
             if reason=='MT_POSE_NOT_AVAILABLE':
                 reason='MT_POSE_INVALID' if c['source_pose_status']=='INVALID_QUAD' or c['source_mt_status']=='DETECTION_INVALID_QUAD' else 'MT_POSE_EVIDENCE_UNAVAILABLE'
             if s.get('exclusion_reason'):reason='SCENE_EXCLUDED'

@@ -1,4 +1,4 @@
-"""Any active layer approves its stack without cycling layers."""
+"""Any active layer toggles its stack without cycling layers."""
 import copy
 from types import SimpleNamespace as NS
 import pytest
@@ -18,7 +18,10 @@ def test_Space_approves_pending_GT_and_presence_from_any_layer_without_switching
     assert partial.progress(core.scene(s,G))['object_decisions'][OID]==partial.PLATE
     assert layers.model(ed)['active']==kind and core.scene(s,G)['parents']==parents and core.scene(s,G)['objects'][0]['quad']==q
     assert s.review.review_revision==revision+1
-    before=s.sidecar_path.read_bytes();native.key(h,'space');ready(root,h,ed);assert s.sidecar_path.read_bytes()==before and ed.checked_var.get()
+    native.key(h,'space');ready(root,h,ed)
+    assert not ed.checked_var.get() and pending(s) and s.review.review_revision==revision+2
+    assert core.scene(s,G)['objects'][0]['quad']==q and core.scene(s,G)['parents']==parents
+    native.key(h,'space');ready(root,h,ed);assert ed.checked_var.get() and s.review.review_revision==revision+3
     item=next(i for i in ed.c.find_withtag('operator_quad') if pid(s) in ed.c.gettags(i));assert ed.c.itemcget(item,'outline')==colors.GREEN
 
 @pytest.mark.parametrize('kind',['BBOX','POSE','GTR'])

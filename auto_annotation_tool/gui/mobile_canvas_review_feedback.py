@@ -4,7 +4,7 @@ import tkinter as tk
 
 def operator_inventory(scene,state):
     """Saved IDs, proven FINALs and explicit links; no IoU or TP/FP/FN here."""
-    from ..ranking.mobile_canvas_operator_view import physical_plate_ids
+    from ..ranking.mobile_canvas_operator_view import physical_plate_ids,reference_numbers
     from ..ranking import mobile_canvas_partial_review as partial
     empty=dict(counts=dict.fromkeys(('gt','mt','rejected','unlinked')),rejected=[],unlinked=[])
     if not scene or not state:return empty
@@ -16,7 +16,7 @@ def operator_inventory(scene,state):
             if link.get('status')=='ASSOCIATED_FOR_GEOMETRY' and link.get('plate_id') in saved}
     rejected=[dict(oid=c['object_id'],label=f"MT {c['mt_detection_index']+1}",kind='BBOX') for c in finals
               if progress['object_decisions'].get(c['object_id'])==partial.NOT_PLATE]
-    numbers={pid:n for n,(pid,p) in enumerate(((pid,p) for pid,p in state['plates'].items() if p['gt_quad']),1)}
+    numbers=reference_numbers(state)
     unlinked=[dict(gt_id=pid,oid=p['origin_object_id'],label=f"GTR {numbers[pid]}" if pid in numbers else 'GT bez obrysu',kind='GTR')
               for pid,p in state['plates'].items() if pid in saved-linked]
     return dict(counts=dict(gt=len(saved),mt=len(finals),rejected=len(rejected),unlinked=len(unlinked)),
@@ -57,9 +57,9 @@ def image_feedback(ed,result=None):
     if result['status']!='MEASURED':
         pending=progress['pending_ids'];gtr=progress['pending_gtr_ids']
         row=next((r for r in rows if len(pending)==len(gtr)==1 and r['oid']==pending[0] and r['pid']==gtr[0]),None)
-        if row and progress['decisions']==2 and not scene.get('exclusion_reason'):
+        if row and progress['decisions']==1 and not scene.get('exclusion_reason'):
             index=row['candidate']['mt_detection_index']+1
-            out['text']=f"2 potwierdzenia jednej tablicy:\nWskazanie MT {index} i obrys GTR {row['n']}.\nJedna Spacja zatwierdza oba."
+            out['text']=f"1 tablica do weryfikacji:\nWskazanie MT {index} i obrys GTR {row['n']}.\nSpacja przełącza ich wspólną ocenę."
         return out
     candidates={c['attempt_id']:c for c in state['candidates'] if c['role']=='FINAL'}
     for value in result['final_outcomes']:

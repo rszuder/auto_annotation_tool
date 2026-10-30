@@ -49,6 +49,18 @@ def full_text_context(ed):
     return '\n\n'+'\n'.join(name+': '+value for name,value in rows) if rows else ''
 
 
+def selected_diagnostic(ed,row):
+    """One source/revision-bound diagnostic shared by the panel and badges."""
+    from ..ranking import mobile_candidate_stacks as data
+    key=(ed.cache_key,row['oid'])
+    if getattr(ed,'_selected_diagnostic_key',None)!=key:
+        candidate=row['candidate']
+        ed._selected_diagnostic=next((r for r in data.diagnostics(ed.h.session,[ed.h.current_invocation])['rows']
+            if r['object_id']==row['oid']),{}) if candidate else {}
+        ed._selected_diagnostic_key=key
+    return ed._selected_diagnostic
+
+
 def measurements(ed,row):
     """Read existing results once per review/selection, never per pan frame."""
     from ..ranking.mobile_mt_detection_evaluation import evaluate_unit,reason_text
@@ -59,7 +71,7 @@ def measurements(ed,row):
         candidate=row['candidate'];aid=candidate['attempt_id'] if candidate else None
         outcome=next((r for r in result['final_outcomes'] if r['attempt_id']==aid),{})
         pair=next((r for r in result['matched_pairs'] if r['attempt_id']==aid),{})
-        diagnostic=next((r for r in data.diagnostics(ed.h.session,[ed.h.current_invocation])['rows'] if r['object_id']==row['oid']),{}) if candidate else {}
+        diagnostic=selected_diagnostic(ed,row)
         measured=result['status']=='MEASURED'
         from .mobile_canvas_review_feedback import reference_comparison
         comparison=reference_comparison(ed,row,result)

@@ -82,7 +82,7 @@ def confirm_gtr(session,gid,plate_id):
     """Approve the current stored geometry of one explicit physical GTR."""
     from . import mobile_canvas_review as core,mobile_candidate_stacks as stacks
     from .mobile_canvas_operator_view import saved_reference_ids
-    scene=core._legacy_scene(session,gid);state=stacks._state(scene)
+    scene=core._legacy_scene(session,gid,include_history=False);state=stacks._state(scene)
     if plate_id not in saved_reference_ids(scene,state):raise ValueError('Wybierz istniejącą GTR do zatwierdzenia.')
     data=scene.get(KEY)
     if not data or plate_id not in data.get('pending_gtr_ids',[]):return False
@@ -171,8 +171,16 @@ def progress(scene):
     empty = not data['decisions'] and not manual and not unknown and not blocked
     negative_pending = empty and not data['empty_confirmed']
     from .mobile_canvas_operator_view import saved_reference_ids
-    pending_gtr=sorted(set(data.get('pending_gtr_ids',())) & saved_reference_ids(scene,state))
-    decisions = len(pending) + len(pending_gtr) + len(unknown) + int(blocked and not unknown) + int(negative_pending)
+    missing_gtr={pid for pid,p in state['plates'].items() if p['geometry_state']=='operator_removed' and p['gt_quad'] is None}
+    pending_gtr=sorted((set(data.get('pending_gtr_ids',())) & saved_reference_ids(scene,state))|missing_gtr)
+    # One Space verifies a physical stack, even when both MT and GTR await it.
+    # Explicit links establish identity; overlap/text never joins review units.
+    units={('GTR',pid) for pid in pending_gtr}
+    for oid in pending:
+        link=state['links'].get(oid,{})
+        pid=link.get('plate_id') if link.get('status')=='ASSOCIATED_FOR_GEOMETRY' else None
+        units.add(('GTR',pid) if pid in state['plates'] else ('MT',oid))
+    decisions = len(units) + len(unknown) + int(blocked and not unknown) + int(negative_pending)
     complete = not decisions
     return dict(complete=complete, decisions=decisions, pending_ids=pending,pending_gtr_ids=pending_gtr,
                 resolved=sum(d != UNRESOLVED for d in data['decisions'].values()),
@@ -249,7 +257,7 @@ def confirm_stack(session,gid,*,oid=None,plate_id=None):
     from . import mobile_canvas_review as core,mobile_candidate_stacks as stacks
     from .mobile_canvas_operator_view import physical_plate_ids
     if oid and plate_id:raise ValueError('Wybierz jedno wskazanie MT albo jedną GTR.')
-    scene=core._legacy_scene(session,gid);state=stacks._state(scene);data=enable(session,gid,scene,state)
+    scene=core._legacy_scene(session,gid,include_history=False);state=stacks._state(scene);data=enable(session,gid,scene,state)
     before=copy.deepcopy((state,data))
     if plate_id is None:
         if not oid:raise ValueError('Wybierz ramkę tablicy do zatwierdzenia.')
@@ -259,7 +267,10 @@ def confirm_stack(session,gid,*,oid=None,plate_id=None):
         if (link.get('plate_id')==plate_id and link.get('status')=='ASSOCIATED_FOR_GEOMETRY'
                 and data['source_roles'].get(key)=='FINAL'):
             _accept_positive(session,gid,scene,state,data,key)
-    plate=state['plates'][plate_id];plate['confirmed']=True
+    plate=state['plates'][plate_id]
+    if plate['geometry_state']=='operator_removed' and plate['gt_quad'] is None:
+        raise ValueError('Obrys operatora został usunięty. Narysuj go przez D albo przywróć Ctrl+Z; MT nie zastępuje GTR.')
+    plate['confirmed']=True
     if plate['gt_quad'] and plate['geometry_state']=='unconfirmed':plate['geometry_state']='operator_confirmed_unchanged'
     if plate_id in data.get('pending_gtr_ids',[]):
         data['pending_gtr_ids']=[pid for pid in data['pending_gtr_ids'] if pid!=plate_id]
@@ -268,9 +279,49 @@ def confirm_stack(session,gid,*,oid=None,plate_id=None):
     return True
 
 
+def stack_is_verified(scene,*,oid=None,plate_id=None):
+    """Read-only state of one explicit physical reference and its FINALs."""
+    from .mobile_canvas_operator_view import physical_plate_ids
+    state,data=_state(scene)
+    if oid and plate_id:return False
+    if oid:
+        if data['source_roles'].get(oid)!='FINAL':return False
+        link=state['links'].get(oid,{})
+        if link.get('status')!='ASSOCIATED_FOR_GEOMETRY':return False
+        plate_id=link.get('plate_id')
+    if plate_id not in physical_plate_ids(scene,state):return False
+    plate=state['plates'][plate_id]
+    members=[key for key,link in state['links'].items() if link.get('plate_id')==plate_id
+             and link.get('status')=='ASSOCIATED_FOR_GEOMETRY' and data['source_roles'].get(key)=='FINAL']
+    return bool(plate['confirmed'] and plate['geometry_state']!='operator_removed' and (plate['gt_quad'] or members)
+                and plate_id not in data.get('pending_gtr_ids',[])
+                and all(data['decisions'].get(key)==PLATE for key in members))
+
+
+def toggle_stack(session,gid,*,oid=None,plate_id=None):
+    """Toggle approval in one audited write, retaining all reference content."""
+    from . import mobile_canvas_review as core,mobile_candidate_stacks as stacks
+    from .mobile_canvas_operator_view import saved_reference_ids
+    if oid and plate_id:raise ValueError('Wybierz jedno wskazanie MT albo jedną GTR.')
+    scene=core._legacy_scene(session,gid,include_history=False)
+    if not stack_is_verified(scene,oid=oid,plate_id=plate_id):
+        return confirm_stack(session,gid,oid=oid,plate_id=plate_id)
+    state=stacks._state(scene);data=enable(session,gid,scene,state)
+    if plate_id is None:plate_id=state['links'][oid]['plate_id']
+    for key,link in state['links'].items():
+        if (link.get('plate_id')==plate_id and link.get('status')=='ASSOCIATED_FOR_GEOMETRY'
+                and data['source_roles'].get(key)=='FINAL'):
+            data['decisions'][key]=UNRESOLVED
+    if plate_id in saved_reference_ids(scene,state):
+        data['pending_gtr_ids']=sorted(set(data.get('pending_gtr_ids',[]))|{plate_id})
+    # This is not Undo: keep the current geometry, text, identity and links.
+    stacks._write(session,gid,scene,state,'operator_unconfirm_associated_frames',plate_id)
+    return True
+
+
 def toggle_plate(session, gid, oid):
     from . import mobile_canvas_review as core, mobile_candidate_stacks as stacks
-    scene = core._legacy_scene(session, gid)
+    scene = core._legacy_scene(session, gid, include_history=False)
     state = stacks._state(scene)
     data = enable(session, gid, scene, state)
     if data['source_roles'].get(oid) != 'FINAL':
@@ -284,7 +335,7 @@ def toggle_plate(session, gid, oid):
 
 def confirm_empty(session, gid):
     from . import mobile_canvas_review as core, mobile_candidate_stacks as stacks
-    scene = core._legacy_scene(session, gid)
+    scene = core._legacy_scene(session, gid, include_history=False)
     state = stacks._state(scene)
     data = enable(session, gid, scene, state)
     scene[stacks.KEY] = state

@@ -67,6 +67,8 @@ class Session:
     scientific_quality_status: str
     source_evidence_status: str
     model_identity: dict[str, Any] = field(default_factory=dict)
+    operator_approved: bool = False
+    mt_evaluation: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
@@ -207,6 +209,17 @@ def load_session_export(directory: Path, *, verify=True, diagnostics=None) -> Se
             raise InvalidExport(f"{name}: review revision mismatch")
     if sci.get("review_status") != mf.get("review_status"):
         raise InvalidExport("Review status mismatch")
+    if 'review_status' in review and review['review_status']!=mf.get('review_status'):
+        raise InvalidExport('Review document status mismatch')
+    if review.get('review_id') and mf.get('review_id') and review['review_id']!=mf['review_id']:
+        raise InvalidExport('Review document ID mismatch')
+    operator_approved=(review.get('schema')=='alpr.mobile_human_review.v1'
+        and review.get('review_status')==mf.get('review_status')=='COMPLETED'
+        and bool(review.get('review_id')) and review['review_id']==mf.get('review_id'))
+    mt_files=[r['path'] for r in mf.get('files',[]) if str(r.get('path','')).endswith('/mt_detection_evaluation.json')]
+    mt_evaluation=_json(directory/mt_files[0]) if len(mt_files)==1 else None
+    if mt_evaluation and any(mt_evaluation.get(k)!=mf.get(k) for k in ('session_id','source_archive_sha256','review_revision')):
+        raise InvalidExport('MT evaluation identity mismatch')
     canvas_file = directory / "canvas_review_summary.json"
     _trace_step(diagnostics, "read_canvas_summary_json", canvas_file)
     canvas = _json(canvas_file) if canvas_file.exists() else None
@@ -241,6 +254,7 @@ def load_session_export(directory: Path, *, verify=True, diagnostics=None) -> Se
     result = Session(
         directory=directory, session_id=id_, review_revision=int(mf["review_revision"]),
         review_status=str(mf.get("review_status")), review_mode=str(mf.get("review_mode")),
+        operator_approved=operator_approved,mt_evaluation=mt_evaluation,
         source_sha256=digest, manifest_sha256=_file_hash(mf_path),
         scenario=str(conditions.get("scenario") or "UNSPECIFIED"), repeat_label=repeat_label,
         device=str(conditions.get("device") or "unknown"), android=str(conditions.get("android") or "unknown"),

@@ -255,7 +255,7 @@ def _seed(session, ctx, parents):
     return result
 
 
-def _legacy_scene(session, gid):
+def _legacy_scene(session, gid, *, include_history=True):
     ctx = context(session, gid)
     if ctx is None:
         raise ValueError("Brak zweryfikowanej pełnej klatki z ROI tego wywołania MT")
@@ -282,7 +282,10 @@ def _legacy_scene(session, gid):
     _verify_nms_review(saved, proof)
     from .mobile_canvas_physical_gt import validate as validate_physical
     validate_physical(session, gid, saved)
-    result = copy.deepcopy(saved)
+    # Views and measurements need current state, not every undo snapshot.
+    # Keep the default complete for editing/history callers and external tools.
+    source=saved if include_history else {k:v for k,v in saved.items() if k!='candidate_stack_history_v1'}
+    result = copy.deepcopy(source)
     _pending_nms_review(result, proof)
     if not result['checked'] and not proof:
         from .mobile_mt_postdedup import unresolved_filter_reason
@@ -291,8 +294,8 @@ def _legacy_scene(session, gid):
     return result
 
 
-def scene(session, gid):
-    result = _legacy_scene(session, gid)
+def scene(session, gid, *, include_history=True):
+    result = _legacy_scene(session, gid, include_history=include_history)
     from .mobile_canvas_partial_review import validate as validate_partial
     validate_partial(session, gid, result)
     if 'candidate_stacks_v1' in result:
@@ -426,7 +429,7 @@ def counts(s):
 
 def _store(session, gid, s, action, oid="", *, object_before=None):
     # Validate BAD transitions before touching flags, events, history or disk.
-    old = _legacy_scene(session, gid)
+    old = _legacy_scene(session, gid, include_history=False)
     from .mobile_gt_link_contract import validate_transition
     merge=(gid,oid) if action=='operator_same_physical_plate_duplicate_final' else None
     if action=='operator_same_physical_plate_across_invocations':merge=(gid,oid,'cross')
@@ -468,7 +471,11 @@ def _store(session, gid, s, action, oid="", *, object_before=None):
     # Source/trace binding is checked on *every* write, also on undo/redo.
     _verify_nms_review(s, _post_nms_proof(session, gid, s["parents"]))
     s.pop("_post_nms_pending", None)
-    changed = copy.deepcopy(session.review)
+    # This action replaces exactly one already-detached Canvas scene. Other
+    # annotations are immutable inputs; copying their audit histories on every
+    # Space press is unnecessary. _save_change changes only header fields.
+    changed = copy.copy(session.review)
+    changed.invocation_annotations = dict(session.review.invocation_annotations)
     if changed.review_mode == 'blinded_gt_v1':
         if changed.review_mode_locked:
             raise ValueError('Zapis asystowanej zmiany zablokowany: zachowano historyczną, zaślepioną ocenę. Użyj odrębnej kopii z jawnym trybem asystowanym.')
@@ -552,29 +559,23 @@ def correct_plate(session, gid, oid, points):
 
 
 def remove_operator_geometry(session, gid, oid):
-    """Remove a manual object or reset ONLY a child's geometry to its MT parent.
+    """Remove operator geometry without adopting any MT geometry as GT.
 
-    MT evidence is immutable. A reset keeps the per-plate GT and error decision.
+    MT evidence is immutable. A linked identity and its GTZ remain without corners.
     Deleted manual objects live only in the audit events, not in metrics or view.
     """
     s = scene(session, gid)
     obj = _object(s, oid)
-    if 'candidate_stacks_v1' in s and obj.get('parent_id'):
-        from .mobile_candidate_stacks import reset_single_reference
-        return reset_single_reference(session,gid,oid)
     if obj.get("post_nms_suppressed", False):
         raise ValueError("Odrzuconego RAW nie można edytować ani usuwać; pozostaje dowodem MT")
+    if obj.get('parent_id'):
+        from .mobile_candidate_stacks import remove_linked_geometry
+        return remove_linked_geometry(session,gid,oid)
     before = copy.deepcopy(obj)
-    if obj["parent_id"]:
-        parent = next(p for p in s["parents"] if p["parent_id"] == obj["parent_id"])
-        obj.update(quad=copy.deepcopy(parent["quad"]), geometry_state="unconfirmed")
-        obj.pop("legacy_geometry_source", None)
-        action = "reset_child_to_mt_original"
-    else:
-        s["objects"].remove(obj)
-        from .mobile_canvas_physical_gt import remove_reference
-        remove_reference(s, oid)
-        action = "remove_manual_plate"
+    s["objects"].remove(obj)
+    from .mobile_canvas_physical_gt import remove_reference
+    remove_reference(s, oid)
+    action = "remove_manual_plate"
     s.update(checked=False, exclusion_reason="")
     _store(session, gid, s, action, oid, object_before=before)
     return action
@@ -792,7 +793,7 @@ def exclude_scene(session, gid, reason):
 
 def group_issues(session, gid):
     try:
-        s = scene(session, gid)
+        s = scene(session, gid, include_history=False)
     except (ValueError, TypeError, KeyError) as e:
         return [f"Canvas {gid}: {e}"]
     if s.get("checked") is True and str(s.get("exclusion_reason") or "").strip():
@@ -801,6 +802,32 @@ def group_issues(session, gid):
     if s.get("checked") is not True:
         issues.insert(0, "Sprawdź cały obszar ROI i oznacz obraz jako sprawdzony")
     return [f"Canvas {gid}: {i}" for i in issues]
+
+
+def approval_scene_issues(s):
+    """Form approval permits explicit BBOX identity without optional Pose GT.
+
+    Quantitative qualification stays in _content_issues/group_issues. Removed
+    operator geometry, unresolved identity and missing OCR GT still block.
+    """
+    if s.get('checked') and s.get('exclusion_reason'):return []
+    from .mobile_canvas_partial_review import progress,PLATE
+    decisions=progress(s)['object_decisions'];parents={p['parent_id']:p for p in s['parents']}
+    optional=set()
+    for obj in s['objects']:
+        parent=parents.get(obj.get('parent_id'))
+        if (parent and not parent['quad'] and obj.get('identity_decision') and not obj.get('quad')
+                and obj['geometry_state']!='operator_removed' and decisions.get(obj['object_id'])==PLATE):
+            optional.add('Brak czterech rogów: '+obj['object_id'])
+    return [i for i in _content_issues(s) if i not in optional]
+
+
+def approval_group_issues(session,gid):
+    try:s=scene(session,gid,include_history=False)
+    except (ValueError,TypeError,KeyError) as e:return [f'Canvas {gid}: {e}']
+    issues=approval_scene_issues(s)
+    if not s['checked']:issues.insert(0,'Sprawdź cały obszar ROI i oznacz obraz jako sprawdzony')
+    return [f'Canvas {gid}: {i}' for i in issues]
 
 
 def subject_issues(session, subject_key):
@@ -827,7 +854,7 @@ def summary(session):
             continue
         result["scene_count"] += 1
         try:
-            s = scene(session, gid)
+            s = scene(session, gid, include_history=False)
         except (ValueError, TypeError, KeyError) as e:
             result["pending_scenes"] += 1
             result["scenes"].append(dict(mt_invocation_id=gid, status="INVALID", reason=str(e)))

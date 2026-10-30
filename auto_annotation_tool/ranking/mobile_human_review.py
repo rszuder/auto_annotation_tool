@@ -13,7 +13,7 @@ import tempfile
 import uuid
 import zipfile
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from functools import lru_cache
 from typing import Any
@@ -345,7 +345,11 @@ class MobileReviewSession:
                 raise ValueError("Weryfikacja została zmieniona w innym oknie. Otwórz ją ponownie przed zapisem.")
         changed.review_revision = self.review.review_revision + 1
         changed.updated_at = _utc_now_iso()
-        _atomic_write(self.sidecar_path, json.dumps(changed.to_dict(), ensure_ascii=False, indent=2))
+        # Serialize the complete validated record directly. asdict() first
+        # deep-copied every historical snapshot; pretty indentation then used
+        # the slow Python encoder. Exports/to_dict remain independent copies.
+        payload={f.name:getattr(changed,f.name) for f in fields(changed)}
+        _atomic_write(self.sidecar_path, json.dumps(payload, ensure_ascii=False, separators=(',',':')))
         self.review = changed
 
     def set_subject(self, key: str, *, ground_truth: str = "", evaluable: bool | None = True, note: str = "") -> None:

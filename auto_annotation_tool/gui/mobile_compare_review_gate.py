@@ -25,6 +25,10 @@ class Verification:
     def ready(self) -> bool:
         return self.state == "READY"
 
+    @property
+    def approved(self) -> bool:
+        return self.state in ('READY','APPROVED_LIMITED')
+
 
 def _integer(value, *, maximum=1_000_000) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
@@ -329,6 +333,11 @@ def imported_verification(session_id: str, source_sha: str, results_root: Path |
             return Verification(state, "Wymaga eksportu", "Bieżąca rewizja/status GT różni się od eksportu.", item.review_revision, path)
         ok, reason = inspect_canvas(item.canvas, item.review_status)
         if not ok:
+            if item.operator_approved:
+                from .mobile_measurement_availability import limits_text
+                details=limits_text(item.canvas,item.mt_evaluation) or reason
+                return Verification('APPROVED_LIMITED','Zatwierdzona',
+                    'Weryfikacja operatora zatwierdzona. Ograniczenia pomiarów:\n'+details,item.review_revision,path)
             return Verification("INCOMPLETE", "Niepełna MT+MZ", reason, item.review_revision, path)
         return Verification("READY", "Zatwierdzona", reason + "; GT asystowane", item.review_revision, path)
     if exports:

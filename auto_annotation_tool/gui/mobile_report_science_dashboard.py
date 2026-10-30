@@ -288,7 +288,7 @@ class ScientificDashboard(tk.Frame):
         header = tk.Frame(self.content, bg=bg)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 7))
         header.grid_columnconfigure(0, weight=1)
-        tk.Label(header, text="Ocena operatora — Canvas · ASSISTED", bg=bg, fg=fg,
+        tk.Label(header, text="Weryfikacja operatora", bg=bg, fg=fg,
                  font=("Segoe UI", 12, "bold"), anchor="w").grid(row=0, column=0, sticky="w")
         tk.Label(header, textvariable=self.status_var, bg=bg, fg=muted, font=("Segoe UI", 9),
                  anchor="w", justify="left").grid(row=1, column=0, sticky="ew", pady=(3, 0))

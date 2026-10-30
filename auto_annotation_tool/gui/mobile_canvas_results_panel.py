@@ -7,9 +7,10 @@ from ..ranking.mobile_canvas_presentation import percent, progress_caption
 
 
 class CanvasResultsPanel(ScrollPane):
-    def __init__(self, parent, *, p):
+    def __init__(self, parent, *, p, on_open_image=None):
         super().__init__(parent, p=p)
         self.p = p
+        self.on_open_image=on_open_image;self.limit_buttons={};self._limits_signature=None
         header = tk.Frame(self.body, bg=p["bg"])
         header.pack(fill="x", padx=18, pady=(16, 8))
         label(header, "Wyniki weryfikacji", p=p, bg=p["bg"], size=17, bold=True).pack(anchor="w")
@@ -21,6 +22,7 @@ class CanvasResultsPanel(ScrollPane):
         self.progress.pack(fill="x", padx=20, pady=(4, 3))
         self.notice = label(self.body, "", p=p, bg=p["bg"], fg=p["amber"], size=10, wrap=950)
         self.notice.pack(fill="x", padx=20, pady=(4, 3))
+        self.limits_host=tk.Frame(self.body,bg=p['bg']);self.limits_host.pack(fill='x',padx=20,pady=(0,4))
         self.section("GEOMETRIA MT")
         self._cards([("iou", "Pokrycie obrysów · IoU", "blue"),
                      ("nmce", "Błąd narożników · NMCE", "purple")], 2)
@@ -42,7 +44,7 @@ class CanvasResultsPanel(ScrollPane):
         self.reads.pack(fill="x", padx=20, pady=(3, 7))
         technical = Disclosure(self.body, "Szczegóły postępu i wykrycia MT", p=p)
         technical.pack(fill="x", padx=18, pady=(8, 0))
-        self._cards([("inspected", "Przejrzane", "blue"), ("ready", "Oceny kompletne", "green"),
+        self._cards([("inspected", "Przejrzane", "blue"), ("ready", "Zweryfikowane", "green"),
                      ("excluded", "Nie do oceny", "purple"), ("pending", "Do sprawdzenia", "amber")], 4, host=technical.body)
         self._cards([("expected", "Oczekiwane tablice", "blue"), ("linked", "Powiązane z MT", "green"),
                      ("missed", "Pominięte przez MT", "amber"), ("false", "Fałszywe wskazania", "red")], 4, host=technical.body)
@@ -93,24 +95,40 @@ class CanvasResultsPanel(ScrollPane):
             for i, card in enumerate(cards):
                 card.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
 
-    def render(self, data, inventory, *, refreshing=False):
+    def render(self, data, inventory, *, refreshing=False, review_status=None):
         d = data or {}
         def value(key, default=0):
             return d.get(key, default)
         n = inventory["total"]
-        self.progress.configure(text=progress_caption(inventory)+f" · Oceny kompletne: {inventory['assessed']}")
+        ready=inventory.get('approval_ready',inventory['assessed']);remaining=inventory.get('approval_remaining',inventory['remaining'])
+        self.progress.configure(text=f"Zweryfikowane obrazy: {ready}/{n} · Do uzupełnienia: {remaining}")
         self.cards["inspected"].set(f"{inventory['inspected']} / {n}", "w tym obrazy nie do oceny")
-        self.cards["ready"].set(str(inventory["assessed"]), "komplet danych do pomiaru")
+        self.cards["ready"].set(str(ready), "wymagane decyzje operatora zapisane")
         self.cards["excluded"].set(str(inventory["excluded"]), "sprawdzone, poza oceną")
-        self.cards["pending"].set(str(inventory["remaining"]), "jeszcze nieoznaczone jako sprawdzone")
+        self.cards["pending"].set(str(remaining), "wymagają decyzji lub uzupełnienia danych")
         notices = []
-        if inventory["incomplete"]:
-            notices.append(f"Przejrzane z niekompletną oceną: {inventory['incomplete']}. "
-                "Sprawdź decyzję lub przyczynę braku dowodów w panelu obrazu.")
+        if review_status=='COMPLETED':notices.append('Weryfikacja zatwierdzona.')
+        elif not remaining:notices.append('Wszystkie wymagane decyzje zapisane; można zatwierdzić weryfikację.')
+        else:notices.append(f'Do uzupełnienia: {remaining} obrazów.')
         if inventory["unavailable"]:
             notices.append(f"Bez zweryfikowanej pełnej klatki/ROI: {inventory['unavailable']} — tylko podgląd.")
-        if not inventory["assessed"]:
-            notices.append("Brak kompletnych ocen MT+MZ. Kreska oznacza brak pomiaru, nie zerową skuteczność.")
+        from .mobile_measurement_availability import measurement_limits
+        limits=measurement_limits(d,d.get('mt_detection_evaluation_v1')) if not refreshing else []
+        if limits:notices.append('Nie wszystkie pomiary są dostępne. Poniżej wskazano obrazy i przyczyny.')
+        signature=tuple((r['gid'],r['label'],tuple(r['reasons'])) for r in limits)
+        if signature!=self._limits_signature:
+            for w in self.limits_host.winfo_children():w.destroy()
+            self.limit_buttons={}
+            for row in limits:
+                text=row['label']+': '+'; '.join(row['reasons'])
+                if self.on_open_image:
+                    w=tk.Button(self.limits_host,text=text+'  →',command=lambda gid=row['gid']:self.on_open_image(gid),
+                        bg=self.p['bg'],fg=self.p['blue'],activebackground=self.p['bg'],activeforeground=self.p['blue'],
+                        font=('Segoe UI',10),relief='flat',anchor='w',justify='left',cursor='hand2')
+                else:w=label(self.limits_host,text,p=self.p,bg=self.p['bg'],size=10)
+                w.pack(fill='x',pady=2);w.bind('<Configure>',lambda e:e.widget.configure(wraplength=max(160,e.width-12)))
+                self.limit_buttons[row['gid']]=w
+            self._limits_signature=signature
         if refreshing:
             notices.insert(0, "Przeliczanie zapisanej rewizji… Poprzednie wyniki są chwilowo ukryte.")
         self.notice.configure(text="  ".join(notices))
@@ -157,7 +175,7 @@ class CanvasResultsPanel(ScrollPane):
             self.cards[key].title.configure(text=title)
             self.cards[key].set(str(mt[field]) if mt.get(field) is not None else '—')
         qualified,total=mt.get('n_qualified',0),mt.get('n_total',0)
-        scope=('Ocenione' if mt.get('status')=='COMPLETE' else 'W toku · ocenione')+f' {qualified}/{total} · ASSISTED'
+        scope=f'Pomiar MT dostępny dla {qualified}/{total} obrazów · ocena asystowana'
         if qualified:
             self.mt_counts.configure(text=f"GT {mt['n_gt']} · TP {mt['tp']} · FP {mt['fp']} · FN {mt['fn']}\n"+scope)
         else:self.mt_counts.configure(text='Ocena MT: — · brak ocenialnych wywołań\n'+scope)

@@ -1385,7 +1385,7 @@ class MobileReportBrowser:
                  font=("Segoe UI", 9), anchor=tk.W).grid(row=2, column=0, sticky="ew", pady=(0, 5))
         self.report_table = _TreeTable(
             left, ("Wybor", "Data", "Wariant", "Scena", "Powt.", "Weryfikacja", "p95"),
-            ("✓", "Data", "Wariant", "Materiał", "Powt.", "Ocena MT+MZ", "P95"),
+            ("✓", "Data", "Wariant", "Materiał", "Powt.", "Weryfikacja", "P95"),
             (30, 112, 87, 96, 45, 116, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
             selectmode="browse")
         self.report_table.shell.grid(row=3, column=0, sticky="nsew")
@@ -1408,7 +1408,7 @@ class MobileReportBrowser:
         self.btn_import_reports = ttk.Button(left, text="Importuj raport z telefonu", command=self.import_report)
         self.btn_import_reports.grid(row=4, column=0, sticky="ew", pady=(9, 0), ipady=3)
         # AKT87: one click per reviewed session. No duplicate selection basket.
-        self.compare_hint = tk.Label(left, text="✓: tylko zatwierdzone MT + MZ · GT asystowane",
+        self.compare_hint = tk.Label(left, text="✓: dostępne porównanie jakości · GT asystowane",
             bg=self.card_bg, fg=self.muted, anchor=tk.W, font=("Segoe UI", 8))
         self.compare_hint.grid(row=5,column=0,sticky="ew",pady=(8,3))
         self.btn_compare_open = ttk.Button(left,text="Porównaj wybrane (0)",
@@ -2015,7 +2015,7 @@ class MobileReportBrowser:
         self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select, refresh_preview=True)
 
     def _update_sort_headings(self):
-        titles=dict(Data='Data',Wariant='Wariant',Scena='Materiał',Weryfikacja='Ocena MT+MZ',p95='P95',**{'Powt.':'Powt.'})
+        titles=dict(Data='Data',Wariant='Wariant',Scena='Materiał',Weryfikacja='Weryfikacja',p95='P95',**{'Powt.':'Powt.'})
         for column in SORT_COLUMNS:
             arrow=(' ↓' if self._report_sort_descending else ' ↑') if column==self._report_sort_column else ''
             self.report_table.tree.heading(column,text=titles[column]+arrow,command=lambda c=column:self._sort_reports(c))
@@ -2052,7 +2052,7 @@ class MobileReportBrowser:
             status=state.label if state else "Nieustalona"
             ready=bool(state and state.ready)
             tick="☑" if key in self._comparison_checked else "☐" if ready else "—"
-            tag="success" if ready else "warning" if state and state.state in ("STALE","NEEDS_EXPORT","IN_PROGRESS") else "muted"
+            tag="success" if state and state.approved else "warning" if state and state.state in ("STALE","NEEDS_EXPORT","IN_PROGRESS") else "muted"
             stamp=report_measurement_time(r)
             if stamp and stamp.tzinfo:
                 offset=stamp.strftime('%z');offset=offset[:3]+':'+offset[3:]
@@ -2077,7 +2077,7 @@ class MobileReportBrowser:
                 else:tree.insert('',tk.END,iid=iid,values=values,tags=tags)
                 tree.move(iid,'',index)
         finally:self._suppress_report_select=False
-        ready_count=sum(1 for state in self._comparison_verification.values() if state.ready)
+        ready_count=sum(1 for state in self._comparison_verification.values() if state.approved)
         self.report_count_var.set(f"{len(filtered)} z {len(all_reports)} raportów · {ready_count} zatwierdzonych")
         if not filtered:
             if getattr(self,'current_report',None) is not None and all_reports:
@@ -2741,7 +2741,8 @@ class MobileReportBrowser:
         info = report_identity(report, bundle)
         from .mobile_model_identity import identity_from_bundle
         models = identity_from_bundle(bundle)
-        self.hero_title_var.set("Pakiet: " + models["caption"])
+        from .mobile_measurement_availability import polish_model_caption
+        self.hero_title_var.set("Pakiet: " + polish_model_caption(models["caption"]))
         meta = (f"{info['variant']} · {info['scenario'] or 'Scenariusz: brak danych'} · "
                 f"{models['repeat_label']} · {models['variant_caption']} · {local_measurement_time(report.measured_at, compact=True)}")
         if bundle and bundle.validation.warnings:

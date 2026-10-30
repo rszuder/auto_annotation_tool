@@ -655,7 +655,7 @@ class CanvasReviewEditor:
         if self.cache_key != key:
             self.cache_key = key
             try:
-                self.cached = core.scene(h.session, h.current_invocation) if h.session and h.current_invocation else None
+                self.cached = core.scene(h.session, h.current_invocation, include_history=False) if h.session and h.current_invocation else None
                 self.read_error = ""
             except (ValueError, KeyError, TypeError) as e:
                 self.cached = None
@@ -675,6 +675,7 @@ class CanvasReviewEditor:
         context = (id(h.session), getattr(getattr(h.session, 'review', None), 'source_archive_sha256', None), h.current_invocation)
         previous_context = getattr(self, '_selection_context', None)
         if previous_context != context:
+            self._pending_frame_toggles = []
             self.collision_warning.clear()
             self.corner_pulse.clear()
             self.shift_preview.clear()
@@ -1349,6 +1350,7 @@ class CanvasReviewEditor:
             # The operator may have selected/deselected a frame in the meantime.
             self.sync()
             self.request_overlay()
+            self._drain_frame_verification()
         # Use the existing single worker for statistics/ranking; sidecar writes
         # have already succeeded. Never push hidden legacy subject GT fields.
         h._change(lambda:None, save_draft=False, after=after)
@@ -1639,7 +1641,7 @@ class CanvasReviewEditor:
                         self.message('Zmieniono obraz; anuluj szkic przez Esc. Nie zapisano GT.')
                         return 'break'
                     oid=self._commit(lambda:complete_bbox_reference(self.h.session,gid,oid,quad,expected_plate_id=pid,operator_draw=True),
-                                     'Uzupełniono obrys istniejącej GT przy BBOX MT')
+                                     'Narysowano obrys operatora dla istniejącej GT')
                 else:
                     oid=self._commit(lambda:core.add_plate(self.h.session,self.h.current_invocation,quad,
                                       partial_review=True),"Dodano poprawną ramkę tablicy operatora")
@@ -2100,7 +2102,10 @@ class CanvasReviewEditor:
         if self.mode=='draw':
             self.message('Dokończ ramkę lub anuluj szkic przed zatwierdzeniem.')
             return 'break'
-        if not self.prepare_navigation() or not self.available():
+        if not self.prepare_navigation():
+            return "break"
+        deferred = self.in_refresh and self.h._saving
+        if not deferred and not self.available():
             return "break"
         from ..ranking import mobile_canvas_partial_review as partial
         current = partial.progress(self._read())
@@ -2120,16 +2125,53 @@ class CanvasReviewEditor:
                     (r for r in rows if r['oid']==oid and (r['gt'] if reference else r['candidate'])),None)
         if not oid:
             if current['empty_eligible']:
-                return self.confirm_empty_image()
-            self.message('Wybierz ramkę tablicy lub najedź na nią i naciśnij Spację: zatwierdź skojarzone ramki.')
+                return self._queue_frame_verification(None) if deferred else self.confirm_empty_image()
+            self.message('Wybierz ramkę tablicy lub najedź na nią i naciśnij Spację: przełącz weryfikację skojarzonych ramek.')
             return 'break'
         pid=row['pid'] if row and row['gt'] else None
         if not pid and oid not in current['object_decisions']:
             self.message('Wybierz GTR albo końcowe wskazanie modelu tej tablicy.')
             return 'break'
-        self._commit(lambda:partial.confirm_stack(self.h.session,self.h.current_invocation,oid=oid if not pid else None,plate_id=pid),
-                     'Potwierdzono skojarzone ramki tablicy')
+        target=dict(oid=oid if not pid else None,plate_id=pid)
+        if deferred:
+            return self._queue_frame_verification(target)
+        return self._toggle_frame_verification(target)
+
+    def _toggle_frame_verification(self, target):
+        if target is None:
+            return self.confirm_empty_image()
+        from ..ranking import mobile_canvas_partial_review as partial
+        verified=partial.stack_is_verified(self._read(),**target)
+        self._commit(lambda:partial.toggle_stack(self.h.session,self.h.current_invocation,**target),
+                     'Cofnięto weryfikację skojarzonych ramek tablicy' if verified else 'Potwierdzono skojarzone ramki tablicy')
         return "break"
+
+    def _queue_frame_verification(self, target):
+        # Statistics temporarily owns the session. Keep each released press,
+        # bound to its original source/target; never write from its worker.
+        context=(id(self.h.session),self.h.current_invocation,self.h._image_entry)
+        self._pending_frame_toggles=getattr(self,'_pending_frame_toggles',[])+[(context,target)]
+        if not getattr(self,'_frame_toggle_after',None):
+            self._frame_toggle_after=self.c.after(40,self._drain_frame_verification)
+        self.message('Przełączenie weryfikacji oczekuje na zakończenie odświeżania wyników.')
+        return 'break'
+
+    def _drain_frame_verification(self):
+        if getattr(self,'_frame_toggle_after',None):
+            self.c.after_cancel(self._frame_toggle_after)
+        self._frame_toggle_after=None
+        if self.h._closed or not getattr(self,'_pending_frame_toggles',[]):
+            self._pending_frame_toggles=[]
+            return
+        if self.h._saving or self.in_refresh:
+            self._frame_toggle_after=self.c.after(40,self._drain_frame_verification)
+            return
+        pending=getattr(self,'_pending_frame_toggles',[])
+        self._pending_frame_toggles=[]
+        context=(id(self.h.session),self.h.current_invocation,self.h._image_entry)
+        for source,target in pending:
+            if source==context:
+                self._toggle_frame_verification(target)
 
     def release_frame_space(self, event=None):
         self._frame_space_down = False
@@ -2327,7 +2369,8 @@ class CanvasReviewEditor:
         self.corner_pulse.clear()
         self.shift_preview.dispose()
         """Stop controller callbacks before the window and its Tcl commands die."""
-        for name in ("entry_after", "refresh_after", "paint_after", "selection_release_after", "fit_release_after"):
+        self._pending_frame_toggles=[]
+        for name in ("entry_after", "refresh_after", "paint_after", "selection_release_after", "fit_release_after", "_frame_toggle_after"):
             callback = getattr(self, name, None)
             if callback:
                 try:
@@ -2365,7 +2408,8 @@ class CanvasReviewEditor:
             self.shortcut_tag = None
 
     def build_report_tab(self, tabs):
-        self.report_host=CanvasResultsPanel(tabs,p=self.p)
+        self.report_host=CanvasResultsPanel(tabs,p=self.p,on_open_image=self.open_result_image)
+        self.review_tabs=tabs
         tabs.tab(1,text="Analiza historyczna")
         tabs.add(self.report_host,text="Canvas · wyniki")
         tabs.insert(1,self.report_host)
@@ -2391,7 +2435,7 @@ class CanvasReviewEditor:
         if current:
             data = dict(data, mt_detection_evaluation_v1=mt)
         refreshing = not current and bool(data or self.in_refresh or self.refresh_after or self.h._saving)
-        self.report_host.render(data if current else {}, inv, refreshing=refreshing)
+        self.report_host.render(data if current else {}, inv, refreshing=refreshing,review_status=self.h.session.review.review_status)
         self.h.science_dashboard.render_canvas(data if current else None, inv,
             refreshing=refreshing, review_status=self.h.session.review.review_status)
 
@@ -2601,9 +2645,10 @@ class CanvasReviewEditor:
         if obj is None:
             return "break"
         oid, parent = obj["object_id"], obj["parent_id"]
-        description = ("Cofnięto korektę do oryginału MT; GT zachowano" if parent else
+        description = ("Usunięto obrys GTR; MT pozostaje źródłem. Numer GT zachowano. D: narysuj, Ctrl+Z: przywróć" if parent else
                        "Usunięto ręczną ramkę z widoku i oceny; Ctrl+Z przywraca")
         if self._commit(lambda: core.remove_operator_geometry(self.h.session, self.h.current_invocation, oid), description):
+            self.gt_focus_id='';self._reserved_edit=None;self._geometry_layer_state=None;self.mode='select'
             if not parent:
                 self.selected = self.hover = ""
             self.sync(); self.refresh_tree(); self.request_overlay()
@@ -2792,6 +2837,8 @@ class CanvasReviewEditor:
         if all(row["status"] == "READY" for row in rows):
             return "Zweryfikowany", "canvas_ready"
         if all(row.get('progress', {}).get('complete') or row['status'] == 'EXCLUDED' for row in rows):
+            if any(row.get('approval_issues',row.get('issues',[])) for row in rows):
+                return 'Uzupełnij dane', 'canvas_pending'
             return "Zweryfikowany", "canvas_ready"
         if any(row.get("scene") and row["scene"].get("_post_nms_pending") for row in rows):
             return "Wyjaśnij rozbieżność", "canvas_error"
@@ -2887,7 +2934,13 @@ class CanvasReviewEditor:
         if hasattr(self.h, "form_status_label"):
             from ..ranking.mobile_verification_policy import verification_issues
             session = self.h.session
-            complete = bool(session and not verification_issues(session))
+            review=getattr(session,'review',None)
+            key=(id(session),id(review),getattr(review,'review_revision',None))
+            if getattr(self,'_header_validation_key',None)!=key:
+                self._header_complete=bool(session and not verification_issues(session))
+                self._header_validation_key=key
+            # Display-only cache; the report approval command revalidates.
+            complete=self._header_complete
             if getattr(session,'_history_inspection_only',False):
                 status, tone = "TYLKO HISTORIA", "amber"
                 self.h.progress_label.configure(text='Historia · brak obrazów dopuszczonych do oceny')
@@ -2969,12 +3022,24 @@ class CanvasReviewEditor:
         self.plate_fit_saved = None
         return False
 
+    def open_result_image(self,gid):
+        if not self.prepare_navigation():return False
+        tree=self.h.subject_tree
+        iid=next((i for i in tree.get_children('') if gid in subject_groups(self.h.session,self.h._subject_ids[i])),None)
+        if iid is None:return False
+        self.review_tabs.select(0);tree.selection_set(iid);tree.focus(iid);tree.see(iid);self.h._select_subject()
+        if gid!=self.h.current_invocation:
+            group=self.h.session.mt_invocations.get(gid)
+            aid=str(group.records[0].get('id') or '') if group and group.records else ''
+            if aid:self.pending_tree_target=(gid,'');self.h._multi_focus_attempt(aid)
+        return True
+
     def next_pending(self):
         inv = self.inventory()
         tree = self.h.subject_tree
         roots = tuple(tree.get_children(""))
         for gid, item in inv["groups"].items():
-            if item["status"] in ("READY", "EXCLUDED"):
+            if item["status"] in ("READY", "EXCLUDED") or ('approval_issues' in item and not item['approval_issues']):
                 continue
             iid = next((iid for iid in roots
                         if gid in subject_groups(self.h.session, self.h._subject_ids[iid])), None)

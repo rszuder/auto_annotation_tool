@@ -8,13 +8,13 @@ from .mobile_pose_metrics import _cross, _signed_area, _clip_convex
 def reference_records(scene,exclude_plate_id=None):
     """Saved active references, not raw model contours or history snapshots."""
     from . import mobile_candidate_stacks as stacks
-    from .mobile_canvas_operator_view import collision_reference_ids
+    from .mobile_canvas_operator_view import collision_reference_ids,reference_numbers
     state=scene.get(stacks.KEY) or stacks._legacy(scene)
     active=collision_reference_ids(scene,state)
-    numbered=((pid,p) for pid,p in state['plates'].items() if p['gt_quad'])
-    for number,(pid,p) in enumerate(numbered,1):
+    numbers=reference_numbers(state)
+    for pid,p in state['plates'].items():
         if pid in active and pid!=exclude_plate_id:
-            yield dict(plate_id=pid,number=number,quad=p['gt_quad'])
+            yield dict(plate_id=pid,number=numbers[pid],quad=p['gt_quad'])
 
 
 def manual_references(scene):

@@ -27,7 +27,7 @@ def selected_canvas_export(session_id, source_sha, results_root, review_root):
     """Same revision selection and fail-closed rules as the import checkboxes."""
     from .mobile_comparison_core import load_session_export
     gate = imported_verification(session_id, source_sha, results_root, review_root)
-    if not gate.ready:
+    if not gate.approved:
         return gate, None
     # Retain manifest verification when fetching the selected payload. Never
     # read a guessed export, or render a previous READY after a concurrent edit.
@@ -41,7 +41,8 @@ def selected_canvas_export(session_id, source_sha, results_root, review_root):
     canvas_sid = (item.canvas or {}).get("session_id", session_id)
     if (item.session_id != session_id or item.source_sha256 != source_sha or
             item.review_revision != gate.revision or canvas_sid != session_id or
-            not item.canvas_ready or live not in (None, (item.review_revision, "COMPLETED"))):
+            (not item.canvas_ready if gate.ready else not item.operator_approved)
+            or live not in (None, (item.review_revision, "COMPLETED"))):
         return replace(gate, state="STALE", label="Eksport nieaktualny",
                        reason="Tożsamość lub rewizja zmieniła się podczas odczytu."), None
     return gate, item
@@ -53,7 +54,7 @@ def load_canvas_snapshot(session_id, source_sha, results_root, review_root):
                   summary=None, identity=None)
     if item is not None:
         result.update(summary=item.canvas, identity=item.model_identity,
-                      manifest_sha256=item.manifest_sha256, review_revision=item.review_revision)
+                      manifest_sha256=item.manifest_sha256, review_revision=item.review_revision,mt_evaluation=item.mt_evaluation)
     return result
 
 
@@ -95,8 +96,17 @@ def canvas_overview(snapshot, *, session_id="", source_sha="", progress=None, lo
         chars, errors = c['gt_characters'], c['text_errors']
         cards[3].update(value=pct(errors/chars*100) if chars else "Nie oceniano",
                         note=f"Micro-CER: {errors}/{chars} · błędy edycji / znaki GT.")
+    elif (state=='APPROVED_LIMITED' and snapshot.get('session_id')==session_id
+          and snapshot.get('source_sha256')==source_sha and c.get('source_archive_sha256')==source_sha
+          and c.get('review_revision')==gate.get('revision') and c.get('session_id')==session_id):
+        status='ZATWIERDZONA · OGRANICZENIA POMIARÓW'
+        checked=(c.get('operator_progress') or {}).get('inspected',c.get('inspected_scenes',0))
+        total=c.get('scene_count',0);counter=f'Zweryfikowane obrazy: {checked}/{total} · rewizja {gate["revision"]}'
+        ratio=checked/total if total else None
+        from .mobile_measurement_availability import limits_text
+        detail='Weryfikacja zakończona. Nie każdy obraz ma dane do wszystkich pomiarów.\n'+limits_text(c,snapshot.get('mt_evaluation'))
     elif loading:
         status = "Wczytywanie oceny Canvas…"
     return dict(status=status, cards=cards, progress=counter, progress_subtitle=detail,
                 progress_ratio=ratio, ready=bound,
-                methodology="Canvas ASSISTED: ocena z widoczną predykcją. E2E Exact Match: nie oceniano osobno.")
+                methodology="Ocena asystowana: z widoczną predykcją. Pełnej zgodności całego potoku nie oceniano osobno.")

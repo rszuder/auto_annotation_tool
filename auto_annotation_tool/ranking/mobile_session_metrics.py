@@ -86,6 +86,6 @@ def presentation(snapshot, key):
     geometry=(f"{geo['n_geometry']} par" if geo['n_geometry'] else '0 (brak par)')
     text=(f"{ocr['n_reads']} odczytów / {ocr['n_gt_characters']} znaków GT"
           if ocr['n_reads'] and ocr['n_gt_characters'] else '0 (brak ocenionych odczytów)')
-    return dict(values=values, status=('Ocenione dane · ASSISTED' if snapshot['status']=='COMPLETE'
-                else 'W toku · tylko ocenione dane'), exact='Exact MZ: '+exact,
+    return dict(values=values, status=('Ocena asystowana · pełny zakres pomiarów' if snapshot['status']=='COMPLETE'
+                else 'Ocena asystowana · dostępny zakres pomiarów'), exact='Exact MZ: '+exact,
         denominators=f"MT: {mt['n_qualified']}/{mt['n_total']} · geometria: {geometry}\nMZ: {text}", refreshing=False)

@@ -17,10 +17,11 @@ def test_R_on_source_cannot_reset_linked_GTR(gui,kind):
     before=frozen(s);ed.remove_selected(NS(state=0));ready(root,h,ed)
     assert frozen(s)==before
 
-def test_R_on_GTR_still_resets_and_undo_restores_same_reference(gui):
+def test_R_removes_GTR_geometry_and_undo_restores_same_reference(gui):
     root,h,ed,s=gui;q=edit(s);ready(root,h,ed);nav.select_layer(ed,'GTR',OID);ready(root,h,ed)
     ident=pid(s);ed.remove_selected(NS(state=0));ready(root,h,ed)
-    assert stacks.snapshot(s,G)['plates'][ident]['gt_quad']==core.scene(s,G)['parents'][0]['quad']
+    assert stacks.snapshot(s,G)['plates'][ident]['gt_quad'] is None
+    assert layers.model(ed)['gtr_count']==0 and layers.model(ed)['active'] in ('BBOX','POSE')
     ed.undo();ready(root,h,ed)
     assert pid(s)==ident and stacks.snapshot(s,G)['plates'][ident]['gt_quad']==q
 

@@ -123,7 +123,7 @@ def subject_verification_issues(session, subject_key: str) -> list[str]:
         group = session.mt_invocations.get(group_id)
         if not _active(session, group):
             continue
-        from .mobile_canvas_review import has_scene, group_issues as canvas_group_issues
+        from .mobile_canvas_review import has_scene, approval_group_issues as canvas_group_issues
         if has_scene(session, group_id):
             issues.extend(canvas_group_issues(session, group_id))
             continue
@@ -195,8 +195,9 @@ def verification_progress(session) -> dict:
     if not session:
         return {"total": 0, "verified": 0, "excluded": 0, "issues": (), "status": "NOT_STARTED"}
     total = len(session.subjects)
-    issues = verification_issues(session)
-    verified = sum(not subject_verification_issues(session, key) for key in session.subjects)
+    by_subject=[subject_verification_issues(session,key) for key in session.subjects]
+    issues=list(dict.fromkeys(issue for items in by_subject for issue in items)) if by_subject else verification_issues(session)
+    verified=sum(not items for items in by_subject)
     excluded = 0
     class_counts = Counter()
     for key, subject in session.subjects.items():

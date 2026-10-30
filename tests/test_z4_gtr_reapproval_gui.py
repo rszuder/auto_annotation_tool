@@ -23,7 +23,9 @@ def view(h,ed):
 def approved(root,h,ed,s):
     ready(root,h,ed)
     assert core.scene(s,G)['checked'] and ed.checked_var.get() and not pending(s)
-    assert not ed.clean_gtr_confirm_button.winfo_manager()
+    if ed.selected:
+        assert ed.clean_gtr_confirm_button.winfo_manager() and ed.clean_gtr_confirm_button['text']=='Cofnij weryfikację · Spacja'
+    else:assert not ed.clean_gtr_confirm_button.winfo_manager()
 
 @pytest.mark.parametrize('size',['1649x896','1180x760'])
 @pytest.mark.parametrize('approve',['space','button'])
@@ -67,5 +69,7 @@ def test_source_space_approves_its_associated_changed_GTR(gui,kind):
     root,h,ed,s=gui;edit(s);ed.cache_key=None;ed.sync();nav.select_layer(ed,kind);ready(root,h,ed)
     assert pending(s)==[pid(s)]
     native.key(h,'space');approved(root,h,ed,s)
-    before=s.sidecar_path.read_bytes();native.key(h,'space');approved(root,h,ed,s)
-    assert s.sidecar_path.read_bytes()==before
+    before=copy.deepcopy(core.scene(s,G)['objects']);native.key(h,'space');ready(root,h,ed)
+    assert not ed.checked_var.get() and pending(s)==[pid(s)]
+    native.key(h,'space');approved(root,h,ed,s)
+    assert core.scene(s,G)['objects']==before

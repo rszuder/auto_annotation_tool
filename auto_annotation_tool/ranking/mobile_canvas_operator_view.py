@@ -1,6 +1,16 @@
 """Presentation-only physical references; never change evaluation eligibility."""
 
 
+def reference_numbers(state):
+    """Stable Canvas numbers, including gaps left by explicit reconciliation."""
+    numbers=dict(state.get('reference_numbers',{}))
+    next_number=max(numbers.values(),default=0)+1
+    for pid,p in state['plates'].items():
+        if p.get('gt_quad') and pid not in numbers:
+            numbers[pid]=next_number;next_number+=1
+    return numbers
+
+
 def physical_plate_ids(scene, state):
     """Persisted physical identities, also when only GTZ has been supplied."""
     removed=set(state.get('removed_manual_ids',()))

@@ -203,7 +203,7 @@ def test_U19_missing_pose_NOT_RUN_is_not_zero(tmp_path,monkeypatch,clean):
 
 def test_U20_concrete_next_action(pair,clean):
     root,h,ed,s,gid=pair;core.set_text(s,gid,'GT:a0','');ready(root,h,ed)
-    assert 'Rozstrzygnij ramkę MT 1' in ed.contexts.data['image']
+    assert 'Zweryfikuj tablicę GTR 1' in ed.contexts.data['image']
     pick(pair);native.key(h,'space');ready(root,h,ed)
     assert 'Obraz zweryfikowany' in ed.contexts.fields['image'].cget('text')
     assert 'uzupełnij numer GT' in ed.contexts.fields['image'].cget('text')

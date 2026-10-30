@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy,math,tkinter as tk
 from ..ranking import mobile_canvas_review as core,mobile_candidate_stacks as data
 from ..ranking import mobile_canvas_partial_review as partial
+from ..ranking.mobile_canvas_operator_view import reference_numbers
 
 def source(ed):
     from .mobile_canvas_stacks import view
@@ -19,7 +20,7 @@ def records(ed):
     s=ed._read();v=source(ed)
     if not s or not v:return []
     result=[];conflicted={c['plate_id'] for c in v['conflicts']}
-    numbers={pid:n for n,(pid,p) in enumerate(((pid,p) for pid,p in v['plates'].items() if p['gt_quad']),1)}
+    numbers=reference_numbers(v)
     for pid,p in v['plates'].items():
         if pid not in v.get('active_plate_ids', v['plates']):continue
         members=candidates(v,pid)
@@ -490,7 +491,8 @@ def context(ed,model):
             if location:obj+=f" · MT {r['candidate']['mt_detection_index']+1} {location['kind']} powiązany"
             elif not r['candidate']:obj+=' · MT: niepowiązany'
             obj+='\nGTZ: '+(gt[:35] or 'nieuzupełniony')
-            row=next((x for x in data.diagnostics(ed.h.session,[ed.h.current_invocation])['rows'] if r['candidate'] and x['object_id']==r['oid']),None)
+            from .mobile_canvas_info_badge import selected_diagnostic
+            row=selected_diagnostic(ed,r)
             ed._clean_geometry_preview=(ed.cache_key,r['oid'],row)
             if r['conflict']:geo='Nie można ustalić referencji GT'
             elif row and row['polygon_iou_pct'] is not None:
@@ -515,11 +517,18 @@ def context(ed,model):
         problems=[]
         if unknown:problems.append('Nie można ustalić pochodzenia wskazania')
         if v['conflicts']:problems.append('Rozstrzygnij sprzeczne referencje GT')
+        numbers=reference_numbers(v);pending_units=set()
         for c in final:
             if frame['object_decisions'].get(c['object_id'])==partial.UNRESOLVED:
-                problems.append(f"Rozstrzygnij ramkę MT {c['mt_detection_index']+1}")
-        numbers={pid:n for n,(pid,p) in enumerate(((pid,p) for pid,p in v['plates'].items() if p['gt_quad']),1)}
-        problems += [f"Zatwierdź GTR {numbers.get(pid,'—')}" for pid in frame['pending_gtr_ids']]
+                pid=v['links'].get(c['object_id'],{}).get('plate_id')
+                if pid in numbers:
+                    if pid not in pending_units:
+                        problems.append(f"Narysuj obrys GTR {numbers[pid]} (D)" if v['plates'][pid]['geometry_state']=='operator_removed'
+                                        else f"Zweryfikuj tablicę GTR {numbers[pid]}")
+                    pending_units.add(pid)
+                else:problems.append(f"Zweryfikuj wskazanie MT {c['mt_detection_index']+1}")
+        problems += [(f"Narysuj obrys GTR {numbers.get(pid,'—')} (D)" if v['plates'][pid]['geometry_state']=='operator_removed'
+                      else f"Zweryfikuj tablicę GTR {numbers.get(pid,'—')}") for pid in frame['pending_gtr_ids'] if pid not in pending_units]
         if frame['empty_eligible'] and not frame['empty_confirmed']:
             problems.append('Potwierdź: na obrazie nie ma tablic')
         complete=frame['complete']
@@ -539,7 +548,7 @@ def context(ed,model):
         if complete and data_issues and not s.get('exclusion_reason'):
             image_note+='\nDo oceny GT/MZ: '+('uzupełnij numer GT' if any('GT numeru' in i for i in data_issues)
                                            else 'uzupełnij dane referencji')
-        elif not complete and not s.get('exclusion_reason'):image_note+='\nSpacja: zatwierdź ramki tablicy · PPM: błędne MT'
+        elif not complete and not s.get('exclusion_reason'):image_note+='\nSpacja: przełącz weryfikację tablicy · PPM: odrzuć MT'
     detection=None
     if ed.h.session and ed.h.current_invocation:
         from ..ranking.mobile_mt_detection_evaluation import evaluate_unit, reason_text
@@ -580,8 +589,9 @@ def context(ed,model):
     if ed.h.session and report and report.source_archive_sha256.lower()==ed.h.session.review.source_archive_sha256.lower():
         gate=getattr(ed.h.browser,'_comparison_verification',{}).get((str(report.report_id),report.source_archive_sha256.lower()))
         stale=bool(gate and gate.state=='STALE')
-    progress=(f"Eksport nieaktualny · decyzje: {inv['decisions']}" if stale else f"{status} · Pozostałe decyzje: {inv['decisions']}")
-    session=f"Sprawdzone: {inv['inspected']}/{inv['total']} · Pozostało: {inv['remaining']}\n{progress}"
+    pending=inv.get('approval_decisions',inv['decisions'])
+    progress=(f"Eksport nieaktualny · decyzje: {pending}" if stale else f"{status} · Pozostałe decyzje: {pending}")
+    session=f"Sprawdzone: {inv.get('approval_ready',inv['inspected'])}/{inv['total']} · Pozostało: {inv.get('approval_remaining',inv['remaining'])}\n{progress}"
     if r and r['pid'] and not r['candidate']:
         from ..ranking.mobile_mt_geometry_layers import overlapping_references
         overlap=overlapping_references(s,v).get(r['pid'],[])
@@ -605,7 +615,7 @@ def context(ed,model):
     image='Zapisane GT: '+image_counts['gt']+' · Wskazania MT: '+image_counts['mt']+'\n'+image_note
     return dict(object=obj,image=image,session=session,object_title=title,image_counts=image_counts,image_note=image_note,
                 bbox_counts=bbox_counts,bbox_note=bbox_note,bbox_scope=bbox_scope,
-                session_counts=dict(inspected=f"{inv['inspected']}/{inv['total']}",remaining=str(inv['remaining']),decisions=str(inv['decisions'])),
+                session_counts=dict(inspected=f"{inv.get('approval_ready',inv['inspected'])}/{inv['total']}",remaining=str(inv.get('approval_remaining',inv['remaining'])),decisions=str(pending)),
                 session_note='Eksport nieaktualny' if stale else status)
 
 class CompactContexts(tk.Frame):
@@ -629,7 +639,15 @@ class CompactContexts(tk.Frame):
                     else:number.pack(fill='x');caption_label.pack(fill='x')
                     caption_label.bind('<Configure>',lambda e,w=caption_label:w.configure(wraplength=max(55,e.width)) if int(str(w.cget('wraplength')))!=max(55,e.width) else None)
                     self.counters[name]=number;self.counter_labels[name]=caption_label
-            label=tk.Label(frame,bg=p['bg'],fg=p['fg'],anchor='nw',justify='left',font=('Segoe UI',10),wraplength=290,width=1)
+            host=frame
+            if key=='object':
+                self.object_details=tk.Frame(frame,bg=p['bg']);host=self.object_details
+                self.details_open=False
+                self.details_button=tk.Button(frame,text='Szczegóły wskazania ▸',command=self.toggle_details,
+                    bg=p['bg'],fg=p['blue'],activebackground=p['bg'],activeforeground=p['blue'],
+                    font=('Segoe UI',10),anchor='w',relief='flat',cursor='hand2')
+                self.details_button.pack(fill='x',pady=(2,0))
+            label=tk.Label(host,bg=p['bg'],fg=p['fg'],anchor='nw',justify='left',font=('Segoe UI',10),wraplength=290,width=1)
             label.pack(fill='x',pady=(5,0));self.fields[key]=label
             if key=='image':
                 self.bbox_section=tk.Frame(frame,bg=p['bg']);self.bbox_section.pack(fill='x',pady=(9,2))
@@ -657,11 +675,20 @@ class CompactContexts(tk.Frame):
         for k,w in self.fields.items():w.configure(text=value.get(k+'_note',value[k]))
         for group in ('image_counts','session_counts'):
             for name,number in value.get(group,{}).items():self.counters[name].configure(text=number)
-        self.titles['object'].configure(text=value.get('object_title','WYBRANA TABLICA'))
+        self.titles['object'].configure(text='AKCJE DLA WSKAZANIA')
         for name,number in value.get('bbox_counts',{}).items():self.bbox_counters[name].configure(text=name.upper()+': '+number)
         self.bbox_note.configure(text=value.get('bbox_note',''))
+        if value.get('bbox_note'):
+            if not self.bbox_note.winfo_manager():self.bbox_note.pack(fill='x',pady=(4,0))
+        else:self.bbox_note.pack_forget()
         self.bbox_scope.configure(text=value.get('bbox_scope',''))
         self.live_metrics.render(value.get('session_metrics'),value.get('session_metrics_key'))
+
+    def toggle_details(self):
+        self.details_open=not self.details_open
+        if self.details_open:self.object_details.pack(fill='x',after=self.details_button)
+        else:self.object_details.pack_forget()
+        self.details_button.configure(text='Szczegóły wskazania ▾' if self.details_open else 'Szczegóły wskazania ▸')
 
 def show_exclusion(ed):
     if not ed.available():return
@@ -694,20 +721,26 @@ def sync_image_actions(ed):
     if editing_reason:
         note.pack_forget();ed.clean_exclude_button.pack_forget()
     else:
-        if not note.winfo_manager():note.pack(fill='x',pady=(5,0),before=ed.approve)
+        if note['text'].strip() in ('','Obraz zweryfikowany'):note.pack_forget()
+        elif not note.winfo_manager():note.pack(fill='x',pady=(5,0),before=ed.approve)
         if not ed.clean_exclude_button.winfo_manager():ed.clean_exclude_button.pack(fill='x',pady=(5,0),after=ed.approve)
     scene=ed._read() or {};enabled=ed.available() and not ed.busy and not ed.h._saving
     frame=partial.progress(scene) if scene else None
     row=selected(ed)
-    pending=bool(frame and row and (row['pid'] in frame['pending_gtr_ids']
-        or (row['candidate'] and row['role']=='FINAL' and frame['object_decisions'].get(row['oid'])!=partial.PLATE)
-        or any(frame['object_decisions'].get(c['object_id'])!=partial.PLATE for c in row['members'])))
-    if pending:
-        ed.clean_gtr_confirm_button.configure(text='Zatwierdź ramki · Spacja',state='normal' if enabled and ed.mode!='draw' else 'disabled')
+    target=bool(frame and row and ((row['pid'] and row['gt']) or (row['candidate'] and row['role']=='FINAL')))
+    if target:
+        pid=row['pid'] if row['gt'] else None
+        verified=partial.stack_is_verified(scene,oid=row['oid'] if not pid else None,plate_id=pid)
+        removed=bool(row['plate'] and row['plate']['geometry_state']=='operator_removed' and not row['gt'])
+        ed.clean_gtr_confirm_button.configure(text='Narysuj obrys GTR · D' if removed else 'Cofnij weryfikację · Spacja' if verified else 'Zatwierdź ramki · Spacja',
+                                            command=ed.draw_toggle if removed else ed.confirm,
+                                            state='normal' if enabled and ed.mode!='draw' else 'disabled')
         ed.clean_gtr_confirm_button.pack(fill='x',pady=(4,0))
     else:ed.clean_gtr_confirm_button.pack_forget()
     from .mobile_canvas_review_feedback import sync_actions
     sync_actions(ed)
+    from .mobile_canvas_gtr_reconciliation import sync as sync_reconciliation
+    sync_reconciliation(ed)
     if frame and frame['empty_eligible'] and not scene.get('exclusion_reason'):
         if not ed.clean_empty_button.winfo_manager():ed.clean_empty_button.pack(fill='x',pady=(4,0),after=ed.approve)
         ed.clean_empty_button.configure(state='normal' if enabled else 'disabled',
@@ -750,6 +783,8 @@ def install(ed,viewer):
     ed.clean_gtr_confirm_button=tk.Button(ed.contexts.sections['object'],text='Zatwierdź ramki · Spacja',command=ed.confirm,**button_options)
     from .mobile_canvas_review_feedback import install as install_feedback
     install_feedback(ed,button_options)
+    from .mobile_canvas_gtr_reconciliation import install as install_reconciliation
+    install_reconciliation(ed,button_options)
     ed.clean_empty_button=tk.Button(ed.contexts.sections['image'],text='Na obrazie nie ma tablic',
                                    command=ed.confirm_empty_image,**button_options)
     ed.clean_exclude_button=tk.Button(ed.contexts.sections['image'],text='Nie można ocenić całego obrazu…',command=lambda:show_exclusion(ed),**button_options)
@@ -783,7 +818,7 @@ def install(ed,viewer):
     ed.clean_mz_crop_index=menu.index('end')
     ed.clean_menu=menu
     help_menu=tk.Menu(menu,tearoff=False,**menu_colors(p));menu.add_cascade(label='Skróty i obsługa',menu=help_menu);ed.clean_help_menu=help_menu
-    for text in ('S / klik: wybierz obiekt','Spacja: zatwierdź skojarzone ramki tablicy','GTR: zielona — zatwierdzona; pomarańczowa — oczekuje','Obwódka obrazu: zielona — zweryfikowany; czerwona — oczekuje','Z/X: poprzednia/następna warstwa','↑/↓: poprzednie/następne wskazanie modelu','Warstwę wybierzesz także z listy nad zdjęciem','LPM na narożniku: korekta GTR; Esc: koniec','Klik w badge obrysu operatora: edycja GTZ','PPM: błędne wskazanie; Ctrl+Z/Y: historia','Ctrl+PPM: powiązania i pochodzenie','D: cztery narożniki GTR · R: usuń/cofnij referencję','A: następna tablica + dopasowanie · F: cały obraz · rolka: zoom','Q/E: poprzedni/następny obraz · N: następny obrys'):
+    for text in ('S / klik: wybierz obiekt','Spacja: przełącz weryfikację skojarzonych ramek','GTR: zielona — zatwierdzona; pomarańczowa — oczekuje','Obwódka obrazu: zielona — zweryfikowany; czerwona — oczekuje','Z/X: poprzednia/następna warstwa','↑/↓: poprzednie/następne wskazanie modelu','Warstwę wybierzesz także z listy nad zdjęciem','LPM na narożniku: korekta GTR; Esc: koniec','Klik w badge obrysu operatora: edycja GTZ','PPM: błędne wskazanie; Ctrl+Z/Y: historia','Ctrl+PPM: powiązania i pochodzenie','D: cztery narożniki GTR · R: usuń/cofnij referencję','A: następna tablica + dopasowanie · F: cały obraz · rolka: zoom','Q/E: poprzedni/następny obraz · N: następny obrys'):
         help_menu.add_command(label=text,command=lambda message=text:ed.message(message))
     ed.h.progress_label.grid_remove()
     from .mobile_canvas_navigator import Navigator

@@ -21,7 +21,7 @@ def build_inventory(session):
                     issues=[], persisted=core.has_scene(session, gid),
                     subject_keys=tuple(group.subject_keys))
         try:
-            scene = core.scene(session, gid)
+            scene = core.scene(session, gid, include_history=False)
         except (ValueError, TypeError, KeyError) as exc:
             item["issues"] = [str(exc)]
             result["unavailable"] += 1
@@ -37,6 +37,8 @@ def build_inventory(session):
             if not scene["checked"]:
                 issues.insert(0, "Obraz nie został oznaczony jako sprawdzony")
             item["issues"] = issues
+            item['approval_issues']=core.approval_scene_issues(scene)
+            if not scene['checked']:item['approval_issues'].insert(0,'Obraz nie został oznaczony jako sprawdzony')
             presence_verified = item['progress']['complete']
             if presence_verified or excluded:
                 result["inspected"] += 1
@@ -53,6 +55,10 @@ def build_inventory(session):
                 item["status"] = "PENDING"
         result["groups"][gid] = item
     result["remaining"] = result["total"] - result["inspected"]
+    result['approval_ready']=sum(not r.get('approval_issues',r['issues']) for r in result['groups'].values())
+    result['approval_remaining']=result['total']-result['approval_ready']
+    result['approval_decisions']=result['decisions']+sum(bool(r.get('approval_issues',r['issues']))
+        for r in result['groups'].values() if r.get('progress',{}).get('complete'))
     return result
 
 

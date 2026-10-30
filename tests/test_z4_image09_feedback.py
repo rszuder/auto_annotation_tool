@@ -32,12 +32,12 @@ def gui(tmp_path,monkeypatch):
 @pytest.mark.parametrize('focus',['canvas','navigator','image_list'])
 def test_ctrl_z_after_Space_works_from_review_focus(gui,focus):
     root,h,ed,s=gui;ed.undo();ready(root,h,ed)
-    assert partial.progress(core.scene(s,G))['decisions']==2
+    assert partial.progress(core.scene(s,G))['decisions']==1
     native.key(h,'space');ready(root,h,ed);assert partial.progress(core.scene(s,G))['complete']
     widget={'canvas':h.canvas,'navigator':ed.navigator.layer,'image_list':h.subject_tree}[focus]
     widget.focus_force();native.pump(root,lambda:root.focus_get() is widget)
     widget.event_generate('<Control-KeyPress-z>');widget.event_generate('<Control-KeyRelease-z>');ready(root,h,ed)
-    assert partial.progress(core.scene(s,G))['decisions']==2
+    assert partial.progress(core.scene(s,G))['decisions']==1
 
 def test_image09_source_explains_FP_and_FN_without_extra_plate(gui):
     from auto_annotation_tool.gui import mobile_canvas_review_feedback as feedback
@@ -51,7 +51,7 @@ def test_visible_undo_redo_is_one_review_action_and_keeps_GT(gui):
     root,h,ed,s=gui;before=stacks.snapshot(s,G);rev=s.review.review_revision
     assert ed.clean_undo_button.winfo_ismapped() and 'Cofnij zatwierdzenie' in ed.clean_undo_button['text']
     ed.clean_undo_button.invoke();ready(root,h,ed)
-    assert s.review.review_revision==rev+1 and partial.progress(core.scene(s,G))['decisions']==2
+    assert s.review.review_revision==rev+1 and partial.progress(core.scene(s,G))['decisions']==1
     assert 'Wskazanie MT 1' in clean.context(ed,{})['image_note'] and 'obrys GTR 1' in clean.context(ed,{})['image_note']
     assert ed.clean_redo_button.winfo_ismapped();ed.clean_redo_button.invoke();ready(root,h,ed)
     after=stacks.snapshot(s,G)
@@ -97,10 +97,12 @@ def test_two_physical_GTs_stay_separate_when_cycling_FN(gui):
     for _ in range(2):feedback.inspect(ed,'fn');ready(root,h,ed);seen.append(clean.selected(ed)['pid'])
     assert len(set(seen))==2 and s.sidecar_path.read_bytes()==before
 
-def test_second_space_remains_idempotent_and_undo_does_not_touch_other_images(gui):
-    root,h,ed,s=gui;before=s.sidecar_path.read_bytes();other=copy.deepcopy(s.review.invocation_annotations)
-    native.key(h,'space');ready(root,h,ed);assert s.sidecar_path.read_bytes()==before
-    ed.undo();ready(root,h,ed)
+def test_space_toggles_verification_and_undo_does_not_touch_other_images(gui):
+    root,h,ed,s=gui;before=copy.deepcopy(stacks.snapshot(s,G)['plates']);other=copy.deepcopy(s.review.invocation_annotations)
+    native.key(h,'space');ready(root,h,ed);assert not partial.progress(core.scene(s,G))['complete']
+    native.key(h,'space');ready(root,h,ed);assert partial.progress(core.scene(s,G))['complete']
+    after=stacks.snapshot(s,G)['plates'];assert all(after[pid][k]==p[k] for pid,p in before.items() for k in ('gt_quad','gt_text'))
+    ed.undo();ready(root,h,ed);assert not partial.progress(core.scene(s,G))['complete']
     assert {k:v for k,v in s.review.invocation_annotations.items() if k!=G}=={k:v for k,v in other.items() if k!=G}
 
 def test_counter_cannot_project_coordinates_onto_a_different_image(gui):

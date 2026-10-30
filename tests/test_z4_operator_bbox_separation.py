@@ -80,7 +80,7 @@ def test_saved_GT_and_links_survive_undo_of_approval(real_gui):
     root,h,ed,s=real_gui;before=copy.deepcopy(stacks.snapshot(s,G)['plates']);ed.undo();ready(root,h,ed)
     value=clean.context(ed,{})
     assert value['image_counts']==dict(gt='1',mt='1',rejected='0',unlinked='0')
-    assert all(v=='—' for v in value['bbox_counts'].values()) and '2 potwierdzenia' in value['image_note']
+    assert all(v=='—' for v in value['bbox_counts'].values()) and '1 tablica do weryfikacji' in value['image_note']
     after=stacks.snapshot(s,G)['plates'];assert set(after)==set(before)
     assert all(after[pid][k]==p[k] for pid,p in before.items() for k in ('gt_quad','gt_text'))
 
