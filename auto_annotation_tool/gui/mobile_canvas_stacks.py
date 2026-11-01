@@ -20,6 +20,16 @@ def enhanced(ed):
                 or any(len(members(v,pid))>1 for pid in v['plates'])))
 
 def write_reference(ed,oid,*,quad=None,text=None,reason=''):
+    if hasattr(ed,'clean_bar') and oid==ed.selected:
+        from .mobile_canvas_clean_view import selected
+        row=selected(ed)
+        if row and row['pid'] and not row['candidate']:
+            return stacks.edit_gt(ed.h.session,ed.h.current_invocation,row['pid']+':reference',quad=quad,text=text,reason=reason)
+    from .mobile_canvas_spatial_reference import selected_relation,canonical_action
+    relation=selected_relation(ed,oid) if hasattr(ed,'clean_bar') else None
+    if relation:
+        source,pid=relation
+        return canonical_action(ed.h.session,ed.h.current_invocation,source,pid,operation='edit',quad=quad,text=text,reason=reason)
     v=view(ed);pid=(v or {}).get('links',{}).get(oid,{}).get('plate_id')
     shared=stacks.KEY in ed._read() or (pid and len(members(v,pid))>1)
     if shared:return stacks.edit_gt(ed.h.session,ed.h.current_invocation,oid,quad=quad,text=text,reason=reason)

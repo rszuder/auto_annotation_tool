@@ -71,21 +71,41 @@ class ShiftPreview:
             try:
                 scene=s if other==gid else core.scene(session,other)
                 state=stacks.snapshot(session,other,scene)
+                from .mobile_canvas_spatial_reference import project
+                state=project(session,other,scene,state)
             except (ValueError,KeyError,TypeError,OSError):continue
+            from ..ranking.mobile_canvas_operator_view import reference_numbers
+            numbers=reference_numbers(state)
             for c in state['candidates']:
-                color=RED if c['association_status']=='UNASSOCIATED_NO_PLATE' else POSE if c['role']=='FINAL' else '#AEB8C2'
+                role='FINAL' if c['role']=='FINAL' else 'RAW · odrzucony przez NMS' if c['role']=='SUPPRESSED' else 'rola nieustalona'
+                detail=dict(mt_index=c['mt_detection_index']+1,role=c['role'],attempt_id=c['attempt_id'],
+                    label=f"MT {c['mt_detection_index']+1} · {role}")
+                bad=c.get('operator_bad') or c['association_status']=='UNASSOCIATED_NO_PLATE'
+                color=RED if bad else POSE if c['role']=='FINAL' else '#AEB8C2'
                 bbox=source_bbox(session,scene,c)
                 if bbox:
-                    l,t,r,b=bbox;frames.append(dict(kind='BBOX',quad=[(l,t),(r,t),(r,b),(l,b)],color=RED if c['association_status']=='UNASSOCIATED_NO_PLATE' else BBOX if c['role']=='FINAL' else color,oid=c['object_id'],gid=other))
+                    l,t,r,b=bbox;frames.append(dict(kind='BBOX',quad=[(l,t),(r,t),(r,b),(l,b)],color=RED if bad else BBOX if c['role']=='FINAL' else color,oid=c['object_id'],gid=other,**detail))
+                else:
+                    from .mobile_canvas_bbox_marker import describe,quad
+                    marker=describe(session,other,scene,c)
+                    if marker['marker']:
+                        frames.append(dict(kind='BBOX',quad=quad(marker),marker=marker,color=BBOX if c['role']=='FINAL' else color,oid=c['object_id'],gid=other,**detail))
                 if c['mt_quad']:
                     try:core.validate_mt_quad(c['mt_quad'],*scene['image_size'])
                     except (ValueError,TypeError):continue
-                    frames.append(dict(kind='POSE',quad=c['mt_quad'],color=color,oid=c['object_id'],gid=other))
+                    frames.append(dict(kind='POSE',quad=c['mt_quad'],color=color,oid=c['object_id'],gid=other,**detail))
+                from .mobile_canvas_reference_seed import project
+                seed=project(session,other,scene,state,c)
+                if seed:frames.append(dict(kind='GTR',quad=seed['quad'],color='#FFD400',oid=c['object_id'],gid=other,
+                    seed=True,role='SEED',label=f"GTR startowy · MT {c['mt_detection_index']+1} · niezapisany",attempt_id=c['attempt_id']))
             saved=saved_reference_ids(scene,state)
             from .mobile_canvas_approval_visuals import approved_ids,GREEN,PENDING
             approved=approved_ids(scene,state)
             for pid,p in state['plates'].items():
-                if pid in saved:frames.append(dict(kind='GTR',quad=p['gt_quad'],color=GREEN if pid in approved else PENDING,oid=pid,gid=other))
+                if pid in saved:
+                    linked=[str(c['mt_detection_index']+1) for c in state['candidates'] if c['role']=='FINAL' and state['links'].get(c['object_id'],{}).get('plate_id')==pid]
+                    frames.append(dict(kind='GTR',quad=p['gt_quad'],color=GREEN if pid in approved else PENDING,oid=pid,gid=other,
+                        role='OPERATOR',label=f"GTR {numbers[pid]} · operator · "+('MT '+', '.join(linked) if linked else 'bez powiązania MT')))
         self._frames_key=key;self._frames=frames
         return frames
 
@@ -98,6 +118,31 @@ class ShiftPreview:
         for frame in sorted(self.frames(),key=lambda frame:frame['kind']=='GTR'):
             q=frame['quad'];kind=frame['kind'];tags=(TAG,'shift_source_preview',frame['gid'],frame['oid'])
             tag={'BBOX':'shift_mt_source_bbox','POSE':'shift_mt_pose','GTR':'shift_saved_gtr'}[kind]
-            polygon(ed,[v for p in q for v in ed.to_canvas(p)],color=frame['color'],width=2 if kind=='GTR' else 1.5,
+            from .mobile_canvas_selection import accent
+            accent(ed,frame,2 if kind=='GTR' else 1.5)
+            if frame.get('marker'):
+                from .mobile_canvas_bbox_marker import paint
+                paint(ed,frame['marker'],color=frame['color'],tags=tags+(tag,))
+            else:polygon(ed,[v for p in q for v in ed.to_canvas(p)],color=frame['color'],width=2 if kind=='GTR' else 1.5,
                     dash=(4,3) if kind=='BBOX' else (),tags=tags+(tag,),underlay='shift_contrast_underlay')
             ed.clean_geometry_boxes.append(clean.bounds(ed,q))
+        # Every rendered contour has its own identity, including suppressed
+        # RAW. Labels are diagnostic only; they do not enter layer navigation.
+        import tkinter.font as tkfont
+        font=tkfont.Font(root=ed.c,font=('Segoe UI',9,'bold'))
+        frames=sorted(self.frames(),key=lambda frame:frame['kind']=='GTR')
+        ed.shift_preview_labels=[]
+        for index,frame in enumerate(frames):
+            label=frame['label']+(' · '+frame['kind'] if frame['kind']!='GTR' else '')
+            if frame.get('marker'):label+=' INVALID · '+frame['marker']['reason']
+            if len({f['gid'] for f in frames})>1:label+=' · wyw. '+str(1+list(dict.fromkeys(f['gid'] for f in frames)).index(frame['gid']))
+            width=min(font.measure(label)+16,max(100,ed.c.winfo_width()-12));height=font.metrics('linespace')+12
+            rect=clean.badge_position(ed,clean.bounds(ed,frame['quad']),width,height)
+            if rect is None:
+                y=6+index*(height+4);rect=(6,y,6+width,y+height)
+            ed.clean_label_boxes.append(rect);x,y,r,b=rect
+            tags=(TAG,'shift_identity_badge',frame['gid'],frame['oid'],frame['kind'],str(index))
+            ed.c.create_rectangle(*rect,fill='#13252D',outline=frame['color'],tags=tags)
+            ed.c.create_text(x+8,(y+b)/2,text=label,font=font,anchor='w',fill='#FFFFFF',width=width-16,tags=tags+('shift_identity_text',))
+            clean.badge_tether(ed,frame['quad'],rect,frame['oid'],tag='shift_identity_tether')
+            ed.shift_preview_labels.append(dict(frame=frame,text=label,rect=rect))

@@ -809,10 +809,6 @@ class MobileReportBrowser:
         self._suppress_report_select = False
         # AKT87: persistent checkbox selection keyed by verified report identity.
         self._comparison_checked = set()
-        self.comparison_scope = 'quality'
-        self._scope_access = {}
-        self._scope_generation = 0
-        self._comparison_selection_epoch = 0
         self._comparison_verification = {}
         self._comparison_busy = False
         self._comparison_dialogs = []
@@ -1384,12 +1380,6 @@ class MobileReportBrowser:
         self.search_entry.grid(row=1, column=0, sticky="ew", ipady=5, pady=(3, 0))
         self.search_entry.bind("<Escape>", lambda _event: self.search_var.set(""), add="+")
         self.search_var.trace_add("write", lambda *_args: self._apply_report_filter(auto_select=True))
-        from .mobile_comparison_scope import SCOPES
-        self.comparison_scope_var=tk.StringVar(value=SCOPES[self.comparison_scope])
-        self.comparison_scope_select=ttk.Combobox(search_area,state='readonly',
-            textvariable=self.comparison_scope_var,values=list(SCOPES.values()))
-        self.comparison_scope_select.grid(row=2,column=0,sticky='ew',pady=(6,0))
-        self.comparison_scope_select.bind('<<ComboboxSelected>>',self._change_comparison_scope)
         self.report_count_var = tk.StringVar(value="Brak zapisanych raportów")
         tk.Label(left, textvariable=self.report_count_var, bg=self.card_bg, fg=self.muted,
                  font=("Segoe UI", 9), anchor=tk.W).grid(row=2, column=0, sticky="ew", pady=(0, 5))
@@ -1418,7 +1408,7 @@ class MobileReportBrowser:
         self.btn_import_reports = ttk.Button(left, text="Importuj raport z telefonu", command=self.import_report)
         self.btn_import_reports.grid(row=4, column=0, sticky="ew", pady=(9, 0), ipady=3)
         # AKT87: one click per reviewed session. No duplicate selection basket.
-        self.compare_hint = tk.Label(left, text="✓: dostępne porównanie jakości · GT asystowane",
+        self.compare_hint = tk.Label(left, text="✓: wybór do analizy · miary sprawdzane osobno",
             bg=self.card_bg, fg=self.muted, anchor=tk.W, font=("Segoe UI", 8))
         self.compare_hint.grid(row=5,column=0,sticky="ew",pady=(8,3))
         self.btn_compare_open = ttk.Button(left,text="Porównaj wybrane (0)",
@@ -2016,14 +2006,11 @@ class MobileReportBrowser:
             self._comparison_key(report):self._comparison_status_of(report)
             for report in self._ordered_reports
         }
-        if hasattr(self,'comparison_scope_var'):
-            self._start_scope_refresh()
-            self._apply_report_filter(select_report_id=select_report_id,auto_select=auto_select,refresh_preview=True)
-            return
-        # An edited GT revision or invalidated export *revokes* selection.
+        # Selection expresses intent. A GT change invalidates quality inside
+        # the analyzer, not the operator's choice to inspect the source.
         self._comparison_checked = {
             key for key in self._comparison_checked
-            if key in self._comparison_verification and self._comparison_verification[key].ready
+            if key in self._comparison_verification
         }
         self._update_comparison_basket_status(silent=True)
         self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select, refresh_preview=True)
@@ -2063,9 +2050,15 @@ class MobileReportBrowser:
             repeat=report_repeat(r)[0]
             key=self._comparison_key(r)
             state=self._comparison_verification.get(key)
-            status='Zatwierdzona\nOgr. jakości' if state and state.state=='APPROVED_LIMITED' else state.label if state else "Nieustalona"
-            access=getattr(self,'_scope_access',{}).get(key)
-            ready=access.allowed(self.comparison_scope) if access else bool(state and state.ready and not hasattr(self,'_scope_access'))
+            from .mobile_analysis import selection_identity
+            try:selection_identity(r,self._matching_cached_bundle(r));ready=True
+            except ValueError:ready=False
+            status=('Zatwierdzona\npełna ocena' if state and state.ready else
+                'Zatwierdzona\nogr. miary' if state and state.state=='APPROVED_LIMITED' else state.label if state else 'Nieustalona')
+            from .mobile_report_source_recovery import stored_source
+            try:source_available=Path(stored_source(r)).is_file()
+            except OSError:source_available=False
+            if not source_available:status='Nieczytelne\nźródło'
             tick="☑" if key in self._comparison_checked else "☐" if ready else "—"
             tag="success" if state and state.approved else "warning" if state and state.state in ("STALE","NEEDS_EXPORT","IN_PROGRESS") else "muted"
             stamp=report_measurement_time(r)
@@ -2093,9 +2086,8 @@ class MobileReportBrowser:
                 tree.move(iid,'',index)
         finally:self._suppress_report_select=False
         ready_count=sum(1 for state in self._comparison_verification.values() if state.approved)
-        eligible_count=sum(a.allowed(self.comparison_scope) for a in getattr(self,'_scope_access',{}).values())
         self.report_count_var.set(f"{len(filtered)} z {len(all_reports)} raportów · {ready_count} zatwierdzonych"
-            +(f" · {eligible_count} dostępnych w tym trybie" if hasattr(self,'comparison_scope_var') else ''))
+            +f" · koszyk: {len(self._comparison_checked)}")
         if not filtered:
             if getattr(self,'current_report',None) is not None and all_reports:
                 self.report_count_var.set(self.report_count_var.get()+' · podgląd poza filtrem')
@@ -2213,127 +2205,77 @@ class MobileReportBrowser:
     def _comparison_key(report) -> tuple[str,str]:
         return (str(report.report_id),str(report.source_archive_sha256).lower())
 
-    def _change_comparison_scope(self,_event=None):
-        from .mobile_comparison_scope import SCOPES
-        selected=next(k for k,v in SCOPES.items() if v==self.comparison_scope_var.get())
-        if selected==self.comparison_scope:return
-        self.comparison_scope=selected
-        self._comparison_selection_epoch+=1
-        self._comparison_checked.clear()
-        self.compare_hint.configure(text='✓: zweryfikowane czasy z telefonu' if selected=='performance' else '✓: pełna jakość MT/MZ · GT asystowane')
-        self._apply_report_filter(auto_select=False,preserve_preview=True)
-        self._update_comparison_basket_status(silent=True)
-        self._set_status('Zmieniono zakres. Wybór wyczyszczono; zaznacz sesje dla tego trybu.')
 
-    def _start_scope_refresh(self):
-        """Check full original sources off the Tk thread, never trust index labels."""
-        from .mobile_comparison_scope import assess_import, ComparisonAccess
-        from .mobile_report_source_recovery import stored_source
-        from .mobile_report_canvas_view import results_root_for_source
-        self._scope_generation+=1;generation=self._scope_generation
-        reports=list(self._ordered_reports);states=dict(self._comparison_verification)
-        # Keep candidates during refresh, but hide/disable their checkmarks until requalified.
-        candidates=set(self._comparison_checked);start_scope=self.comparison_scope;selection_epoch=self._comparison_selection_epoch
-        self._comparison_checked.clear();self._scope_access={}
-        self._update_comparison_basket_status(silent=True)
-        def worker():
-            result={}
-            for report in reports:
-                if self._closing:return
-                key=self._comparison_key(report);gate=states[key]
-                if not gate.approved:
-                    result[key]=ComparisonAccess(gate.state,performance_reason=gate.reason,quality_reason=gate.reason)
-                    continue
-                path=stored_source(report)
-                result[key]=assess_import(report,path,results_root_for_source(path))
-            def done():
-                if self._closing or generation!=self._scope_generation:return
-                self._scope_access=result
-                # A mode change during loading deliberately cleared the old basket.
-                self._comparison_checked={k for k in candidates if start_scope==self.comparison_scope
-                    and selection_epoch==self._comparison_selection_epoch and k in result and result[k].allowed(self.comparison_scope)}
-                self._update_comparison_basket_status(silent=True)
-                self._apply_report_filter(auto_select=False,preserve_preview=True)
-                revoked=candidates-self._comparison_checked
-                if revoked:
-                    failed=result.get(next(iter(revoked)))
-                    self._set_status('Cofnięto nieaktualne zaznaczenie: '+(failed.reason(self.comparison_scope) if failed else 'raport usunięty z listy'),'warning')
-            self._run_on_ui(done)
-        threading.Thread(target=worker,daemon=True,name='alpr-comparison-eligibility').start()
 
     def _toggle_comparison_checkbox(self,event):
-        """Click only the first column to check an operator-verified import."""
         tree=self.report_table.tree
-        if tree.identify_region(event.x,event.y)!="cell" or tree.identify_column(event.x)!="#1":
-            return None
-        iid=tree.identify_row(event.y)
-        report=self.report_by_iid.get(iid)
-        if report is None:
-            return "break"
+        if tree.identify_region(event.x,event.y)!='cell' or tree.identify_column(event.x)!='#1':return None
+        iid=tree.identify_row(event.y);report=self.report_by_iid.get(iid)
+        if report is None:return 'break'
+        from .mobile_analysis import selection_identity
+        try:identity=selection_identity(report,self._matching_cached_bundle(report))
+        except ValueError as exc:self._set_status(str(exc),'warning');return 'break'
         key=self._comparison_key(report)
-        status=self._comparison_verification.get(key)
-        access=getattr(self,'_scope_access',{}).get(key)
-        if access and access.allowed(self.comparison_scope) and key not in self._comparison_checked:
-            # Selection is an explicit trust boundary too; do not reuse a stale
-            # approved label after another window changed GT or the archive.
-            from .mobile_comparison_scope import assess_import
-            source=access.record.comparison_source
-            access=assess_import(report,source['path'],source['results_root'],source['review_root'])
-            self._scope_access[key]=access
-            self._apply_report_filter(auto_select=False,preserve_preview=True)
-        allowed=access.allowed(getattr(self,'comparison_scope','quality')) if access else bool(status and status.ready and not hasattr(self,'_scope_access'))
-        if not allowed:
-            tree.set(iid,'Wybor','—')
-            reason=access.reason(self.comparison_scope) if access else status.reason if status and not status.approved else 'Sprawdzanie oryginalnego archiwum i śladów czasu…'
-            self._set_status(reason+" · Użyj «Odśwież» po eksporcie.","warning")
-            return "break"
-        if key in self._comparison_checked:
-            self._comparison_checked.discard(key)
-            tree.set(iid,"Wybor","☐")
+        if key in self._comparison_checked:self._comparison_checked.discard(key);tree.set(iid,'Wybor','☐')
         else:
-            if access and any(other!=key and (other[1]==key[1] or
-                getattr(self,'_scope_access',{}).get(other) and self._scope_access[other].record.session_id==access.record.session_id)
-                for other in self._comparison_checked):
-                self._set_status('To samo źródło lub session_id jest już zaznaczone. Kopia nie jest osobnym pomiarem.','warning');return 'break'
-            self._comparison_checked.add(key)
-            tree.set(iid,"Wybor","☑")
+            for other in getattr(self,'_ordered_reports',list(self.report_by_iid.values())):
+                if self._comparison_key(other) not in self._comparison_checked:continue
+                try:other_identity=selection_identity(other,self._matching_cached_bundle(other))
+                except ValueError:continue
+                if identity[0]==other_identity[0] or identity[1]==other_identity[1]:
+                    self._set_status('Ta sama sesja lub SHA jest już w koszyku. Kopia nie jest kolejnym pomiarem.','warning');return 'break'
+            self._comparison_checked.add(key);tree.set(iid,'Wybor','☑')
         self._update_comparison_basket_status()
-        if access:self._set_status(access.description)
-        return "break"
+        return 'break'
 
     def _clear_comparison_checks(self):
-        self._comparison_selection_epoch=getattr(self,'_comparison_selection_epoch',0)+1
+        from .mobile_analysis import selection_identity
         self._comparison_checked.clear()
         for iid,report in self.report_by_iid.items():
-            key=self._comparison_key(report)
-            access=getattr(self,'_scope_access',{}).get(key)
-            if (access.allowed(getattr(self,'comparison_scope','quality')) if access else
-                    self._comparison_verification.get(key) and self._comparison_verification[key].ready and not hasattr(self,'_scope_access')):
-                self.report_table.tree.set(iid,"Wybor","☐")
+            try:selection_identity(report,self._matching_cached_bundle(report));symbol='☐'
+            except ValueError:symbol='—'
+            self.report_table.tree.set(iid,'Wybor',symbol)
         self._update_comparison_basket_status()
 
     def _update_comparison_basket_status(self,*,silent=False):
         count=len(self._comparison_checked)
-        self.btn_compare_open.configure(text=f"Porównaj wybrane ({count})",
-            state="normal" if count >= 2 and not self._comparison_busy else "disabled")
-        if not silent:
-            self._set_status(f"Zaznaczono {count} sesji w bieżącym trybie. Porównanie wymaga co najmniej dwóch różnych źródeł.")
+        self.btn_compare_open.configure(text=f'Porównaj wybrane ({count})',state='normal' if count>=2 and not self._comparison_busy else 'disabled')
+        if hasattr(self,'report_count_var'):
+            text=self.report_count_var.get().split(' · koszyk:')[0]
+            self.report_count_var.set(text+f' · koszyk: {count}')
+        if not silent:self._set_status(f'Wybrano {count} sesji do analizy. Dostępność źródeł i każdej miary zostanie sprawdzona w module.')
 
     def _open_mobile_comparison(self):
-        records=[r for r in self._ordered_reports if self._comparison_key(r) in self._comparison_checked]
-        if len(records)<2:
-            self._set_status("Zaznacz co najmniej 2 zatwierdzone sesje w kolumnie ✓.","warning")
-            return
-        # Never trust a stale list entry after GT was edited in another window.
-        for report in records:
-            state=self._comparison_status_of(report)
-            if not (state.approved if self.comparison_scope=='performance' else state.ready):
-                self._comparison_checked.discard(self._comparison_key(report))
-                self._update_comparison_basket_status()
-                self._set_status("Zmienił się status oceny: "+state.reason,"warning")
-                self._apply_report_filter(auto_select=True)
-                return
-        self._launch_mobile_comparison(records,comparison_scope=self.comparison_scope)
+        reports=[r for r in self._ordered_reports if self._comparison_key(r) in self._comparison_checked]
+        if len(reports)<2:self._set_status('Zaznacz co najmniej dwie różne sesje.','warning');return
+        self._launch_unified_analysis(reports)
+
+    def _launch_unified_analysis(self,reports):
+        if self._comparison_busy:return
+        from .mobile_analysis import make_input,analyze
+        from .mobile_report_source_recovery import stored_source
+        try:
+            inputs=[make_input(r,source_path=str(getattr(self._matching_cached_bundle(r),'path','') or stored_source(r)),
+                bundle=self._matching_cached_bundle(r)) for r in reports]
+        except ValueError as exc:self._set_status(str(exc),'warning');return
+        self._comparison_busy=True;self._update_comparison_basket_status(silent=True)
+        self._set_status('Sprawdzam źródła i dostępność poszczególnych miar…')
+        def worker():
+            try:
+                cohort=analyze(inputs,'F4')
+                if not any(s.metadata.get('experiment')=='F4' for s in cohort.sessions):cohort=analyze(inputs,'DIAGNOSTIC')
+                failure=None
+            except Exception as exc:cohort=None;failure=str(exc)
+            def done():
+                self._comparison_busy=False;self._update_comparison_basket_status(silent=True)
+                if failure:self._set_status('Nie otwarto analizy: '+failure,'warning');return
+                from .mobile_analysis_gui import UnifiedAnalysisWindow
+                roots={i.results_root for i in inputs if i.results_root}
+                root=next(iter(roots)) if len(roots)==1 else None
+                dialog=UnifiedAnalysisWindow(self.window,cohort,root);self._comparison_dialogs.append(dialog)
+                self._set_status(f'Analiza {len(cohort.sessions)} źródeł. Wyniki opisowe; n i braki osobno dla każdej miary.')
+            self._run_on_ui(done)
+        threading.Thread(target=worker,daemon=True,name='alpr-unified-analysis').start()
 
     def _export_mobile_report_figures(self) -> None:
         current=getattr(self,"current_report",None)

@@ -28,6 +28,7 @@ def badge_rows(ed):
     gtz=(ed.entry_var.get() if clean.entry_matches(ed,row) else plate['gt_text'] if plate else '')
     if plate and plate['text_exclusion_reason']:gtz='nieczytelny'
     elif not gtz:gtz='nie wpisano'
+    if row['fp'] and not plate:gtz='nie dotyczy — odrzucone MT'
     mt_name='Model tablic MT';mt='brak powiązanej detekcji';mz='brak powiązanego odczytu'
     if candidate:
         mt_name+=f" {candidate['mt_detection_index']+1}"
@@ -41,18 +42,23 @@ def badge_rows(ed):
         if status=='NOT_RUN':mz='nie uruchomiono'
         elif status in ('READ','NO_CHARACTERS') and candidate['mz_ran']:mz=prediction or 'brak odczytu'
         else:mz='wynik niejednoznaczny'+(': '+prediction if prediction else '')
-    return [(gtr,'obrys operatora' if reference else 'brak obrysu'),(mt_name,mt),('GTZ',gtz),('Model znaków MZ',mz)]
+    from .mobile_mz_quality_context import note
+    mz+=note(candidate)
+    return [(gtr,'niezapisany szkic z '+row['seed']['origin'] if row.get('seed') else 'obrys operatora' if reference else 'brak obrysu'),(mt_name,mt),('GTZ',gtz),('Model znaków MZ',mz)]
 
 def full_text_context(ed):
     """The complete physical/source summary belongs in the existing sidebar."""
     rows=badge_rows(ed)
-    return '\n\n'+'\n'.join(name+': '+value for name,value in rows) if rows else ''
+    from .mobile_canvas_spatial_reference import diagnostic
+    from .mobile_canvas_clean_view import selected
+    detail=diagnostic(selected(ed))
+    return '\n\n'+'\n'.join([*(name+': '+value for name,value in rows),detail]) if rows else ''
 
 
 def selected_diagnostic(ed,row):
     """One source/revision-bound diagnostic shared by the panel and badges."""
     from ..ranking import mobile_candidate_stacks as data
-    key=(ed.cache_key,row['oid'])
+    key=(ed.cache_key,row['oid'],row.get('pid'))
     if getattr(ed,'_selected_diagnostic_key',None)!=key:
         candidate=row['candidate']
         ed._selected_diagnostic=next((r for r in data.diagnostics(ed.h.session,[ed.h.current_invocation])['rows']
@@ -65,7 +71,7 @@ def measurements(ed,row):
     """Read existing results once per review/selection, never per pan frame."""
     from ..ranking.mobile_mt_detection_evaluation import evaluate_unit,reason_text
     from ..ranking import mobile_candidate_stacks as data
-    key=(ed.cache_key,row['oid'])
+    key=(ed.cache_key,row['oid'],row.get('pid'))
     if getattr(ed,'_badge_measurement_key',None)!=key:
         result=evaluate_unit(ed.h.session,ed.h.current_invocation)
         candidate=row['candidate'];aid=candidate['attempt_id'] if candidate else None
@@ -75,12 +81,15 @@ def measurements(ed,row):
         measured=result['status']=='MEASURED'
         from .mobile_canvas_review_feedback import reference_comparison
         comparison=reference_comparison(ed,row,result)
-        ed._badge_measurement=dict(bbox_iou=pair.get('bbox_iou') if measured else None,
+        same_bbox_reference=not pair or pair.get('gt_id')==row.get('pid')
+        same_pose_reference=diagnostic.get('plate_id')==row.get('pid')
+        ed._badge_measurement=dict(bbox_iou=pair.get('bbox_iou') if measured and same_bbox_reference else None,
             reference_comparison=comparison,
-            outcome=outcome.get('outcome') if measured else None,
-            bbox_reason=reason_text(result) if not measured else outcome.get('reason'),
-            polygon_iou_pct=diagnostic.get('polygon_iou_pct'),nmce_pct=diagnostic.get('nmce_pct'),
-            pose_reason=diagnostic.get('not_measurable_reason'))
+            outcome=outcome.get('outcome') if measured and same_bbox_reference else None,
+            bbox_reason='SPATIAL_REFERENCE_NOT_SCIENTIFIC_PAIR' if not same_bbox_reference else reason_text(result) if not measured else outcome.get('reason'),
+            polygon_iou_pct=diagnostic.get('polygon_iou_pct') if same_pose_reference else None,
+            nmce_pct=diagnostic.get('nmce_pct') if same_pose_reference else None,
+            pose_reason=diagnostic.get('not_measurable_reason') if same_pose_reference else 'SPATIAL_REFERENCE_NOT_SCIENTIFIC_PAIR')
         ed._badge_measurement_key=key
     return ed._badge_measurement
 
@@ -93,7 +102,8 @@ def mz_readout(candidate):
     if not candidate:return 'brak powiązanego odczytu'
     if candidate['mz_status']=='NOT_RUN':return 'nie uruchomiono (NOT_RUN)'
     if candidate['mz_status'] in ('READ','NO_CHARACTERS') and candidate['mz_ran']:
-        return candidate['mz_prediction'] or 'brak odczytu'
+        from .mobile_mz_quality_context import note
+        return (candidate['mz_prediction'] or 'brak odczytu')+note(candidate)
     return 'wynik niejednoznaczny'+(': '+candidate['mz_prediction'] if candidate['mz_prediction'] else '')
 
 
@@ -110,6 +120,11 @@ def context_model(ed,layer_view=None,*,row=None,kind=None):
     model=dict(kind=kind,oid=row['oid'],plate_id=row['pid'],attempt_id=row['candidate']['attempt_id'] if row['candidate'] else None,
                quad=copy.deepcopy(q),reference_id=row.get('reference_id'))
     if kind=='GTR':
+        if row.get('seed'):
+            model.update(title='GTR startowy · niezapisany szkic',
+                detail='Narożniki z '+row['seed']['origin']+' · przeciągnij, aby ustalić GTR',
+                mz_detail='MZ: '+mz_readout(row['candidate']))
+            return model
         p=row['plate'];text=ed.entry_var.get() if clean.entry_matches(ed,row) else p['gt_text']
         text='nieczytelny' if p['text_exclusion_reason'] else text or 'nie wpisano'
         model.update(title=f"Obrys operatora · GTR {row['n']}",detail='GTZ: '+text,
@@ -117,6 +132,12 @@ def context_model(ed,layer_view=None,*,row=None,kind=None):
     else:
         values=measurements(ed,row);index=row['candidate']['mt_detection_index']+1
         if kind=='BBOX':
+            if layer_view.get('bbox_marker'):
+                from .mobile_canvas_bbox_marker import verdict
+                from .mobile_bbox_spatial_review import LABELS
+                model.update(title=f"MT {index} · BBOX niepoprawny: "+layer_view['bbox_marker']['reason'],
+                    detail='Położenie: '+LABELS[verdict(ed,row['candidate'])],spatial_action=True)
+                return model
             iou=values['bbox_iou'];outcome=values['outcome']
             comparison=values.get('reference_comparison')
             detail=('BBOX IoU z GTR '+str(comparison['number'])+': '+percent(100*comparison['iou'])
@@ -133,7 +154,7 @@ def clear(ed):
     ed.c.delete('active_layer_badge');ed.c.delete('badge_tether');ed.c.delete('stack_count_badge');ed.c.delete('stack_position_badges')
     ed._context_badge=None;ed._badge4_rows=[];ed._badge4_rect=None
     ed._stack_counter=None
-    ed.badges={};ed.mt_source_badge_hits={};ed.stack_badges={}
+    ed.badges={};ed.mt_source_badge_hits={};ed.stack_badges={};ed.bbox_spatial_hits={}
 
 
 def focus_in_window(ed):
@@ -218,7 +239,10 @@ def display_context(ed,layer_view):
         from ..ranking.mobile_mt_geometry_layers import snapshot
         key=(ed.cache_key,row['oid'])
         if getattr(ed,'_idle_layer_key',None)!=key:
-            try:ed._idle_layer_value=snapshot(ed.h.session,ed.h.current_invocation,row['oid'],scene=ed._read(),state=source(ed))
+            try:
+                ed._idle_layer_value=snapshot(ed.h.session,ed.h.current_invocation,row['oid'],scene=ed._read(),state=source(ed))
+                from .mobile_canvas_bbox_marker import enrich
+                ed._idle_layer_value=enrich(ed.h.session,ed.h.current_invocation,ed._read(),row['candidate'],ed._idle_layer_value)
             except (ValueError,KeyError,TypeError,OSError):ed._idle_layer_value=None
             ed._idle_layer_key=key
         value=ed._idle_layer_value
@@ -238,7 +262,7 @@ def paint(ed,layer_view):
     from .mobile_canvas_visibility import enabled
     from .mobile_canvas_editor import TAG
     import tkinter.font as tkfont
-    ed._context_badge=None;ed._badge4_rows=[];ed._badge4_rect=None;ed._gtz_entry_right=None
+    ed._context_badge=None;ed._badge4_rows=[];ed._badge4_rect=None;ed._gtz_entry_right=None;ed.bbox_spatial_hits={}
     if ed.mode=='draw':return
     if getattr(ed,'_badge_window_inactive',False):
         if not focus_in_window(ed):return
@@ -265,7 +289,7 @@ def paint(ed,layer_view):
                   values.measure(model.get('mz_detail','')),edit_width)+20,430,ed.c.winfo_width()-12)
     if width<80:return
     title=fitted(model['title'],names,width-14);detail=fitted(model['detail'],values,width-action_width-20)
-    rect=clean.badge_position(ed,clean.bounds(ed,q),width,3*line+14 if kind=='GTR' else 2*line+8)
+    rect=clean.badge_position(ed,clean.bounds(ed,q),width,3*line+14 if kind=='GTR' or model.get('spatial_action') else 2*line+8)
     if rect is None:return
     ed.clean_label_boxes.append(rect);ed._context_badge=dict(model,rect=rect,displayed=[title,detail],inspection=bool(inspection))
     x,y,r,b=rect;p=badge_palette(dark_theme(ed));tags=(TAG,'active_layer_badge','context_badge','clean_label',oid)
@@ -292,6 +316,10 @@ def paint(ed,layer_view):
     else:
         ed.c.create_text(x+7,y+5+line,text=detail,font=values,anchor='nw',fill=p['fg'],tags=tags+('context_badge_detail','clean_label_text'))
         ed.mt_source_badge_hits[oid]=rect
+        if model.get('spatial_action'):
+            top=y+5+2*line
+            ed.c.create_text(x+7,top,text='Oceń położenie ▾ · BBOX IoU: N/A',font=names,anchor='nw',fill=p['name'],tags=tags+('bbox_spatial_action',))
+            ed.bbox_spatial_hits[oid]=(x,top,r,b)
     clean.badge_tether(ed,q,rect,oid)
     from .mobile_canvas_stack_counter import paint as paint_counter
     paint_counter(ed,ed._context_badge,layer_view)

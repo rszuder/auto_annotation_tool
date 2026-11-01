@@ -9,10 +9,17 @@ def model(ed):
     key=(ed.cache_key,row['oid'])
     if getattr(ed,'_geometry_model_key',None)!=key:
         ed._geometry_model_key=key
-        try:ed._geometry_model=data.snapshot(ed.h.session,ed.h.current_invocation,row['oid'],scene=ed._read())
+        try:
+            ed._geometry_model=data.snapshot(ed.h.session,ed.h.current_invocation,row['candidate']['object_id'],scene=ed._read(),state=clean.source(ed))
+            from .mobile_canvas_bbox_marker import enrich
+            ed._geometry_model=enrich(ed.h.session,ed.h.current_invocation,ed._read(),row['candidate'],ed._geometry_model)
         except (ValueError,KeyError,TypeError,OSError):ed._geometry_model=None
     value=ed._geometry_model
     if not value or not value['layers']:return None
+    value=dict(value,bad=row['fp'])
+    if row.get('seed'):
+        value=dict(value,layers=[*value['layers'],dict(kind='GTR',role='GTR startowy (niezapisany szkic)',
+            quad=row['gt'],plate_id=None,provisional=True)],gtr_seed=True)
     identity=(id(ed.h.session),tuple(value['source_key']),row['oid'])
     selection=getattr(ed,'_geometry_layer_state',None)
     kinds=[l['kind'] for l in value['layers']]
@@ -53,6 +60,11 @@ def paint_geometry(ed,value):
         return paint_navigator_geometry(ed)
     from .mobile_canvas_editor import TAG
     q=bbox_quad(value)
+    if q and value.get('bbox_marker'):
+        from .mobile_canvas_bbox_marker import paint
+        paint(ed,value['bbox_marker'],color='#EF5262' if value['bad'] else '#58B8D5',
+              tags=(TAG,'mt_source_bbox_layer',value['object_id']))
+        q=None
     if q:
         x,y=ed.to_canvas(q[0]);r,b=ed.to_canvas(q[2]);active=value['active']=='BBOX'
         existing=[i for i in ed.c.find_withtag('model_location_bbox') if value['object_id'] in ed.c.gettags(i)]
@@ -83,9 +95,10 @@ def paint_reference_identities(ed):
     active_kind='GTR' if ed.gt_focus_id or not value else value['active']
     for frame in contours(ed):
         if frame['kind']!='GTR' or (frame['oid']==ed.selected and active_kind=='GTR'):continue
-        row=next((r for r in rows if r['pid']==frame['plate_id']),None)
+        row=next((r for r in rows if r['oid']==frame['oid'] and r.get('seed')),None) if frame.get('seed') else next((r for r in rows if r['pid']==frame['plate_id']),None)
         if not row:continue
-        text=f"GTR {row['n']} · operator";w=font.measure(text)+12;h=font.metrics('linespace')+8
+        text=(f"Szkic GTR · MT {row['candidate']['mt_detection_index']+1} · niezapisany" if frame.get('seed') else f"GTR {row['n']} · operator")
+        w=font.measure(text)+12;h=font.metrics('linespace')+8
         rect=clean.badge_position(ed,clean.bounds(ed,frame['quad']),w,h)
         if rect is None:continue
         color=GREEN if frame['approved'] else PENDING;tags=(TAG,'reference_identity_label',frame['oid'])
@@ -127,15 +140,26 @@ def paint_navigator_geometry(ed):
     from .mobile_canvas_approval_visuals import GREEN,PENDING,RED,POSE,BBOX,polygon
     from .mobile_canvas_editor import TAG
     if ed.mode=='draw':return
-    for tag in ('mt_original','operator_quad','model_location_bbox','mt_source_bbox_layer','fp_diagonal','corner_handle','navigator_contrast_underlay','clean_contrast_underlay'):ed.c.delete(tag)
+    for tag in ('mt_original','operator_quad','model_location_bbox','mt_source_bbox_layer','fp_diagonal','corner_handle','navigator_contrast_underlay','clean_contrast_underlay','bbox_zero_marker','active_frame_accent'):ed.c.delete(tag)
     if ed.shift_preview.active:return
     for item in sorted(contours(ed),key=lambda item:item['kind']=='GTR'):
         oid,kind,q=item['oid'],item['kind'],item['quad'];active=oid==ed.selected
         color=(GREEN if item['approved'] else PENDING) if kind=='GTR' else RED if item['bad'] else BBOX if kind=='BBOX' else POSE
         tag={'GTR':'operator_quad','POSE':'mt_original','BBOX':'model_location_bbox'}[kind]
+        from .mobile_canvas_selection import accent
+        accent(ed,item,{'GTR':3,'POSE':2.5,'BBOX':2}[kind])
+        if item.get('marker'):
+            from .mobile_canvas_bbox_marker import paint as paint_marker,verdict
+            from .mobile_canvas_clean_view import source
+            candidate=next(c for c in source(ed)['candidates'] if c['object_id']==oid)
+            if verdict(ed,candidate)=='OFF_PLATES_BAD':color=RED
+            paint_marker(ed,item['marker'],color=color,tags=(TAG,tag,'mt_source_bbox_layer','navigator_geometry',kind,oid))
+            continue
         coords=[v for p in q for v in ed.to_canvas(p)]
         polygon(ed,coords,color=color,width={'GTR':3,'POSE':2.5,'BBOX':2}[kind],
-                dash=(4,3) if kind=='BBOX' else (),tags=(TAG,tag,'navigator_geometry',kind,oid,item['plate_id'] or 'unlinked'))
+                dash=(4,3) if kind=='BBOX' else (2,2) if item.get('seed') else (),
+                tags=(TAG,tag,'navigator_geometry',kind,oid,item['plate_id'] or 'unlinked',
+                      'operator_seed' if item.get('seed') else 'saved_or_source'))
         if kind=='BBOX':ed.c.addtag_withtag('mt_source_bbox_layer',ed.c.find_withtag(tag)[-1])
         if kind!='GTR' and item['bad']:
             for a,b in ((0,2),(1,3)):ed.c.create_line(*ed.to_canvas(q[a]),*ed.to_canvas(q[b]),fill=RED,width=2,tags=(TAG,'fp_diagonal',oid))

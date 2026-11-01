@@ -46,12 +46,17 @@ def contours(editor):
             result.append(dict(oid=oid,kind='GTR',quad=copy.deepcopy(quad),
                                plate_id=pid,source='saved_reference',bad=False,
                                approved=pid in approved and not(editor.drag and editor.drag['oid']==oid)))
+        for row in rows:
+            if not row.get('seed') or (isolated and row['oid']!=editor.selected):continue
+            q=editor.drag['quad'] if editor.drag and editor.drag['oid']==row['oid'] else row['gt']
+            result.append(dict(oid=row['oid'],kind='GTR',quad=copy.deepcopy(q),plate_id=None,
+                source='unsaved_operator_seed',seed=True,bad=False,approved=False))
     if enabled(editor, 'inf') and not isolated:
         selection = layers.model(editor)
         for candidate in state['candidates']:
             if candidate['role'] != 'FINAL':
                 continue
-            bad = candidate['association_status'] == 'UNASSOCIATED_NO_PLATE'
+            bad = candidate.get('operator_bad') or candidate['association_status'] == 'UNASSOCIATED_NO_PLATE'
             if bad and not clean.show_fp(editor):
                 continue
             oid = candidate['object_id']
@@ -62,15 +67,20 @@ def contours(editor):
                 except (ValueError, TypeError):
                     quad = None
             inspect_bbox = bool(selection and selection['object_id'] == oid and selection['active'] == 'BBOX')
-            kind = 'POSE'
+            kind = 'POSE'; marker=None
             if not quad or inspect_bbox:
                 bbox = source_bbox(editor.h.session, scene, candidate)
                 if bbox:
                     l,t,r,b = bbox
                     quad = [(l,t),(r,t),(r,b),(l,b)]
                     kind = 'BBOX'
+                else:
+                    from .mobile_canvas_bbox_marker import describe,quad as marker_quad
+                    descriptor=describe(editor.h.session,editor.h.current_invocation,scene,candidate)
+                    if descriptor['marker']:
+                        marker=descriptor;quad=marker_quad(marker);kind='BBOX'
             if quad:
                 result.append(dict(oid=oid,kind=kind,quad=copy.deepcopy(quad),
                                    plate_id=candidate['plate_id'],source='MT_FINAL',
-                                   attempt_id=candidate['attempt_id'],bad=bad))
+                                   attempt_id=candidate['attempt_id'],bad=bad,marker=marker))
     return result

@@ -65,7 +65,10 @@ def test_last_frame_decision_verifies_image_without_extra_image_checkbox(gui):
     accept(root, h, ed, 0)
     accept(root, h, ed, 1)
     assert ed.checked_var.get() and frame(s)['complete']
-    assert ed.approve.cget('text') == 'Obraz zweryfikowany' and ed.approve.cget('state') == 'disabled'
+    # Mouse verification targets this stack; completion of the whole image is
+    # still derived from all frame decisions, without an extra confirmation.
+    assert ed.approve.cget('text') == 'Ramki wybranej tablicy zweryfikowane'
+    assert ed.approve.cget('state') == 'normal' and ed.frame_checked_var.get()
     assert ed.contexts.counters['inspected'].cget('text') == '1/1'
     assert ed.contexts.counters['remaining'].cget('text') == '0'
     assert ed.contexts.counters['decisions'].cget('text') == '0'

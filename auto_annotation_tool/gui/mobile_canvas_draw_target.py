@@ -7,7 +7,7 @@ def resolve(editor):
     row=clean.selected(editor)
     if not row:raise ValueError('Nie ustalono wybranej referencji. Anuluj zaznaczenie i wybierz obiekt ponownie.')
     if row['conflict']:raise ValueError('Konflikt referencji GT — zachowano zapisane dane.')
-    if row['fp'] or row['role'] not in ('GT','FINAL'):return None
+    if row['role'] not in ('GT','FINAL'):return None
     s=editor._read();v=clean.source(editor);p=row['plate'];c=row['candidate']
     from ..ranking.mobile_manual_frame_guard import reservation_records
     references=reservation_records(s,session=editor.h.session,gid=editor.h.current_invocation)
@@ -16,10 +16,16 @@ def resolve(editor):
         reference=next((r for r in references if r['plate_id']==row['pid']),None)
         if reference:return dict(kind='focus',reference=reference)
         raise ValueError('Nie potwierdzono aktywnej GTR. Wybierz istniejącą referencję ponownie; nie rozpoczęto nowej ramki.')
+    canonical=(c or {}).get('canonical_link',{}).get('plate_id')
+    if canonical and canonical!=row['pid']:
+        reference=next((r for r in references if r['plate_id']==canonical),None)
+        if reference:return dict(kind='focus',reference=reference)
+    if row['fp']:return None
     if c and row['pid'] not in saved:
         from .mobile_canvas_reservation import for_source
         reserved=for_source(editor,c['object_id'])
         if reserved:return dict(kind='focus',reference=reserved)
+    if row.get('seed'):return dict(kind='seed',oid=row['oid'])
     if c and not p:
         location=clean.source_location(editor,row)
         if not location:raise ValueError('Brak wiarygodnej lokalizacji wybranego MT.')

@@ -71,6 +71,10 @@ def cycle_result(ed,back=False):
 def label(ed,kind):
     from .mobile_canvas_clean_view import selected
     row=selected(ed)
+    if kind=='BBOX':
+        value=layers.model(ed)
+        if value and value.get('bbox_marker'):return 'BBOX (niepoprawny — '+('punkt' if value['bbox_marker']['validity']=='INVALID_POINT' else 'odcinek')+')'
+    if kind=='GTR' and row and row.get('seed'):return 'GTR startowy (niezapisany szkic)'
     return {'BBOX':'Prostokąt modelu (BBOX)','POSE':'Narożniki modelu (Pose)',
             'GTR':f"Obrys operatora (GTR {row['n'] if row else '—'})"}.get(kind,'Wybierz warstwę')
 
@@ -81,6 +85,19 @@ def quad(value,kind=None):
         l,t,r,b=layer['bbox'];return [(l,t),(r,t),(r,b),(l,b)]
     return layer['quad']
 
+def show_geometry(ed,points,*,only_if_needed=False):
+    """Fit source geometry using the counter inspector's existing viewport rules."""
+    width,height=ed.c.winfo_width(),ed.c.winfo_height()
+    visible=[ed.to_canvas(p) for p in points]
+    if only_if_needed and all(12<=x<=width-12 and 12<=y<=height-12 for x,y in visible):return False
+    sw,sh=ed._read()['image_size'];sx,sy=ed.h._image.width/sw,ed.h._image.height/sh
+    xs=[p[0]*sx for p in points];ys=[p[1]*sy for p in points]
+    scale=min(width*.65/max(1,max(xs)-min(xs)),height*.45/max(1,max(ys)-min(ys)))
+    ed.h._view_zoom=max(1,min(256,scale/max(.0001,ed.h._view_fit_scale)))
+    ed.h._view_center=((min(xs)+max(xs))/2,(min(ys)+max(ys))/2)
+    ed.h._paint_image()
+    return True
+
 def geometries(ed):
     from .mobile_canvas_visibility import contours
     return [(item['oid'],item['kind'],item['quad']) for item in contours(ed)]
@@ -89,6 +106,9 @@ def selection_hit(ed,x,y):
     """S edits a visible GTR before considering any overlapping MT layer."""
     from .mobile_canvas_editor import quad_contains_point
     from ..ranking.mobile_manual_frame_guard import edge_distance
+    from .mobile_canvas_bbox_marker import hit as marker_hit
+    marker=marker_hit(ed,x,y)
+    if marker:return marker
     point=ed.to_source(x,y);hits=[]
     for oid,kind,q in geometries(ed):
         if kind!='GTR':continue
@@ -116,6 +136,8 @@ def hit(ed,x,y,*,prefer_stack=False):
         if l<=x<=r and t<=y<=b:return oid,'badge',None
     for oid,(l,t,r,b) in getattr(ed,'reference_identity_hits',{}).items():
         if l<=x<=r and t<=y<=b:return oid,'layer:GTR',None
+    for oid,(l,t,r,b) in getattr(ed,'bbox_spatial_hits',{}).items():
+        if l<=x<=r and t<=y<=b:return oid,'bbox_spatial_menu',None
     for oid,(l,t,r,b) in ed.mt_source_badge_hits.items():
         if l<=x<=r and t<=y<=b:
             badge=getattr(ed,'_context_badge',None)
@@ -125,6 +147,9 @@ def hit(ed,x,y,*,prefer_stack=False):
     if badge and badge['kind']=='GTR':
         l,t,r,b=badge['rect']
         if l<=x<=r and t<=y<=b:return badge['oid'],'layer:GTR',None
+    from .mobile_canvas_bbox_marker import hit as marker_hit
+    marker=marker_hit(ed,x,y)
+    if marker:return marker
     hits=[];point=ed.to_source(x,y);shapes=geometries(ed);models={}
     if prefer_stack:
         from .mobile_canvas_clean_view import source
@@ -136,6 +161,11 @@ def hit(ed,x,y,*,prefer_stack=False):
             if kind=='GTR' or oid in models:continue
             try:models[oid]=snapshot(ed.h.session,ed.h.current_invocation,oid,scene=ed._read(),state=state)
             except (ValueError,KeyError,TypeError,OSError):continue
+            # A visible, unsaved operator seed belongs to this exact source
+            # object too, even though it is absent from the scientific GT.
+            seed=next((q for key,role,q in shapes if key==oid and role=='GTR'),None)
+            if seed and not any(l['kind']=='GTR' for l in models[oid]['layers']):
+                models[oid]['layers'].append(dict(kind='GTR',quad=seed,provisional=True))
             for layer in models[oid]['layers']:
                 if layer['kind'] in ('BBOX','POSE'):shapes.append((oid,layer['kind'],quad(models[oid],layer['kind'])))
     from ..ranking.mobile_manual_frame_guard import edge_distance
@@ -162,6 +192,19 @@ def hit(ed,x,y,*,prefer_stack=False):
 
 def right_hit(ed,x,y):
     from ..ranking import mobile_canvas_review as core
+    if getattr(getattr(ed,'shift_preview',None),'active',False):
+        for label in getattr(ed,'shift_preview_labels',[]):
+            l,t,r,b=label['rect']
+            if not (l<=x<=r and t<=y<=b):continue
+            frame=label['frame']
+            if frame['kind']=='GTR' and not frame.get('seed'):raise ValueError(core.GTR_BAD_MESSAGE)
+            if frame.get('role') not in ('FINAL','SEED') or frame['gid']!=ed.h.current_invocation:
+                raise ValueError('RAW lub inne wywołanie: tylko podgląd. Wybierz źródłowy MT FINAL w nawigatorze.')
+            core.require_source_final(ed.h.session,ed.h.current_invocation,frame['oid'])
+            return frame['oid']
+    from .mobile_canvas_reference_seed import right_target
+    seed_source=right_target(ed,x,y)
+    if seed_source:return seed_source
     if ed.mode=='draw':
         # Drawing intentionally hides contours; a saved GTR remains protected
         # from PPM/BAD and must not turn the click into draft cancellation.
@@ -199,6 +242,13 @@ def source_context(ed,value):
     from .mobile_canvas_info_badge import measurements,percent
     values=measurements(ed,row)
     if kind=='BBOX':
+        if value.get('bbox_marker'):
+            from .mobile_canvas_bbox_marker import verdict
+            from .mobile_bbox_spatial_review import LABELS
+            marker=value['bbox_marker']
+            text+='\nBBOX niepoprawny: '+marker['reason']+'\nBBOX IoU: N/A\nPołożenie: '+LABELS[verdict(ed,c)]
+            text+='\nOcena położenia BBOX jest niezależna od Pose i decyzji MT.'
+            return label(ed,kind).upper(),text
         text+='\nWynik dopasowania BBOX: '+(values['outcome'] or 'ocena oczekuje')
         text+='\nBBOX IoU: '+percent(100*values['bbox_iou'] if values['bbox_iou'] is not None else None)+'\nProstokąt źródłowy · tylko inspekcja'
         comparison=values.get('reference_comparison')
@@ -216,12 +266,14 @@ def source_context(ed,value):
             reason=values['pose_reason']
             text+='\n'+('Porównanie oczekuje na zatwierdzenie ramek' if reason=='UNASSOCIATED' and value['gtr_count'] else
                         {'UNASSOCIATED':'Brak powiązanej referencji GTR','GT_UNCONFIRMED':'Referencja GTR niepotwierdzona',
+                         'SPATIAL_REFERENCE_NOT_SCIENTIFIC_PAIR':'Relacja przestrzenna; brak zatwierdzonej pary metrycznej dla tej GTR',
                          'SCENE_EXCLUDED':'Obraz wyłączony z oceny','LEGACY_CONFLICT':'Konflikt referencji GTR'}.get(reason,'Nie można porównać geometrii z referencją'))
     text+='\nReferencja operatora: '+(f"GTR {row['n']}" if value['gtr_count'] else 'brak powiązania')
     if row['plate'] and row['plate']['geometry_state']=='operator_removed' and not row['gt']:
         text=text.replace('Referencja operatora: brak powiązania','Obrys operatora: usunięty; ID i GTZ zachowane')
         text+='\nD: narysuj nowy obrys · Ctrl+Z: przywróć usunięty'
-    text+='\nMZ: '+('nie wykonano (NOT_RUN) · N/A' if c['mz_status']=='NOT_RUN' else c['mz_prediction'] or 'brak odczytu')
+    from .mobile_canvas_info_badge import mz_readout
+    text+='\nMZ: '+mz_readout(c)
     return label(ed,kind).upper(),text
 
 class Navigator:
@@ -264,7 +316,7 @@ class Navigator:
         self.result.configure(text=f'Wynik {ids.index(ed.selected)+1} z {len(ids)}' if ed.selected in ids else 'Wybór ręczny' if manual else 'Brak wskazań modelu' if not ids else 'Wybierz wskazanie')
         self.result.configure(state='normal' if ids and ed.selected not in ids and ed.mode!='draw' else 'disabled')
         kinds=[l['kind'] for l in value['layers']] if value else []
-        signature=(tuple(kinds),value['identity'] if value else None,row['n'] if row else None)
+        signature=(tuple(kinds),value['identity'] if value else None,row['n'] if row else None,bool(row and row.get('seed')))
         if signature!=self.signature:
             self.signature=signature;self.menu.delete(0,'end')
             for kind in ('BBOX','POSE','GTR'):
@@ -275,16 +327,20 @@ class Navigator:
             state='normal' if kinds and not ed.drag and ed.mode!='draw' else 'disabled',bg='#145A7A' if value else ed.p['surface'],fg='white' if value else ed.p['fg'])
         hints=[]
         if value:
-            hints.append((f"GTR {row['n']} · obrys operatora" if value['active']=='GTR' else
+            hints.append(('Szkic GTR · niezapisany · D: przesuń narożniki' if row.get('seed') and value['active']=='GTR' else
+                          f"GTR {row['n']} · obrys operatora" if value['active']=='GTR' else
                           f"{value['active'].title()} MT {row['candidate']['mt_detection_index']+1} · zapis źródłowy"))
             pose=quad(value,'POSE')
-            if pose and row['gt']==pose:
+            if pose and row['gt']==pose and not row.get('seed'):
                 hints.append(f"Pose MT i GTR {row['n']}: te same narożniki")
-            if 'BBOX' not in kinds:hints.append('Brak wiarygodnego prostokąta modelu')
+            if value.get('bbox_marker'):hints.append('BBOX niepoprawny: '+value['bbox_marker']['reason'])
+            elif 'BBOX' not in kinds:hints.append(value.get('bbox_diagnostic',{}).get('reason','Brak wiarygodnego prostokąta modelu'))
             if 'POSE' not in kinds:
                 status=(row['candidate'].get('source_pose_status') or '') if row and row['candidate'] else ''
                 hints.append('Narożniki modelu: niepoprawne (INVALID_QUAD)' if status=='INVALID_QUAD' else 'Narożniki modelu: brak potwierdzonych danych')
-            if 'GTR' not in kinds:hints.append('Obrys operatora: brak referencji')
+            if 'GTR' not in kinds:
+                hints.append('Obrys operatora: brak referencji · GTR usunięta' if row['plate'] and row['plate']['geometry_state']=='operator_removed'
+                             else 'Brak powiązanej GTR dla tego MT')
         elif manual:hints.append(f"GTR {row['n']} · niezależny obrys operatora · brak powiązania MT/MZ")
         elif any(c['role']=='UNKNOWN' for c in (source(ed) or {}).get('candidates',[])):hints.append('Nie potwierdzono pochodzenia FINAL — brak dostępnych warstw')
         if ed.mode=='draw':

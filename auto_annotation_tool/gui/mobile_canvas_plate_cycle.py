@@ -16,7 +16,7 @@ def targets(ed):
             if location and location['kind']=='BBOX':
                 l,t,r,b=location['bbox'];q=[(l,t),(r,t),(r,b),(l,b)];kind='BBOX'
         if not q:continue
-        key=('GTR',row['pid']) if row['gt'] else ('MT',row['oid'])
+        key=('GTR',row['pid']) if row['gt'] and row['pid'] else ('MT',row['oid'])
         if key in seen:continue
         seen.add(key);result.append(dict(key=key,oid=row['oid'],kind=kind,quad=q,pid=row['pid']))
     return result
@@ -28,7 +28,7 @@ def next_target(ed,choices):
     if hasattr(ed,'clean_bar'):
         from .mobile_canvas_clean_view import selected
         row=selected(ed)
-        if row:current=('GTR',row['pid']) if row['gt'] else ('MT',row['oid'])
+        if row:current=('GTR',row['pid']) if row['gt'] and row['pid'] else ('MT',row['oid'])
     else:current=ed.selected
     index=next((i for i,r in enumerate(choices) if r['key']==current),-1)
     return choices[(index+1)%len(choices)]

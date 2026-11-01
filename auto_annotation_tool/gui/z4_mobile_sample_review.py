@@ -4544,6 +4544,10 @@ class MobileSampleReviewWindow:
             result_dir["path"] = target
             try:
                 paths.extend(self.session.export(target))
+                from .mobile_bbox_spatial_review import export_addendum
+                paths.extend(export_addendum(self.session,target))
+                from .mobile_mz_quality_context import export as export_mz_context
+                paths.extend(export_mz_context(self.session,target))
                 export_path = target / "mt_pose_geometry.csv"
                 temp = export_path.with_name(export_path.name + ".tmp")
                 rows = _pose_geometry_rows(self.session)

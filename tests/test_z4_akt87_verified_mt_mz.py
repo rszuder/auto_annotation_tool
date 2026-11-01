@@ -179,7 +179,7 @@ def test_paired_geometry_figures_and_csv(tmp_path):
         export_imported_charts([s,replace(s2,review_status='IN_PROGRESS')],[[],[]],root)
 
 
-def test_native_checkbox_click_keeps_single_report_preview():
+def test_native_identity_checkbox_click_keeps_single_report_preview():
     try:
         root=tk.Tk()
     except tk.TclError:
@@ -194,16 +194,16 @@ def test_native_checkbox_click_keeps_single_report_preview():
                   '_update_comparison_basket_status','_clear_comparison_checks'}
         short=ast.ClassDef(name='Short',bases=[],keywords=[],body=[x for x in browser.body
             if isinstance(x,ast.FunctionDef) and x.name in selected],decorator_list=[])
-        env={'Verification':Verification}
+        env={'Verification':Verification,'__name__':'auto_annotation_tool.gui._checkbox_test','__package__':'auto_annotation_tool.gui'}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[short],type_ignores=[])),'<short>','exec'),env)
         widget=ttk.Treeview(root,columns=('Wybor','Data'),show='headings',selectmode='browse',height=3)
         widget.heading('Wybor',text='✓');widget.heading('Data',text='Dane')
         widget.column('Wybor',width=60);widget.column('Data',width=150)
         widget.insert('',tk.END,iid='row_0',values=('☐','foo'))
-        widget.insert('',tk.END,iid='row_1',values=('—','bar'))
+        widget.insert('',tk.END,iid='row_1',values=('☐','bar'))
         widget.pack();root.update()
-        a=SimpleNamespace(report_id='one',source_archive_sha256=SHA)
-        b=SimpleNamespace(report_id='two',source_archive_sha256='c'*64)
+        a=SimpleNamespace(report_id='one',source_archive_sha256=SHA,experiment_index={'session_id':'one'})
+        b=SimpleNamespace(report_id='two',source_archive_sha256='c'*64,experiment_index={'session_id':'two'})
         obj=env['Short']();obj._comparison_checked=set();obj._comparison_busy=False
         obj.report_table=SimpleNamespace(tree=widget)
         obj.report_by_iid={'row_0':a,'row_1':b}
@@ -222,9 +222,11 @@ def test_native_checkbox_click_keeps_single_report_preview():
         assert click_row('row_0')=='break'
         assert widget.set('row_0','Wybor')=='☑' and len(obj._comparison_checked)==1
         assert click_row('row_1')=='break'
-        assert widget.set('row_1','Wybor')=='—' and len(obj._comparison_checked)==1
+        # ALPR-ANALYSIS-1.0: IN_PROGRESS is selectable for analysis, not approved quality.
+        assert widget.set('row_1','Wybor')=='☑' and len(obj._comparison_checked)==2
         assert opened==['one']  # checkbox click did not open a different report
         obj._clear_comparison_checks()
         assert widget.set('row_0','Wybor')=='☐'
+        assert widget.set('row_1','Wybor')=='☐'
     finally:
         root.destroy()

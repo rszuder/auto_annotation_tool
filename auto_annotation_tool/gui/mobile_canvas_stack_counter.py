@@ -27,7 +27,8 @@ def paint(ed,context,layer_view):
         ed.c.create_oval(*active,fill='#FFFFFF',outline='#145A7A',width=1.5,tags=tags)
         ed.c.create_text(left+diameter/2,top+diameter/2,text=position,font=font,fill='#08263B',tags=tags+('stack_current_text',))
         middle=left+diameter+between/2
-        ed.c.create_rectangle(left+diameter+1,top+3,left+diameter+between-1,top+diameter-3,fill='#080808',outline='',tags=common+('stack_position_separator',))
+        for dx,dy in ((-1,0),(1,0),(0,-1),(0,1)):
+            ed.c.create_text(middle+dx,top+diameter/2+dy,text='/',font=font,fill='#080808',tags=common+('stack_position_separator','stack_slash_halo'))
         ed.c.create_text(middle,top+diameter/2,text='/',font=font,fill='#FFFFFF',tags=common+('stack_position_separator',))
         tags=common+('stack_count_badge',)
         ed.c.create_oval(*total,fill='#145A7A',outline='#EAF5FC',width=1,tags=tags)

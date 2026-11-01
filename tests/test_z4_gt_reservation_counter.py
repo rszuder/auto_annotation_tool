@@ -114,7 +114,11 @@ def test_D_on_unlinked_occupied_source_redirects_without_creating_link(gui):
     root,h,ed,s,oid=gui;before=frozen(s);nav.select_layer(ed,'BBOX');ready(root,h,ed)
     native.key(h,'d');ready(root,h,ed)
     assert ed.mode=='edit' and clean.selected(ed)['plate']['gt_text']=='SAVEDGT'
-    assert clean.selected(ed)['candidate'] is None and frozen(s)==before
+    # Current spatial contract exposes the source immediately, but D remains
+    # read-only and does not persist a canonical relation by itself.
+    selected=clean.selected(ed)
+    assert selected['candidate']['role']=='FINAL' and selected['candidate']['canonical_link']['plate_id'] is None
+    assert frozen(s)==before
 
 def test_timer_expires_but_edit_preview_is_usable_until_Escape(gui):
     root,h,ed,s,oid=gui;start_new(root,h,ed);ed.ref_visible.set(False);ed.inf_visible.set(False);ed.overlay()
@@ -146,11 +150,12 @@ def test_counter_is_three_available_layers_and_covers_nothing(gui,kind):
     x,y,r,b=counter['rect'];assert 0<=x<r<=h.canvas.winfo_width() and 0<=y<b<=h.canvas.winfo_height()
     assert frozen(s)==before
 
-def test_counter_two_without_GT_and_one_for_independent_GT(tmp_path,monkeypatch):
+def test_counter_includes_unsaved_seed_but_keeps_independent_GT_separate(tmp_path,monkeypatch):
     s=source_session(tmp_path/'data',n=1);monkeypatch.setattr(native,'source_session',lambda _:s)
     gen=native.gui.__wrapped__(tmp_path,monkeypatch);root,h,ed,s=next(gen)
     try:
-        ready(root,h,ed);assert ed._stack_counter['count']==2
+        ready(root,h,ed);assert ed._stack_counter['count']==3
+        assert not data.snapshot(s,G)['plates'] # The third layer is an unsaved starting outline.
         oid=core.add_plate(s,G,rect(650,350,800,420),partial_review=True);ed._choose_plate(oid);ready(root,h,ed)
         assert ed._stack_counter['count']==1
         ed.escape();ready(root,h,ed);assert ed._stack_counter is None and not h.canvas.find_withtag('stack_count_badge')

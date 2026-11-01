@@ -1,6 +1,44 @@
 """Explain review work and source-bound matching; never persist decisions."""
 from __future__ import annotations
 import tkinter as tk
+import math
+
+def partial_fp(scene,state,session,result):
+    """A lower bound from explicit FINAL rejections, not a partial matching.
+
+    No TP/FN, rates or report denominators can be inferred from unfinished GT.
+    Only otherwise usable source BBOXes qualify for a displayed FP bound.
+    Invalid/missing source geometry stays unavailable, with rejections named.
+    """
+    from ..ranking.mobile_mt_geometry_layers import source_bbox
+    value=dict(items=[],note='',lower_bound=None)
+    inventory=operator_inventory(scene,state)
+    rejected=inventory['rejected']
+    if not rejected:return value
+    names=', '.join(r['label'] for r in rejected)
+    value['note']=f'Odrzucone wskazania: {names}.'
+    if result.get('unavailable_reasons')!=['REVIEW_INCOMPLETE']:
+        from ..ranking.mobile_mt_detection_evaluation import reason_text
+        value['note']+=' FP niedostępne: '+reason_text(result)+'.'
+        return value
+    finals=[c for c in state['candidates'] if c['role']=='FINAL']
+    for c in finals:
+        row=session.attempts.get(c['attempt_id'],{})
+        confidence=row.get('mt_confidence')
+        if confidence is None or str(confidence).strip()=='':confidence=row.get('plate_confidence')
+        try:confidence=float(confidence)
+        except (TypeError,ValueError,OverflowError):confidence=None
+        if confidence is None or not math.isfinite(confidence) or not 0<=confidence<=1:
+            value['note']+=' FP niedostępne: brak wiarygodnej pewności MT.';return value
+        if source_bbox(session,scene,c) is None:
+            value['note']+=' FP niedostępne: brak poprawnego źródłowego BBOX MT.';return value
+    # Rejected FINALs are forced FP by the canonical policy, independently of
+    # future GT matches. Unresolved FINALs can only increase this count.
+    by_id={c['object_id']:c for c in finals}
+    value['items']=[dict(r,attempt_id=by_id[r['oid']]['attempt_id'],outcome='FP',reason='OPERATOR_NOT_PLATE') for r in rejected]
+    value['lower_bound']=len(rejected)
+    value['note']=f"Ocena częściowa: FP ≥{len(rejected)} — odrzucone {names}."
+    return value
 
 def operator_inventory(scene,state):
     """Saved IDs, proven FINALs and explicit links; no IoU or TP/FP/FN here."""
@@ -55,6 +93,8 @@ def image_feedback(ed,result=None):
     rows=records(ed);progress=partial.progress(scene)
     out=dict(status=result['status'],fp=[],fn=[],text='')
     if result['status']!='MEASURED':
+        known=partial_fp(scene,state,ed.h.session,result)
+        out.update(fp=known['items'],partial_fp_lower_bound=known['lower_bound'],partial_note=known['note'])
         pending=progress['pending_ids'];gtr=progress['pending_gtr_ids']
         row=next((r for r in rows if len(pending)==len(gtr)==1 and r['oid']==pending[0] and r['pid']==gtr[0]),None)
         if row and progress['decisions']==1 and not scene.get('exclusion_reason'):
@@ -113,20 +153,17 @@ def inspect(ed,kind):
     elif row:q=row['gt']
     if q:
         points=list(q)+(list(row['gt']) if source_kind and row and row['gt'] else [])
-        sw,sh=ed._read()['image_size'];sx,sy=ed.h._image.width/sw,ed.h._image.height/sh
-        xs=[p[0]*sx for p in points];ys=[p[1]*sy for p in points]
-        width,height=ed.c.winfo_width(),ed.c.winfo_height()
-        scale=min(width*.65/max(1,max(xs)-min(xs)),height*.45/max(1,max(ys)-min(ys)))
-        ed.h._view_zoom=max(1,min(256,scale/max(.0001,ed.h._view_fit_scale)))
-        ed.h._view_center=((min(xs)+max(xs))/2,(min(ys)+max(ys))/2)
-        ed.h._paint_image()
+        nav.show_geometry(ed,points)
     ed._metric_counter_cursor=(key,index)
     descriptions=dict(fp='FP w ocenie BBOX: źródłowy prostokąt bez dopasowania',fn='FN w ocenie BBOX: referencja bez dopasowanego prostokąta',
                       rejected='Wskazanie odrzucone przez operatora (PPM)',unlinked='Zapisana GT bez jawnego powiązania ze wskazaniem MT')
-    ed.message(item['label']+' · '+descriptions[kind])
+    explanation=('Odrzucone przez operatora · częściowy licznik FP, pełna ocena obrazu trwa'
+                 if formal and data.get('partial_fp_lower_bound') is not None else descriptions[kind])
+    ed.message(item['label']+' · '+explanation)
     return True
 
 def history_state(ed):
+    from . import mobile_bbox_spatial_review as bbox_review
     from ..ranking import mobile_candidate_stacks as stacks,mobile_canvas_review as core
     history=ed.h.session.invocation_annotation(ed.h.current_invocation).get(core.KEY,{}).get(stacks.HISTORY,{}) if ed.h.session and ed.h.current_invocation else {}
     head=history.get('head');entries=history.get('entries',[])
@@ -135,6 +172,14 @@ def history_state(ed):
     can_redo=bool(history.get('redo'))
     if not history:
         can_undo=bool(ed.undo_stack.get(ed.h.current_invocation));can_redo=bool(ed.redo_stack.get(ed.h.current_invocation))
+    if ed.h.session and ed.h.current_invocation:
+        try:
+            if ed.h.current_invocation in bbox_review.load(ed.h.session)['histories']:
+                undo=bbox_review.history_choice(ed.h.session,ed.h.current_invocation)
+                redo=bbox_review.history_choice(ed.h.session,ed.h.current_invocation,redo=True)
+                can_undo=bool(undo) or can_undo;can_redo=bool(redo)
+                if undo=='diagnostic':action='bbox_spatial_verdict'
+        except (ValueError,OSError,KeyError):pass
     return can_undo,can_redo,action
 
 def sync_actions(ed):
@@ -146,18 +191,15 @@ def sync_actions(ed):
         if redo:ed.clean_redo_button.pack(side='right',padx=(4,0));ed.clean_redo_button.configure(state='normal' if enabled else 'disabled')
         else:ed.clean_redo_button.pack_forget()
     else:ed.clean_history_bar.pack_forget()
-    measured=image_feedback(ed);operational=operator_view(ed)
-    for kind in ('rejected','unlinked'):
-        cursor='hand2' if operational[kind] and enabled else ''
-        for widget in (ed.contexts.counters[kind],ed.contexts.counter_labels[kind],ed.contexts.counters[kind].master):widget.configure(cursor=cursor)
+    measured=image_feedback(ed)
     for kind in ('fp','fn'):
-        ed.contexts.bbox_counters[kind].configure(state='normal' if measured[kind] and enabled else 'disabled')
+        cursor='hand2' if measured[kind] and enabled else ''
+        for widget in (ed.contexts.counters[kind],ed.contexts.counter_labels[kind],ed.contexts.counters[kind].master):widget.configure(cursor=cursor)
 
 def install(ed,options):
     ed.clean_history_bar=tk.Frame(ed.contexts.sections['object'],bg=ed.p['bg'])
     ed.clean_undo_button=tk.Button(ed.clean_history_bar,command=ed.undo,**options);ed.clean_undo_button.pack(side='left',fill='x',expand=True)
     ed.clean_redo_button=tk.Button(ed.clean_history_bar,text='Ponów',command=lambda:ed.undo(redo=True),**options)
-    for kind in ('rejected','unlinked'):
+    for kind in ('fp','fn'):
         for widget in (ed.contexts.counters[kind],ed.contexts.counter_labels[kind],ed.contexts.counters[kind].master):
             widget.bind('<Button-1>',lambda event,kind=kind:inspect(ed,kind))
-    for kind in ('fp','fn'):ed.contexts.bbox_counters[kind].configure(command=lambda kind=kind:inspect(ed,kind))

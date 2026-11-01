@@ -52,6 +52,7 @@ def handle(ed,reference):
     objects={o['object_id'] for o in ed._read()['objects']}
     oid=row['reference_id'] if row.get('reference_id') in objects else row['oid']
     if not ed._choose_plate(oid):return
+    oid=ed.selected # A spatially attached manual reference uses its MT view alias.
     ed.gt_focus_id=oid;ed._reserved_edit=dict(context=key(ed),plate_id=row['pid'],oid=oid)
     ed.sync();ed.request_overlay();ed.c.focus_set()
     ed.collision_warning.show(reference,editing=True)

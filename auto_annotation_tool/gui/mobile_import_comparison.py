@@ -184,7 +184,7 @@ def _identity(report, bundle):
                 recorded_repeat=recorded_repeat)
 
 
-def record_from_import(report, bundle, results_root=None, *, review_root=None):
+def record_from_import(report, bundle, results_root=None, *, review_root=None, include_review=True):
     """Return (verified or incomplete Session, trace rows, explicit warnings)."""
     if bundle is None:
         raise ValueError("Raport nie ma podłączonego oryginalnego archiwum.")
@@ -210,7 +210,7 @@ def record_from_import(report, bundle, results_root=None, *, review_root=None):
         warnings.append(f"Telefon zapisuje powtórzenie {recorded_repeat}, folder źródła wskazuje {ident['repeat_label']} — zachowano oba odniesienia.")
     if source_state!="complete":
         warnings.append(source_state + ": pominięto niepełne statystyki czasów.")
-    review, more=_discover_review(results_root,ident["session_id"],sha,review_root)
+    review, more=(_discover_review(results_root,ident["session_id"],sha,review_root) if include_review else (None,[]))
     warnings.extend(more)
     if review is not None:
         if ident["apk_sha256"] and review.apk_sha256 and review.apk_sha256 != ident["apk_sha256"]:
