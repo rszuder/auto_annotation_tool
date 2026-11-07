@@ -100,7 +100,7 @@ class TaskText(tk.Text):
         enabled=bool(self._target and self.locator and not self.locator.blocked())
         self.button.configure(state='normal' if enabled else 'disabled')
     def invoke(self,event=None):
-        if self.locator:self.locator.activate(copy.deepcopy(self._target))
+        if self._target and self.locator:self.locator.activate(copy.deepcopy(self._target))
         return 'break'
     def traverse(self,back):
         (self.button.tk_focusPrev() if back else self.button.tk_focusNext()).focus_set()
@@ -110,7 +110,8 @@ class TaskText(tk.Text):
         # Deleting an embedded Text window also destroys its Tk widget. Detach
         # it first so changing/finishing a task can reuse the same button.
         for name in self.window_names():self.window_configure(name,window='')
-        self.delete('1.0','end');self.insert('1.0',self._text)
+        self.delete('1.0','end')
+        self.insert('1.0',self._text)
         if self._target:
             self.button.configure(text=f"Pokaż MT{self._target['index']+1}")
             self.insert('end',' · ');self.window_create('end',window=self.button,align='center')

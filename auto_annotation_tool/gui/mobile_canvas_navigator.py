@@ -233,12 +233,12 @@ def right_hit(ed,x,y):
 
 def source_context(ed,value):
     from .mobile_canvas_clean_view import selected
-    from ..ranking.mobile_mt_detection_evaluation import evaluate_unit
+    from ..ranking.mobile_mt_object_evaluation import evaluate_unit
     from ..ranking import mobile_candidate_stacks as data
     row=selected(ed);c=row['candidate'];kind=value['active'];det=evaluate_unit(ed.h.session,ed.h.current_invocation)
     outcome=next((r['outcome'] for r in det['final_outcomes'] if r['attempt_id']==c['attempt_id']),'—')
     decision={'PLATE':'poprawna','NOT_PLATE':'błędna','UNRESOLVED':'oczekuje'}.get(row['decision'],'oczekuje')
-    text='Źródło: model lokalizacji tablic\nDecyzja operatora: '+decision
+    text='Źródło: model lokalizacji tablic\nDecyzja operatora: '+decision+'\nWynik MT v2: '+outcome
     from .mobile_canvas_info_badge import measurements,percent
     values=measurements(ed,row)
     if kind=='BBOX':
@@ -249,7 +249,7 @@ def source_context(ed,value):
             text+='\nBBOX niepoprawny: '+marker['reason']+'\nBBOX IoU: N/A\nPołożenie: '+LABELS[verdict(ed,c)]
             text+='\nOcena położenia BBOX jest niezależna od Pose i decyzji MT.'
             return label(ed,kind).upper(),text
-        text+='\nWynik dopasowania BBOX: '+(values['outcome'] or 'ocena oczekuje')
+        text+='\nPomocnicza ocena BBOX v1: '+(values['outcome'] or 'ocena oczekuje')
         text+='\nBBOX IoU: '+percent(100*values['bbox_iou'] if values['bbox_iou'] is not None else None)+'\nProstokąt źródłowy · tylko inspekcja'
         comparison=values.get('reference_comparison')
         if comparison and values['bbox_iou'] is None:
@@ -309,11 +309,13 @@ class Navigator:
         ed=self.ed;value=layers.model(ed);choices=finals(ed);ids=[c['object_id'] for c in choices]
         from .mobile_canvas_clean_view import selected,source
         row=selected(ed);manual=bool(row and not row['candidate'])
+        unknown=sum(c['role']=='UNKNOWN' for c in (source(ed) or {}).get('candidates',[]))
+        absent=f'Nieudowodnione role MT: {unknown}' if unknown else 'Brak wskazań modelu'
         ed.clean_caption.configure(text=TITLE)
         if len(ids)>1:
             self.previous.grid(row=0,column=0);self.following.grid(row=0,column=2)
         else:self.previous.grid_remove();self.following.grid_remove()
-        self.result.configure(text=f'Wynik {ids.index(ed.selected)+1} z {len(ids)}' if ed.selected in ids else 'Wybór ręczny' if manual else 'Brak wskazań modelu' if not ids else 'Wybierz wskazanie')
+        self.result.configure(text=f'Wynik {ids.index(ed.selected)+1} z {len(ids)}' if ed.selected in ids else 'Wybór ręczny' if manual else absent if not ids else 'Wybierz wskazanie')
         self.result.configure(state='normal' if ids and ed.selected not in ids and ed.mode!='draw' else 'disabled')
         kinds=[l['kind'] for l in value['layers']] if value else []
         signature=(tuple(kinds),value['identity'] if value else None,row['n'] if row else None,bool(row and row.get('seed')))

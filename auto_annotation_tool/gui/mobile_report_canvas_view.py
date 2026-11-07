@@ -54,7 +54,8 @@ def load_canvas_snapshot(session_id, source_sha, results_root, review_root):
                   summary=None, identity=None)
     if item is not None:
         result.update(summary=item.canvas, identity=item.model_identity,
-                      manifest_sha256=item.manifest_sha256, review_revision=item.review_revision,mt_evaluation=item.mt_evaluation)
+                      manifest_sha256=item.manifest_sha256, review_revision=item.review_revision,mt_evaluation=item.mt_evaluation,
+                      mt_object_evaluation=item.mt_object_evaluation)
     return result
 
 
@@ -107,6 +108,27 @@ def canvas_overview(snapshot, *, session_id="", source_sha="", progress=None, lo
         detail='Weryfikacja zakończona. Nie każdy obraz ma dane do wszystkich pomiarów.\n'+limits_text(c,snapshot.get('mt_evaluation'))
     elif loading:
         status = "Wczytywanie oceny Canvas…"
+    objects=snapshot.get('mt_object_evaluation') or {}
+    from ..ranking.mobile_mt_object_evaluation import POLICY_ID,POLICY_SHA256,format_rate
+    object_bound=(state in ('READY','APPROVED_LIMITED') and objects.get('matching_policy_id')==POLICY_ID
+        and objects.get('matching_policy_sha256')==POLICY_SHA256 and objects.get('session_id')==session_id
+        and objects.get('source_archive_sha256')==source_sha and objects.get('review_revision')==gate.get('revision'))
+    if object_bound:
+        geo,ocr=objects['geometry_summary'],objects['ocr_summary']
+        def number(key):return str(objects[key]) if objects.get(key) is not None else '—'
+        cards[0].update(title='MT v2 — wykrycie tablic',value=number('tp')+'/'+number('n_gt'),
+            note=f"TP/GT · FP {number('fp')} · FN {number('fn')} · {objects['n_qualified']}/{objects['n_total']} wywołań. "
+                 f"P {format_rate(objects['precision'])} · R {format_rate(objects['recall'])} · F1 {format_rate(objects['f1'])}.")
+        cards[1].update(value='IoU '+pct(geo['polygon_iou_mean_pct']),
+            note=f"NMCE {pct(geo['nmce_mean_pct'])} · n={geo['n_geometry']}/{geo['n_pairs']} par v2; geometria pomocnicza.")
+        cards[2].update(value=f"{ocr['n_exact']}/{ocr['n_reads']}" if ocr['n_reads'] else '—',
+            note=f"Warunkowe MZ · {ocr['status']} · potwierdzony TP/crop/GTZ; FP i NOT_RUN poza mianownikiem.")
+        cards[3].update(value=pct(100*ocr['micro_cer']) if ocr['micro_cer'] is not None else '—',
+            note=f"Micro-CER {ocr['n_text_errors']}/{ocr['n_gt_characters']} znaków GTZ; również błędne i puste wykonane odczyty.")
+        detail+='\nF4-EVAL-2.0 · ASSISTED · retrospektywnie 2026-11-01 · odrębne zakresy MT/geometrii/OCR.'
+    elif bound or state=='APPROVED_LIMITED':
+        cards[0]['title']='MT — archiwalna ocena Canvas'
+        detail+='\nArchiwalny wynik Canvas/v1; brak eksportu F4-EVAL-2.0. Bieżące v2 jest dostępne w weryfikacji i analizie.'
     return dict(status=status, cards=cards, progress=counter, progress_subtitle=detail,
                 progress_ratio=ratio, ready=bound,
                 methodology="Ocena asystowana: z widoczną predykcją. Pełnej zgodności całego potoku nie oceniano osobno.")

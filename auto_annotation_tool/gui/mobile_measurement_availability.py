@@ -16,6 +16,7 @@ def measurement_limits(canvas,mt=None):
            'FINAL_CONFIDENCE_UNAVAILABLE':'brak zapisanej pewności wskazania MT',
            'GT_PARTIAL_ROI_COVERAGE':'tablica przecina granicę ocenianego obszaru',
            'FINAL_POPULATION_UNPROVEN':'nieustalony zestaw końcowych wskazań MT',
+           'SOURCE_FINAL_ROLE_UNPROVEN':'brak dowodu tożsamości FINAL/RAW — techniczne N/A',
            'SOURCE_OR_REVIEW_UNAVAILABLE':'brak zgodnego źródła lub referencji',
            'REVIEW_INCOMPLETE':'brak wymaganej decyzji operatora',
            'SCENE_EXCLUDED':'obraz wyłączony z pomiaru',

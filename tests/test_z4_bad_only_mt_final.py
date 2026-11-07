@@ -139,6 +139,7 @@ def test_B10_manual_reference_is_FN_never_FP(tmp_path):
     s=source_session(tmp_path,n=0,mz=False);oid=core.add_plate(s,G,MANUAL,partial_review=True)
     assert evaluate_unit(s,G,cache=False)['status']=='NOT_EVALUABLE'
     partial.confirm_gtr(s,G,stacks.snapshot(s,G)['links'][oid]['plate_id'])
+    core.check_scene(s,G)
     result=evaluate_unit(s,G,cache=False)
     assert result['status']=='MEASURED' and (result['tp'],result['fp'],result['fn'])==(0,0,1)
     assert not core._object(core.scene(s,G),oid)['error']

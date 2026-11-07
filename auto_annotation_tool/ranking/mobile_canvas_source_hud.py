@@ -18,7 +18,7 @@ def _identity(group,ctx):
 
 def frame_execution(session,gid,*,image_entry=None,image_size=None):
     result=dict(mt=None,final=None,mz=None,reason='brak wiarygodnego śladu',
-                mt_invocation_ids=[],final_attempt_ids=[],mz_execution_ids=[],proof=[],frame=None)
+                mt_invocation_ids=[],final_attempt_ids=[],mz_execution_ids=[],proof=[],frame=None,final_roles_proven=True)
     if session is None or gid not in session.mt_invocations:return result
     session.verify_source()
     group=session.mt_invocations[gid];ctx=_context(session,gid);identity=_identity(group,ctx)
@@ -48,11 +48,8 @@ def frame_execution(session,gid,*,image_entry=None,image_size=None):
         from . import mobile_canvas_review as core,mobile_candidate_stacks as stacks
         try:roles=stacks.roles(session,key,core.scene(session,key))
         except (ValueError,KeyError,TypeError):roles={'?':'UNKNOWN'}
-        if any(role=='UNKNOWN' for role in roles.values()):final=None
+        if any(role=='UNKNOWN' for role in roles.values()):final=None;result['final_roles_proven']=False
         elif final is not None:final+=sum(role=='FINAL' for role in roles.values())
-        from .mobile_mt_postdedup import canvas_post_nms_proof
-        proof=canvas_post_nms_proof(session,key)
-        suppressed=proof.get('suppressed_id') if proof else None
         result['final_attempt_ids'].extend(aid for aid,role in roles.items() if role=='FINAL')
     result.update(mt=len(set(result['mt_invocation_ids'])),final=final)
     result['proof'].append('source_invocation_context + execution_state; unique MT invocation IDs, FINAL after source NMS')
@@ -93,6 +90,7 @@ def caption(value):
     number=lambda key:'—' if value[key] is None else str(value[key])
     text=f"Bieżąca klatka · MT wyw.: {number('mt')} · FINAL: {number('final')} · MZ wyw.: {number('mz')}"
     if any(value[k] is None for k in ('mt','final','mz')):text+=' · '+value['reason']
+    if not value.get('final_roles_proven',True):text+=' · role ID nieudowodnione · N/A'
     return text
 
 

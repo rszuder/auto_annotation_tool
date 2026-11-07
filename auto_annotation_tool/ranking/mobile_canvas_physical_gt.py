@@ -99,10 +99,10 @@ def issues(scene):
 
 def require_final(session,gid,objects):
     """For explicit duplicate decisions, require final IDs from this invocation."""
-    from .mobile_mt_postdedup import canvas_post_nms_proof,_trace_index,_source_integer
+    from .mobile_mt_postdedup import canvas_post_nms_proof,_trace_index,_source_integer,final_ids
     proof=canvas_post_nms_proof(session,gid)
     if proof:
-        final=set(proof.get('final_ids') or [proof['primary_id']])
+        final=set(final_ids(proof))
     else:
         group=session.mt_invocations[gid];rows=group.records;stat=session.path.stat()
         key=tuple(_source_integer(rows[0].get(k)) for k in ('source_sequence','source_timestamp_nanos','scene_generation'))
@@ -157,7 +157,11 @@ def share_across_invocations(session,gid,object_id,other_gid,other_object_id):
     obj=core._object(s,object_id);reference=core._object(other,other_object_id)
     if any(o['error'] or o.get('duplicate_of') or o.get('post_nms_suppressed') for o in (obj,reference)):
         raise ValueError('Wybierz rzeczywiste tablice, nie FP ani RAW.')
-    if KEY not in other or not other[KEY]['confirmed']:raise ValueError('Najpierw potwierdź tablicę w poprzednim wywołaniu.')
+    from .mobile_canvas_partial_review import stack_is_verified
+    other_gt=(other.get(KEY) or {}).get('associations',{}).get(other_object_id)
+    if (KEY not in other or (not other[KEY]['confirmed']
+            and not stack_is_verified(other,plate_id=other_gt))):
+        raise ValueError('Najpierw potwierdź tablicę w poprzednim wywołaniu.')
     target=other[KEY]['associations'].get(other_object_id)
     if not target:raise ValueError('Brak fizycznej tablicy odniesienia.')
     if any(p['gt_id']==target and p.get('scene_identity')=='UNRESOLVED_ACROSS_INVOCATIONS' for p in other[KEY]['plates']):

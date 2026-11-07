@@ -14,8 +14,6 @@ def build_inventory(session):
     if session is None:
         return result
     for gid, group in session.mt_invocations.items():
-        if not group.executed or group.cancelled or group.execution_failed:
-            continue
         result["total"] += 1
         item = dict(gid=gid, scene=None, status="UNAVAILABLE", cells=("○", "—", "—", "—", "○"),
                     issues=[], persisted=core.has_scene(session, gid),
@@ -24,41 +22,73 @@ def build_inventory(session):
             scene = core.scene(session, gid, include_history=False)
         except (ValueError, TypeError, KeyError) as exc:
             item["issues"] = [str(exc)]
+            from .mobile_frame_review_state import for_session
+            frame=for_session(session,gid)
+            item.update(status=frame['state'],approval_issues=[],frame_review=frame,progress=review_progress(None,frame))
+            result['inspected']+=int(frame['complete'])
             result["unavailable"] += 1
         else:
             result["editable"] += 1
             item["scene"] = scene
-            item['progress'] = review_progress(scene)
+            from .mobile_frame_review_state import for_session,READY,NO_REFERENCE,SOURCE_NA
+            frame=for_session(session,gid,scene);item['frame_review']=frame
+            item['progress'] = review_progress(scene,frame)
             result['decisions'] += item['progress']['decisions']
             result['evidence_gaps'] += item['progress']['evidence_gaps']
             item["cells"] = core.scene_review_cells(scene)
             excluded = scene["checked"] and bool(scene.get("exclusion_reason"))
             issues = [] if excluded else core._content_issues(scene)
-            if not scene["checked"]:
-                issues.insert(0, "Obraz nie został oznaczony jako sprawdzony")
             item["issues"] = issues
             item['approval_issues']=core.approval_scene_issues(scene)
-            if not scene['checked']:item['approval_issues'].insert(0,'Obraz nie został oznaczony jako sprawdzony')
             presence_verified = item['progress']['complete']
             if presence_verified or excluded:
                 result["inspected"] += 1
             if excluded:
                 result["excluded"] += 1
                 item["status"] = "EXCLUDED"
-            elif not issues:
+            elif frame['state']==READY:
                 result["assessed"] += 1
                 item["status"] = "READY"
+                if issues:result['incomplete']+=1
+            elif frame['state'] in {NO_REFERENCE,SOURCE_NA}:
+                item['status']=frame['state']
             elif presence_verified:
                 result["incomplete"] += 1
                 item["status"] = "VERIFIED"
             else:
                 item["status"] = "PENDING"
         result["groups"][gid] = item
+    if getattr(session.review, 'scene_annotations', {}):
+        from .mobile_scene_frame_review import unit_for_mt
+        from .mobile_mt_object_evaluation import evaluate_unit
+        for gid,item in result['groups'].items():
+            if unit_for_mt(session,gid) is None:continue
+            measured=evaluate_unit(session,gid)
+            if measured['n_qualified']:
+                item.update(status='READY',persisted=True,issues=[],approval_issues=[],
+                            reference_scope='SCENE_FRAME_SAME_STAMP_TO_MT_ROI',
+                            progress=dict(decisions=0,evidence_gaps=0,unresolved=0,complete=True,title='Ocena z pełnej sceny',action='Zweryfikowany',tone='green'))
+                item['frame_review']=dict(item['frame_review'],complete=True,metric_complete=True)
+        result['inspected']=sum(bool(r.get('frame_review',{}).get('complete')) for r in result['groups'].values())
+        result['assessed']=sum(r['status']=='READY' for r in result['groups'].values())
+        result['decisions']=sum(r['progress']['decisions'] for r in result['groups'].values())
     result["remaining"] = result["total"] - result["inspected"]
     result['approval_ready']=sum(not r.get('approval_issues',r['issues']) for r in result['groups'].values())
     result['approval_remaining']=result['total']-result['approval_ready']
+    result['source_na']=sum(r['status']=='SOURCE_NOT_EVALUABLE' for r in result['groups'].values())
+    result['no_reference']=sum(r['status']=='NO_REFERENCE_EVIDENCE' for r in result['groups'].values())
     result['approval_decisions']=result['decisions']+sum(bool(r.get('approval_issues',r['issues']))
         for r in result['groups'].values() if r.get('progress',{}).get('complete'))
+    from .mobile_experiment_identity import from_bundle
+    identity = from_bundle(getattr(session, 'bundle', None))
+    if identity.get('family') == 'F5A':
+        result['experiment_family'] = 'F5A'
+        result['operator_assessed'] = sum(r['persisted'] and r['status'] == 'READY'
+                                           for r in result['groups'].values())
+        result['operationally_resolved'] = result['inspected']
+    if getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import summary as scene_summary
+        result['scene_scope'] = scene_summary(session)
     return result
 
 
@@ -72,14 +102,18 @@ def percent(value):
     return "—" if value is None else f"{value:.2f}%".replace(".", ",")
 
 
-def review_progress(scene):
+def review_progress(scene,frame=None):
     """One meaning for list, panel and progress, independent of metric counts."""
     from .mobile_canvas_partial_review import progress as frame_progress
-    frame = frame_progress(scene)
-    if scene.get('exclusion_reason'):
+    frame = frame if frame is not None else frame_progress(scene)
+    if scene and scene.get('exclusion_reason'):
         return dict(decisions=0, evidence_gaps=0, unresolved=0, title='Obraz poza oceną',
                     action='Poza oceną', tone='purple', complete=False)
-    return dict(decisions=frame['decisions'], evidence_gaps=sum(not p.get('quad') for p in scene['parents']),
+    from .mobile_frame_review_state import NO_REFERENCE,SOURCE_NA
+    if frame['state'] in {NO_REFERENCE,SOURCE_NA}:
+        text='Brak referencji · N/A' if frame['state']==NO_REFERENCE else 'Źródło nieocenialne · N/A'
+        return dict(decisions=0,evidence_gaps=1,unresolved=0,title=text,action=text,tone='blue',complete=True)
+    return dict(decisions=frame['decisions'], evidence_gaps=sum(not p.get('quad') for p in (scene or {}).get('parents',[])),
                 unresolved=int(frame['source_unknown']), complete=frame['complete'],
                 title='Obraz zweryfikowany' if frame['complete'] else f"Decyzje ramek: {frame['decisions']}",
                 action='Zweryfikowany' if frame['complete'] else f"Decyzje: {frame['decisions']}",
@@ -277,6 +311,10 @@ def plate_review_state(scene, obj, execution=None):
                   gt_note="", frame_state="UNKNOWN", frame="Brak ramki / nie można ustalić pochodzenia",
                   canvas_frame="Pochodzenie nieustalone", correction_history="Historia korekty: nieustalona",
                   mt_label="", bound_parent_id=None, identity_reason="Brak wybranej ramki.")
+    if scene and scene.get('scope') == 'SCENE_FRAME' and obj:
+        result.update(gt_editable=True, gt_reason='', identity_reason='', frame_state='MANUAL',
+                      frame='GTR · pełna scena · ASSISTED', canvas_frame='Referencja sceny', correction_history='')
+        return result
     if not scene or not obj:
         return result
     oid = obj.get("object_id")
@@ -380,6 +418,12 @@ def execution_state(session, gid, *, image_entry=None, image_size=None):
     """Read execution evidence for this invocation AND source frame, never GT."""
     from .mobile_source_frame_roi import source_invocation_context, source_frame_entry
     from .mobile_mt_postdedup import post_nms_proof
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import context
+        ctx = context(session, gid, image_size)
+        return dict(state='SCENE_FRAME', title='Pełna scena · niezależnie od MT',
+                    detail='MT/ROI oceniane osobno; TV E2E N/A', detections=None,
+                    mt_invocation_id=None, scene_event_id=gid, image_entry=ctx['entry'] if ctx else None)
 
     result = dict(state="MT_UNKNOWN", title="MT: nie potwierdzono wykonania",
                   detail="Ocena MT: nieustalona (bez FN)", detections=None,
@@ -430,9 +474,9 @@ def execution_state(session, gid, *, image_entry=None, image_size=None):
             parents = core._parents(session, ctx)
         except (ValueError, TypeError, KeyError):
             return result
-        proof = post_nms_proof(session, gid)
-        suppressed = int(bool(proof and proof.get("suppressed_id") in
-                              {p["attempt_id"] for p in parents}))
+        from .mobile_mt_postdedup import canvas_post_nms_proof,suppressed_ids
+        proof = canvas_post_nms_proof(session, gid)
+        suppressed = len(set(suppressed_ids(proof)) & {p['attempt_id'] for p in parents})
         n = len(parents) - suppressed
         result.update(state="MT_EXECUTED", detections=n,
                       title=f"MT: uruchomiono · detekcje: {n}",
@@ -686,7 +730,8 @@ def current_summary(data, session):
 
 
 def summary_caption(data, inventory):
-    d = data
+    from .mobile_session_metrics import canvas_metric_projection
+    d = canvas_metric_projection(data,data.get('mt_object_evaluation_v2'))
     cer = d["text_errors"] / d["gt_characters"] if d["gt_characters"] else None
     return (f"Sprawdzono {inventory['inspected']}/{inventory['total']}  |  "
             f"MZ zgodne {d['exact_reads']}/{d['evaluated_reads']}  |  "

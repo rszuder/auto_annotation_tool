@@ -78,7 +78,7 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def _plain_manifest(session, export_dir, rows):
+def _plain_manifest(session, export_dir, rows, variant=None):
     review = session.review
     source_sha = str(review.source_archive_sha256).lower()
     if not _SHA256.fullmatch(source_sha):
@@ -102,6 +102,16 @@ def _plain_manifest(session, export_dir, rows):
     if not paths_returned.issubset({p.resolve() for p in all_entries}):
         raise ValueError("Eksporter zwrócił ścieżkę spoza nowego katalogu lub brakujący wynik.")
     provenance = review.provenance if isinstance(review.provenance, dict) else {}
+    primary=[]
+    for path in export_dir.glob('mt_object_evaluation_v2_*/manifest.json'):
+        item=json.loads(path.read_text(encoding='utf-8'))
+        if (item['session_id']!=session.session_id or item['review_revision']!=review.review_revision
+                or item['source_archive_sha256']!=source_sha):
+            raise ValueError('Niespójna rewizja lub źródło eksportu F4-EVAL-2.0.')
+        primary.append(dict(manifest=path.relative_to(export_dir).as_posix(),
+            methodology_version=item['methodology_version'],matching_policy_id=item['matching_policy_id'],
+            matching_policy_sha256=item['matching_policy_sha256']))
+    if len(primary)>1:raise ValueError('Niejednoznaczny eksport PRIMARY F4-EVAL-2.0.')
     return {
         "schema": "alpr_mobile_review_export_manifest_v1",
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -115,22 +125,23 @@ def _plain_manifest(session, export_dir, rows):
         "source_archive_sha256": source_sha,
         "variant_as_recorded": provenance.get("variant_id"),
         "experiment_session_as_recorded": provenance.get("experiment_session"),
-        "note": ("Wariant, scenariusz i rNN w rejestrze F4 wymagają osobnego "
-                 "mapowania na podstawie SHA, session_id oraz ścieżki oryginalnej. "
-                 "Metadanych telefonu nie poprawiano w eksporcie."),
+        "f4_variant": variant,
+        "primary_evaluation": primary[0] if primary else None,
+        "note": "Etykieta F4 ma osobną proweniencję rejestru SHA. Surowych metadanych telefonu nie poprawiano.",
         "files": files,
     }
 
 
-def finalize_export_manifest(session, export_dir, exported_paths):
+def finalize_export_manifest(session, export_dir, exported_paths, *, variant=None, before_publish=None):
     """Write an exclusive manifest after every exporter finished successfully."""
     export_dir = Path(export_dir)
     manifest_path = export_dir / "export_manifest.json"
     if manifest_path.exists():
         raise FileExistsError("Manifest eksportu już istnieje: " + str(manifest_path))
-    manifest = _plain_manifest(session, export_dir, exported_paths)
+    manifest = _plain_manifest(session, export_dir, exported_paths, variant)
     # Reject side-effecting edits to source/archive after the exported files were written.
     session.verify_source(force=True)
+    if before_publish is not None:before_publish()
     with manifest_path.open("x", encoding="utf-8") as handle:
         json.dump(manifest, handle, ensure_ascii=False, indent=2)
         handle.write("\n")

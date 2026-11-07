@@ -3,8 +3,8 @@
 Coordinates are verified pre-ROI Bitmap pixels, never screen pixels. The
 SHA-bound sidecar owns editable children and manual plates. Nothing writes
 predictions, source images, or the legacy review. Metrics are ASSISTED, not
-independent/blind ground truth. A scene must be explicitly checked before
-its provisional inventory becomes an evaluation denominator.
+independent/blind ground truth. Completion follows the saved FINAL/GTR
+decisions; FN is limited to the operator's registered physical references.
 """
 from __future__ import annotations
 
@@ -31,10 +31,15 @@ GTR_BAD_MESSAGE = 'GTR to obrys referencyjny. Popraw lub usuń ramkę; BAD dotyc
 
 
 def has_scene(session, gid):
+    if gid in getattr(session, 'scene_frames', {}):
+        return gid in session.review.scene_annotations
     return KEY in session.review.invocation_annotations.get(gid, {})
 
 
 def context(session, gid, image_size=None):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import context as scene_context
+        return scene_context(session, gid, image_size)
     group = session.mt_invocations.get(gid)
     if not group or not group.executed or group.cancelled or group.execution_failed:
         return None
@@ -107,15 +112,14 @@ def _post_nms_proof(session, gid, parents):
     This is not a physical-plate counter. An additional physical plate missed
     by the final MT is still entered manually by the operator.
     """
-    from .mobile_mt_postdedup import canvas_post_nms_proof
+    from .mobile_mt_postdedup import canvas_post_nms_proof,final_ids,suppressed_ids
     proof = canvas_post_nms_proof(session, gid)
     aids = {p["attempt_id"] for p in parents}
-    if (not isinstance(proof, dict) or proof.get('raw') != len(parents)
-            or proof.get('after_dedup') != len(parents)-1
-            or proof.get("suppressed") != 1
-            or proof.get("suppressed_id") not in aids
-            or (proof.get('final_ids') is not None and set(proof['final_ids']) != aids-{proof['suppressed_id']})
-            or (proof.get('final_ids') is None and (len(parents) != 2 or proof.get('primary_id') not in aids-{proof['suppressed_id']}))):
+    if not isinstance(proof,dict):return None
+    final,raw=final_ids(proof),suppressed_ids(proof)
+    if (proof.get('raw') != len(parents) or proof.get('after_dedup') != len(final)
+            or proof.get('suppressed') != len(raw) or len(set(final+raw)) != len(final+raw)
+            or set(final+raw)!=aids):
         return None
     return copy.deepcopy(proof)
 
@@ -124,18 +128,29 @@ def _pending_nms_review(s, proof):
     """Unmigrated reviews remain intact and must be reconciled explicitly."""
     if not proof:
         return
-    suppressed_id = proof["suppressed_id"]
-    objects = [o for o in s["objects"] if o["attempt_id"] == suppressed_id]
-    if len(objects) == 1 and not objects[0].get("post_nms_suppressed", False):
-        s["_post_nms_pending"] = suppressed_id  # transient; never store this hint
+    from .mobile_mt_postdedup import suppressed_ids
+    pending=[]
+    for aid in suppressed_ids(proof):
+        objects=[o for o in s['objects'] if o['attempt_id']==aid]
+        if len(objects)==1 and not objects[0].get('post_nms_suppressed',False):
+            obj=objects[0]
+            linked=(s.get('candidate_stacks_v1') or {}).get('links',{}).get(obj['object_id'],{}).get('plate_id')
+            untouched=(not linked and not obj['error'] and not obj['gt_text'] and not obj['text_confirmed']
+                and not obj['text_exclusion_reason'] and obj['geometry_state']=='unconfirmed'
+                and not obj.get('legacy_geometry_source') and not obj.get('legacy_text_source'))
+            if proof.get('schema')=='alpr.postdedup.explicit_ids.v2' and untouched:
+                # A transient source-role projection, never a sidecar migration.
+                obj['post_nms_suppressed']=True;s['post_nms_evidence']=copy.deepcopy(proof)
+            else:pending.append(aid)
+    if pending:s['_post_nms_pending']=pending[0] if len(pending)==1 else pending
 
 
 def _verify_nms_review(s, proof):
     flagged = [o for o in s["objects"] if o.get("post_nms_suppressed", False)]
     if not flagged:
         return
-    if (proof is None or len(flagged) != 1
-            or flagged[0]["attempt_id"] != proof["suppressed_id"]
+    from .mobile_mt_postdedup import suppressed_ids
+    if (proof is None or {o['attempt_id'] for o in flagged} != set(suppressed_ids(proof))
             or s.get("post_nms_evidence") != proof):
         raise ValueError("Brak zgodnego dowodu NMS dla wyłączenia surowego MT")
 
@@ -235,16 +250,17 @@ def _seed(session, ctx, parents):
         checked=False, exclusion_reason="", migration_warnings=warnings, events=[])
     proof = _post_nms_proof(session, ctx["invocation_id"], parents)
     if proof:
-        raw = next(o for o in objects if o["attempt_id"] == proof["suppressed_id"])
+        from .mobile_mt_postdedup import suppressed_ids
+        raws=[o for o in objects if o['attempt_id'] in suppressed_ids(proof)]
         # A legacy GT, corrected geometry or error flag is operator evidence.
         # Never hide it automatically or change past decisions.
-        untouched = (not raw["error"] and not raw["gt_text"]
+        untouched = all(not raw["error"] and not raw["gt_text"]
             and not raw["text_exclusion_reason"] and not raw["text_confirmed"]
             and raw["geometry_state"] == "unconfirmed"
             and not raw.get("legacy_geometry_source")
-            and not raw.get("legacy_text_source"))
+            and not raw.get("legacy_text_source") for raw in raws)
         if untouched:
-            raw["post_nms_suppressed"] = True
+            for raw in raws:raw['post_nms_suppressed']=True
             result["post_nms_evidence"] = proof
         else:
             _pending_nms_review(result, proof)
@@ -256,6 +272,9 @@ def _seed(session, ctx, parents):
 
 
 def _legacy_scene(session, gid, *, include_history=True):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import scene as scene_frame
+        return scene_frame(session, gid, include_history=include_history)
     ctx = context(session, gid)
     if ctx is None:
         raise ValueError("Brak zweryfikowanej pełnej klatki z ROI tego wywołania MT")
@@ -286,8 +305,12 @@ def _legacy_scene(session, gid, *, include_history=True):
     # Keep the default complete for editing/history callers and external tools.
     source=saved if include_history else {k:v for k,v in saved.items() if k!='candidate_stack_history_v1'}
     result = copy.deepcopy(source)
+    if proof and proof.get('schema')=='alpr.postdedup.explicit_ids.v2':
+        result.pop('_post_nms_unknown',None);result.pop('_post_nms_pending',None)
+        from .mobile_canvas_partial_review import project_proven_source_roles
+        project_proven_source_roles(session,gid,result)
     _pending_nms_review(result, proof)
-    if not result['checked'] and not proof:
+    if not proof:
         from .mobile_mt_postdedup import unresolved_filter_reason
         reason=unresolved_filter_reason(session,gid)
         if reason:result['_post_nms_unknown']=reason
@@ -295,6 +318,8 @@ def _legacy_scene(session, gid, *, include_history=True):
 
 
 def scene(session, gid, *, include_history=True):
+    if gid in getattr(session, 'scene_frames', {}):
+        return _legacy_scene(session, gid, include_history=include_history)
     result = _legacy_scene(session, gid, include_history=include_history)
     from .mobile_canvas_partial_review import validate as validate_partial
     validate_partial(session, gid, result)
@@ -352,10 +377,12 @@ def _validate_objects(s):
     suppressed_objects = [o for o in objects if o.get("post_nms_suppressed", False)]
     if suppressed_objects:
         evidence = s.get("post_nms_evidence")
-        if (len(suppressed_objects) != 1 or not isinstance(evidence, dict)
-                or evidence.get("suppressed_id") != suppressed_objects[0]["attempt_id"]
-                or evidence.get("raw") != len(parents) or evidence.get("after_dedup") != len(parents)-1
-                or evidence.get("suppressed") != 1):
+        from .mobile_mt_postdedup import suppressed_ids
+        if (not isinstance(evidence,dict)
+                or set(suppressed_ids(evidence)) != {o['attempt_id'] for o in suppressed_objects}
+                or evidence.get('raw') != len(parents)
+                or evidence.get('after_dedup') != len(parents)-len(suppressed_objects)
+                or evidence.get('suppressed') != len(suppressed_objects)):
             raise ValueError("Wyłączenie RAW wymaga jednoznacznego dowodu końcowych wyników NMS")
 
 
@@ -427,7 +454,10 @@ def counts(s):
     return result
 
 
-def _store(session, gid, s, action, oid="", *, object_before=None):
+def _store(session, gid, s, action, oid="", *, object_before=None, event_details=None, expected_sidecar_sha256=None):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import store
+        return store(session, gid, s, action, oid, expected_sidecar_sha256=expected_sidecar_sha256)
     # Validate BAD transitions before touching flags, events, history or disk.
     old = _legacy_scene(session, gid, include_history=False)
     from .mobile_gt_link_contract import validate_transition
@@ -455,12 +485,14 @@ def _store(session, gid, s, action, oid="", *, object_before=None):
         sync_gtr_review(session,gid,s,old,action,oid)
         if PARTIAL_KEY in s:
             from .mobile_candidate_stacks import project, pack
-            sync_write(session, gid, s, action, oid)
+            sync_write(session, gid, s, action, oid, previous=old)
             s = project(session, gid, pack(s))
-        if s['checked'] and not s.get('exclusion_reason'):
+        from .mobile_frame_review_state import from_scene
+        if from_scene(s)['metric_complete'] and not s.get('exclusion_reason'):
             from .mobile_candidate_stacks import record_scene_identity,project,pack
             record_scene_identity(session,gid,s)
             s=project(session,gid,pack(s))
+            if 'frame_completion_v1' in s:s['frame_completion_v1']['state']=from_scene(s)['state']
     from .mobile_canvas_partial_review import validate as validate_partial
     validate_partial(session, gid, s)
     sync_references(s)
@@ -488,6 +520,8 @@ def _store(session, gid, s, action, oid="", *, object_before=None):
         review_revision_before=session.review.review_revision))
     if object_before is not None:
         s["events"][-1]["object_before"] = copy.deepcopy(object_before)
+    if event_details is not None:
+        s['events'][-1].update(copy.deepcopy(event_details))
     s["expected_plate_count"] = counts(s)["expected"]
     from .mobile_candidate_stacks import pack, record_history
     inv[KEY] = pack(s)
@@ -496,7 +530,9 @@ def _store(session, gid, s, action, oid="", *, object_before=None):
     # verification path; never feed this derived count into legacy denominators.
     changed.invocation_annotations[gid] = inv
     changed.review_status = session.review.review_status if diagnostic_only and s['checked'] else "IN_PROGRESS"
-    session._save_change(changed,_gtr_history_restore=action in {'undo_stack_history','redo_stack_history'},_gtr_merge=merge)
+    save_options=dict(_gtr_history_restore=action in {'undo_stack_history','redo_stack_history'},_gtr_merge=merge)
+    if expected_sidecar_sha256 is not None:save_options['_expected_sidecar_sha256']=expected_sidecar_sha256
+    session._save_change(changed,**save_options)
 
 
 def _edit(session, gid, oid, action, modify):
@@ -512,6 +548,9 @@ def _edit(session, gid, oid, action, modify):
 
 
 def add_plate(session, gid, points, *, partial_review=False):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import add_plate as add_scene_plate
+        return add_scene_plate(session, gid, points)
     s = scene(session, gid)
     if partial_review:
         from .mobile_candidate_stacks import adopt_canvas_write
@@ -532,6 +571,9 @@ def add_plate(session, gid, points, *, partial_review=False):
 
 
 def correct_plate(session, gid, oid, points):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import edit
+        return edit(session, gid, oid, quad=points)
     if 'candidate_stacks_v1' in session.invocation_annotation(gid).get(KEY, {}):
         from .mobile_candidate_stacks import edit_gt
         return edit_gt(session, gid, oid, quad=points)
@@ -559,6 +601,9 @@ def correct_plate(session, gid, oid, points):
 
 
 def remove_operator_geometry(session, gid, oid):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import remove
+        return remove(session, gid, oid)
     """Remove operator geometry without adopting any MT geometry as GT.
 
     MT evidence is immutable. A linked identity and its GTZ remain without corners.
@@ -590,26 +635,29 @@ def accept_post_nms_raw_only(session, gid):
     """
     s = scene(session, gid)
     proof = _post_nms_proof(session, gid, s["parents"])
-    if not proof or s.get("_post_nms_pending") != proof["suppressed_id"]:
+    from .mobile_mt_postdedup import suppressed_ids
+    raw_ids=suppressed_ids(proof);pending=s.get('_post_nms_pending')
+    if not proof or set(pending if isinstance(pending,list) else [pending]) != set(raw_ids):
         raise ValueError("Brak nierozstrzygniętej ramki RAW z jednoznacznym dowodem NMS")
-    obj = next(o for o in s["objects"] if o["attempt_id"] == proof["suppressed_id"])
-    before = copy.deepcopy(obj)
-    obj["post_nms_suppressed"] = True
-    if s.get('physical_gt_v1') and obj['object_id'] in s['physical_gt_v1']['associations']:
-        registry=s['physical_gt_v1'];gt=registry['associations'].pop(obj['object_id'])
-        plate=next(p for p in registry['plates'] if p['gt_id']==gt)
-        if plate['reference_object_id']==obj['object_id']:
-            manual=_new_object('MANUAL:'+uuid.uuid4().hex,quad=plate['quad'])
-            manual.update(gt_text=obj['gt_text'],text_exclusion_reason=obj['text_exclusion_reason'],text_confirmed=obj['text_confirmed'])
-            s['objects'].append(manual);plate['reference_object_id']=manual['object_id']
-            registry['associations'][manual['object_id']]=gt
+    raw_objects=[o for o in s['objects'] if o['attempt_id'] in raw_ids]
+    before=copy.deepcopy(raw_objects[0] if len(raw_objects)==1 else raw_objects)
+    for obj in raw_objects:
+        obj['post_nms_suppressed']=True
+        if s.get('physical_gt_v1') and obj['object_id'] in s['physical_gt_v1']['associations']:
+            registry=s['physical_gt_v1'];gt=registry['associations'].pop(obj['object_id'])
+            plate=next(p for p in registry['plates'] if p['gt_id']==gt)
+            if plate['reference_object_id']==obj['object_id']:
+                manual=_new_object('MANUAL:'+uuid.uuid4().hex,quad=plate['quad'])
+                manual.update(gt_text=obj['gt_text'],text_exclusion_reason=obj['text_exclusion_reason'],text_confirmed=obj['text_confirmed'])
+                s['objects'].append(manual);plate['reference_object_id']=manual['object_id']
+                registry['associations'][manual['object_id']]=gt
     s["post_nms_evidence"] = proof
     s.update(checked=False, exclusion_reason="")
-    _store(session, gid, s, "operator_accept_trace_proven_nms_raw_only", obj["object_id"], object_before=before)
-    return obj["object_id"]
+    _store(session, gid, s, "operator_accept_trace_proven_nms_raw_only", raw_objects[0]['object_id'], object_before=before)
+    return raw_objects[0]['object_id'] if len(raw_objects)==1 else [o['object_id'] for o in raw_objects]
 
 
-def set_scene_review_state(session, gid, *, checked, exclusion_reason=""):
+def set_scene_review_state(session, gid, *, checked, exclusion_reason="", expected_sidecar_sha256=None):
     """Inspected is distinct from complete/evaluable; validation remains mandatory.
 
     A user can inspect an image with incomplete GT. Such an image stays pending
@@ -630,7 +678,7 @@ def set_scene_review_state(session, gid, *, checked, exclusion_reason=""):
     s.update(checked=checked, exclusion_reason=reason)
     if checked and not reason:_inspect_established_references(s)
     _explicit_inspection_presence(s)
-    _store(session, gid, s, "set_roi_review_checkboxes")
+    _store(session, gid, s, "set_roi_review_checkboxes", expected_sidecar_sha256=expected_sidecar_sha256)
 
 
 def merge_review_cells(rows):
@@ -648,7 +696,9 @@ def merge_review_cells(rows):
 
 def object_review_cells(s, obj):
     """ROI inspected, frame decision, text GT, corners, completion."""
-    inspected = "✓" if s["checked"] else "○"
+    from .mobile_frame_review_state import from_scene
+    frame=from_scene(s)
+    inspected = "✓" if frame['complete'] else "○"
     if obj.get("post_nms_suppressed", False):
         return (inspected, "—", "—", "—", inspected)
     if s.get("exclusion_reason") and s["checked"]:
@@ -660,8 +710,7 @@ def object_review_cells(s, obj):
     text = ("✓" if obj["text_confirmed"] and obj["gt_text"] else
             "—" if obj["text_confirmed"] and obj["text_exclusion_reason"] else
             "○" if parent and parent["mz_ran"] else "—")
-    ready = (s["checked"] and bool(obj.get("quad")) and text != "○" and
-             not (parent and parent["mz_status"] == "AMBIGUOUS_SAMPLES"))
+    ready = frame['metric_complete'] and bool(obj.get("quad"))
     return (inspected, "✓" if corners else "○", text,
             "✓" if corners else "○", "✓" if ready else "○")
 
@@ -671,10 +720,13 @@ def scene_review_cells(s):
         return ("✓", "—", "—", "—", "✓")
     rows = [object_review_cells(s, obj) for obj in s["objects"]]
     cells = list(merge_review_cells(rows))
-    cells[0] = "✓" if s["checked"] else "○"
+    from .mobile_frame_review_state import from_scene,SOURCE_NA,NO_REFERENCE
+    frame=from_scene(s)
+    if frame['state'] in {SOURCE_NA,NO_REFERENCE}:return ('—',)*5
+    cells[0] = "✓" if frame['complete'] else "○"
     if not rows:
         cells[1] = cells[0]  # Explicitly inspected zero, never an inferred zero.
-    cells[-1] = "✓" if s["checked"] and not _content_issues(s) else "○"
+    cells[-1] = "✓" if frame['complete'] else "○"
     return tuple(cells)
 
 
@@ -685,6 +737,9 @@ def toggle_error(session, gid, oid):
 
 
 def set_text(session, gid, oid, text, reason=""):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import edit
+        return edit(session, gid, oid, text=text, reason=reason)
     if 'candidate_stacks_v1' in session.invocation_annotation(gid).get(KEY, {}):
         from .mobile_candidate_stacks import edit_gt
         return edit_gt(session, gid, oid, text=text, reason=reason)
@@ -701,6 +756,9 @@ def set_text(session, gid, oid, text, reason=""):
 
 
 def _content_issues(s):
+    if s.get('scope') == 'SCENE_FRAME':
+        from .mobile_scene_frame_review import progress
+        return [] if progress(s)['complete'] else ['Potwierdź obecność tablic albo świadomy brak tablic na pełnej scenie']
     issues = []
     issues.extend('Historyczne BAD na GTR '+o['object_id']+': wymagana jawna korekta lub usunięcie referencji; to nie FP modelu.'
                   for o in manual_bad_objects(s))
@@ -709,11 +767,6 @@ def _content_issues(s):
     if s.get('_post_nms_unknown'):
         issues.append(s['_post_nms_unknown'])
     parents = {p["parent_id"]:p for p in s["parents"]}
-    if (s.get("decision_contract") == DECISION_CONTRACT and not counts(s)["expected"]
-            and (s.get('events') and 'candidate_stacks_v1' not in s or
-                 not any(not o['error'] and not o.get('post_nms_suppressed') for o in s['objects']))
-            and s.get("roi_presence") != "NO_PLATES"):
-        issues.append("Potwierdź: brak tablic w analizowanym obszarze")
     for obj in s["objects"]:
         if obj.get("post_nms_suppressed", False) or obj["error"] or obj.get('duplicate_of'):
             continue
@@ -741,8 +794,6 @@ def _content_issues(s):
         issues.extend('Zatwierdź nową lub zmienioną GTR: ' + pid for pid in pending['pending_gtr_ids'])
         if pending['source_unknown']:
             issues.append('Nieustalone pochodzenie końcowych ramek MT.')
-        if pending['empty_eligible'] and not pending['empty_confirmed']:
-            issues.append('Potwierdź: na obrazie nie ma tablic.')
     from .mobile_canvas_physical_gt import issues as physical_issues
     issues.extend(physical_issues(s))
     return issues
@@ -764,12 +815,13 @@ def _explicit_inspection_presence(s):
     """Inspection can establish a negative only after every candidate is resolved."""
     if not s['checked'] or s.get('exclusion_reason'):return
     state=s.get('candidate_stacks_v1')
-    if (state is not None and not state['plates'] and not s.get('_post_nms_unknown') and not s.get('_post_nms_pending')
+    from .mobile_canvas_operator_view import eligible_physical_plate_ids
+    if (state is not None and not eligible_physical_plate_ids(s,state) and not s.get('_post_nms_unknown') and not s.get('_post_nms_pending')
             and all(o.get('post_nms_suppressed') or o['error'] for o in s['objects'])):
         s.update(roi_presence='NO_PLATES',decision_contract=DECISION_CONTRACT)
 
 
-def check_scene(session, gid):
+def check_scene(session, gid, *, expected_sidecar_sha256=None):
     s = scene(session, gid)
     from .mobile_candidate_stacks import adopt_canvas_write
     s=adopt_canvas_write(session,gid,s)
@@ -779,7 +831,7 @@ def check_scene(session, gid):
     issues = _content_issues(s)
     if issues:
         raise ValueError(issues[0])
-    _store(session, gid, s, "confirm_complete_roi_review")
+    _store(session, gid, s, "confirm_complete_roi_review", expected_sidecar_sha256=expected_sidecar_sha256)
 
 
 def exclude_scene(session, gid, reason):
@@ -799,8 +851,8 @@ def group_issues(session, gid):
     if s.get("checked") is True and str(s.get("exclusion_reason") or "").strip():
         return []
     issues = _content_issues(s)
-    if s.get("checked") is not True:
-        issues.insert(0, "Sprawdź cały obszar ROI i oznacz obraz jako sprawdzony")
+    from .mobile_frame_review_state import from_scene,PENDING
+    if from_scene(s)['state']==PENDING and not issues:issues.append('Rozstrzygnij pozostałe ramki MT/GTR.')
     return [f"Canvas {gid}: {i}" for i in issues]
 
 
@@ -811,6 +863,8 @@ def approval_scene_issues(s):
     operator geometry, unresolved identity and missing OCR GT still block.
     """
     if s.get('checked') and s.get('exclusion_reason'):return []
+    from .mobile_frame_review_state import from_scene,SOURCE_NA,NO_REFERENCE
+    if from_scene(s)['state'] in {SOURCE_NA,NO_REFERENCE}:return []
     from .mobile_canvas_partial_review import progress,PLATE
     decisions=progress(s)['object_decisions'];parents={p['parent_id']:p for p in s['parents']}
     optional=set()
@@ -824,9 +878,8 @@ def approval_scene_issues(s):
 
 def approval_group_issues(session,gid):
     try:s=scene(session,gid,include_history=False)
-    except (ValueError,TypeError,KeyError) as e:return [f'Canvas {gid}: {e}']
+    except (ValueError,TypeError,KeyError):return []  # Technical N/A; not an image-confirmation task.
     issues=approval_scene_issues(s)
-    if not s['checked']:issues.insert(0,'Sprawdź cały obszar ROI i oznacz obraz jako sprawdzony')
     return [f'Canvas {gid}: {i}' for i in issues]
 
 
@@ -861,8 +914,10 @@ def summary(session):
             continue
         issues = group_issues(session, gid)
         excluded = bool(s.get("exclusion_reason")) and s.get("checked") is True
-        evaluable = not issues and not excluded
-        result["inspected_scenes"] += int(s.get("checked") is True)
+        from .mobile_frame_review_state import from_scene
+        frame=from_scene(s)
+        evaluable = frame['metric_complete'] and not issues and not excluded
+        result["inspected_scenes"] += int(frame['complete'])
         result["incomplete_checked_scenes"] += int(s.get("checked") is True and bool(issues) and not excluded)
         result["excluded_scenes" if excluded else "checked_scenes" if evaluable else "pending_scenes"] += 1
         tally = counts(s)

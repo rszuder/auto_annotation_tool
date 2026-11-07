@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 from pathlib import Path
 import json
+import hashlib
 import zipfile
 import pytest
 from auto_annotation_tool.ranking.mobile_mt_invocations import group_mt_invocations, calculate_mt_invocations
@@ -37,7 +38,7 @@ def make_session(tmp_path, *, raw=2, after=1, suppressed=1, mz_runs=1,
     review=SimpleNamespace(attempt_annotations=annotations,subjects={},sample_annotations={},
                            invocation_annotations={},
                            mt_review_policy="invocation_v1",review_status="IN_PROGRESS")
-    s=SimpleNamespace(path=p,bundle=SimpleNamespace(source_archive_sha256="testsha"),
+    s=SimpleNamespace(path=p,bundle=SimpleNamespace(source_archive_sha256=hashlib.sha256(p.read_bytes()).hexdigest()),
             mt_invocations=gs,attempts=rows,attempts_available=True,sample_ids_by_attempt={},
             invocation_by_attempt={"A":"S1-a00019","B":"S1-a00019"},
             entry_names={"samples/evidence/test.jpg"},review=review,

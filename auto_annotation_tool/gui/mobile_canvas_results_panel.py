@@ -55,7 +55,7 @@ class CanvasResultsPanel(ScrollPane):
         for text in (
             "Korekta jest potomkiem MT, a nie dodatkową tablicą. Oryginalna inferencja pozostaje niezmienna.",
             "GT dotyczy jednej ramki. CER = suma błędów / suma znaków GT; brak uruchomienia MZ nie tworzy błędu OCR.",
-            "MT: źródłowe FINAL, BBOX IoU ≥ 0,50, greedy 1:1. Referencje operatora pozostają ASSISTED.",
+            "MT v2: źródłowe FINAL i potwierdzone relacje MT ↔ GTR, 1:1. F4-EVAL-2.0 · ASSISTED · retrospektywnie 2026-11-01.",
             "Precision = TP/(TP+FP), Recall = TP/(TP+FN), F1 = 2TP/(2TP+FP+FN). Zerowy mianownik: —.",
             "Usunięte próbne ramki pozostają w historii edycji, ale nie w widoku ani mianownikach oceny.",
             "Eksport: canvas_review_summary.json · canvas_review_plates.csv · canvas_review_report.md.",
@@ -65,6 +65,7 @@ class CanvasResultsPanel(ScrollPane):
             item.bind("<Configure>", lambda e, w=item: w.configure(wraplength=max(120, e.width - 8)))
         self.body.bind("<Configure>", self._reflow, add="+")
         for item in (self.progress, self.notice, self.mt_counts, self.reads, self.detection):
+            item.configure(width=1)  # Wrapped text must not drive its parent's requested width.
             item.bind("<Configure>", lambda e, w=item: w.configure(wraplength=max(120, e.width - 8)))
         self.bind_wheel(self)
 
@@ -97,23 +98,40 @@ class CanvasResultsPanel(ScrollPane):
 
     def render(self, data, inventory, *, refreshing=False, review_status=None):
         d = data or {}
+        from ..ranking.mobile_session_metrics import canvas_metric_projection
+        d=canvas_metric_projection(d,d.get('mt_object_evaluation_v2'))
         def value(key, default=0):
             return d.get(key, default)
         n = inventory["total"]
-        ready=inventory.get('approval_ready',inventory['assessed']);remaining=inventory.get('approval_remaining',inventory['remaining'])
-        self.progress.configure(text=f"Zweryfikowane obrazy: {ready}/{n} · Do uzupełnienia: {remaining}")
-        self.cards["inspected"].set(f"{inventory['inspected']} / {n}", "w tym obrazy nie do oceny")
+        ready=inventory['assessed'];remaining=inventory['remaining']
+        from ..ranking.mobile_review_status import approval_caption
+        caption=approval_caption(inventory,review_status,d.get('review_revision','?'))
+        self.progress.configure(text=caption)
+        assessed = inventory.get('operator_assessed', inventory['inspected'])
+        self.cards["inspected"].set(f"{assessed} / {n}", "zapisane oceny MT/ROI; N/A osobno" if inventory.get('experiment_family') == 'F5A' else "w tym obrazy nie do oceny")
         self.cards["ready"].set(str(ready), "wymagane decyzje operatora zapisane")
         self.cards["excluded"].set(str(inventory["excluded"]), "sprawdzone, poza oceną")
         self.cards["pending"].set(str(remaining), "wymagają decyzji lub uzupełnienia danych")
         notices = []
-        if review_status=='COMPLETED':notices.append('Weryfikacja zatwierdzona.')
-        elif not remaining:notices.append('Wszystkie wymagane decyzje zapisane; można zatwierdzić weryfikację.')
+        scene_scope = d.get('scene_frame_assessment') or {}
+        if scene_scope:
+            notices.append(f"Pełne sceny ASSISTED: {scene_scope['n_assessed']}/{scene_scope['n_scene_events']} ocenione; MISSING: {scene_scope['n_missing']}. TV E2E: N/A (SCENE_UNMAPPED).")
+        if review_status=='COMPLETED':notices.append('Zatwierdzenie zapisane w ocenie.')
+        elif inventory.get('experiment_family') == 'F5A':
+            notices.append(f'Zapisane oceny MT/ROI: {assessed}/{n}; techniczne N/A nie są ocenami operatora.')
+        elif not inventory.get('approval_remaining',remaining):notices.append('Wszystkie wymagane decyzje zapisane; można zatwierdzić weryfikację.')
+        elif not remaining:notices.append('Decyzje ramek zapisane; uzupełnij wymagane dane GTZ.')
         else:notices.append(f'Do uzupełnienia: {remaining} obrazów.')
         if inventory["unavailable"]:
-            notices.append(f"Bez zweryfikowanej pełnej klatki/ROI: {inventory['unavailable']} — tylko podgląd.")
+            notices.append(f"Brak kontekstu aktywnego MT/ROI: {inventory['unavailable']} — tylko podgląd."
+                           if inventory.get('experiment_family') == 'F5A' else
+                           f"Bez zweryfikowanej pełnej klatki/ROI: {inventory['unavailable']} — tylko podgląd.")
+        if inventory.get('source_na'):
+            notices.append(f"Technicznie nieocenialne źródło: {inventory['source_na']} — zakres MT N/A.")
+        if inventory.get('experiment_family') == 'F5A':
+            notices.append('Lista zawiera wywołania MT/ROI. Ich ocena nie potwierdza pokrycia pełnych scen TV.')
         from .mobile_measurement_availability import measurement_limits
-        limits=measurement_limits(d,d.get('mt_detection_evaluation_v1')) if not refreshing else []
+        limits=measurement_limits(d,d.get('mt_object_evaluation_v2')) if not refreshing else []
         if limits:notices.append('Nie wszystkie pomiary są dostępne. Poniżej wskazano obrazy i przyczyny.')
         signature=tuple((r['gid'],r['label'],tuple(r['reasons'])) for r in limits)
         if signature!=self._limits_signature:
@@ -126,6 +144,7 @@ class CanvasResultsPanel(ScrollPane):
                         bg=self.p['bg'],fg=self.p['blue'],activebackground=self.p['bg'],activeforeground=self.p['blue'],
                         font=('Segoe UI',10),relief='flat',anchor='w',justify='left',cursor='hand2')
                 else:w=label(self.limits_host,text,p=self.p,bg=self.p['bg'],size=10)
+                w.configure(width=1)
                 w.pack(fill='x',pady=2);w.bind('<Configure>',lambda e:e.widget.configure(wraplength=max(160,e.width-12)))
                 self.limit_buttons[row['gid']]=w
             self._limits_signature=signature
@@ -149,10 +168,12 @@ class CanvasResultsPanel(ScrollPane):
                                f"{reads} ocenionych odczytów MZ")
         self.cards["iou"].set(percent(value("polygon_iou_mean_pct", None)), f"n = {value('geometry_n')} par obrysów · więcej = lepiej")
         self.cards["nmce"].set(percent(value("nmce_mean_pct", None)), f"n = {value('geometry_n')} par obrysów · mniej = lepiej")
-        no_read = sum(1 for row in d.get("rows", ()) if row.get("included")
-                      and row.get("cer") is not None and not row.get("mz_prediction"))
+        no_read = d.get('conditional_empty_reads')
+        if no_read is None:
+            no_read=sum(1 for row in d.get("rows", ()) if row.get("included")
+                        and row.get("cer") is not None and not row.get("mz_prediction"))
         self.reads.configure(text=f"Błędne pełne odczyty: {reads - exact} · w tym brak odczytu: {no_read}\n"
-            "Wyniki tylko ze sprawdzonych, ocenialnych obrazów · ocena asystowana")
+            "Wyniki w zakresie zapisanych GT operatora · ocena asystowana")
         mt_counts = (f"Pominięte przez MT: {value('missed_plates')} · "
             f"Fałszywe wskazania: {value('false_positive_mt')} · tylko zweryfikowane ROI")
         if d.get("decision_contract") == "mt_object_pose_v2":
@@ -167,7 +188,7 @@ class CanvasResultsPanel(ScrollPane):
                 f"Starsze wywołania bez nowych ID: {value('physical_gt_legacy_invocations')}.")
         self.cards['expected'].title.configure(text='Obserwacje GT w wywołaniach' if d.get('physical_gt_contract') else 'Oczekiwane tablice')
         self.mt_counts.configure(text=mt_counts)
-        mt=d.get('mt_detection_evaluation_v1') or {}
+        mt=d.get('mt_object_evaluation_v2') or {}
         if any(mt.get(k)!=d.get(k) for k in ('session_id','source_archive_sha256','review_revision')):
             mt={}
         for key,field,title in (('expected','n_gt','Tablice GT'),('linked','tp','Trafne MT (TP)'),
@@ -175,12 +196,18 @@ class CanvasResultsPanel(ScrollPane):
             self.cards[key].title.configure(text=title)
             self.cards[key].set(str(mt[field]) if mt.get(field) is not None else '—')
         qualified,total=mt.get('n_qualified',0),mt.get('n_total',0)
-        scope=f'Pomiar MT dostępny dla {qualified}/{total} obrazów · ocena asystowana'
+        f5a = inventory.get('experiment_family') == 'F5A'
+        subset = f5a and 0 < qualified < total
+        scope=(f"{'ASSISTED_SUBSET' if subset else 'ASSISTED' if qualified else 'N/A'} · MT/ROI: {qualified}/{total} wywołań; to nie liczba scen TV"
+               if f5a else f'Pomiar MT dostępny dla {qualified}/{total} obrazów · ocena asystowana')
         if qualified:
             self.mt_counts.configure(text=f"GT {mt['n_gt']} · TP {mt['tp']} · FP {mt['fp']} · FN {mt['fn']}\n"+scope)
         else:self.mt_counts.configure(text='Ocena MT: — · brak ocenialnych wywołań\n'+scope)
         for key in ('precision','recall','f1'):
             from ..ranking.mobile_mt_detection_evaluation import format_rate
             number=mt.get(key)
-            self.cards[key].set(format_rate(number))
+            if f5a:
+                self.cards[key].set(format_rate(number), f'ASSISTED_SUBSET · {qualified}/{total} wywołań MT/ROI' if subset else scope)
+            else:
+                self.cards[key].set(format_rate(number))
         self.detection.configure(text=f"Oznaczone błędy operatora: {value('operator_errors')} (osobno od MT).")

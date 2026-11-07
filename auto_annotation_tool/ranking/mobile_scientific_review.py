@@ -221,7 +221,7 @@ def make_scientific_summary(session, statistics, pose_rows):
                        "Brak niezależnego pełnoklatkowego GT, udowodnionego pokrycia ROI i zamrożonego dopasowania IoU.")
         if multi_results["verified_multi_invocations"] < multi_results["total_multi_invocations"]:
             caveats.append("Nieukończona weryfikacja części scen wielotablicowych: nie obliczamy dla nich formalnych TP/FP/FN.")
-    return {
+    result = {
         "multi_plate": multi_results,
         "schema": SCIENCE_SCHEMA,
         "session_id": session.session_id,
@@ -288,11 +288,33 @@ def make_scientific_summary(session, statistics, pose_rows):
             "Status etapu MT nie zmienia natywnego review_status ani warunków pełnego zakończenia sesji.",
         ],
     }
+    if result['conditions'].get('experiment_family') == 'F5A':
+        mt_scope = statistics.get('mt_object_evaluation_v2') or {}
+        qualified, total = mt_scope.get('n_qualified', 0), mt_scope.get('n_total', 0)
+        result['canvas_assessment'] = dict(n_qualified=qualified, n_total=total,
+            n_unscored=max(0, total-qualified),
+            scope='ASSISTED_SUBSET' if 0 < qualified < total else 'ASSISTED' if qualified else 'N/A',
+            unit='MT_INVOCATION_ROI', tv_scene_coverage=None)
+    from .mobile_mz_input_evidence import is_diagnostic_purpose
+    if is_diagnostic_purpose(result['conditions'].get('measurement_purpose')):
+        result['measurement_purpose'] = result['conditions']['measurement_purpose']
+        result['scientific_state'] = result['conditions']['measurement_purpose']
+    return result
 
 
 def session_conditions(session):
     """Short user-facing configuration; retain full raw provenance separately."""
     bundle = session.bundle
+    from .mobile_experiment_identity import from_bundle
+    identity = from_bundle(bundle)
+    from .mobile_tv_bbox_evidence import decorate_conditions
+    if identity.get('family') == 'DIAGNOSTIC':
+        result = _f5a_session_conditions(session, identity)
+        result.update(experiment_family=identity.get('measurement_purpose'),
+                      measurement_purpose=identity.get('measurement_purpose'))
+        return decorate_conditions(session, result)
+    if identity.get('family') == 'F5A':
+        return decorate_conditions(session, _f5a_session_conditions(session, identity))
     experiment = (bundle.experiment_session or {}) if isinstance(bundle.experiment_session, dict) else {}
     execution = experiment.get("execution") or {}
     stages = execution.get("stages") or {}
@@ -312,10 +334,15 @@ def session_conditions(session):
             "delegate": stage.get("delegate") or "brak danych",
             "model_sha256": info.get("package_sha256") or "brak danych",
         }
-    return {
+    from .mobile_f4_variant import for_session
+    f4_variant=for_session(session)
+    return decorate_conditions(session, {
         "session_id": session.session_id,
         "scenario": experiment.get("scenario_id") or "brak danych",
         "variant": experiment.get("variant") or "brak danych",
+        "f4_variant": f4_variant,
+        "variant_display": f4_variant['label'],
+        "variant_provenance": f4_variant['provenance'],
         "device": device.get("name") or device.get("model") or "brak danych",
         "android": device.get("android_version") or "brak danych",
         "build": (experiment.get("app_build") or {}).get("build_type") or "brak danych",
@@ -323,16 +350,73 @@ def session_conditions(session):
         "source_archive_sha256": session.review.source_archive_sha256,
         "review_revision": session.review.review_revision,
         "review_mode": session.review.review_mode,
-    }
+        "review_status": session.review.review_status,
+    })
+
+
+def _f5a_session_conditions(session, identity):
+    """Use recorded ROI metadata without consulting or modifying F4's registry."""
+    bundle = session.bundle
+    raw = bundle.report_payload or {}
+    collection = bundle.collection_session or {}
+    build = collection.get('app_build') or raw.get('app_build') or {}
+    stages = (identity.get('execution') or {}).get('stages') or {}
+    refs = bundle.model_refs or {}
+    models = {}
+    for key, role in (('MP', 'vehicle'), ('MT', 'plate'), ('MZ', 'character')):
+        info, stage = refs.get(role) or {}, stages.get(key.lower()) or {}
+        artifacts = info.get('variant_artifact_sha256') or []
+        if not isinstance(artifacts, list):
+            artifacts = []
+        models[key] = dict(name=info.get('model_display_id') or info.get('model_id') or stage.get('model_id') or 'brak danych',
+            variant=info.get('variant_id') or stage.get('variant_id') or 'brak danych',
+            precision=info.get('precision') or stage.get('precision') or 'brak danych',
+            runtime=info.get('runtime') or stage.get('runtime') or 'brak danych',
+            delegate=stage.get('delegate') or 'brak danych', cpu_threads=stage.get('cpu_threads'),
+            model_sha256=artifacts[0] if len(artifacts) == 1 else 'brak pojedynczego artefaktu',
+            artifact_sha256=list(artifacts), package_sha256=info.get('package_sha256'))
+    device = getattr(bundle.report, 'device', {}) or {}
+    if not isinstance(device, dict):
+        device = {'name': str(device)}
+    return dict(session_id=session.session_id, experiment_family='F5A',
+        experiment_type=identity.get('experiment_type'), identity_status=identity['status'],
+        identity_issues=list(identity['issues']), series_id=identity.get('series_id'),
+        is_pilot=identity['is_pilot'], scenario=identity.get('scenario_id') or 'brak danych',
+        variant=identity.get('variant') or 'brak danych', variant_display=identity['variant_display'],
+        variant_provenance=identity.get('provenance'), roi_budget_policy=identity.get('roi_budget_policy'),
+        device=device.get('name') or device.get('model') or 'brak danych',
+        android=device.get('android_version') or 'brak danych',
+        build=build.get('build_type') or 'brak danych',
+        apk_sha256=(build.get('apk_identity') or {}).get('base_apk_sha256') or build.get('apk_sha256'),
+        models=models, source_archive_sha256=session.review.source_archive_sha256,
+        review_revision=session.review.review_revision, review_mode=session.review.review_mode,
+        review_status=session.review.review_status)
 
 
 def session_conditions_text(info):
-    return (f"Scenariusz: {info['scenario']}  •  Wariant: {info['variant']}\n"
+    from .mobile_f4_variant import text as variant_text
+    f5a = info.get('experiment_family') == 'F5A'
+    variant=(f"F5A · {info['variant_display']} · seria {info.get('series_id') or 'niepotwierdzona'}\n"
+             f"Scenariusz: {info['scenario']} · tożsamość: {info.get('identity_status')}" if f5a else
+             variant_text(info['f4_variant']) if info.get('f4_variant') else
+             f"Scenariusz: {info['scenario']}  •  Wariant zadeklarowany przez Androida: {info['variant']}")
+    from .mobile_mz_input_evidence import is_diagnostic_purpose
+    if is_diagnostic_purpose(info.get('measurement_purpose')):
+        variant = (f"{info['measurement_purpose']} · poza oficjalnymi kohortami F4/F5A\n"
+                   f"Seria: {info.get('series_id')} · scenariusz: {info['scenario']}")
+    mp=(f"MP: {info['models']['MP']['name']} · {info['models']['MP']['precision']} · {info['models']['MP']['delegate']}\n" if f5a else '')
+    input_note = ''
+    if info.get('input_mode') == 'TV_BBOX_CROP':
+        ctx = info['input_context']
+        input_note = (f"TV_BBOX_CROP · {ctx['status']} · konfiguracja {ctx.get('variant')} · H_TV=NOT_APPLIED\n"
+                      f"Pełna kamera dla GT · BBOX {ctx['tv_bbox_px']} · offset {ctx['offset_to_camera_full']}\n")
+    return (variant+'\n'+input_note +
             f"Telefon: {info['device']}  •  Android: {info['android']}  •  APK: {info['build']}\n"
+            + mp +
             f"MT: {info['models']['MT']['name']}  •  {info['models']['MT']['precision']}  •  {info['models']['MT']['delegate']}\n"
             f"MZ: {info['models']['MZ']['name']}  •  {info['models']['MZ']['precision']}  •  {info['models']['MZ']['delegate']}\n"
             f"Archiwum SHA-256: {info['source_archive_sha256']}\n"
-            f"Weryfikacja: rewizja {info['review_revision']}; tryb {info['review_mode']}\n"
+            f"Weryfikacja: rewizja {info['review_revision']}; status {info.get('review_status','nieustalony')}; tryb {info['review_mode']}\n"
             "Pełne SHA modeli, ścieżki, historia treningu i pola techniczne znajdują się poniżej.")
 
 

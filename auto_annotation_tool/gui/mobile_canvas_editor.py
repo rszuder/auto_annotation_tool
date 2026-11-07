@@ -184,6 +184,7 @@ class CanvasReviewEditor:
         self.entry_original = ""
         self.entry_after = None
         self.refresh_after = None
+        self.task_inventory_cache = {}
         self.paint_scheduled = False
         self.paint_after = None
         self.in_refresh = False
@@ -832,6 +833,11 @@ class CanvasReviewEditor:
         if self.h._saving or self.busy:
             self.message("Trwa zapis/odświeżanie wyników; bieżąca edycja pozostaje zachowana.")
             return False
+        choices = getattr(self.h, '_image_rows', ())
+        index = self.h.image_choice.current() if hasattr(self.h, 'image_choice') else -1
+        if 0 <= index < len(choices) and choices[index][1].get('context_only'):
+            self.message('Wycinek TV jest kontekstem. Edycja GT pozostaje na pełnej klatce kamery.')
+            return False
         if not s or self.h._image is None or self.h._image_entry != s["image_entry"] or tuple(self.h._image_source_size or ()) != tuple(s["image_size"]):
             self.message("Rysowanie jest możliwe na zweryfikowanej pełnej klatce z ROI, nie na cropie ani innym obrazie.")
             return False
@@ -977,6 +983,9 @@ class CanvasReviewEditor:
         if hasattr(self,'clean_bar'):
             from .mobile_canvas_clean_view import paint
             paint(self)
+            from .mobile_canvas_scene_frames import paint_sources, paint_tv_bbox
+            paint_sources(self)
+            paint_tv_bbox(self)
             self.collision_warning.paint()
             if s:
                 if self.drag:self._render_drag_geometry(s)
@@ -1016,6 +1025,8 @@ class CanvasReviewEditor:
             self.c.create_rectangle(x1,y1,x2,y2, fill="", outline="#FFD16C",
                                     width=1.1, tags=(TAG,"analyzed_roi"))
         parents = {p["parent_id"]:p for p in s["parents"]}
+        from .mobile_canvas_scene_frames import paint_tv_bbox
+        paint_tv_bbox(self)
         suppressed_parent_ids = {o["parent_id"] for o in s["objects"]
                                  if o.get("post_nms_suppressed", False)}
         # Exclude RAW candidates rejected by NMS only from the visual overlay;
@@ -1349,14 +1360,13 @@ class CanvasReviewEditor:
         self.in_refresh=True
         def after():
             self.in_refresh=False
-            # Statistics must not restore a selection captured before the worker.
-            # The operator may have selected/deselected a frame in the meantime.
-            self.sync()
-            self.request_overlay()
-            self._drain_frame_verification()
-        # Use the existing single worker for statistics/ranking; sidecar writes
-        # have already succeeded. Never push hidden legacy subject GT fields.
-        h._change(lambda:None, save_draft=False, after=after)
+            if not self.drag and self.entry is None:self._drain_frame_verification()
+        # Persistence already succeeded. Read-only work must not take the
+        # write lock or reload the image while the next corner is being held.
+        from .mobile_canvas_statistics_refresh import request
+        if not request(h,after=after):
+            self.in_refresh=False
+            self.schedule_refresh()
 
     def draw_toggle(self,event=None):
         if event is not None and self._is_typing_shortcut(getattr(event,'widget',None)):
@@ -1646,7 +1656,14 @@ class CanvasReviewEditor:
                     self.request_overlay()
                     return "break"
                 target=self.draw_reference_target
-                if self.draw_target and self.draw_target['kind']=='create':
+                if self.draw_target and self.draw_target['kind']=='scene_complete':
+                    from ..ranking.mobile_scene_frame_review import edit
+                    intent=self.draw_target
+                    def complete_scene_outline():
+                        edit(self.h.session,intent['gid'],intent['oid'],quad=quad)
+                        return intent['oid']
+                    oid=self._commit(complete_scene_outline,'Uzupełniono obrys tej samej fizycznej tablicy')
+                elif self.draw_target and self.draw_target['kind']=='create':
                     from ..ranking.mobile_mt_geometry_layers import create_reference
                     intent=self.draw_target
                     oid=self._commit(lambda:create_reference(self.h.session,intent['gid'],intent['oid'],quad,
@@ -1993,7 +2010,7 @@ class CanvasReviewEditor:
         self.entry.bind("<Return>",lambda e:self.entry_enter())
         self.entry.bind("<KP_Enter>",lambda e:self.entry_enter())
         self.entry.bind("<Escape>",self.escape)
-        self.entry.bind("<FocusOut>",lambda e:self.finish_entry())
+        self.entry.bind("<FocusOut>",self.entry_focus_out)
         self.entry.bind('<Tab>',lambda e:self.entry_tab(bool(e.state & 1)))
         self.entry.bind('<Shift-Tab>',lambda e:self.entry_tab(True))
         self.entry.bind('<ISO_Left_Tab>',lambda e:self.entry_tab(True))
@@ -2024,6 +2041,8 @@ class CanvasReviewEditor:
             # Re-read the source binding on entry and save, not only the cached
             # UI revision. Cancellation/NMS can invalidate an already open field.
             scene = core.scene(h.session, h.current_invocation)
+            if scene.get('scope') == 'SCENE_FRAME':
+                return dict(gt_editable=any(o['object_id'] == oid for o in scene['objects']), gt_reason='', gt_note='ASSISTED · pełna scena')
             execution = execution_state(h.session, h.current_invocation,
                 image_entry=h._image_entry, image_size=h._image_source_size)
             from .mobile_canvas_spatial_reference import entry_reference
@@ -2099,6 +2118,12 @@ class CanvasReviewEditor:
     def finish_entry(self):
         return self.save_entry(close=True)
 
+    def entry_focus_out(self, event=None):
+        if getattr(self.h,'_export_has_focus',lambda:False)():
+            self.prepare_export()
+            return 'break'
+        return self.finish_entry()
+
     def entry_enter(self):
         if self.finish_entry():
             self.c.focus_set()
@@ -2130,13 +2155,30 @@ class CanvasReviewEditor:
             self.sync()
         return "break"
 
+    def prepare_export(self):
+        """Read-only preflight; keep drafts and all ordinary gestures intact."""
+        if self.entry_after:
+            self.c.after_cancel(self.entry_after);self.entry_after=None
+        clean_reason=getattr(self,'clean_exclusion',None)
+        reason_open=bool(clean_reason is not None and clean_reason.winfo_manager())
+        scene=self._read()
+        reason_dirty=bool(scene and self.reason_gid==self.h.current_invocation
+            and self.excluded_var.get() and scene.get('exclusion_reason','')!=self.reason_var.get().strip())
+        if (self.entry is not None or self.points or self.drag or self.mode=='draw'
+                or reason_open or reason_dirty):
+            self.message('Zakończ lub anuluj edycję przed eksportem. Eksport odczytuje zapisany stan.')
+            if self.entry is not None:self.entry.focus_set()
+            return False
+        if self.in_refresh or self.busy:
+            self.message('Poczekaj na zakończenie zapisu przed eksportem.')
+            return False
+        return True
+
     def prepare_navigation(self):
         from .mobile_canvas_pan import cancel_pan
         cancel_pan(self.h)
         self.collision_warning.clear()
         self.shift_preview.clear()
-        if self.in_refresh:
-            return True
         if self.points:
             self.message("Dokończ ramkę (4 punkty) albo anuluj D/Esc przed zmianą obrazu. Szkic pozostaje na canvasie.")
             return False
@@ -2195,9 +2237,8 @@ class CanvasReviewEditor:
         layer=current_layers(self)
         bad_reference=bool(row and row['fp'] and (self.gt_focus_id or (layer and layer['active']=='GTR')))
         if row and row['fp'] and row['candidate'] and not (bad_reference and row['plate']):
-            self.message('Wskazanie MT jest odrzucone. Cofnij odrzucenie przez PPM lub Ctrl+Z przed zatwierdzeniem.')
-            return 'break'
-        if row and not bad_reference and row['candidate'] and row['pid'] and row['candidate'].get('spatial_relation',{}).get('plate_id')==row['pid']:
+            target=dict(oid=row['candidate']['object_id'],plate_id=None)
+        if row and not row['fp'] and not bad_reference and row['candidate'] and row['pid'] and row['candidate'].get('spatial_relation',{}).get('plate_id')==row['pid']:
             target['spatial_oid']=row['candidate']['object_id']
         if deferred:
             return self._queue_frame_verification(target)
@@ -2250,10 +2291,11 @@ class CanvasReviewEditor:
     def confirm_empty_image(self):
         if not self.prepare_navigation() or not self.available():
             return 'break'
-        from ..ranking.mobile_canvas_partial_review import confirm_empty, progress
-        confirmed = progress(self._read())['empty_confirmed']
-        self._commit(lambda: confirm_empty(self.h.session, self.h.current_invocation),
-                     'Cofnięto potwierdzenie braku tablic' if confirmed else 'Potwierdzono: na obrazie nie ma tablic')
+        if self._read().get('scope') == 'SCENE_FRAME':
+            from ..ranking.mobile_scene_frame_review import confirm_empty
+            self._commit(lambda: confirm_empty(self.h.session, self.h.current_invocation), 'Potwierdzono brak tablic na pełnej scenie')
+            return 'break'
+        self.message('Brak ramek i zapisanych referencji: miary N/A. Pominiętą tablicę można dorysować przez D.')
         return 'break'
 
     def exclude_image(self):
@@ -2407,6 +2449,10 @@ class CanvasReviewEditor:
         self.collision_warning.clear()
         if not self.prepare_navigation() or not self.available():
             return "break"
+        if self._read().get('scope') == 'SCENE_FRAME':
+            from ..ranking.mobile_scene_frame_review import restore
+            self._commit(lambda: restore(self.h.session, self.h.current_invocation, redo=redo), 'Ponowiono ocenę sceny' if redo else 'Cofnięto ocenę sceny', remember=False)
+            return 'break'
         if self.mode=='draw':
             self.mode='select';self.draw_target=None;self.draw_reference_target=None
         gid=self.h.current_invocation
@@ -2500,20 +2546,20 @@ class CanvasReviewEditor:
         from ..ranking.mobile_canvas_presentation import current_summary
         from ..ranking.mobile_session_metrics import result_key
         if hasattr(self.contexts,'live_metrics'):
-            self.contexts.live_metrics.render(self.h.stats.get('live_session_metrics_v1'),result_key(self.h.session))
+            self.contexts.live_metrics.render(self.h.stats.get('live_session_metrics_v2'),result_key(self.h.session))
         if not hasattr(self,"report_host") or self.h.session is None:
             return
         inv=self.inventory()
         self.update_header(inv)
         data = self.h.stats.get("canvas_review") or {}
-        mt = self.h.stats.get('mt_detection_evaluation_v1') or {}
+        mt = self.h.stats.get('mt_object_evaluation_v2') or {}
         if not data and (mt.get('session_id')==self.h.session.session_id
                 and mt.get('source_archive_sha256')==self.h.session.review.source_archive_sha256
                 and mt.get('review_revision')==self.h.session.review.review_revision):
             data = core.summary(self.h.session)
         current = current_summary(data, self.h.session)
         if current:
-            data = dict(data, mt_detection_evaluation_v1=mt)
+            data = dict(data, mt_object_evaluation_v2=mt)
         refreshing = not current and bool(data or self.in_refresh or self.refresh_after or self.h._saving)
         self.report_host.render(data if current else {}, inv, refreshing=refreshing,review_status=self.h.session.review.review_status)
         self.h.science_dashboard.render_canvas(data if current else None, inv,
@@ -2524,7 +2570,7 @@ class CanvasReviewEditor:
             from .mobile_canvas_clean_view import context,sync_image_actions
             from ..ranking.mobile_session_metrics import result_key
             value=context(self,model)
-            value.update(session_metrics=self.h.stats.get('live_session_metrics_v1'),
+            value.update(session_metrics=self.h.stats.get('live_session_metrics_v2'),
                          session_metrics_key=result_key(self.h.session))
             self.contexts.render(value)
             sync_image_actions(self)
@@ -2613,9 +2659,9 @@ class CanvasReviewEditor:
         options = dict(bg=p["bg"], fg=p["fg"], activebackground=p["bg"], activeforeground=p["fg"],
                        selectcolor=p["surface"], font=("Segoe UI", 10), anchor="w", bd=0,
                        highlightthickness=1, highlightbackground=p["bg"], highlightcolor=p["blue"])
-        self.approve = tk.Checkbutton(controls, text="Przejrzałem tablice, ramki i numery", variable=self.checked_var,
-                                      command=self.toggle_checked, **options)
-        self.approve.pack(fill="x")
+        # Kept hidden for legacy panel adapters; it has no user action.
+        self.approve = tk.Checkbutton(controls, text="", variable=self.checked_var,
+                                      state='disabled', **options)
         self.approve.bind('<Configure>',lambda e:self.approve.configure(wraplength=max(120,e.width-36)))
         self.exclude = tk.Checkbutton(controls, text="Nie można ocenić całego obrazu", variable=self.excluded_var,
                                       command=self.toggle_excluded, **options)
@@ -2884,6 +2930,9 @@ class CanvasReviewEditor:
             "Zapisano przyczynę wyłączenia obrazu"))
 
     def save_exclusion_reason(self, event=None):
+        if event is not None and getattr(self.h,'_export_has_focus',lambda:False)():
+            self.prepare_export()
+            return 'break'
         saved = self._flush_exclusion_reason()
         if saved and event is not None and getattr(event, "keysym", "") == "Return":
             self.c.focus_set()
@@ -2952,7 +3001,7 @@ class CanvasReviewEditor:
         key = (id(self.h.session), getattr(getattr(self.h.session, "review", None), "review_revision", -1))
         if key != self.inventory_key:
             from .mobile_canvas_review_tasks import inventory
-            self.inventory_data = inventory(self.h.session,build_inventory(self.h.session))
+            self.inventory_data = inventory(self.h.session,build_inventory(self.h.session),cache=self.task_inventory_cache)
             self.inventory_key = key
         return self.inventory_data
 
@@ -2999,6 +3048,8 @@ class CanvasReviewEditor:
                 # descendant represents a raw candidate, not another task.
                 for cid in tuple(tree.get_children(iid)):
                     tree.delete(cid)
+            from .mobile_canvas_scene_frames import add_rows
+            add_rows(self, desired)
             for iid in tuple(tree.get_children("")):
                 if iid not in desired:
                     tree.delete(iid)
@@ -3024,7 +3075,11 @@ class CanvasReviewEditor:
         if inv['unavailable']:
             extra += f"  •  tylko podgląd: {inv['unavailable']}"
         self.h.progress_label.configure(text=progress_caption(inv)+extra)
-        if 'task_decisions' in inv:
+        if inv.get('experiment_family') == 'F5A':
+            from ..ranking.mobile_review_status import approval_caption
+            review = self.h.session.review
+            self.h.progress_label.configure(text=approval_caption(inv, review.review_status, review.review_revision))
+        elif 'task_decisions' in inv:
             self.h.progress_label.configure(text=f"Sprawdzone: {inv.get('approval_ready',inv['inspected'])}/{inv['total']} · Decyzje tablic: {inv['task_decisions']} · Osobne kroki: {inv['task_steps']}"+extra)
         if hasattr(self.h, "form_status_label"):
             from ..ranking.mobile_verification_policy import verification_issues
@@ -3064,6 +3119,13 @@ class CanvasReviewEditor:
         """
         if self.tree_refreshing or not hasattr(self.h, "_subject_ids"):
             return
+        if self.h.current_invocation in getattr(self.h.session, 'scene_frames', {}):
+            iid=next((i for i,(key,gid) in getattr(self,'scene_mt_tree_ids',{}).items() if gid==getattr(self,'scene_mt_focus',None)),None)
+            iid=iid or next((i for i,key in getattr(self,'scene_tree_ids',{}).items() if key==self.h.current_invocation),None)
+            if iid and self.h.subject_tree.exists(iid):
+                if self.h.subject_tree.selection()!=(iid,):self.h.subject_tree.selection_set(iid)
+                self.h.subject_tree.focus(iid)
+            return
         tree = self.h.subject_tree
         key = self.h.subject_key
         roots = set(tree.get_children(""))
@@ -3095,6 +3157,14 @@ class CanvasReviewEditor:
     def select_tree_row(self, iid):
         if self.tree_refreshing:
             return True
+        if iid in getattr(self, 'scene_mt_tree_ids', {}):
+            from .mobile_canvas_scene_frames import open_scene
+            key, self.scene_mt_focus = self.scene_mt_tree_ids[iid]
+            return open_scene(self, key)
+        if iid in getattr(self, 'scene_tree_ids', {}):
+            from .mobile_canvas_scene_frames import open_scene
+            self.scene_mt_focus = None
+            return open_scene(self, self.scene_tree_ids[iid])
         if iid in self.linked_tree_rows:
             # A legacy asynchronous selection event may reference an old row.
             # Never navigate to a hidden source alias or create a new GT task.
@@ -3130,6 +3200,22 @@ class CanvasReviewEditor:
         return True
 
     def next_pending(self):
+        from ..ranking.mobile_scene_frame_review import scene as full_scene
+        for iid, key in getattr(self, 'scene_tree_ids', {}).items():
+            row = self.h.session.scene_frames[key]
+            if row['write_status'] == 'WRITTEN' and not full_scene(self.h.session, key)['checked']:
+                self.h.subject_tree.selection_set(iid); self.h.subject_tree.focus(iid); self.h.subject_tree.see(iid)
+                self.select_tree_row(iid)
+                return
+        from ..ranking.mobile_mt_object_evaluation import evaluate_unit
+        for iid,(_,gid) in getattr(self,'scene_mt_tree_ids',{}).items():
+            group=self.h.session.mt_invocations[gid]
+            if group.cancelled or group.execution_failed:continue
+            from ..ranking.mobile_scene_frame_review import mt_review_issues
+            if mt_review_issues(self.h.session,gid)==[]:continue
+            if not evaluate_unit(self.h.session,gid)['n_qualified']:
+                self.h.subject_tree.selection_set(iid);self.h.subject_tree.focus(iid);self.h.subject_tree.see(iid)
+                self.select_tree_row(iid);return
         inv = self.inventory()
         tree = self.h.subject_tree
         roots = tuple(tree.get_children(""))

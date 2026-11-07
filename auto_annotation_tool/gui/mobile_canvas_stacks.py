@@ -260,16 +260,32 @@ def context_menu(ed,event=None,*,show=True):
     from ..ranking import mobile_canvas_resolution as resolution,mobile_canvas_physical_gt as physical
     if ed.points or ed.drag or getattr(ed,'gt_focus_id',''):
         ed.message('Dokończ rysowanie lub anuluj szkic przez Esc.');return None
-    if not ed.selected or not ed.available():
+    scene_scope=(ed._read() or {}).get('scope')=='SCENE_FRAME'
+    if (not ed.selected and not scene_scope) or not ed.available():
         ed.message('Najpierw wybierz obiekt na Canvas.');return None
     previous=getattr(ed,'_canvas_decision_menu',None)
     if previous is not None:
         try:previous.destroy()
         except tk.TclError:pass
     s=ed._read();v=view(ed);oid=ed.selected;gid=ed.h.current_invocation;session=ed.h.session
-    obj=core._object(s,oid);candidate=next((c for c in v['candidates'] if c['object_id']==oid),None)
+    obj=core._object(s,oid) if oid else None;candidate=next((c for c in v['candidates'] if c['object_id']==oid),None)
     menu=tk.Menu(ed.c,tearoff=False)
     def add(label,action):menu.add_command(label=label,command=lambda:ed._commit(action,'Zapisano decyzję wskazanego obiektu Canvas'))
+    if s.get('scope') == 'SCENE_FRAME':
+        from ..ranking.mobile_scene_frame_review import role_for_final, decide_mt
+        from .mobile_canvas_scene_frames import show_presence_only
+        menu.add_command(label='Tablica widoczna, narożniki niedostępne…',command=lambda:show_presence_only(ed))
+        for item in s['objects']:
+            if item['quad'] is None:
+                menu.add_command(label='Wybierz tablicę bez narożników: '+(item['gt_text'] or 'GTZ nieuzupełniony'),command=lambda target=item['object_id']:ed._choose_plate(target))
+        index=0
+        for role in session.mt_detection_roles.values():
+            for aid in role['final_attempt_ids']:
+                try:role_for_final(session,gid,aid)
+                except ValueError:continue
+                index+=1
+                if oid:add(f'Ta GTR odpowiada FINAL MT {index}',lambda target=aid:decide_mt(session,gid,target,reference=oid))
+                add(f'FINAL MT {index} jest błędnym wskazaniem',lambda target=aid:decide_mt(session,gid,target,is_plate=False))
     if candidate:
         if candidate['role']=='FINAL' and not candidate['plate_id'] and not obj['error'] and candidate['mt_quad']:
             add('Ustanów GT z tego obrysu MT',lambda:stacks.accept_reference(session,gid,oid))

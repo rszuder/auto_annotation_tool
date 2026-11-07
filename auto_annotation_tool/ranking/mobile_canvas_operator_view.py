@@ -1,4 +1,4 @@
-"""Presentation-only physical references; never change evaluation eligibility."""
+"""Read-only projections of stored references and explicit dispositions."""
 
 
 def reference_numbers(state):
@@ -20,8 +20,13 @@ def physical_plate_ids(scene, state):
 
 def saved_reference_ids(scene, state):
     """Persisted physical GTR, including provisional corner accuracy."""
-    return {pid for pid in physical_plate_ids(scene,state)
+    return {pid for pid in eligible_physical_plate_ids(scene,state)
             if state['plates'][pid].get('gt_quad')}
+
+def eligible_physical_plate_ids(scene,state):
+    """Current physical identities; historical IDs remain in physical_plate_ids."""
+    from .mobile_reference_disposition import withdrawn_ids
+    return physical_plate_ids(scene,state)-withdrawn_ids(scene,state)
 
 
 def collision_reference_ids(scene,state):
@@ -32,7 +37,7 @@ def collision_reference_ids(scene,state):
 
 def display_snapshot(scene, snapshot):
     """Pending decisions hide metric pairs, not the operator's saved GTR/GTZ."""
-    saved=physical_plate_ids(scene,snapshot)
+    saved=eligible_physical_plate_ids(scene,snapshot)
     result=dict(snapshot,active_plate_ids=sorted(set(snapshot['active_plate_ids'])|saved))
     result['candidates']=[]
     for candidate in snapshot['candidates']:

@@ -62,14 +62,15 @@ def test_P01_P04_P09_P18_real_single_PPM_without_D(gui,oid,kind):
     assert core.scene(s,G)['parents']==before and s.review.review_revision==revision+1
     assert ed.source_hud.cget('text')==hud and ed.c.find_withtag('fp_diagonal')
 
-def test_P22_space_on_BAD_cannot_create_GTR(gui):
+def test_P22_space_on_BAD_explicitly_accepts_same_source_without_full_image_check(gui):
     root,h,ed,s=gui
     # Secondary precondition only; P01 proves the real PPM event independently.
     stacks.toggle_unassociated(s,G,IDS[1],partial_review=True);settled(root,h,ed);pick(gui,IDS[1],'POSE')
-    before=frozen(s);native.key(h,'space');settled(root,h,ed)
-    assert frozen(s)==before and not stacks.snapshot(s,G)['plates']
-    assert ed.clean_gtr_confirm_button.cget('state')=='disabled' and 'PPM cofa' in ed.clean_gtr_confirm_button.cget('text')
-    assert ed.approve.cget('state')=='disabled'
+    parents=copy.deepcopy(core.scene(s,G)['parents']);native.key(h,'space');settled(root,h,ed)
+    sc=core.scene(s,G);v=stacks.snapshot(s,G)
+    assert partial.progress(sc)['object_decisions'][IDS[1]]==partial.PLATE and len(v['plates'])==1
+    assert sc['parents']==parents and not sc['checked'] and not partial.progress(sc)['pending_gtr_ids']
+    assert ed.clean_gtr_confirm_button.cget('state')=='normal'
 
 def test_P11_P12_P21_roundtrip_seed_and_Space(gui):
     root,h,ed,s=gui;point=pick(gui);before=copy.deepcopy(core.scene(s,G)['parents'])

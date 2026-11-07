@@ -618,7 +618,7 @@ class MobileSampleReviewWindow:
             converted = False
             from ..ranking.mobile_canvas_review import context as canvas_context
             session._history_inspection_only = not any(canvas_context(session,gid)
-                for gid in session.mt_invocations)
+                for gid in (*session.mt_invocations, *session.scene_frames))
             return session, session.statistics(), converted
         self._submit(load, self._loaded)
 
@@ -694,6 +694,8 @@ class MobileSampleReviewWindow:
         actions = tk.Frame(header, bg=self.bg)
         actions.grid(row=0, column=1, sticky="e")
         export_button = self._button(actions, "Eksport wyników", self.export, row=0, column=0)
+        self.export_button = export_button
+        export_button.bind('<ButtonPress-1>', self._export_press, add='+')
         self.form_status_label = self._label(actions, "W TOKU", font=("Segoe UI", 9, "bold"))
         self.form_status_label.grid(row=0, column=1, sticky="e", padx=(10, 7))
         self.complete_button = self._button(actions, "Zatwierdź weryfikację", self.complete,
@@ -1281,7 +1283,7 @@ class MobileSampleReviewWindow:
             "Ukryj zapisy techniczne" if self._details_open else
             "Pokaż zapisy techniczne (detekcje i cropy)"))
 
-    def _submit(self, work, done, *, saving=False):
+    def _submit(self, work, done, *, saving=False, refresh_controls=True):
         if self._closed:
             return
         if saving:
@@ -1300,9 +1302,9 @@ class MobileSampleReviewWindow:
                 button.configure(state="disabled")
         def task():
             try:
-                self._results.put((done, work(), None, saving))
+                self._results.put((done, work(), None, saving, refresh_controls))
             except Exception as error:
-                self._results.put((done, None, str(error), saving))
+                self._results.put((done, None, str(error), saving, refresh_controls))
         self._executor.submit(task)
 
     def _poll(self):
@@ -1310,7 +1312,9 @@ class MobileSampleReviewWindow:
             return
         try:
             while True:
-                done, result, error, saving = self._results.get_nowait()
+                item = self._results.get_nowait()
+                done, result, error, saving = item[:4]
+                refresh_controls = item[4] if len(item)>4 else True
                 if saving:
                     self._saving = False
                     self.gt_entry.configure(state="normal")
@@ -1330,7 +1334,7 @@ class MobileSampleReviewWindow:
                     if saving and self._close_requested:
                         self.close()
                         return
-                if self.session:
+                if self.session and refresh_controls:
                     self._sync_review_controls()
         except queue.Empty:
             pass
@@ -1371,7 +1375,12 @@ class MobileSampleReviewWindow:
                             + (" Przełączono wcześniejszą weryfikację na tryb asystowany; GT zachowano." if self._review_was_converted else ""))
         if getattr(session,'_history_inspection_only',False):
             self.status_var.set('Tylko inspekcja historii · bez zapisu danych')
-        if self._subject_ids:
+        if session.scene_frames and getattr(self, '_canvas_editor', None):
+            first = next(iter(self._canvas_editor.scene_tree_ids))
+            self.subject_tree.selection_set(first)
+            self.subject_tree.focus(first)
+            self._canvas_editor.select_tree_row(first)
+        elif self._subject_ids:
             first = next(iter(self._subject_ids))
             self.subject_tree.selection_set(first)
             self.subject_tree.focus(first)
@@ -1643,10 +1652,11 @@ class MobileSampleReviewWindow:
             self.subject_tree.focus(iid)
             self._select_subject()
 
-    def _refresh_subject_rows(self):
+    def _refresh_subject_rows(self, prepared=None):
         self._subject_stats = {row["subject_key"]: row for row in self.stats["subjects"]}
-        geometry = _pose_geometry_rows(self.session)
-        self._science_data = make_scientific_summary(self.session, self.stats, geometry)
+        geometry = prepared['geometry'] if prepared is not None else _pose_geometry_rows(self.session)
+        self._science_data = (prepared['science'] if prepared is not None else
+                              make_scientific_summary(self.session, self.stats, geometry))
         pose_map = {row["attempt_id"]: row for row in geometry}
         if getattr(self, "_canvas_editor", None) is not None:
             self._canvas_editor.refresh_tree()
@@ -3579,7 +3589,10 @@ class MobileSampleReviewWindow:
         index = self.image_choice.current()
         if index < 0 or not getattr(self, "_image_rows", None):
             return
-        label, _ = self._image_rows[index]
+        label, context_row = self._image_rows[index]
+        if context_row.get('context_only'):
+            self.image_help.configure(text='Wycinek TV — JPEG94, tylko kontekst. GT i weryfikacja pozostają na pełnej klatce kamery.')
+            return
         if self._is_source_frame_view():
             self.image_help.configure(text="Klatka przed ROI — widok tylko do odczytu. Złota ramka oznacza wejście MT.")
             return
@@ -3620,7 +3633,7 @@ class MobileSampleReviewWindow:
         self._set_image_help()
         def work():
             try:
-                if row.get("source_frame_view"):
+                if row.get("source_frame_view") or row.get('context_only'):
                     self.session.verify_source()
                     image = read_mobile_source_frame(self.session.bundle, row["image_entry"])
                     self.session.verify_source()
@@ -4362,11 +4375,11 @@ class MobileSampleReviewWindow:
         key, gt, note = self.subject_key, self.gt_var.get(), self.note_var.get()
         return lambda: self._persist_subject_fields(key, gt, note)
 
-    def _change(self, operation, *, save_draft=True, after=None):
+    def _change(self, operation, *, save_draft=True, update_ranking=True, after=None):
         if not self.session or self._saving:
             return
-        self.status_var.set("Zapisuję weryfikację…")
-        draft = self._draft_operation()
+        self.status_var.set("Zapisuję weryfikację…" if update_ranking else "Eksportuję zapisaną rewizję…")
+        draft = self._draft_operation() if save_draft else None
         def work():
             if save_draft:
                 draft()
@@ -4374,13 +4387,14 @@ class MobileSampleReviewWindow:
             stats = self.session.statistics()
             warning = ""
             updated_report = None
-            try:
-                store = MobilePackageExperimentStore(self.browser.store.root_dir)
-                if store.apply_human_review(self.session):
-                    updated_report = next((report for report in store.reports if report.report_id == self.report.report_id
-                                           and report.source_archive_sha256 == self.session.review.source_archive_sha256), None)
-            except Exception as error:
-                warning = f"Decyzje zapisane; ranking wymaga odświeżenia: {error}"
+            if update_ranking:
+                try:
+                    store = MobilePackageExperimentStore(self.browser.store.root_dir)
+                    if store.apply_human_review(self.session):
+                        updated_report = next((report for report in store.reports if report.report_id == self.report.report_id
+                                               and report.source_archive_sha256 == self.session.review.source_archive_sha256), None)
+                except Exception as error:
+                    warning = f"Decyzje zapisane; ranking wymaga odświeżenia: {error}"
             return stats, warning, updated_report
         def done(result):
             self._changed(result)
@@ -4390,7 +4404,7 @@ class MobileSampleReviewWindow:
 
     def _changed(self, result):
         from ..ranking.mobile_session_metrics import current, result_key
-        snapshot=result[0].get('live_session_metrics_v1')
+        snapshot=result[0].get('live_session_metrics_v2')
         if snapshot and not current(snapshot,result_key(self.session)):
             # A delayed worker must not replace a newer revision/session. The
             # existing debounce schedules the current saved state once idle.
@@ -4405,6 +4419,9 @@ class MobileSampleReviewWindow:
             self.subject_key, self._pending_subject = self._pending_subject, ""
         self._render_subject()
         self.status_var.set(warning or f"Zapisano automatycznie • rewizja {self.session.review.review_revision}")
+        self._publish_review_report(updated_report)
+
+    def _publish_review_report(self, updated_report):
         if updated_report is not None and self.browser.window.winfo_exists():
             self.browser.store.add_report(updated_report, save=False)
             for iid, report in self.browser.report_by_iid.items():
@@ -4415,6 +4432,9 @@ class MobileSampleReviewWindow:
                 self.browser._show_report(updated_report, self.browser.current_bundle)
 
     def save_gt(self, *, explicit=False):
+        if not explicit and self._export_has_focus():
+            self._prepare_export()
+            return
         if getattr(self, "_canvas_editor", None) is not None:
             self._canvas_editor.finish_entry()
             return
@@ -4506,10 +4526,39 @@ class MobileSampleReviewWindow:
         self.status_var.set("Nie ma brakujących decyzji MT ani odczytów MZ do weryfikacji. "
                             "Zobacz «Analiza wyników»; brak uruchomienia MZ nie blokuje weryfikacji MT.")
 
+    def _export_press(self, event=None):
+        # Widget binding precedes Tk's Button class focus handling. Export
+        # cannot finish a GTZ field merely by taking keyboard focus from it.
+        if not self._prepare_export():
+            return 'break'
+
+    def _export_has_focus(self):
+        return self.window.focus_get() is getattr(self,'export_button',None)
+
+    def _prepare_export(self):
+        if not self.session or self._saving:
+            return False
+        if self.reviewer_var.get().strip()!=self.session.review.reviewer_id:
+            self.status_var.set('Zakończ lub anuluj edycję przed eksportem. Eksport odczytuje zapisany stan.')
+            return False
+        editor=getattr(self,'_canvas_editor',None)
+        if editor is not None:
+            return editor.prepare_export()
+        if self._autosave_id:
+            self.window.after_cancel(self._autosave_id);self._autosave_id=None
+        old=self.session.review.subjects.get(self.subject_key,{})
+        dirty=(normalize_registration(old.get('ground_truth'))!=normalize_registration(self.gt_var.get())
+               or old.get('note','')!=self.note_var.get()
+               or self.reviewer_var.get().strip()!=self.session.review.reviewer_id)
+        if dirty:
+            self.status_var.set('Zakończ lub anuluj edycję przed eksportem. Eksport odczytuje zapisany stan.')
+            return False
+        return True
+
     def export(self):
         if not self.session or self._saving:
             return
-        if getattr(self, "_canvas_editor", None) is not None and not self._canvas_editor.prepare_navigation():
+        if not self._prepare_export():
             return
         directory = filedialog.askdirectory(
             parent=self.window,
@@ -4538,6 +4587,8 @@ class MobileSampleReviewWindow:
         paths = []
         result_dir = {"path": None, "file_count": 0}
         def export_all():
+            from ..ranking.mobile_mt_object_export import capture_review_state,_publish_guard
+            review_state=capture_review_state(self.session)
             # The saved GT review (not a draft or earlier session) determines the revision.
             target = reserve_export_path(base, self.session.session_id,
                                          self.session.review.review_revision)
@@ -4582,20 +4633,24 @@ class MobileSampleReviewWindow:
                 from ..ranking.mobile_candidate_stacks import export as export_candidates
                 candidate_dir = export_candidates(self.session, target)
                 paths.extend(sorted(p for p in candidate_dir.iterdir() if p.is_file()))
-                from ..ranking.mobile_mt_detection_evaluation import export as export_detection
-                paths.extend(export_detection(self.session, target))
-                paths.append(finalize_export_manifest(self.session, target, paths))
+                from ..ranking.mobile_mt_object_evaluation import export as export_objects
+                paths.extend(export_objects(self.session, target))
+                _publish_guard(self.session,*review_state)
+                from ..ranking.mobile_f4_variant import for_session
+                paths.append(finalize_export_manifest(self.session, target, paths,
+                    variant=for_session(self.session),
+                    before_publish=lambda:_publish_guard(self.session,*review_state)))
                 result_dir["file_count"] = sum(1 for path in target.rglob("*") if path.is_file())
             except Exception as error:
                 mark_export_incomplete(target, error)
                 raise RuntimeError(f"Eksport nieukończony w {target}: {error}") from error
-        self._change(export_all,
+        self._change(export_all,save_draft=False,update_ranking=False,
                      after=lambda: self.status_var.set(
                          f"Eksport jednej sesji: {result_dir['file_count']} plików do {result_dir['path']} "
                          "· poprzednie wyniki zachowane"))
 
-    def _refresh_stats(self):
-        form = verification_progress(self.session)
+    def _refresh_stats(self, prepared=None):
+        form = prepared['form'] if prepared is not None else verification_progress(self.session)
         canvas_editor = getattr(self, "_canvas_editor", None)
         if hasattr(self, "form_status_label") and canvas_editor is None:
             titles = {"IN_PROGRESS": "Weryfikacja w toku", "READY_TO_APPROVE": "Obrazy sprawdzone — zatwierdź weryfikację",
@@ -4625,7 +4680,7 @@ class MobileSampleReviewWindow:
         for section, fields in sections.items():
             for key, label in fields.items():
                 self.stats_tree.insert("", "end", values=(section, label, _display(summary.get(key), rate=key.endswith("rate") or key == "cer")))
-        pose = _pose_geometry_summary(self.session)
+        pose = prepared['pose'] if prepared is not None else _pose_geometry_summary(self.session)
         for key, label in (
             ("pose_eligible", "Prawdziwe tablice MT Pose do pomiaru"),
             ("pose_measured", "Polygony z ręcznie wyznaczonym GT — mianownik"),
@@ -4659,7 +4714,7 @@ class MobileSampleReviewWindow:
         if hasattr(self, "conditions_view"):
             self.conditions_view.configure(state="normal")
             self.conditions_view.delete("1.0", "end")
-            self.conditions_view.insert("end", session_conditions_text(self._science_data["conditions"]))
+            self.conditions_view.insert("end", self._conditions_text())
             self.conditions_view.configure(state="disabled")
         if getattr(self, "_canvas_editor", None) is not None:
             self._canvas_editor.update_report()
@@ -4693,6 +4748,9 @@ class MobileSampleReviewWindow:
                   "capture": self.session.bundle.report_payload.get("capture", {}),
                   "pochodzenie modeli i warianty": self.session.review.provenance,
                   "błędy wykonania MT": {key: list(group.execution_errors) for key, group in self.session.mt_invocations.items() if group.execution_failed}}
+        values['dowód wejścia MZ (odczytowo)'] = self.session.mz_input_evidence
+        if self.session.tv_bbox_evidence.get('available'):
+            values['wejście TV BBOX (odczytowo)'] = self.session.tv_bbox_evidence
         def append(value, prefix=""):
             for key, item in value.items():
                 name = f"{prefix} / {key}" if prefix else str(key)
@@ -4704,8 +4762,15 @@ class MobileSampleReviewWindow:
         if hasattr(self, "conditions_view"):
             self.conditions_view.configure(state="normal")
             self.conditions_view.delete("1.0", "end")
-            self.conditions_view.insert("end", session_conditions_text(self._science_data["conditions"]))
+            self.conditions_view.insert("end", self._conditions_text())
             self.conditions_view.configure(state="disabled")
+
+    def _conditions_text(self):
+        from ..ranking.mobile_mz_input_evidence import diagnostic_text
+        from ..ranking.mobile_tv_bbox_evidence import diagnostic_text as tv_text
+        return (session_conditions_text(self._science_data['conditions']) + '\n\n'
+                + diagnostic_text(self.session.mz_input_evidence)
+                + ('\n\n' + tv_text(self.session.tv_bbox_evidence) if self.session.tv_bbox_evidence.get('available') else ''))
 
     def close(self):
         if self._closed:
@@ -4721,6 +4786,8 @@ class MobileSampleReviewWindow:
             return
         if getattr(self, "_canvas_editor", None) is not None:
             self._canvas_editor.dispose()
+        from .mobile_canvas_statistics_refresh import cancel
+        cancel(self)
         self._closed = True
         self._close_crop_preview()
         if getattr(self, "_status_paint_after", None):
@@ -4735,6 +4802,8 @@ class MobileSampleReviewWindow:
     def _destroyed(self, event):
         if event.widget is self.window:
             self._closed = True
+            from .mobile_canvas_statistics_refresh import cancel
+            cancel(self)
             self._executor.shutdown(wait=False, cancel_futures=False)
 
 

@@ -42,6 +42,8 @@ def require_unoccupied(scene,oid,target_pid=None):
 
 def validate_transition(before,after,*,history=False,merge_oid=None,cross_identity=False):
     validate(after)
+    from .mobile_reference_disposition import validate_transition as validate_disposition
+    validate_disposition(before,after,history=history)
     if not before or history:return
     validate(before)
     old=state_of(before);new=state_of(after)

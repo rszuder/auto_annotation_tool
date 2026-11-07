@@ -138,11 +138,15 @@ class MobileHumanReview:
     subjects: dict[str, dict] = field(default_factory=dict)
     attempt_annotations: dict[str, dict] = field(default_factory=dict)
     invocation_annotations: dict[str, dict] = field(default_factory=dict)
+    scene_annotations: dict[str, dict] = field(default_factory=dict)
     sample_annotations: dict[str, dict] = field(default_factory=dict)
     provenance: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        if not self.scene_annotations:
+            result.pop('scene_annotations', None)
+        return result
 
     @classmethod
     def from_dict(cls, data: dict, *, source_sha256: str, session_id: str) -> "MobileHumanReview":
@@ -162,11 +166,11 @@ class MobileHumanReview:
         result.review_status = result.review_status.upper()
         if result.review_status not in {"NOT_STARTED", "IN_PROGRESS", "COMPLETED"}:
             raise ValueError("Nieprawidłowy status weryfikacji.")
-        for mapping in (result.subjects, result.attempt_annotations, result.sample_annotations, result.invocation_annotations):
+        for mapping in (result.subjects, result.attempt_annotations, result.sample_annotations, result.invocation_annotations, result.scene_annotations):
             if not isinstance(mapping, dict) or any(not isinstance(value, dict) for value in mapping.values()):
                 raise ValueError("Nieprawidłowy zapis decyzji operatora.")
         result.review_mode_locked = bool(result.review_mode_locked or any((result.subjects, result.attempt_annotations,
-                                                                         result.sample_annotations, result.invocation_annotations)))
+                                                                          result.sample_annotations, result.invocation_annotations, result.scene_annotations)))
         return result
 
 
@@ -256,6 +260,13 @@ class MobileReviewSession:
             strict_contract=strict_mt_contract,
         )
         self.invocation_by_attempt = {row["id"]: key for key, group in self.mt_invocations.items() for row in group.records}
+        extension = getattr(bundle, 'scene_evidence', {}) or {}
+        self.scene_frames = {row['scene_event_id']: copy.deepcopy(row) for row in extension.get('scenes', ())}
+        self.mt_detection_roles = {row['mt_invocation_id']: copy.deepcopy(row) for row in extension.get('roles', ())}
+        from .mobile_mz_input_evidence import absent as mz_absent
+        self.mz_input_evidence = copy.deepcopy(getattr(bundle, 'mz_input_evidence', None) or mz_absent())
+        from .mobile_tv_bbox_evidence import absent as tv_absent
+        self.tv_bbox_evidence = copy.deepcopy(getattr(bundle, 'tv_bbox_evidence', None) or tv_absent())
         self.verify_source()
         self.sidecar_path = Path(sidecar_path) if sidecar_path else (
             CONFIG.DIR_7_RANKINGS_MOBILE_PACKAGES / "human_reviews" / f"{bundle.source_archive_sha256}.review.json")
@@ -273,6 +284,9 @@ class MobileReviewSession:
             self.review = MobileHumanReview.from_dict(json.loads(self.sidecar_path.read_text(encoding="utf-8")),
                 source_sha256=bundle.source_archive_sha256, session_id=self.session_id)
             self._validate_decisions(self.review)
+            from .mobile_reference_disposition import validate_audit
+            for annotation in self.review.invocation_annotations.values():
+                validate_audit(annotation.get('canvas_review_v1'),session_id=self.session_id)
             if self.review.review_status == "COMPLETED" and self.completion_issues():
                 raise ValueError("Zapis oznaczono jako ukończony mimo brakujących decyzji.")
             if any(group.executed and not group.cancelled and self.invocation_annotation(key).get("decision_source") == "legacy_cardinality_unknown"
@@ -309,6 +323,8 @@ class MobileReviewSession:
         return result
 
     def _validate_decisions(self, review: MobileHumanReview) -> None:
+        from .mobile_scene_frame_review import validate_loaded
+        validate_loaded(self, review)
         for decisions, records in ((review.subjects, self.subjects), (review.attempt_annotations, self.attempts),
                                    (review.sample_annotations, self.samples), (review.invocation_annotations, self.mt_invocations)):
             if set(decisions) - set(records):
@@ -325,9 +341,26 @@ class MobileReviewSession:
             if subject.get("evaluable") is True and not normalize_registration(subject.get("ground_truth")):
                 raise ValueError("Oceniana tablica wymaga niepustego GT.")
 
-    def _save_change(self, changed: MobileHumanReview, *, allow_assisted_reveal: bool = False, _gtr_history_restore: bool = False, _gtr_merge=None) -> None:
+    def _save_change(self, changed: MobileHumanReview, *, allow_assisted_reveal: bool = False, _gtr_history_restore: bool = False, _gtr_merge=None, _expected_sidecar_sha256=None) -> None:
+        # Cooperating review writers share one short exclusive transaction.
+        # A failed/stale caller cannot remove somebody else's lock or overwrite
+        # an intervening revision. Read-only loading never creates this file.
+        self.sidecar_path.parent.mkdir(parents=True,exist_ok=True)
+        lock=self.sidecar_path.with_suffix(self.sidecar_path.suffix+'.write.lock')
+        try:fd=os.open(lock,os.O_CREAT|os.O_EXCL|os.O_WRONLY)
+        except FileExistsError:raise ValueError('Trwa zapis weryfikacji w innym oknie. Spróbuj ponownie.') from None
+        try:
+            os.close(fd)
+            self._save_change_locked(changed,allow_assisted_reveal=allow_assisted_reveal,_gtr_history_restore=_gtr_history_restore,
+                _gtr_merge=_gtr_merge,_expected_sidecar_sha256=_expected_sidecar_sha256)
+        finally:lock.unlink(missing_ok=True)
+
+    def _save_change_locked(self, changed: MobileHumanReview, *, allow_assisted_reveal: bool = False, _gtr_history_restore: bool = False, _gtr_merge=None, _expected_sidecar_sha256=None) -> None:
         self.verify_source()
         self._validate_decisions(changed)
+        from .mobile_reference_disposition import validate_audit
+        for annotation in changed.invocation_annotations.values():
+            validate_audit(annotation.get('canvas_review_v1'),session_id=self.session_id)
         from .mobile_gt_link_contract import validate_review
         validate_review(self,changed,history=_gtr_history_restore,merge=_gtr_merge)
         if self.review.review_mode_locked and changed.review_mode != self.review.review_mode:
@@ -336,7 +369,7 @@ class MobileReviewSession:
             if not allowed:
                 raise ValueError("Tryb weryfikacji jest stały po pierwszej zapisanej decyzji.")
         changed.review_mode_locked = self.review.review_mode_locked or any((changed.subjects, changed.attempt_annotations,
-                                                                          changed.sample_annotations, changed.invocation_annotations))
+                                                                          changed.sample_annotations, changed.invocation_annotations, changed.scene_annotations))
         if self.sidecar_path.exists():
             saved = json.loads(self.sidecar_path.read_text(encoding="utf-8"))
             if (saved.get("review_id") != self.review.review_id
@@ -349,6 +382,12 @@ class MobileReviewSession:
         # deep-copied every historical snapshot; pretty indentation then used
         # the slow Python encoder. Exports/to_dict remain independent copies.
         payload={f.name:getattr(changed,f.name) for f in fields(changed)}
+        if not changed.scene_annotations:
+            payload.pop('scene_annotations', None)
+        if _expected_sidecar_sha256 is not None:
+            import hashlib
+            if not self.sidecar_path.exists() or hashlib.sha256(self.sidecar_path.read_bytes()).hexdigest()!=_expected_sidecar_sha256:
+                raise ValueError('Weryfikacja zmieniła się przed zapisem. Odczytaj obraz ponownie.')
         _atomic_write(self.sidecar_path, json.dumps(payload, ensure_ascii=False, separators=(',',':')))
         self.review = changed
 
@@ -469,8 +508,11 @@ class MobileReviewSession:
         self._save_change(changed)
 
     def set_reviewer(self, reviewer_id: str) -> None:
+        reviewer_id = str(reviewer_id).strip()
+        if reviewer_id == self.review.reviewer_id:
+            return
         changed = copy.deepcopy(self.review)
-        changed.reviewer_id = str(reviewer_id).strip()
+        changed.reviewer_id = reviewer_id
         self._save_change(changed)
 
     def cancelled(self, row: dict) -> bool:
@@ -507,6 +549,9 @@ class MobileReviewSession:
         return subject_verification_issues(self, key)
 
     def completion_issues(self) -> list[str]:
+        if self.scene_frames:
+            from .mobile_scene_frame_review import issues
+            return issues(self) + list(dict.fromkeys(issue for key in self.subjects for issue in self.subject_completion_issues(key)))
         if not self.subjects:
             return ["Sesja nie zawiera próbek ani prób do weryfikacji."]
         return list(dict.fromkeys(issue for key in self.subjects for issue in self.subject_completion_issues(key)))
@@ -538,8 +583,19 @@ class MobileReviewSession:
                 if isinstance(value, (int, float, bool)) or value is None})
         from .mobile_mt_detection_evaluation import evaluate_session
         result['mt_detection_evaluation_v1'] = evaluate_session(self)
+        from .mobile_mt_object_evaluation import evaluate_session as evaluate_objects
+        result['mt_object_evaluation_v2'] = evaluate_objects(self)
         from .mobile_session_metrics import from_results
-        result['live_session_metrics_v1'] = from_results(self, canvas, result['mt_detection_evaluation_v1'])
+        result['live_session_metrics_v2'] = from_results(self, canvas, result['mt_object_evaluation_v2'])
+        if (getattr(self.bundle, 'scene_evidence', {}) or {}).get('available'):
+            from .mobile_scene_frame_review import summary as scene_summary
+            result['scene_frame_assessment'] = scene_summary(self)
+        if self.mz_input_evidence.get('available'):
+            result['mz_input_evidence'] = {key: copy.deepcopy(self.mz_input_evidence[key])
+                for key in ('status', 'summary', 'measurement_purpose', 'context_missing', 'diagnostic_costs')}
+        if self.tv_bbox_evidence.get('available'):
+            result['tv_bbox_input_evidence'] = {key: copy.deepcopy(self.tv_bbox_evidence[key])
+                for key in ('status', 'descriptor', 'summary')}
         return result
 
     def export(self, directory: Path) -> list[Path]:
@@ -570,6 +626,12 @@ class MobileReviewSession:
         if "canvas_review" in stats:
             from .mobile_canvas_review import export as export_canvas
             paths.extend(export_canvas(self, directory))
+        from .mobile_scene_frame_review import export as export_scenes
+        paths.extend(export_scenes(self, directory))
+        from .mobile_mz_input_evidence import export as export_mz_inputs
+        paths.extend(export_mz_inputs(self, directory))
+        from .mobile_tv_bbox_evidence import export as export_tv_inputs
+        paths.extend(export_tv_inputs(self, directory))
         return paths
 
 

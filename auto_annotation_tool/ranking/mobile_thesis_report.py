@@ -248,7 +248,8 @@ def _write_report_md(out, manifest, metrics, figure_specs, warnings, pose_rows):
         "# Raport weryfikacji mobilnego ALPR — dane do pracy dyplomowej", "",
         f"Sesja: `{meta['session_id']}`  ",
         f"Status oceny: **{manifest['review']['quality_status']}**  ",
-        f"Seria / wariant / scenariusz: `{meta['series_id'] or 'brak'}` / `{meta['variant'] or 'brak'}` / `{meta['scenario_id'] or 'brak'}`  ",
+        f"Seria / wariant zadeklarowany przez Androida / scenariusz: `{meta['series_id'] or 'brak'}` / `{meta['variant'] or 'brak'}` / `{meta['scenario_id'] or 'brak'}`  ",
+        f"Wariant F4 (rejestr SHA): `{meta.get('f4_variant',{}).get('label','NIEPOTWIERDZONE')}`; provenance=`{meta.get('f4_variant',{}).get('provenance') or 'NIEPOTWIERDZONE'}`  ",
         f"Źródłowe archiwum SHA-256: `{meta['source_archive_sha256']}`  ",
         f"Rewizja oceny operatora: `{manifest['review']['review_revision']}`  ", "",
         "## Wyniki i mianowniki", "",
@@ -374,6 +375,8 @@ def export_thesis_bundle(session, statistics, pose_rows, export_files, output_ro
     identity = {}
     for key in ("series_id", "variant", "scenario_id", "replicate_index"):
         identity[key] = _safe_attr(exp, key) or _safe_attr(metadata, key) or ""
+    from .mobile_f4_variant import for_session
+    identity['f4_variant']=for_session(session)
     status_counts = {}
     for row in pose_rows:
         status = str(row.get("metric_status") or "unknown")

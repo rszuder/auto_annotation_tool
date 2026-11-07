@@ -55,13 +55,13 @@ def _id(s,oid):
     return _gt_id(s,oid)
 
 def roles(session,gid,s):
-    from .mobile_mt_postdedup import canvas_post_nms_proof
+    from .mobile_mt_postdedup import canvas_post_nms_proof,final_ids,suppressed_ids
     from .mobile_canvas_physical_gt import require_final
     result={p['attempt_id']:'UNKNOWN' for p in s['parents']}
     proof=canvas_post_nms_proof(session,gid)
     if proof:
-        for aid in proof.get('final_ids') or [proof['primary_id']]:result[aid]='FINAL'
-        result[proof['suppressed_id']]='SUPPRESSED'
+        for aid in final_ids(proof):result[aid]='FINAL'
+        for aid in suppressed_ids(proof):result[aid]='SUPPRESSED'
     elif s['parents']:
         try:require_final(session,gid,[o for o in s['objects'] if o.get('parent_id')])
         except (ValueError,KeyError,TypeError):
@@ -120,6 +120,10 @@ def snapshot(session,gid,s=None):
     from . import mobile_canvas_review as core
     s=s or core._legacy_scene(session,gid,include_history=False)
     state=copy.deepcopy(s.get(KEY) or _legacy(s))
+    from .mobile_reference_disposition import withdrawn_ids
+    withdrawn_ids(s,state,session_id=session.session_id)
+    from .mobile_reference_lifecycle import validate_retired
+    validate_retired(s,state)
     if state.get('schema')!=SCHEMA or state.get('source_binding')!=s['source_binding']:
         raise ValueError('Stos GT dotyczy innego źródła/wywołania.')
     states=roles(session,gid,s);candidates=[]
@@ -148,6 +152,8 @@ def snapshot(session,gid,s=None):
     state['active_plate_ids'] = sorted(active_plate_ids(s, state))
     state.update(candidates=candidates,session_id=session.session_id,mt_invocation_id=gid,source_sha=session.review.source_archive_sha256,
                  image_entry=s['image_entry'],image_size=s['image_size'])
+    if s.get('scope') == 'SCENE_FRAME':
+        state.update(scope='SCENE_FRAME', scene_event_id=gid, mt_invocation_id=None)
     return state
 
 def _state(s):
@@ -173,19 +179,24 @@ def adopt_canvas_write(session,gid,s):
 def record_scene_identity(session,gid,s):
     """Preserve the existing cross-call ambiguity gate, independently of count UI."""
     from .mobile_canvas_physical_gt import scope
+    from .mobile_canvas_operator_view import eligible_physical_plate_ids
+    from .mobile_reference_disposition import withdrawn_ids
     current=scope(session,gid)
     prior=any(other_gid!=gid and scope(session,other_gid)==current and
-              ((value.get('canvas_review_v1',{}).get(KEY) or {}).get('plates') or
-               (value.get('canvas_review_v1',{}).get('physical_gt_v1') or {}).get('plates'))
+              (bool(eligible_physical_plate_ids(value['canvas_review_v1'],value['canvas_review_v1'][KEY])) if value.get('canvas_review_v1',{}).get(KEY) else
+               bool((value.get('canvas_review_v1',{}).get('physical_gt_v1') or {}).get('plates')))
               for other_gid,value in session.review.invocation_annotations.items() if other_gid in session.mt_invocations)
-    for plate in s[KEY]['plates'].values():
+    withdrawn=withdrawn_ids(s,s[KEY])
+    for pid,plate in s[KEY]['plates'].items():
+        if pid in withdrawn:continue
         plate.setdefault('scene_identity','UNRESOLVED_ACROSS_INVOCATIONS' if prior else 'DISTINCT')
 
 
 def physical_count_view(s):
     """Known physical records, independent of image completion/count confirmation."""
     state=s.get(KEY) or _legacy(s)
-    n=len(state['plates'])
+    from .mobile_canvas_operator_view import eligible_physical_plate_ids
+    n=len(eligible_physical_plate_ids(s,state))
     known=bool(n or (s.get('checked') and all(o['error'] or o.get('post_nms_suppressed') for o in s['objects'])))
     return n,known
 
@@ -266,6 +277,8 @@ def pack(s):
     """Capture an explicit edit; restore legacy children before serialization."""
     if '_stack_legacy' not in s:return s
     state=s[KEY];objects={o['object_id']:o for o in s['objects']}
+    from .mobile_reference_disposition import withdrawn_ids
+    withdrawn=withdrawn_ids(s,state)
     from .mobile_canvas_partial_review import KEY as PARTIAL_KEY
     if s.get('roi_presence')=='NO_PLATES' and PARTIAL_KEY not in s:
         state['removed_manual_ids']=list(set(state.get('removed_manual_ids',[]))|{o['object_id'] for o in s['_stack_legacy']['objects'] if not o.get('parent_id')})
@@ -286,6 +299,7 @@ def pack(s):
             s['_stack_legacy']['objects'].append(copy.deepcopy(obj))
     retained={p['gt_id'] for p in s['physical_gt_v1']['plates']}
     for pid,p in list(state['plates'].items()):
+        if pid in withdrawn:continue
         if pid not in retained and p['origin_object_id'] not in objects:
             state.setdefault('removed_manual_ids',[]).append(p['origin_object_id'])
             state['links'].pop(p['origin_object_id'],None);state['plates'].pop(pid)
@@ -368,6 +382,8 @@ def accept_reference(session,gid,oid):
     from .mobile_manual_frame_guard import require_free_manual_area
     require_free_manual_area(s,parent['quad'],session=session,gid=gid)
     pid=_id(s,oid);p=_plate(s,obj,pid);p.update(confirmed=True,geometry_state='operator_confirmed_unchanged')
+    from .mobile_reference_lifecycle import mark_model
+    mark_model(s,p,oid)
     state['plates'][pid]=p;state['links'][oid]=dict(plate_id=pid,status='ASSOCIATED_FOR_GEOMETRY',provenance='operator_accept_unchanged_final_reference')
     _write(session,gid,s,state,'operator_accept_shared_gt_reference',oid)
 
@@ -424,9 +440,14 @@ def redraw_reference(session,gid,target,points):
 
 
 def edit_gt(session,gid,oid,*,quad=None,text=None,reason=''):
+    if gid in getattr(session, 'scene_frames', {}):
+        from .mobile_scene_frame_review import edit
+        return edit(session, gid, oid, quad=quad, text=text, reason=reason)
     from . import mobile_canvas_review as core
     from .mobile_human_review import normalize_registration
     s=core._legacy_scene(session,gid);state=_state(s)
+    from .mobile_reference_disposition import require_active
+    require_active(s,plate_id=oid if oid in state['plates'] else None,object_id=oid)
     pid=state['links'].get(oid,{}).get('plate_id') or next((pid for pid,p in state['plates'].items() if oid in (p['origin_object_id'],pid+':reference')),None)
     if quad is not None:
         from .mobile_manual_frame_guard import require_free_manual_area
@@ -448,6 +469,8 @@ def edit_gt(session,gid,oid,*,quad=None,text=None,reason=''):
     p=state['plates'][pid]
     if quad is not None:
         p['gt_quad']=[list(v) for v in core.validate_mt_quad(quad,*s['image_size'])];p['geometry_state']='operator_corrected';p['confirmed']=True
+        from .mobile_reference_lifecycle import mark_independent
+        mark_independent(p,'OPERATOR_CORNERS')
         obj=next((o for o in s['objects'] if o['object_id']==oid),None)
         if obj and not obj.get('parent_id'):
             l,t,r,b=s['roi']
@@ -456,15 +479,17 @@ def edit_gt(session,gid,oid,*,quad=None,text=None,reason=''):
         text=normalize_registration(text);reason=' '.join(str(reason).split())
         if len(text)>256 or len(reason)>240 or (text and reason):raise ValueError('Wpisz numer albo przyczynę nieczytelności.')
         p.update(gt_text=text,text_exclusion_reason=reason,text_confirmed=bool(text or reason))
+        if text or reason:
+            from .mobile_reference_lifecycle import mark_independent
+            mark_independent(p,'OPERATOR_GTZ')
     _write(session,gid,s,state,'operator_edit_shared_gt',oid)
 
 def toggle_unassociated(session,gid,oid,*,partial_review=False):
     from . import mobile_canvas_review as core
     core.require_source_final(session,gid,oid)
     s=core._legacy_scene(session,gid);state=_state(s);link=state['links'].get(oid)
-    if partial_review:
-        from .mobile_canvas_partial_review import enable
-        enable(session, gid, s, state)
+    from .mobile_canvas_partial_review import enable
+    enable(session, gid, s, state)
     if not link:raise ValueError('Nieznany kandydat.')
     obj=core._object(s,oid)
     parent=next(p for p in s['parents'] if p['parent_id']==obj['parent_id'])
@@ -472,9 +497,14 @@ def toggle_unassociated(session,gid,oid,*,partial_review=False):
         from .mobile_canvas_resolution import model_location
         model_location(session,gid,s,obj)  # no spatial FP without source location
     if link['status']=='UNASSOCIATED_NO_PLATE':
+        from .mobile_reference_lifecycle import restore
+        restore(state,link)
         if link.get('previous_link'):state['links'][oid]=link['previous_link']
         else:state['links'][oid]=dict(plate_id=None,status='UNRESOLVED',provenance='operator_canvas')
-    else:state['links'][oid]=dict(plate_id=None,status='UNASSOCIATED_NO_PLATE',provenance='operator_canvas',previous_link=copy.deepcopy(link))
+    else:
+        state['links'][oid]=dict(plate_id=None,status='UNASSOCIATED_NO_PLATE',provenance='operator_canvas',previous_link=copy.deepcopy(link))
+        from .mobile_reference_lifecycle import retire
+        retire(s,state,oid)
     _write(session,gid,s,state,'operator_candidate_no_plate',oid)
 
 

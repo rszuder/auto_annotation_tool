@@ -7,6 +7,7 @@ from PIL import Image
 from test_mobile_p2b2_canvas_review import source_session,text_all
 from test_mobile_human_review import load
 from auto_annotation_tool.ranking import mobile_canvas_review as core
+from auto_annotation_tool.ranking import mobile_canvas_partial_review as partial
 from auto_annotation_tool.ranking.mobile_canvas_physical_gt import mark_duplicate,share_across_invocations,declare_distinct,KEY
 from auto_annotation_tool.ranking.mobile_mt_postdedup import canvas_post_nms_proof
 from auto_annotation_tool.gui.mobile_compare_review_gate import inspect_canvas
@@ -62,7 +63,9 @@ def prepare(s,gid='mt-one'):
         if o.get('post_nms_suppressed') or o['error'] or o.get('duplicate_of'):continue
         parent=next((p for p in core.scene(s,gid)['parents'] if p['parent_id']==o['parent_id']),None)
         if parent and parent['mz_ran']:core.set_text(s,gid,o['object_id'],parent['mz_prediction'] or 'ABC123')
-    core.check_scene(s,gid)
+        if parent:partial.confirm_stack(s,gid,oid=o['object_id'])
+    # Per-frame decisions are the completion action; checking the whole image
+    # is no longer part of this fixture's operator workflow.
 
 
 def test_three_raw_two_final_has_one_gt_one_fp_and_one_suppressed(tmp_path):

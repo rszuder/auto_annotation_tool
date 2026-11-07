@@ -112,11 +112,21 @@ def _refresh_record(record, scope):
             raise ValueError('Źródło lub rewizja zmieniły się od wyboru sesji. Otwórz porównanie ponownie.')
     if evidence['trace_sha256'] != current.comparison_source['trace_sha256']:
         raise ValueError('Ślady czasowe zmieniły się od wyboru sesji.')
+    for field in ('input_mode', 'input_context'):
+        if getattr(current, field, None) != getattr(record, field, None):
+            raise ValueError('Zamrożone wejście zmieniło się od wyboru sesji. Otwórz porównanie ponownie.')
     return access
 
 def validate_comparison(records, row_sets=None, *, comparison_scope=None, require_sources=False):
     """Common guard at launch, chart creation and both sides of atomic export."""
     records = list(records)
+    from ..ranking.mobile_tv_bbox_evidence import cohort_conflict as tv_conflict
+    conflict = tv_conflict(getattr(r, 'input_context', None) or {'input_mode': getattr(r, 'input_mode', 'CAMERA_FULL_FRAME')} for r in records)
+    if conflict:
+        raise ValueError('NOT_COMPARABLE / N/A: ' + conflict)
+    from ..ranking.mobile_mz_input_evidence import diagnostic_cohort_conflict
+    if diagnostic_cohort_conflict(getattr(r, 'measurement_purpose', '') for r in records):
+        raise ValueError('NOT_COMPARABLE / N/A: cele diagnostyczne i oficjalne wymagają odrębnych kohort.')
     scope = scope_value(comparison_scope, len(records))
     if not records or (require_sources and scope != 'single' and len(records) < 2):
         raise ValueError('Porównanie wymaga co najmniej dwóch różnych sesji.')

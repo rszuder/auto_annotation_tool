@@ -7,48 +7,42 @@ def partial_fp(scene,state,session,result):
     """A lower bound from explicit FINAL rejections, not a partial matching.
 
     No TP/FN, rates or report denominators can be inferred from unfinished GT.
-    Only otherwise usable source BBOXes qualify for a displayed FP bound.
-    Invalid/missing source geometry stays unavailable, with rejections named.
+    The v2 source adapter proves membership and explicit operator rejections.
+    Missing/degenerate BBOX is only a geometry diagnostic.
     """
-    from ..ranking.mobile_mt_geometry_layers import source_bbox
     value=dict(items=[],note='',lower_bound=None)
     inventory=operator_inventory(scene,state)
     rejected=inventory['rejected']
     if not rejected:return value
     names=', '.join(r['label'] for r in rejected)
     value['note']=f'Odrzucone wskazania: {names}.'
-    if result.get('unavailable_reasons')!=['REVIEW_INCOMPLETE']:
-        from ..ranking.mobile_mt_detection_evaluation import reason_text
+    bound=result.get('partial_fp_lower_bound')
+    if bound is None:
+        from ..ranking.mobile_mt_object_evaluation import reason_text
         value['note']+=' FP niedostępne: '+reason_text(result)+'.'
         return value
-    finals=[c for c in state['candidates'] if c['role']=='FINAL']
-    for c in finals:
-        row=session.attempts.get(c['attempt_id'],{})
-        confidence=row.get('mt_confidence')
-        if confidence is None or str(confidence).strip()=='':confidence=row.get('plate_confidence')
-        try:confidence=float(confidence)
-        except (TypeError,ValueError,OverflowError):confidence=None
-        if confidence is None or not math.isfinite(confidence) or not 0<=confidence<=1:
-            value['note']+=' FP niedostępne: brak wiarygodnej pewności MT.';return value
-        if source_bbox(session,scene,c) is None:
-            value['note']+=' FP niedostępne: brak poprawnego źródłowego BBOX MT.';return value
+    finals=[c for c in result.get('source_finals',[]) if c.get('role')=='FINAL'
+            and c.get('decision')=='NOT_PLATE' and c.get('operator_confirmed') is True]
     # Rejected FINALs are forced FP by the canonical policy, independently of
     # future GT matches. Unresolved FINALs can only increase this count.
     by_id={c['object_id']:c for c in finals}
-    value['items']=[dict(r,attempt_id=by_id[r['oid']]['attempt_id'],outcome='FP',reason='OPERATOR_NOT_PLATE') for r in rejected]
-    value['lower_bound']=len(rejected)
-    value['note']=f"Ocena częściowa: FP ≥{len(rejected)} — odrzucone {names}."
+    value['items']=[dict(r,attempt_id=by_id[r['oid']]['attempt_id'],outcome='FP',reason='OPERATOR_NOT_PLATE') for r in rejected if r['oid'] in by_id]
+    value['lower_bound']=bound
+    value['note']=f"Ocena częściowa: FP ≥{bound} — odrzucone {names}."
     return value
 
 def operator_inventory(scene,state):
     """Saved IDs, proven FINALs and explicit links; no IoU or TP/FP/FN here."""
-    from ..ranking.mobile_canvas_operator_view import physical_plate_ids,reference_numbers
+    from ..ranking.mobile_canvas_operator_view import saved_reference_ids,reference_numbers
     from ..ranking import mobile_canvas_partial_review as partial
-    empty=dict(counts=dict.fromkeys(('gt','mt','rejected','unlinked')),rejected=[],unlinked=[])
+    from .mobile_canvas_reference_state import saved_outline_count
+    count,reason=saved_outline_count(scene,state)
+    empty=dict(counts=dict.fromkeys(('gt','mt','rejected','unlinked')),rejected=[],unlinked=[],gt_reason=reason)
+    empty['counts']['gt']=count
     if not scene or not state:return empty
     progress=partial.progress(scene)
     if progress['source_unknown'] or scene.get('exclusion_reason'):return empty
-    saved=physical_plate_ids(scene,state)
+    saved=saved_reference_ids(scene,state)
     finals=[c for c in state['candidates'] if c['role']=='FINAL']
     linked={link['plate_id'] for c in finals for link in [state['links'].get(c['object_id'],{})]
             if link.get('status')=='ASSOCIATED_FOR_GEOMETRY' and link.get('plate_id') in saved}
@@ -57,8 +51,8 @@ def operator_inventory(scene,state):
     numbers=reference_numbers(state)
     unlinked=[dict(gt_id=pid,oid=p['origin_object_id'],label=f"GTR {numbers[pid]}" if pid in numbers else 'GT bez obrysu',kind='GTR')
               for pid,p in state['plates'].items() if pid in saved-linked]
-    return dict(counts=dict(gt=len(saved),mt=len(finals),rejected=len(rejected),unlinked=len(unlinked)),
-                rejected=rejected,unlinked=unlinked)
+    return dict(counts=dict(gt=count,mt=len(finals),rejected=len(rejected),unlinked=len(unlinked)),
+                rejected=rejected,unlinked=unlinked,gt_reason=reason)
 
 def operator_view(ed):
     from .mobile_canvas_clean_view import source,records
@@ -86,7 +80,7 @@ def reference_comparison(ed,row,result=None):
 def image_feedback(ed,result=None):
     from .mobile_canvas_clean_view import source,records
     from ..ranking import mobile_canvas_partial_review as partial
-    from ..ranking.mobile_mt_detection_evaluation import evaluate_unit
+    from ..ranking.mobile_mt_object_evaluation import evaluate_unit
     scene=ed._read();state=source(ed)
     if not scene or not state:return dict(status='UNAVAILABLE',fp=[],fn=[],text='')
     result=result or evaluate_unit(ed.h.session,ed.h.current_invocation)
@@ -114,16 +108,9 @@ def image_feedback(ed,result=None):
     if out['fn']:messages.append('FN: '+', '.join(v['label'] for v in out['fn']))
     if messages:
         out['text']=' · '.join(messages)+'.'
-        if len(out['fp'])==len(out['fn'])==1:
-            fp,fn=out['fp'][0],out['fn'][0]
-            row=next((r for r in rows if r['oid']==fp['oid'] and r['pid']==fn['gt_id']),None)
-            comparison=reference_comparison(ed,row,result) if row else None
-            if comparison and fp['reason']=='LOCALIZATION_CRITERION_NOT_MET':
-                iou=f"{100*comparison['iou']:.2f}%".replace('.',',');threshold=f"{100*comparison['threshold']:g}%"
-                out['text']=f"Tablica wykryta — BBOX nie spełnia kryterium lokalizacji.\n{fp['label']} ↔ {fn['label']}: IoU {iou} < {threshold}.\nFormalne FP/FN dotyczą tej samej tablicy."
         if any(v['reason']=='DUPLICATE_FINAL' for v in out['fp']):
-            out['text']+='\nDodatkowe wskazanie tej samej GT: dopasowanie BBOX jest 1:1.'
-        out['text']+='\nKliknij FP/FN w ocenie BBOX, aby wskazać geometrię.'
+            out['text']+='\nDodatkowy FINAL tej samej GTR: parowanie obiektów jest 1:1.'
+        out['text']+='\nKliknij FP/FN, aby wskazać źródłowe MT lub GTR.'
     return out
 
 def inspect(ed,kind):
@@ -139,7 +126,8 @@ def inspect(ed,kind):
     item=items[index]
     ed.inf_visible.set(True);ed.ref_visible.set(True);ed.show_fp_var.set(True);ed.gt_focus_id=''
     source_kind=kind in ('fp','rejected')
-    if source_kind:chosen=nav.select_layer(ed,'BBOX',item['oid'])
+    if source_kind:
+        chosen=nav.select_layer(ed,'BBOX',item['oid']) or nav.select_layer(ed,'POSE',item['oid'])
     else:
         from . import mobile_canvas_plate_cycle as cycle
         target=next((t for t in cycle.targets(ed) if t['kind']=='GTR' and t['pid']==item['gt_id']),None)
@@ -149,13 +137,14 @@ def inspect(ed,kind):
     q=None
     if source_kind:
         from .mobile_canvas_geometry_layers import model
-        q=nav.quad(model(ed),'BBOX')
+        value=model(ed)
+        q=nav.quad(value,'BBOX') or nav.quad(value,'POSE')
     elif row:q=row['gt']
     if q:
         points=list(q)+(list(row['gt']) if source_kind and row and row['gt'] else [])
         nav.show_geometry(ed,points)
     ed._metric_counter_cursor=(key,index)
-    descriptions=dict(fp='FP w ocenie BBOX: źródłowy prostokąt bez dopasowania',fn='FN w ocenie BBOX: referencja bez dopasowanego prostokąta',
+    descriptions=dict(fp='FP MT v2: odrzucony lub dodatkowy FINAL',fn='FN MT v2: GTR bez przypisanego FINAL',
                       rejected='Wskazanie odrzucone przez operatora (PPM)',unlinked='Zapisana GT bez jawnego powiązania ze wskazaniem MT')
     explanation=('Odrzucone przez operatora · częściowy licznik FP, pełna ocena obrazu trwa'
                  if formal and data.get('partial_fp_lower_bound') is not None else descriptions[kind])

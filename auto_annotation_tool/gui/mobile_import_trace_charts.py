@@ -11,7 +11,7 @@ import math
 from pathlib import Path
 
 SERIES = {
-    "plate_inference_ms": ("MT — czas inferencji", "Czas inferencji MT [ms]"),
+    "plate_inference_ms": ("MT — czas inferencji łącznie w śladzie", "Łączny czas inferencji MT na ślad [ms]"),
     "character_inference_ms": ("MZ — czas inferencji łącznie w śladzie", "Łączny czas inferencji MZ na ślad [ms]"),
     "total_ms": ("ALPR — zarejestrowany czas przebiegu", "Czas przebiegu [ms]"),
 }
@@ -73,7 +73,7 @@ def trace_figures(trace_rows, *, session_label, sample_note=""):
         ax.set_ylabel(ylabel)
         ax.grid(alpha=.2)
         note=(f"N={len(values)} rzeczywiście zarejestrowanych wartości. Nie podstawiono zera za brak próby."
-             +(" MZ jest sumą w obrębie śladu przy wielu detekcjach." if key=='character_inference_ms' else "")
+             +(" Czas MT jest sumą w obrębie śladu przy wielu ROI/fallbacku." if key=='plate_inference_ms' else " MZ jest sumą w obrębie śladu przy wielu detekcjach." if key=='character_inference_ms' else "")
              +(f" {sample_note}" if sample_note else ""))
         import textwrap
         fig.text(.055,.055,'\n'.join(textwrap.wrap(note,110)),fontsize=8,va='bottom')

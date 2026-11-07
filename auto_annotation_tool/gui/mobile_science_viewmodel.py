@@ -106,6 +106,7 @@ def make_science_dashboard(report: dict, form: dict | None = None, *, source_ver
     progress = _dict(report.get("progress"))
     multi = _dict(report.get("multi_plate"))
     condition = _dict(report.get("conditions"))
+    f5a = condition.get('experiment_family') == 'F5A'
     status = str(form.get("status") or "NOT_STARTED")
     mode = str(report.get("review_mode") or "")
     assisted = mode == "assisted"
@@ -253,6 +254,14 @@ def make_science_dashboard(report: dict, form: dict | None = None, *, source_ver
         "APPROVED_PENDING_SNAPSHOT": "Decyzje zatwierdzone — pakiet do kontroli",
     }
     form_label = labels.get(status, "Stan weryfikacji nieustalony")
+    assessment = _dict(report.get('canvas_assessment')) if f5a else {}
+    if assessment:
+        q, count = _count(assessment.get('n_qualified')), _count(assessment.get('n_total'))
+        if q is not None and count is not None:
+            form_label = f"Zapisane oceny MT/ROI: {q}/{count} · {assessment.get('scope', 'N/A')}"
+            checks = [progress_item('Ocenione wywołania MT/ROI', q, count, kind='mt'),
+                      dict(label='Pełne sceny TV', done=None, total=None,
+                           text='N/A — brak potwierdzonego pokrycia scen', kind='form')]
     science_label = ("Ocena naukowa nieukończona" if formal_multi_blocked else
                      "Raport wstępny" if preliminary else "Dane ocenione w swoim zakresie")
     if not source_verified:
@@ -270,6 +279,10 @@ def make_science_dashboard(report: dict, form: dict | None = None, *, source_ver
                        ("mz", "MZ · Inferencja modelu znaków"),
                        ("pipeline", "ALPR · Przetwarzanie potoku")):
         value = _dict(latency.get(key))
+        if f5a:
+            label = {'mt': 'MT · suma inferencji w śladzie',
+                     'mz': 'MZ · suma inferencji w śladzie',
+                     'pipeline': 'Potok · wszystkie zarejestrowane przebiegi'}[key]
         n = _count(value.get("n"))
         med, p95 = _number(value.get("p50_ms")), _number(value.get("p95_ms"))
         if not source_verified or not n or med is None or p95 is None:
@@ -281,15 +294,27 @@ def make_science_dashboard(report: dict, form: dict | None = None, *, source_ver
     source = [
         ("Sesja", str(report.get("session_id") or "Brak danych")),
         ("Scenariusz", str(condition.get("scenario") or "Brak danych")),
-        ("Wariant", str(condition.get("variant") or "Brak danych")),
+        ("Wariant F4 (rejestr SHA)", str(condition.get("variant_display") or "NIEPOTWIERDZONE")),
+        ("provenance", str(condition.get("variant_provenance") or "NIEPOTWIERDZONE")),
+        ("Wariant zadeklarowany przez Androida", str(condition.get("variant") or "Brak danych")),
         ("Telefon", str(condition.get("device") or "Brak danych")),
         ("Tryb GT", "Asystowany — predykcje były widoczne" if assisted else
          "Zaślepiony" if mode == "blinded_gt_v1" else "Nieustalony"),
         ("Rewizja weryfikacji", str(report.get("review_revision") if report.get("review_revision") is not None else "—")),
         ("Archiwum SHA-256", str(report.get("source_archive_sha256") or "Brak danych")),
     ]
+    variant_title = 'Wariant F4 (rejestr SHA)'
+    if f5a:
+        variant_title = 'Wariant F5A (Android)'
+        source[2:5] = [
+            (variant_title, str(condition.get('variant_display') or 'NIEPOTWIERDZONE')),
+            ('Seria', str(condition.get('series_id') or 'NIEPOTWIERDZONE')),
+            ('Pochodzenie', str(condition.get('identity_status') or 'NIEPOTWIERDZONE')),
+        ]
     def condition_value(key, title):
         value = str(condition.get(key) or "").strip()
+        if key=='variant_provenance':return 'provenance='+str(value or 'NIEPOTWIERDZONE')
+        if key=='variant_display':return title+': '+str(value or 'NIEPOTWIERDZONE')
         return f"{title}: nie podano w raporcie" if value.lower() in ("", "brak danych", "—") else value
 
     return {
@@ -299,7 +324,9 @@ def make_science_dashboard(report: dict, form: dict | None = None, *, source_ver
         "science_status": science_label,
         "review_mode": "GT asystowany" if assisted else "GT zaślepiony" if mode == "blinded_gt_v1" else "GT: tryb nieustalony",
         "conditions": " · ".join(condition_value(key, title) for key, title in
-                                   (("scenario", "Scenariusz"), ("variant", "Wariant"), ("device", "Telefon"))),
+                                   (("scenario", "Scenariusz"), ("variant_display", variant_title),
+                                     ("variant_provenance", "provenance"), ("variant", "Wariant zadeklarowany przez Androida"), ("device", "Telefon")))
+                      + (f" · Seria: {condition.get('series_id') or 'NIEPOTWIERDZONE'}" if f5a else ''),
         "cards": cards,
         "rows": tuple(rows),
         "progress": checks,

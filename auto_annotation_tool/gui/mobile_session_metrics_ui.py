@@ -49,5 +49,8 @@ class SessionMetrics(tk.Frame):
         for k,card in self.cards.items():card.set(self.data['values'][k])
         for k in ('status','exact','denominators'):
             text=self.data[k]
-            if k=='status':text='MT: dopasowanie BBOX · '+text
+            if k=='status':
+                prefix = ('MT/ROI · '+self.data.get('assessment_scope','ASSISTED')+' · '
+                          if (snapshot or {}).get('experiment_family') == 'F5A' else 'MT v2 · ASSISTED · ')
+                text=prefix+text
             getattr(self,k).configure(text=text)

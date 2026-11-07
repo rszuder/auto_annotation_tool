@@ -2,15 +2,15 @@
 from pathlib import Path
 import copy,csv,json
 
-SCHEMA='alpr.mobile.mz_quality_context.v1'
+SCHEMA='alpr.mobile.mz_quality_context.v2'
 
 def false_mt(c):
-    return bool(c and c.get('role')=='FINAL' and (c.get('operator_bad') or c.get('association_status')=='UNASSOCIATED_NO_PLATE'))
+    return bool(c and c.get('role')=='FINAL' and c.get('operator_decision')=='NOT_PLATE')
 
 def note(c):
     return ' · wykonano, poza CER/Exact: odrzucone MT' if false_mt(c) and c.get('mz_ran') else ''
 
-def snapshot(session):
+def snapshot_v1(session):
     from ..ranking import mobile_candidate_stacks as stacks,mobile_canvas_review as core
     candidates={};canonical=core.summary(session)
     outcomes={r['attempt_id']:r for r in canonical['rows'] if r.get('attempt_id')}
@@ -50,7 +50,7 @@ def snapshot(session):
             raw_prediction=sample.get('raw_prediction',sample.get('prediction',attempt.get('raw_prediction',attempt.get('prediction','')))),
             crop_entry=crop or attempt.get('evidence_entry'),timing=copy.deepcopy(sample.get('timing',{})),
             source_mz_ms=sample.get('mz_ms'),source_pipeline_ms=sample.get('pipeline_ms')))
-    return dict(schema=SCHEMA,session_id=session.session_id,source_archive_sha256=session.bundle.source_archive_sha256,
+    return dict(schema='alpr.mobile.mz_quality_context.v1',session_id=session.session_id,source_archive_sha256=session.bundle.source_archive_sha256,
         review_revision=session.review.review_revision,rows=rows,
         n_source_readouts=len(rows),n_readouts_excluded_mt_fp=sum(r['quality_reason']=='MZ_EXCLUDED_MT_FALSE_POSITIVE' for r in rows),
         n_readouts_unproven_parent=sum(not r['parent_proven'] for r in rows),
@@ -58,9 +58,14 @@ def snapshot(session):
         canonical_gt_characters=canonical['gt_characters'],canonical_text_errors=canonical['text_errors'],
         counting_note='Rows are source readout evidence, not new inference-call counts or a replacement OCR denominator. Source timings and canonical scoring are unchanged.')
 
+def snapshot(session):
+    from ..ranking.mobile_mt_object_evaluation import evaluate_session
+    return evaluate_session(session)['ocr_summary']
+
+
 def export(session,directory):
     data=snapshot(session);root=Path(directory);root.mkdir(parents=True,exist_ok=True)
-    jp=root/'mz_quality_context_v1.json';cp=root/'mz_quality_context_v1.csv'
+    jp=root/'mz_quality_context_v2.json';cp=root/'mz_quality_context_v2.csv'
     if jp.exists() or cp.exists():raise ValueError('Eksport pochodzenia MZ już istnieje; wybierz nową wersję.')
     with jp.open('x',encoding='utf-8') as handle:json.dump(data,handle,ensure_ascii=False,indent=2)
     fields=list(data['rows'][0]) if data['rows'] else ['attempt_id','quality_reason']

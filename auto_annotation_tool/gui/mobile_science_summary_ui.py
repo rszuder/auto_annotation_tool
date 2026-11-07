@@ -227,7 +227,8 @@ class MobileScienceSummaryPanel:
         self._canvas_args = (data, inventory, refreshing, review_status)
         if not hasattr(self, "canvas_caption") or not self.canvas_caption.winfo_exists():
             return
-        state = "zatwierdzona" if review_status == "COMPLETED" else "w toku"
+        from ..ranking.mobile_review_status import approval_caption
+        state = approval_caption(inventory, review_status, (data or {}).get('review_revision','?'))
         self.canvas_title.configure(text="Ocena operatora (Canvas · asystowana) · " + state)
         text = ("Aktualizowanie oceny Canvas…" if refreshing else
                 summary_caption(data, inventory) if data else
@@ -268,17 +269,29 @@ class MobileScienceSummaryPanel:
         header = tk.Frame(self.body, bg=self.background)
         header.pack(fill="x", padx=18, pady=(10, 4))
         header.columnconfigure(0, weight=1)
-        self._text(header, model["form_status"] + "  ·  " + model["science_status"] +
-                   "  ·  " + model["review_mode"], bold=True, size=10, wrap=1070).grid(
-            row=0, column=0, sticky="w")
-        self._text(header, model["conditions"], size=9, muted=True,
-                   wrap=1070).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        status_caption=self._text(header, model["form_status"] + "  ·  " + model["science_status"] +
+                   "  ·  " + model["review_mode"], bold=True, size=10, wrap=1070)
+        status_caption.grid(row=0, column=0, sticky="ew")
+        self.conditions_caption=self._text(header, model["conditions"], size=9, muted=True,wrap=1070)
+        self.conditions_caption.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+        for caption in (status_caption,self.conditions_caption):
+            # The frame owns width. Text must not resize itself repeatedly
+            # through its own Configure event while the tab is being built.
+            caption.configure(width=1)
+        review_button=None
         if self.on_review is not None:
-            tk.Button(header, text="← Weryfikacja", command=self.on_review,
+            review_button=tk.Button(header, text="← Weryfikacja", command=self.on_review,
                       bg=self.ui_p["blue_bg"], fg=self.ui_p["blue"],
                       activebackground=self.ui_p["blue_bg"], activeforeground=self.ui_p["blue"],
                       relief="flat", bd=0, cursor="hand2", padx=12, pady=7,
-                      font=("Segoe UI", 9, "bold")).grid(row=0,column=1,rowspan=2,sticky="ne",padx=(12,0))
+                      font=("Segoe UI", 9, "bold"))
+            review_button.grid(row=0,column=1,rowspan=2,sticky="ne",padx=(12,0))
+        def fit_header(event):
+            reserved=review_button.winfo_reqwidth()+12 if review_button is not None else 0
+            wrap=max(120,event.width-reserved-8)
+            for caption in (status_caption,self.conditions_caption):
+                if int(float(caption.cget('wraplength')))!=wrap:caption.configure(wraplength=wrap)
+        header.bind('<Configure>',fit_header)
         self.history_progress = Disclosure(self.body, "01  Postęp protokołu historycznego · osobna ocena", p=self.ui_p,
             opened=self._sections_open.get("history_progress", not independent_missing),
             command=lambda opened: self._sections_open.update(history_progress=opened))

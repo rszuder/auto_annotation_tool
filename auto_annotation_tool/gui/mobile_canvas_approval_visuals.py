@@ -32,14 +32,14 @@ def color(scene,state,pid):
 
 def paint_image_border(ed,scene):
     """Outline the visible image area, independently of ROI and REF/INF."""
-    from ..ranking.mobile_canvas_presentation import review_progress
+    from ..ranking.mobile_frame_review_state import from_scene,READY,SOURCE_NA,NO_REFERENCE
     from .mobile_canvas_editor import TAG
     if ed.mode=='draw':return
     x,y=ed.to_canvas((0,0));r,b=ed.to_canvas(scene['image_size'])
     # Keep the border visible when zoom clips the image to the Canvas.
     box=(max(2,x+1.5),max(2,y+1.5),min(ed.c.winfo_width()-2,r-1.5),min(ed.c.winfo_height()-2,b-1.5))
     if box[0]>=box[2] or box[1]>=box[3]:return
-    verified=review_progress(scene)['complete']
+    state=from_scene(scene)['state'];verified=state==READY;technical=state in {SOURCE_NA,NO_REFERENCE}
     ed.c.create_rectangle(*box,outline=DARK,width=5,tags=(TAG,'image_border_contrast'))
-    ed.c.create_rectangle(*box,outline=GREEN if verified else RED,width=3,
-                          tags=(TAG,'image_verification_border','image_verified' if verified else 'image_pending'))
+    ed.c.create_rectangle(*box,outline='#8596A6' if technical else GREEN if verified else RED,width=3,
+                          tags=(TAG,'image_verification_border','image_na' if technical else 'image_verified' if verified else 'image_pending'))

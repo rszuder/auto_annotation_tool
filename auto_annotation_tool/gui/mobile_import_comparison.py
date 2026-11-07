@@ -176,12 +176,25 @@ def _identity(report, bundle):
     precision=pmt if pmt==pmz and pmt in ("fp32","int8") else "unknown"
     def model_id(m):
         return str(_first(_get(m,"checkpoint_sha256"),_nested(m,"checkpoint","sha256")) or "")
+    from ..ranking.mobile_experiment_identity import from_bundle
+    experiment_identity = from_bundle(bundle)
+    extra = {}
+    from ..ranking.mobile_tv_bbox_evidence import input_context as tv_input_context
+    tv_context = tv_input_context(getattr(bundle, 'collection_session', {}) or {}, getattr(bundle, 'tv_bbox_evidence', {}) or {})
+    if tv_context:
+        extra.update(input_mode=tv_context['input_mode'], input_context=tv_context)
+    if experiment_identity.get('family') in {'F5A', 'DIAGNOSTIC'}:
+        extra.update(experiment_type=experiment_identity.get('experiment_type') or '',
+                     series_id=experiment_identity.get('series_id') or '',
+                     roi_variant=experiment_identity.get('variant') or '',
+                     is_pilot=experiment_identity['is_pilot'], identity_status=experiment_identity['status'],
+                     measurement_purpose=experiment_identity.get('measurement_purpose', ''))
     return dict(session_id=sid,scenario=scenario,repeat_label=repeat,device=device_name,
                 android=android,apk_sha256=apk,precision=precision,
                 mt_checkpoint=model_id(mt),mz_checkpoint=model_id(mz),
                 mt_model_sha=str(_get(mt,"model_sha256") or ""),
                 mz_model_sha=str(_get(mz,"model_sha256") or ""),
-                recorded_repeat=recorded_repeat)
+                recorded_repeat=recorded_repeat, **extra)
 
 
 def record_from_import(report, bundle, results_root=None, *, review_root=None, include_review=True):
@@ -200,6 +213,7 @@ def record_from_import(report, bundle, results_root=None, *, review_root=None, i
     ident=_identity(report,bundle)
     model_identity=identity_from_bundle(bundle)
     recorded_repeat=ident.pop("recorded_repeat",ident["repeat_label"])
+    experiment_fields = {k: ident[k] for k in ('experiment_type', 'series_id', 'roi_variant', 'is_pilot', 'identity_status', 'measurement_purpose', 'input_mode', 'input_context') if k in ident}
     rows,source_state=_read_all_traces(bundle)
     lat={}
     for stage,col in _STAGES.items():
@@ -224,6 +238,7 @@ def record_from_import(report, bundle, results_root=None, *, review_root=None, i
                        apk_sha256=ident["apk_sha256"],mt_checkpoint=ident["mt_checkpoint"] or review.mt_checkpoint,
                        mz_checkpoint=ident["mz_checkpoint"] or review.mz_checkpoint,
                        model_identity=model_identity,
+                        **experiment_fields,
                        source_evidence_status="verified Android archive + reviewed export"),rows,warnings
     result=Session(directory=Path(results_root or Path.cwd())/ident["session_id"],
         session_id=ident["session_id"],review_revision=0,review_status="UNREVIEWED",

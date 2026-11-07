@@ -102,8 +102,9 @@ def _subject_requires_text_gt(session, subject: dict) -> bool:
         if sample is None or session.cancelled(sample):
             continue
         attempt = session.attempts.get(str(sample.get("attempt_id") or ""), {})
-        from .mobile_canvas_review import has_scene
-        if has_scene(session, session.invocation_by_attempt.get(str(sample.get("attempt_id") or ""), "")):
+        from .mobile_canvas_review import has_scene,context
+        gid=session.invocation_by_attempt.get(str(sample.get("attempt_id") or ""), "")
+        if has_scene(session,gid) or context(session,gid) is not None:
             continue  # Canvas owns this plate-number decision, never subject-level GT.
         mz_status = str(attempt.get("mz_status") or sample.get("mz_status") or "").strip().upper()
         if mz_status != "NOT_RUN":
@@ -123,9 +124,10 @@ def subject_verification_issues(session, subject_key: str) -> list[str]:
         group = session.mt_invocations.get(group_id)
         if not _active(session, group):
             continue
-        from .mobile_canvas_review import has_scene, approval_group_issues as canvas_group_issues
-        if has_scene(session, group_id):
-            issues.extend(canvas_group_issues(session, group_id))
+        from .mobile_canvas_review import has_scene,context,approval_group_issues as canvas_group_issues,approval_scene_issues,scene
+        if has_scene(session, group_id) or context(session,group_id) is not None or any(r.get('source_frame_entry') for r in group.records):
+            issues.extend(canvas_group_issues(session, group_id) if has_scene(session,group_id)
+                          else _frame_issues(session,group_id))
             continue
         decision = session.invocation_annotation(group_id)
         count = decision.get("visible_plate_count")
@@ -182,10 +184,22 @@ def subject_verification_issues(session, subject_key: str) -> list[str]:
     return issues
 
 
+def _frame_issues(session,gid):
+    from .mobile_scene_frame_review import mt_review_issues
+    current=mt_review_issues(session,gid)
+    if current is not None:return current
+    from .mobile_frame_review_state import for_session,SOURCE_NA,NO_REFERENCE
+    from .mobile_canvas_review import scene,approval_scene_issues
+    state=for_session(session,gid)
+    if state['state'] in {SOURCE_NA,NO_REFERENCE}:return []
+    return approval_scene_issues(scene(session,gid,include_history=False))
+
+
 def verification_issues(session) -> list[str]:
-    if not session.subjects:
+    if not session.subjects and not getattr(session, 'scene_frames', {}):
         return ["Archiwum nie zawiera obserwacji do weryfikacji"]
-    result: list[str] = []
+    from .mobile_scene_frame_review import issues
+    result: list[str] = issues(session)
     for key in session.subjects:
         result.extend(subject_verification_issues(session, key))
     return list(dict.fromkeys(result))

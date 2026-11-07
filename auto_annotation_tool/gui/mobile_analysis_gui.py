@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk,filedialog,messagebox
 from .mobile_analysis import analyze,QUESTIONS,METRICS,PROTOCOL_ID
 from .mobile_analysis_export import make_figure,export_analysis
+from .mobile_analysis_presentation import LABELS,scenario_label,session_label,status_label,format_value,coverage,missing_reason,ordered_sessions
 
 class UnifiedAnalysisWindow(tk.Toplevel):
     def __init__(self,parent,cohort,results_root=None):
@@ -19,21 +20,21 @@ class UnifiedAnalysisWindow(tk.Toplevel):
     def _build(self):
         shell=ttk.Frame(self,padding=10);shell.pack(fill='both',expand=True)
         shell.columnconfigure(0,weight=0,minsize=310);shell.columnconfigure(1,weight=1);shell.rowconfigure(2,weight=1)
-        self.protocol_label=ttk.Label(shell,text=PROTOCOL_ID+' · retrospektywnie dla F4 · DESCRIPTIVE',font=('Segoe UI',10,'bold'))
+        self.protocol_label=ttk.Label(shell,text='Analiza opisowa · F4: referencje asystowane, metoda retrospektywna',font=('Segoe UI',10,'bold'))
         self.protocol_label.grid(row=0,column=0,columnspan=2,sticky='ew',pady=(0,6))
         controls=ttk.Frame(shell);controls.grid(row=1,column=0,columnspan=2,sticky='ew',pady=(0,8))
         controls.columnconfigure(1,weight=1);controls.columnconfigure(3,weight=1)
         ttk.Label(controls,text='Pytanie').grid(row=0,column=0,padx=(0,5))
         self.question=ttk.Combobox(controls,state='readonly',values=list(QUESTIONS.values()),width=26)
-        self.question.grid(row=0,column=1,sticky='ew',padx=(0,12));self.question.set(QUESTIONS[self.cohort.question])
+        self.question.grid(row=0,column=1,columnspan=3,sticky='ew');self.question.set(QUESTIONS[self.cohort.question])
         self.question.bind('<<ComboboxSelected>>',self._change_question)
-        ttk.Label(controls,text='Miara').grid(row=0,column=2,padx=(0,5))
-        self.metric=ttk.Combobox(controls,state='readonly',values=[v[0] for v in METRICS.values()],width=38)
-        self.metric.grid(row=0,column=3,sticky='ew');self.metric.current(0);self.metric.bind('<<ComboboxSelected>>',lambda e:self._render())
+        ttk.Label(controls,text='Miara').grid(row=1,column=0,padx=(0,5),pady=(5,0))
+        self.metric=ttk.Combobox(controls,state='readonly',values=[LABELS[k]['title'] for k in METRICS],width=38)
+        self.metric.grid(row=1,column=1,columnspan=3,sticky='ew',pady=(5,0));self.metric.current(0);self.metric.bind('<<ComboboxSelected>>',lambda e:self._render())
         left=ttk.Frame(shell);left.grid(row=2,column=0,sticky='nsew',padx=(0,10));left.columnconfigure(0,weight=1);left.rowconfigure(3,weight=1)
-        ttk.Label(left,text='Wybrane źródła · dostępność tej miary',font=('Segoe UI',9,'bold')).grid(row=0,column=0,sticky='w')
+        ttk.Label(left,text='Źródła dla wybranego materiału',font=('Segoe UI',9,'bold')).grid(row=0,column=0,sticky='w')
         self.sources=ttk.Treeview(left,columns=('session','status','n'),show='headings',height=7,selectmode='browse')
-        for key,label,width in (('session','Sesja',125),('status','Miara',105),('n','n / braki',80)):
+        for key,label,width in (('session','Sesja',145),('status','Dostępność',85),('n','Oceniono',80)):
             self.sources.heading(key,text=label);self.sources.column(key,width=width,minwidth=width,stretch=False)
         self.sources.grid(row=1,column=0,sticky='ew',pady=(5,7));self.sources.bind('<<TreeviewSelect>>',lambda e:self._details())
         ttk.Button(left,text='Usuń wybraną sesję',command=self._remove_selected).grid(row=2,column=0,sticky='ew',pady=(0,7))
@@ -59,10 +60,14 @@ class UnifiedAnalysisWindow(tk.Toplevel):
 
     def metric_id(self):return list(METRICS)[max(0,self.metric.current())]
 
+    def scenario_id(self):
+        return next((k for k in getattr(self,'_scenario_ids',[]) if scenario_label(k)==self.scenario.get()),self.scenario.get())
+
     def _set_cohort(self,cohort):
-        previous=self.scenario.get();self.cohort=cohort
+        previous=self.scenario_id();self.cohort=cohort
         values=sorted({s.metadata.get('scenario','NIEOKREŚLONY') for s in cohort.sessions})
-        self.scenario.configure(values=values);self.scenario.set(previous if previous in values else values[0] if values else '')
+        self._scenario_ids=values
+        self.scenario.configure(values=[scenario_label(k) for k in values]);self.scenario.set(scenario_label(previous if previous in values else values[0]) if values else '')
         self._render()
 
     def _clear_figure(self):
@@ -73,38 +78,50 @@ class UnifiedAnalysisWindow(tk.Toplevel):
     def _render(self):
         self._clear_figure();previous=self.sources.selection();self.sources.delete(*self.sources.get_children())
         key=self.metric_id()
-        for i,s in enumerate(self.cohort.sessions):
-            m=s.metrics[key];n='N/A' if m.n_scored is None else str(m.n_scored);missing='N/A' if m.n_unscored is None else str(m.n_unscored)
-            self.sources.insert('',tk.END,iid=str(i),values=(f"{s.metadata.get('variant')} {s.metadata.get('repeat')}",m.status,f'{n} / {missing}'))
-        if self.cohort.sessions:
-            selected=previous[0] if previous and self.sources.exists(previous[0]) else '0'
+        indices={id(s):i for i,s in enumerate(self.cohort.sessions)}
+        for s in ordered_sessions(self.cohort,self.scenario_id()):
+            i=indices[id(s)]
+            m=s.metrics[key];n='—' if m.n_scored is None else str(m.n_scored);total='—' if m.n_total_eligible is None else str(m.n_total_eligible)
+            self.sources.insert('',tk.END,iid=str(i),values=(session_label(s).replace('powtórzenie','powt.'),status_label(m),f'{n} / {total}'))
+        if self.sources.get_children():
+            selected=previous[0] if previous and self.sources.exists(previous[0]) else self.sources.get_children()[0]
             self.sources.selection_set(selected);self._details()
         if not self.scenario.get():return
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        self.figure=make_figure(self.cohort,key,self.scenario.get());self.drawn=FigureCanvasTkAgg(self.figure,master=self.chart)
+        self.figure=make_figure(self.cohort,key,self.scenario_id());self.drawn=FigureCanvasTkAgg(self.figure,master=self.chart)
         self.drawn.get_tk_widget().pack(fill='both',expand=True)
         self.drawn.get_tk_widget().bind('<Configure>',self._fit,add='+');self.drawn.get_tk_widget().bind('<Map>',lambda e:self.after_idle(self._fit),add='+')
         self._fit();self.drawn.draw()
 
     def _fit(self,event=None):
-        from .mobile_import_comparison_gui import ImportedMobileComparisonWindow
-        ImportedMobileComparisonWindow._fit_preview_text(self,event)
+        if self.drawn is None:return
+        from .mobile_analysis_figure import fit_figure
+        from types import SimpleNamespace
+        widget=self.drawn.get_tk_widget();width,height=widget.winfo_width(),widget.winfo_height()
+        if min(width,height)<=1:return
+        if abs(self.figure.bbox.width-width)>1 or abs(self.figure.bbox.height-height)>1:
+            self.drawn.resize(SimpleNamespace(width=width,height=height))
+        fit_figure(self.figure,preview=True);self.drawn.draw_idle()
 
     def _details(self):
         selected=self.sources.selection()
         if not selected:return
         s=self.cohort.sessions[int(selected[0])];m=s.metrics[self.metric_id()]
-        value='N/A' if m.value is None else f'{m.value:.4f} {METRICS[m.metric_id][1]}'
+        value=format_value(m)
         shown=lambda v:'N/A' if v is None else str(v)
-        lines=['Miara: '+m.status+' · '+value,
+        lines=[LABELS[m.metric_id]['title'],value,LABELS[m.metric_id]['subtitle'],
+            'Zakres: '+coverage(m),LABELS[m.metric_id]['footnote'],
+            *([missing_reason(m)] if m.value is None else []),'','Szczegóły źródłowe:',
             f'n={shown(m.n_scored)}, ogółem={shown(m.n_total_eligible)}, braki={shown(m.n_unscored)}',
             f'Licznik/mianownik: {shown(m.numerator)}/{shown(m.denominator)}',m.explanation,
             'Powody: '+(', '.join(m.missing_reasons) or 'brak')]
+        from ..ranking.mobile_f4_variant import text as variant_text
+        if s.metadata.get('f4_variant'):lines+=['',variant_text(s.metadata['f4_variant'])]
         if s.quality_units:
             names={'FINAL_SOURCE_BBOX_UNAVAILABLE':'brak wiarygodnego BBOX modelu',
                 'GT_GEOMETRY_UNCONFIRMED':'brak potwierdzonego obrysu referencyjnego','MT_NOT_COMPLETED':'MT nie zakończyło pracy'}
             missing=[u for u in s.quality_units if u['status']!='MEASURED']
-            if missing:lines+=['','Nieocenialne jednostki BBOX:']+[u['label']+': '+', '.join(names.get(r,r) for r in u['missing_reasons']) for u in missing]
+            if missing:lines+=['','Wywołania MT poza zakresem oceny:']+[u['label']+': '+', '.join(names.get(r,r) for r in u['missing_reasons']) for u in missing]
         lines+=['','GT: '+m.gt_origin+' · rewizja: '+shown(m.review_revision),'Jednostka: '+METRICS[m.metric_id][2],
             'Ocena operatora: '+s.quality_state,'Źródło: '+s.source_status,s.input.session_id,s.input.report_id,'SHA: '+s.input.source_sha256,
             '','Kontrola warunków (nie jest zatwierdzeniem przyczynowości):']

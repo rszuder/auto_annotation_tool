@@ -225,6 +225,8 @@ def test_E10_no_FINAL_manual_FN(tmp_path):
     s=source_session(tmp_path,n=0,mz=False);oid=core.add_plate(s,G,MANUAL,partial_review=True)
     assert not data.snapshot(s,G)['candidates']
     with pytest.raises(ValueError):api().snapshot(s,G,oid)
+    partial.confirm_gtr(s,G,data.snapshot(s,G)['links'][oid]['plate_id'])
+    core.check_scene(s,G)
     assert core.summary(s)['missed_plates']==1
 
 def test_N01_native_themes_sizes_receipt():

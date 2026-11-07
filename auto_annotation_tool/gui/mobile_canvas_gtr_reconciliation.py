@@ -31,7 +31,7 @@ def sync(ed):
         ed.gtr_reconciliation_key=key
     for button in ed.gtr_reconciliation_buttons:
         button.configure(state='normal' if not ed.h._saving and not ed.busy and ed.entry is None else 'disabled')
-    ed.gtr_reconciliation_bar.pack(fill='x',pady=(5,0),before=ed.approve)
+    ed.gtr_reconciliation_bar.pack(fill='x',pady=(5,0),before=ed.contexts.image_actions)
 
 
 def apply(ed,choice,key):

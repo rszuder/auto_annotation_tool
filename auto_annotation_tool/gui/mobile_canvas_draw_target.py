@@ -9,6 +9,10 @@ def resolve(editor):
     if row['conflict']:raise ValueError('Konflikt referencji GT — zachowano zapisane dane.')
     if row['role'] not in ('GT','FINAL'):return None
     s=editor._read();v=clean.source(editor);p=row['plate'];c=row['candidate']
+    if s.get('scope')=='SCENE_FRAME' and p and not p['gt_quad']:
+        return dict(kind='scene_complete',gid=editor.h.current_invocation,oid=row['oid'],plate_id=row['pid'],binding=s['source_binding'])
+    from ..ranking.mobile_reference_disposition import require_active
+    require_active(s,plate_id=row['pid'],object_id=row['oid'])
     from ..ranking.mobile_manual_frame_guard import reservation_records
     references=reservation_records(s,session=editor.h.session,gid=editor.h.current_invocation)
     saved={r['plate_id'] for r in references}

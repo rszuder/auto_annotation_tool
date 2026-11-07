@@ -69,12 +69,32 @@ class Session:
     model_identity: dict[str, Any] = field(default_factory=dict)
     operator_approved: bool = False
     mt_evaluation: dict[str, Any] | None = None
+    mt_object_evaluation: dict[str, Any] | None = None
     comparison_source: dict[str, Any] | None = None
+    experiment_type: str = ''
+    series_id: str = ''
+    roi_variant: str = ''
+    is_pilot: bool = False
+    identity_status: str = 'UNCONFIRMED'
+    scene_assessment: dict[str, Any] | None = None
+    mz_input_evidence: dict[str, Any] | None = None
+    measurement_purpose: str = ''
+    input_mode: str = 'CAMERA_FULL_FRAME'
+    input_context: dict[str, Any] | None = None
+    tv_bbox_evidence: dict[str, Any] | None = None
 
     @property
     def label(self) -> str:
-        return chart_session_label(self.model_identity, scenario=self.scenario,
+        label = chart_session_label(self.model_identity, scenario=self.scenario,
             repeat=self.repeat_label, session_id=self.session_id, precision=self.precision)
+        from ..ranking.mobile_mz_input_evidence import is_diagnostic_purpose
+        if self.input_mode == 'TV_BBOX_CROP':
+            label = 'TV_BBOX_CROP · pełna kamera dla GT\n' + label
+        if is_diagnostic_purpose(self.measurement_purpose):
+            return self.measurement_purpose + ' · ' + self.series_id + '\n' + label
+        if self.experiment_type == 'roi_budget' and self.series_id.upper().startswith('F5A-'):
+            return f"F5A · {'PILOT · ' if self.is_pilot else ''}{self.roi_variant} · {self.series_id}\n" + label
+        return label
 
     @property
     def canvas_ready(self) -> bool:
@@ -221,6 +241,14 @@ def load_session_export(directory: Path, *, verify=True, diagnostics=None) -> Se
     mt_evaluation=_json(directory/mt_files[0]) if len(mt_files)==1 else None
     if mt_evaluation and any(mt_evaluation.get(k)!=mf.get(k) for k in ('session_id','source_archive_sha256','review_revision')):
         raise InvalidExport('MT evaluation identity mismatch')
+    object_files=[r['path'] for r in mf.get('files',[]) if str(r.get('path','')).endswith('/mt_object_evaluation.json')]
+    mt_objects=None
+    if object_files:
+        if len(object_files)!=1:raise InvalidExport('Ambiguous MT object evaluation namespace')
+        from ..ranking.mobile_mt_object_export import replay
+        mt_objects=replay((directory/object_files[0]).parent)
+        if any(mt_objects.get(k)!=mf.get(k) for k in ('session_id','source_archive_sha256','review_revision')):
+            raise InvalidExport('MT object evaluation identity mismatch')
     canvas_file = directory / "canvas_review_summary.json"
     _trace_step(diagnostics, "read_canvas_summary_json", canvas_file)
     canvas = _json(canvas_file) if canvas_file.exists() else None
@@ -228,6 +256,26 @@ def load_session_export(directory: Path, *, verify=True, diagnostics=None) -> Se
     if canvas and (canvas.get("source_archive_sha256") != digest or canvas.get("review_revision") != mf.get("review_revision")):
         raise InvalidExport("Canvas review identity mismatch")
     conditions = sci.get("conditions") or {}
+    from ..ranking.mobile_mz_input_evidence import load_export as load_mz_export
+    try:
+        mz_input_evidence = load_mz_export(directory, mf, (review.get('provenance') or {}).get('collection_session'))
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        raise InvalidExport('MZ input evidence: ' + str(exc)) from exc
+    from ..ranking.mobile_tv_bbox_evidence import load_export as load_tv_export, input_context as tv_input_context
+    try:
+        source_session = (review.get('provenance') or {}).get('collection_session') or {}
+        tv_bbox_evidence = load_tv_export(directory, mf, source_session)
+        input_context = tv_input_context(source_session, tv_bbox_evidence)
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError, ArithmeticError, OSError) as exc:
+        raise InvalidExport('TV BBOX evidence: ' + str(exc)) from exc
+    scene_file = directory / 'scene_frame_assessment.json'
+    scene_assessment = _json(scene_file) if scene_file.exists() else None
+    if scene_assessment:
+        if 'scene_frame_assessment.json' not in {r.get('path') for r in mf.get('files',[])}:
+            raise InvalidExport('Scene-frame assessment is not covered by manifest')
+        if (any(scene_assessment.get(k) != mf.get(k) for k in ('session_id','source_archive_sha256','review_revision'))
+                or scene_assessment.get('scene_annotations') != review.get('scene_annotations', {})):
+            raise InvalidExport('Scene-frame review identity mismatch')
     models = conditions.get("models") or {}
     mt, mz = models.get("MT") or {}, models.get("MZ") or {}
     mt_p = str(mt.get("precision") or "").lower()
@@ -251,11 +299,26 @@ def load_session_export(directory: Path, *, verify=True, diagnostics=None) -> Se
     source_path = str(review.get("source_archive_path") or "").replace("/", "\\")
     match = re.search(r"\\(r[0-9]{2})(?:\\[^\\]+)?$", source_path, re.IGNORECASE)
     repeat_label = match.group(1).lower() if match else "r?"
+    from ..ranking.mobile_experiment_identity import from_review_provenance
+    roi_identity = from_review_provenance(review_provenance, verified=verify)
+    roi_metadata = {}
+    if roi_identity.get('family') in {'F5A', 'DIAGNOSTIC'}:
+        roi_metadata = dict(experiment_type=roi_identity.get('experiment_type') or '',
+            series_id=roi_identity.get('series_id') or '',
+            roi_variant=roi_identity.get('variant') or 'UNPROVEN',
+            is_pilot=roi_identity['is_pilot'], identity_status=roi_identity['status'],
+            measurement_purpose=roi_identity.get('measurement_purpose', ''))
+        repeat = roi_identity.get('replicate_index')
+        repeat_label = f'r{repeat:02d}' if repeat else 'r?'
     _trace_step(diagnostics, "read_manifest_sha256", mf_path)
     result = Session(
         directory=directory, session_id=id_, review_revision=int(mf["review_revision"]),
         review_status=str(mf.get("review_status")), review_mode=str(mf.get("review_mode")),
-        operator_approved=operator_approved,mt_evaluation=mt_evaluation,
+        operator_approved=operator_approved,mt_evaluation=mt_evaluation,mt_object_evaluation=mt_objects,
+        scene_assessment=scene_assessment,
+        mz_input_evidence=mz_input_evidence,
+        tv_bbox_evidence=tv_bbox_evidence, input_mode=input_context.get('input_mode', 'CAMERA_FULL_FRAME'),
+        input_context=input_context or None,
         source_sha256=digest, manifest_sha256=_file_hash(mf_path),
         scenario=str(conditions.get("scenario") or "UNSPECIFIED"), repeat_label=repeat_label,
         device=str(conditions.get("device") or "unknown"), android=str(conditions.get("android") or "unknown"),
@@ -266,6 +329,7 @@ def load_session_export(directory: Path, *, verify=True, diagnostics=None) -> Se
         source_evidence_status="manifest verified" if verify else "UNVERIFIED",
         model_identity=recorded_model_identity(review_provenance, verified=verify,
             recorded_package_id=(mf.get("experiment_session_as_recorded") or {}).get("package_id", "")),
+        **roi_metadata,
     )
     if diagnostics is not None:
         diagnostics.update(operation="complete", manifest_verified=bool(verify),
@@ -293,6 +357,17 @@ def scan_exports(root: Path) -> list[Session]:
 
 def validate_selection(records: Iterable[Session]) -> list[str]:
     rows = list(records); warnings = []
+    from ..ranking.mobile_tv_bbox_evidence import cohort_conflict as tv_conflict
+    conflict = tv_conflict(getattr(r, 'input_context', None) or {'input_mode': getattr(r, 'input_mode', 'CAMERA_FULL_FRAME')} for r in rows)
+    if conflict:
+        raise ValueError('NOT_COMPARABLE / N/A: ' + conflict)
+    from ..ranking.mobile_mz_input_evidence import is_diagnostic_purpose, diagnostic_cohort_conflict
+    purposes = {r.measurement_purpose for r in rows}
+    if diagnostic_cohort_conflict(purposes):
+        raise ValueError('NOT_COMPARABLE / N/A: diagnostyka wymaga osobnej kohorty; rozdziel cele urządzeniowe, syntetyczne i oficjalne F4/F5A.')
+    for purpose in purposes:
+        if is_diagnostic_purpose(purpose):
+            warnings.append(purpose + ': dane diagnostyczne poza oficjalnymi kohortami F4/F5A.')
     if not rows:
         return ["Nie wybrano żadnej sesji."]
     keys = [r.session_id for r in rows]
@@ -566,6 +641,8 @@ def export_figures(records: Iterable[Session], root: Path, *, single_session=Fal
                 "source_archive_sha256":r.source_sha256,"scenario":r.scenario,
                 "precision":r.precision,"repeat":r.repeat_label,"review_mode":r.review_mode,
                 "apk_sha256":r.apk_sha256,
+                "measurement_purpose":r.measurement_purpose,
+                **({'input_mode': r.input_mode, 'input_context': r.input_context} if r.input_mode == 'TV_BBOX_CROP' else {}),
                 "quality_evaluable_assisted":r.canvas_ready,"scientific_quality_status":r.scientific_quality_status,
                 "mt_checkpoint":r.mt_checkpoint,"mz_checkpoint":r.mz_checkpoint,
                 "package_and_models":r.model_identity,

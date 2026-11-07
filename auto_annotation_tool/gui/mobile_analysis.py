@@ -1,4 +1,4 @@
-"""ALPR-ANALYSIS-1.0: retrospective F4 analysis, never a source-data migration."""
+"""ALPR-ANALYSIS-1.1 / F4-EVAL-2.0; read-only retrospective F4 analysis."""
 from __future__ import annotations
 from dataclasses import dataclass, field, asdict, replace
 from pathlib import Path
@@ -9,16 +9,18 @@ import json
 import math
 import re
 
-PROTOCOL_ID = 'ALPR-ANALYSIS-1.0'
-IMPLEMENTATION_ID = 'alpr.desktop.analysis.v1'
-PROTOCOL_DATE = '2026-10-31'
+PROTOCOL_ID = 'ALPR-ANALYSIS-1.1'
+IMPLEMENTATION_ID = 'alpr.desktop.analysis.v2'
+PROTOCOL_DATE = '2026-11-01'
 QUESTIONS = {'F4':'F4 · FP32 / INT8', 'F5A':'F5A · MP / ROI',
              'F5B':'F5B · AutoZoom', 'DIAGNOSTIC':'Diagnostyka źródeł'}
 REGISTRY = Path(__file__).parents[1]/'ranking/protocols/alpr_analysis_1_0/f4_registry.csv'
 PROTOCOL_DOCUMENT = Path(__file__).parents[2]/'docs/experiments/ALPR_ANALYSIS_1_0_20261031.md'
+OBJECT_DOCUMENT = Path(__file__).parents[2]/'docs/experiments/F4_EVAL_2_0_OPERATOR_ASSISTED_OBJECT_20261101.md'
 
 def protocol_evidence():
-    return {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (REGISTRY,PROTOCOL_DOCUMENT)}
+    from ..ranking.mobile_mt_object_evaluation import POLICY_ID, POLICY_SHA256
+    return {p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in (REGISTRY,PROTOCOL_DOCUMENT,OBJECT_DOCUMENT)} | {POLICY_ID: POLICY_SHA256}
 METRICS = {
     'mt_p50_ms':('Czasy · MT — mediana (p50)','ms','mt_inference_call'),
     'mt_p95_ms':('Czasy · MT — p95','ms','mt_inference_call'),
@@ -29,12 +31,19 @@ METRICS = {
     'mt_calls':('Liczba wywołań MT','wywołania','recorded_mt_call'),
     'mz_calls':('Liczba wywołań MZ','wywołania','recorded_mz_call'),
     'mz_call_p95_ms':('MZ — p95 pojedynczego wywołania','ms','mz_inference_call'),
-    'mt_tp':('Wykrycie BBOX · TP','tablice','complete_mt_invocation_ROI'),
-    'mt_fp':('Wykrycie BBOX · FP','wskazania FINAL','complete_mt_invocation_ROI'),
-    'mt_fn':('Wykrycie BBOX · FN','tablice','complete_mt_invocation_ROI'),
-    'mt_precision_pct':('Wykrycie BBOX · Precision','%','complete_mt_invocation_ROI'),
-    'mt_recall_pct':('Wykrycie BBOX · Recall','%','complete_mt_invocation_ROI'),
-    'mt_f1_pct':('Wykrycie BBOX · F1','%','complete_mt_invocation_ROI'),
+    'mt_tp':('MT v2 · TP','tablice','complete_mt_invocation_ROI'),
+    'mt_fp':('MT v2 · FP','wskazania FINAL','complete_mt_invocation_ROI'),
+    'mt_fn':('MT v2 · FN','tablice','complete_mt_invocation_ROI'),
+    'mt_precision_pct':('MT v2 · Precision','%','complete_mt_invocation_ROI'),
+    'mt_recall_pct':('MT v2 · Recall','%','complete_mt_invocation_ROI'),
+    'mt_f1_pct':('MT v2 · F1','%','complete_mt_invocation_ROI'),
+    'bbox_v1_tp':('Pomocnicze BBOX v1 · TP','tablice','complete_mt_invocation_ROI'),
+    'bbox_v1_fp':('Pomocnicze BBOX v1 · FP','wskazania FINAL','complete_mt_invocation_ROI'),
+    'bbox_v1_fn':('Pomocnicze BBOX v1 · FN','tablice','complete_mt_invocation_ROI'),
+    'bbox_v1_precision_pct':('Pomocnicze BBOX v1 · Precision','%','complete_mt_invocation_ROI'),
+    'bbox_v1_recall_pct':('Pomocnicze BBOX v1 · Recall','%','complete_mt_invocation_ROI'),
+    'bbox_v1_f1_pct':('Pomocnicze BBOX v1 · F1','%','complete_mt_invocation_ROI'),
+    'bbox_iou_pct':('Geometria · ciągłe BBOX IoU par v2','%','source_bbox_GT_pair'),
     'pose_availability_pct':('Pose · dostępność źródłowych narożników','%','source_final_linked_to_GT'),
     'polygon_iou_pct':('Geometria MT · Polygon IoU','%','source_pose_GT_pair'),
     'nmce_pct':('Geometria MT · NMCE','%','source_pose_GT_pair'),
@@ -97,7 +106,12 @@ class MetricEligibility:
 
     def payload(self):
         value=asdict(self)
+        from ..ranking import mobile_mt_object_evaluation as objects,mobile_mt_detection_evaluation as bbox
+        method=bbox if self.metric_id.startswith('bbox_v1_') else objects
         value.update(analysis_protocol_id=PROTOCOL_ID,implementation_id=IMPLEMENTATION_ID,
+            matching_policy_id=method.POLICY_ID if self.gt_origin=='ASSISTED' else None,
+            matching_policy_sha256=method.POLICY_SHA256 if self.gt_origin=='ASSISTED' else None,
+            method_adopted_date=('2026-10-26' if method is bbox else '2026-11-01') if self.gt_origin=='ASSISTED' else None,
             unit=METRICS[self.metric_id][1],observation_unit=METRICS[self.metric_id][2],
             coverage=(self.n_scored/self.n_total_eligible if self.n_total_eligible and self.n_scored is not None else None),
             n_total_planned=None)
@@ -136,11 +150,14 @@ class AnalysisCohort:
     protocol_files: dict = field(default_factory=protocol_evidence)
 
     def payload(self):
+        from ..ranking.mobile_mt_object_evaluation import POLICY_ID,POLICY_SHA256
         return dict(analysis_protocol_id=PROTOCOL_ID,protocol_date=PROTOCOL_DATE,
+            primary_matching_policy_id=POLICY_ID,primary_matching_policy_sha256=POLICY_SHA256,
             protocol_files=self.protocol_files,
             chronology='RETROSPECTIVE_FOR_F4_NOT_PREREGISTERED',implementation_id=IMPLEMENTATION_ID,
             question=self.question,interpretation=self.interpretation,duplicates=self.duplicates,
             limitations=['Brak dowodu parowania fotografii; brak kontrolowanego wniosku przyczynowego.',
+                'F4-EVAL-2.0 przyjęto retrospektywnie 2026-11-01. Główne MT v2 to ocena operatora; BBOX v1 jest odrębną miarą pomocniczą.',
                 'DAY i NIGHT są osobnymi materiałami TV, nie dwoma checkpointami dziennym i nocnym.',
                 'GT ASSISTED nie jest niezależnym F6; różne podzbiory jakości nie tworzą rankingu wariantów.',
                 'n śladów i n wywołań nie są liczbą niezależnych plansz; MZ/ślad może sumować wywołania.'],
@@ -150,7 +167,7 @@ def _digest(value):
     return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,default=str).encode()).hexdigest()
 
 def _missing(s, metric, reason, *, n=None, total=None, explanation=''):
-    needs_gt=metric in ('mt_tp','mt_fp','mt_fn','mt_precision_pct','mt_recall_pct','mt_f1_pct',
+    needs_gt=metric.startswith('bbox_v1_') or metric in ('bbox_iou_pct','mt_tp','mt_fp','mt_fn','mt_precision_pct','mt_recall_pct','mt_f1_pct',
         'pose_availability_pct','polygon_iou_pct','nmce_pct','exact_mz_pct','micro_cer_pct','exact_e2e_pct','no_read_e2e_pct')
     s.metrics[metric]=MetricEligibility(metric,n_scored=n,n_total_eligible=total,
         n_unscored=total-n if n is not None and total is not None else None,
@@ -166,68 +183,11 @@ def _metric(s,key,value,n,total,*,reasons=(),quality=False,numerator=None,denomi
         'UNAVAILABLE' if value is None else 'ASSISTED_SUBSET' if quality and status=='SUBSET' else 'ASSISTED' if quality else 'DESCRIPTIVE',
         tuple(s.metadata.get('quality_evidence',[])) if quality else (s.input.source_path,),explanation)
 
+
 def _quality(s,review):
-    """Consume the existing frozen scorer; never replace its matcher or GT."""
-    from ..ranking.mobile_human_review import MobileReviewSession
-    from ..ranking.mobile_mt_detection_evaluation import evaluate_session,POLICY_SHA256
-    from .mobile_measurement_availability import limits_text
-    quality_keys=[k for k in METRICS if k.startswith('mt_') and k not in ('mt_calls','mt_p50_ms','mt_p95_ms')]
-    quality_keys+=['pose_availability_pct','polygon_iou_pct','nmce_pct','exact_mz_pct','micro_cer_pct']
-    if review is None:
-        for key in quality_keys:_missing(s,key,'EXPORT_STALE' if s.quality_state in ('STALE','NEEDS_EXPORT') else 'QUALITY_NOT_VERIFIED')
-        return
-    c=review.canvas or {}
-    s.metadata['review_revision']=review.review_revision
-    s.metadata['quality_evidence']=[str(review.directory/'export_manifest.json'),str(review.directory/'review.json')]
-    try:
-        read_only=MobileReviewSession.open(s.input.source_path,sidecar_path=review.directory/'review.json')
-        mt=evaluate_session(read_only)
-        if mt['matching_policy_sha256']!=POLICY_SHA256 or mt.get('alias_conflicts'):
-            raise ValueError('Niepotwierdzony kontrakt dopasowania lub tożsamość jednostek.')
-        if review.mt_evaluation is not None and _digest(mt)!=_digest(review.mt_evaluation):
-            raise ValueError('Zapisane wyniki MT nie zgadzają się z kanonicznym odczytem źródła i tej rewizji GT.')
-        units=mt['units'];qualified=[u for u in units if u['status']=='MEASURED']
-        assert len({u['unit_id'] for u in units})==len(units)
-        assert all(u['session_id']==s.input.session_id and u['source_archive_sha256']==s.input.source_sha256 for u in units)
-        for u in qualified:
-            assert all(type(u[k]) is int and u[k]>=0 for k in ('tp','fp','fn','n_gt','n_final_mt'))
-            assert u['tp']+u['fn']==u['n_gt'] and u['tp']+u['fp']==u['n_final_mt']
-            assert len(u['matched_pairs'])==u['tp'] and len(u['final_outcomes'])==u['n_final_mt']
-        n=len(qualified);total=len(units)
-        counts={k:sum(u[k] for u in qualified) for k in ('tp','fp','fn')}
-        assert all(mt[k]==v for k,v in counts.items()) and n==mt['n_qualified'] and total==mt['n_total']
-        labels={r.get('mt_invocation_id'):f'Obraz {i:02d}' for i,r in enumerate(c.get('scenes',[]),1)}
-        s.quality_units=[dict(unit_id=u['unit_id'],mt_invocation_id=u['mt_invocation_id'],image=u.get('image_entry'),
-            label=labels.get(u['mt_invocation_id'],u['mt_invocation_id']),status=u['status'],tp=u['tp'],fp=u['fp'],fn=u['fn'],
-            missing_reasons=u['unavailable_reasons']) for u in units]
-        reasons=[r for u in units if u['status']!='MEASURED' for r in u['unavailable_reasons']]
-        for k in counts:_metric(s,'mt_'+k,counts[k] if n else None,n,total,reasons=reasons,quality=True)
-        tp,fp,fn=(counts[k] for k in ('tp','fp','fn'))
-        for key,num,den in (('mt_precision_pct',tp,tp+fp),('mt_recall_pct',tp,tp+fn),('mt_f1_pct',2*tp,2*tp+fp+fn)):
-            _metric(s,key,100*num/den if n and den else None,n,total,reasons=reasons or (() if den else ('ZERO_DENOMINATOR',)),
-                quality=True,numerator=num,denominator=den,explanation=f'{n}/{total} kompletnych jednostek MT/ROI; BBOX IoU ≥ 0,50, FINAL, greedy 1:1.')
-    except (OSError,ValueError,KeyError,TypeError,AssertionError) as exc:
-        for key in quality_keys[:6]:_missing(s,key,'MT_COUNTS_NOT_VERIFIED',explanation=str(exc))
-    # Geometry/OCR retain their established complete Canvas validator. A partial
-    # detector denominator is not evidence for a partial geometry/OCR denominator.
-    if not review.canvas_ready:
-        for key in ('pose_availability_pct','polygon_iou_pct','nmce_pct','exact_mz_pct','micro_cer_pct'):
-            _missing(s,key,'CANVAS_METRIC_DENOMINATOR_NOT_VERIFIED',explanation=limits_text(c,review.mt_evaluation)
-                +'\nZakres geometrii/MZ wymaga pełnej walidacji Canvas; częściowe sumy nie wystarczają do zatwierdzenia tej miary.')
-        return
-    linked=[r for r in c.get('rows',[]) if r.get('included') and r.get('outcome')=='LINKED_MT' and not r.get('post_nms_suppressed_raw')]
-    geometry=int(c['geometry_n']);pose_known=geometry+int(c.get('pose_invalid_matches',0))
-    pose_unknown=int(c.get('pose_evidence_unavailable_matches',0))
-    _metric(s,'pose_availability_pct',100*geometry/pose_known if pose_known else None,pose_known,pose_known+pose_unknown,
-        quality=True,numerator=geometry,denominator=pose_known,reasons=('POSE_STATUS_UNAVAILABLE',) if pose_unknown else ())
-    for key,value in (('polygon_iou_pct',c.get('polygon_iou_mean_pct')),('nmce_pct',c.get('nmce_mean_pct'))):
-        _metric(s,key,value if geometry else None,geometry,len(linked),quality=True,
-            reasons=('POSE_INVALID_OR_UNAVAILABLE',) if geometry<len(linked) else (),explanation='Wyłącznie rzeczywiste źródłowe Pose i GTR; nie BBOX jako Pose.')
-    n=c['evaluated_reads'];chars=c['gt_characters'];errors=c['text_errors']
-    _metric(s,'exact_mz_pct',100*c['exact_reads']/n if n else None,n,n,quality=True,numerator=c['exact_reads'],denominator=n,
-        explanation='Warunkowe wykonane odczyty z czytelnym GTZ. NOT_RUN poza mianownikiem; to nie E2E.')
-    _metric(s,'micro_cer_pct',100*errors/chars if chars else None,n,n,quality=True,numerator=errors,denominator=chars,
-        explanation='Suma odległości edycyjnych / suma znaków GTZ; nie średnia procentów CER.')
+    from .mobile_analysis_object_quality import quality
+    return quality(s,review)
+
 
 def _source(inp):
     from .mobile_report_source_recovery import restore_source
@@ -252,16 +212,39 @@ def _source(inp):
             raise ValueError('Sprzeczny session_id/SHA albo zmiana źródła podczas odczytu.')
         s.source_status='VERIFIED';s.source_reason='Oryginalne archiwum, manifest i tożsamość sprawdzone.';s.record=record
         _,trace_state=_read_all_traces(s.bundle)
-        with REGISTRY.open(encoding='utf-8-sig',newline='') as f:registry=list(csv.DictReader(f,delimiter=';'))
-        mapping=next((r for r in registry if r['archive_sha256']==inp.source_sha256),None)
+        from ..ranking.mobile_f4_variant import from_bundle
+        f4_variant=from_bundle(s.bundle,session_id=inp.session_id,registry_path=REGISTRY)
+        mapping=f4_variant if f4_variant['status']=='VERIFIED' else None
         s.metadata.update(scenario=record.scenario,variant=record.precision.upper(),repeat=record.repeat_label,
             apk_sha256=record.apk_sha256,device=record.device,mt_checkpoint=record.mt_checkpoint,mz_checkpoint=record.mz_checkpoint,
             package_and_models=record.model_identity,trace_count=len(rows),trace_state=trace_state,registry_verified=bool(mapping))
-        if mapping:
-            if record.scenario!=mapping['scenario']:raise ValueError('Scenariusz źródła niezgodny z rejestrem SHA F4.')
-            s.metadata.update(experiment='F4',variant=mapping['analysis_variant'],repeat=mapping['rNN_folder'],
+        s.metadata.update(f4_variant=f4_variant,variant_provenance=f4_variant['provenance'],
+            declared_android_variant=f4_variant['declared_android_variant'])
+        from ..ranking.mobile_experiment_identity import from_bundle as experiment_identity
+        diagnostic = experiment_identity(s.bundle)
+        if diagnostic.get('family') == 'DIAGNOSTIC':
+            s.metadata.update(experiment=diagnostic['experiment'], variant=diagnostic['variant_display'],
+                registry_verified=False, measurement_purpose=diagnostic.get('measurement_purpose'),
+                declared_android_variant=diagnostic.get('variant'), is_pilot=False,
+                identity_status=diagnostic['status'], series_id=diagnostic.get('series_id'))
+        elif mapping:
+            s.metadata.update(experiment='F4',variant=mapping['analysis_variant'],repeat=mapping['repeat'],
                 source_variant=mapping['source_variant'],source_replicate_index=mapping['source_replicate_index'],
                 mapping_evidence=str(REGISTRY),mapping_sha256=_sha_file(REGISTRY))
+        else:
+            from ..ranking.mobile_experiment_identity import from_bundle
+            identity = from_bundle(s.bundle)
+            if identity.get('family') == 'F5A':
+                s.metadata.update(experiment=identity['experiment'], experiment_type=identity.get('experiment_type'),
+                    variant=identity['variant_display'], series_id=identity.get('series_id'),
+                    is_pilot=identity['is_pilot'], identity_status=identity['status'],
+                    identity_issues=identity['issues'], roi_budget_policy=identity.get('roi_budget_policy'),
+                    variant_provenance=identity.get('provenance'), declared_android_variant=identity.get('variant'),
+                    repeat=('PILOT · ' if identity['is_pilot'] else '') + record.repeat_label)
+        from ..ranking.mobile_tv_bbox_evidence import input_context as tv_input_context
+        tv_context = tv_input_context(s.bundle.collection_session, getattr(s.bundle, 'tv_bbox_evidence', {}) or {})
+        if tv_context:
+            s.metadata.update(input_mode=tv_context['input_mode'], input_context=tv_context)
         for stage,prefix in (('mt','mt'),('mz','mz_trace'),('pipeline','pipeline')):
             met=record.latency[stage];total=len(rows) if trace_state=='complete' else None
             for pct in ('p50','p95'):
@@ -278,6 +261,20 @@ def _source(inp):
                 if key=='mt_calls' and any(v!=1 for v in values):
                     for pct in ('p50','p95'):_missing(s,f'mt_{pct}_ms','MT_CALL_TIMING_UNPROVEN',explanation='Czas śladu może sumować wiele MT; brak pojedynczych czasów wywołań.')
             except (KeyError,ValueError,TypeError,AssertionError):_missing(s,key,'CALL_COUNT_UNAVAILABLE')
+        if s.metadata.get('experiment') == 'F5A':
+            # A stage sum is a call duration only if every timed trace proves
+            # exactly one call. Missing MP-only counters cannot waive this guard.
+            timed = [r for r in rows if r.get('plate_inference_ms') not in (None, '')
+                     and str(r.get('status', '')).lower() not in
+                     ('scene_superseded', 'runtime_error', 'pipeline_error', 'cancelled', 'not_run')]
+            try:
+                single = bool(timed) and all(int(r.get('mt_runs_this_frame', '')) == 1 for r in timed)
+            except (ValueError, TypeError):
+                single = False
+            if not single:
+                for pct in ('p50', 'p95'):
+                    _missing(s, f'mt_{pct}_ms', 'MT_CALL_TIMING_UNPROVEN',
+                        explanation='Zapisany czas MT jest sumą w śladzie; brak dowodu czasu pojedynczego wywołania. Surowa telemetria pozostaje dostępna.')
         _missing(s,'mz_call_p95_ms','PER_CALL_TIMING_UNAVAILABLE',explanation='Nie dzielimy percentyli sumy czasu przez liczbę MZ.')
         for key in ('scene_coverage_pct','exact_e2e_pct','no_read_e2e_pct'):
             _missing(s,key,'SCENE_UNMAPPED',explanation='Brak zweryfikowanej mapy plansza→GT i reguły wyboru odczytu z okna. F4 nie jest niezależnym F6.')
@@ -326,10 +323,29 @@ def analyze(inputs, question='F4'):
     sessions=[_source(inp) for inp in unique]
     from .mobile_report_scientific_comparability import assess_cohort
     reports=[s.bundle.report for s in sessions if s.bundle is not None and s.source_status=='VERIFIED']
+    from ..ranking.mobile_mz_input_evidence import diagnostic_cohort_conflict, is_diagnostic_purpose
+    mixed_purposes = diagnostic_cohort_conflict(s.metadata.get('measurement_purpose', '')
+        for s in sessions if s.source_status == 'VERIFIED')
+    from ..ranking.mobile_tv_bbox_evidence import cohort_conflict as tv_conflict
+    input_conflict = tv_conflict(s.metadata.get('input_context') or {'input_mode': s.metadata.get('input_mode', 'CAMERA_FULL_FRAME')}
+        for s in sessions if s.source_status == 'VERIFIED')
     for s in sessions:
+        if question=='F4' and not s.metadata.get('registry_verified') and not is_diagnostic_purpose(s.metadata.get('measurement_purpose')):
+            s.metadata.update(variant=(s.metadata.get('f4_variant') or {}).get('label','NIEPOTWIERDZONE'),repeat='—')
+            if 'metadata_digest' in s.fingerprint:s.fingerprint['metadata_digest']=_digest(s.metadata)
         if s.source_status=='VERIFIED':s.conditions=assess_cohort(s.bundle.report,reports,bundle=s.bundle)
-        if s.source_status=='VERIFIED' and question!='DIAGNOSTIC' and s.metadata.get('experiment')!=question:
-            s.metrics={k:replace(m,status='NOT_COMPARABLE',value=None,missing_reasons=tuple((*m.missing_reasons,'QUESTION_SOURCE_NOT_PROVEN')),
+        if s.source_status=='VERIFIED' and (input_conflict or mixed_purposes or (question!='DIAGNOSTIC' and s.metadata.get('experiment')!=question)):
+            reason = input_conflict or ('DIAGNOSTIC_PURPOSE_COHORT_MISMATCH' if mixed_purposes else 'QUESTION_SOURCE_NOT_PROVEN')
+            s.metrics={k:replace(m,status='NOT_COMPARABLE',value=None,missing_reasons=tuple((*m.missing_reasons,reason)),
                 n_scored=None,n_total_eligible=None,n_unscored=None,numerator=None,denominator=None,review_revision=None,inference_scope='UNAVAILABLE',
                 explanation='Brak udowodnionego materiału dla tego pytania. Źródło pozostaje w diagnostyce.') for k,m in s.metrics.items()}
+    if question == 'F5A':
+        f5a = [s for s in sessions if s.source_status == 'VERIFIED' and s.metadata.get('experiment') == 'F5A']
+        cohorts = {(s.metadata.get('series_id'), s.metadata.get('is_pilot')) for s in f5a}
+        if len(cohorts) > 1:
+            for s in f5a:
+                s.metrics = {k: replace(m, status='NOT_COMPARABLE', value=None,
+                    missing_reasons=(*m.missing_reasons, 'F5A_SERIES_OR_PILOT_MISMATCH'),
+                    numerator=None, denominator=None, inference_scope='UNAVAILABLE',
+                    explanation='PILOT i właściwa seria F5A pozostają osobnymi kohortami.') for k, m in s.metrics.items()}
     return AnalysisCohort(tuple(unique),sessions,question,duplicates)

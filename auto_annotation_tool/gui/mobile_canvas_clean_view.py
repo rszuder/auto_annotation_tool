@@ -125,6 +125,10 @@ def drawing_context(ed):
     return dict(row=row,location=location,number=visible.index(target[2])+1)
 
 def bar_caption(ed,r=None):
+    s=ed._read()
+    if s and s.get('scope')=='SCENE_FRAME':
+        obj=next((o for o in s['objects'] if o['object_id']==ed.selected),None)
+        if obj and obj['quad'] is None:return 'GTR · obecność potwierdzona · narożniki niedostępne'
     r=r or selected(ed)
     if not r:return ''
     if location_only(r):return f"MT {r['candidate']['mt_detection_index']+1} · brak narożników"
@@ -485,6 +489,9 @@ def right_hit(ed,x,y):
     return next(iter(hits),None)
 
 def context(ed,model):
+    if (ed._read() or {}).get('scope') == 'SCENE_FRAME':
+        from .mobile_canvas_scene_frames import context as scene_context
+        return scene_context(ed, model)
     s=ed._read();v=source(ed);r=next((row for row in records(ed) if entry_matches(ed,row)),None) or selected(ed)
     inv=ed.inventory();obj='Wybierz ramkę na obrazie';title='WYBRANA TABLICA'
     if r:
@@ -526,19 +533,19 @@ def context(ed,model):
             else:obj+='\nOdczyt: brak potwierdzonych danych'
     detection=None
     if ed.h.session and ed.h.current_invocation:
-        from ..ranking.mobile_mt_detection_evaluation import evaluate_unit, reason_text
+        from ..ranking.mobile_mt_object_evaluation import evaluate_unit, reason_text
         detection=evaluate_unit(ed.h.session,ed.h.current_invocation)
         measured=detection['status']=='MEASURED'
         if r and r['fp']:
             outcome=next((p for p in detection['final_outcomes'] if p['attempt_id']==r['candidate']['attempt_id']),None)
-            obj+='\nWynik dopasowania BBOX: '+(outcome['outcome'] if outcome else '—')
+            obj+='\nWynik MT v2: '+(outcome['outcome'] if outcome else '—')
         if r and not r['fp'] and r['role']!='UNKNOWN':
             outcome=next((p for p in detection['final_outcomes'] if r['candidate']
                           and p['attempt_id']==r['candidate']['attempt_id']),None)
             status=(outcome['outcome']+(' (duplikat)' if outcome.get('reason')=='DUPLICATE_FINAL' else '')
                     if outcome else 'FN' if measured and r['pid'] in detection.get('unmatched_gt_ids',[]) else '—')
             decision='poprawna' if r['decision']==partial.PLATE else 'nieustalona'
-            obj=obj.replace('Decyzja ramki: '+decision,'Decyzja operatora: '+('poprawna' if decision=='poprawna' else 'oczekuje')+'\nWynik dopasowania BBOX: '+status)
+            obj=obj.replace('Decyzja ramki: '+decision,'Decyzja operatora: '+('poprawna' if decision=='poprawna' else 'oczekuje')+'\nWynik MT v2: '+status)
             if r['candidate'] and not r['mt'] and r['gt']:
                 overlap=None
                 if measured:
@@ -559,14 +566,21 @@ def context(ed,model):
                   if r['candidate']['mz_ran'] else '\nNie wykonano odczytu' if r['candidate']['mz_status']=='NOT_RUN'
                   else '\nOdczyt: brak potwierdzonych danych')
         obj+='\nGTZ: '+(saved[:35] or 'nieuzupełniony')
-    status='Zatwierdzona' if ed.h.session and ed.h.session.review.review_status=='COMPLETED' else 'W toku'
+    from ..ranking.mobile_review_status import approval_caption
+    status=(approval_caption(inv,ed.h.session.review.review_status,ed.h.session.review.review_revision)
+            if ed.h.session else 'Wczytywanie oceny…')
     report=getattr(ed.h,'report',None);stale=False
     if ed.h.session and report and report.source_archive_sha256.lower()==ed.h.session.review.source_archive_sha256.lower():
         gate=getattr(ed.h.browser,'_comparison_verification',{}).get((str(report.report_id),report.source_archive_sha256.lower()))
         stale=bool(gate and gate.state=='STALE')
     pending=inv.get('task_decisions',inv.get('approval_decisions',inv['decisions']))
     progress=(f"Eksport nieaktualny · decyzje: {pending}" if stale else f"{status} · Pozostałe decyzje: {pending}")
-    session=f"Sprawdzone: {inv.get('approval_ready',inv['inspected'])}/{inv['total']} · Pozostało: {inv.get('approval_remaining',inv['remaining'])}\n{progress}"
+    session=f"Sprawdzone: {inv['inspected']}/{inv['total']} · Pozostało: {inv['remaining']}\n{progress}"
+    assessed = inv['inspected']
+    if inv.get('experiment_family') == 'F5A':
+        from ..ranking.mobile_review_status import approval_caption
+        assessed = inv.get('operator_assessed', inv['assessed'])
+        session = approval_caption(inv, ed.h.session.review.review_status, ed.h.session.review.review_revision)
     if r and r['pid'] and not r['candidate']:
         from ..ranking.mobile_mt_geometry_layers import overlapping_references
         overlap=overlapping_references(s,v).get(r['pid'],[])
@@ -596,11 +610,10 @@ def context(ed,model):
     # An untouched image still cannot claim a confirmed empty scene. Once an
     # explicit rejection is shown, zero means zero saved references, alongside
     # the partial-review explanation, not an assertion that no plate exists.
-    if image_counts['gt']=='0' and s and not s['checked'] and not operational['counts']['rejected']:
-        image_counts['gt']='—'
     if feedback.get('partial_fp_lower_bound') is not None:
         image_counts['fp']=f"≥{feedback['partial_fp_lower_bound']}"
     if feedback.get('partial_note'):image_note=feedback['partial_note']+'\n'+image_note
+    if operational.get('gt_reason'):image_note='Zapisane GT: '+operational['gt_reason']+'.\n'+image_note
     image=' · '.join(k.upper()+': '+v for k,v in image_counts.items())+'\n'+image_note
     obj+='\n\nBieżący obraz · szczegóły: FINAL '+operational_counts['mt']+' · odrzucone przez operatora '+operational_counts['rejected']+' · GT bez powiązania '+operational_counts['unlinked']
     obj+='\n'+bbox_scope+'\n'+bbox_note
@@ -609,7 +622,7 @@ def context(ed,model):
     for unit in task['units']:obj+='\n'+unit['text']+' · '+', '.join(unit['reasons'])
     return dict(object=obj,image=image,session=session,object_title=title,image_counts=image_counts,image_note=image_note,
                 bbox_counts=bbox_counts,bbox_note=bbox_note,bbox_scope=bbox_scope,locator_target=locator_target,
-                session_counts=dict(inspected=f"{inv.get('approval_ready',inv['inspected'])}/{inv['total']}",remaining=str(inv.get('approval_remaining',inv['remaining'])),decisions=str(pending)),
+                session_counts=dict(inspected=f"{assessed}/{inv['total']}",remaining=str(inv['remaining']),decisions=str(inv.get('decisions',pending))),
                 session_note='Eksport nieaktualny' if stale else status)
 
 class CompactContexts(tk.Frame):
@@ -670,6 +683,9 @@ class CompactContexts(tk.Frame):
 
 def show_exclusion(ed):
     if not ed.available():return
+    ed.clean_reason_kind='exclude'
+    ed.clean_reason_label.configure(text='Przyczyna wyłączenia całego obrazu:')
+    ed.clean_reason_save.configure(text='Wyłącz obraz')
     ed.clean_exclusion_context=(id(ed.h.session),ed.h.current_invocation)
     ed.clean_reason.set(ed._read().get('exclusion_reason','') if ed._read() else '')
     ed.clean_exclusion.pack(fill='x',pady=(5,0),before=ed.contexts.image_actions);sync_image_actions(ed);ed.clean_reason_entry.focus_set()
@@ -680,6 +696,13 @@ def close_exclusion(ed):
 def save_exclusion(ed):
     if not ed.available() or ed.clean_exclusion_context!=(id(ed.h.session),ed.h.current_invocation):return False
     reason=ed.clean_reason.get().strip()
+    if getattr(ed,'clean_reason_kind','exclude')=='presence' and (ed._read() or {}).get('scope')=='SCENE_FRAME':
+        if not reason:ed.message('Podaj przyczynę braku narożników tablicy.');return False
+        from ..ranking.mobile_scene_frame_review import add_plate
+        oid=ed._commit(lambda:add_plate(ed.h.session,ed.h.current_invocation,geometry_reason=reason),'Zapisano fizyczną tablicę bez fikcyjnych narożników')
+        if oid:
+            close_exclusion(ed);ed.selected=oid;ed.mode='edit';ed.sync();ed.start_entry(oid)
+        return bool(oid)
     if not reason:ed.message('Podaj przyczynę wyłączenia całego obrazu.');return False
     result=ed._commit(lambda:core.exclude_scene(ed.h.session,ed.h.current_invocation,reason),'Zapisano przyczynę wyłączenia obrazu')
     if result:close_exclusion(ed)
@@ -689,15 +712,6 @@ def restore_image(ed):
     if ed.available():
         ed._commit(lambda:core.set_scene_review_state(ed.h.session,ed.h.current_invocation,checked=True),'Przywrócono ocenę obrazu')
         close_exclusion(ed)
-
-def confirm_checkbox(ed):
-    # Tk flips the BooleanVar before command. The persisted stack, not that
-    # temporary UI value or the derived whole-image status, owns the decision.
-    try:
-        ed.confirm()
-    finally:
-        sync_image_actions(ed)
-
 
 def sync_image_actions(ed):
     context=(id(ed.h.session),ed.h.current_invocation)
@@ -709,8 +723,8 @@ def sync_image_actions(ed):
         note.pack_forget();ed.clean_exclude_button.pack_forget()
     else:
         if not note['text'].strip():note.pack_forget()
-        elif not note.winfo_manager():note.pack(fill='x',pady=(0 if getattr(note,'compact',False) else 5,0),before=ed.approve)
-        if not ed.clean_exclude_button.winfo_manager():ed.clean_exclude_button.pack(fill='x',pady=(0 if getattr(note,'compact',False) else 5,0),after=ed.approve)
+        elif not note.winfo_manager():note.pack(fill='x',pady=(0 if getattr(note,'compact',False) else 5,0),before=ed.contexts.image_actions)
+        if not ed.clean_exclude_button.winfo_manager():ed.clean_exclude_button.pack(fill='x',pady=(0 if getattr(note,'compact',False) else 5,0),before=ed.contexts.image_actions)
     scene=ed._read() or {};enabled=ed.available() and not ed.busy and not ed.h._saving
     frame=partial.progress(scene) if scene else None
     row=selected(ed)
@@ -721,29 +735,23 @@ def sync_image_actions(ed):
                     (row['plate'] and (ed.gt_focus_id or (layer and layer['active']=='GTR'))))
     verified=False;removed=False
     if target:
-        pid=row['pid'] if row['gt'] else None
+        pid=row['pid'] if row['gt'] and not bad_source else None
         verified=partial.stack_is_verified(scene,oid=row['oid'] if not pid else None,plate_id=pid)
         removed=bool(row['plate'] and row['plate']['geometry_state']=='operator_removed' and not row['gt'])
-        ed.clean_gtr_confirm_button.configure(text='MT odrzucone · PPM cofa' if bad_source else 'Narysuj obrys GTR · D' if removed else 'Cofnij weryfikację · Spacja' if verified else 'Zatwierdź ramki · Spacja',
-                                            command=ed.draw_toggle if removed else ed.confirm,
-                                            disabledforeground=ed.p['fg'],state='normal' if enabled and not bad_source and ed.mode!='draw' else 'disabled')
+        ed.clean_gtr_confirm_button.configure(text='Uznaj wskazanie MT · Spacja' if bad_source else 'Narysuj obrys GTR · D' if removed else 'Cofnij weryfikację · Spacja' if verified else 'Zatwierdź ramki · Spacja',
+                                            command=ed.draw_toggle if removed and not bad_source else ed.confirm,
+                                            disabledforeground=ed.p['fg'],state='normal' if enabled and ed.mode!='draw' else 'disabled')
         ed.clean_gtr_confirm_button.pack(fill='x',pady=(4,0))
     else:ed.clean_gtr_confirm_button.pack_forget()
+    from .mobile_canvas_scene_frames import sync_empty_action
+    sync_empty_action(ed, scene, enabled)
     # One stack may be verified while another plate still awaits a decision.
-    # checked_var remains the independent, derived whole-image status.
+    # Read-only stack state; no image-level confirmation widget is installed.
     ed.frame_checked_var.set(verified)
-    ed.approve.configure(text='Wskazanie MT odrzucone' if bad_source else 'Wybrana tablica zweryfikowana' if target else 'Wybierz ramkę, aby ją zatwierdzić',
-        state='normal' if target and enabled and not removed and not bad_source and ed.mode!='draw'
-            and not scene.get('exclusion_reason') else 'disabled')
     from .mobile_canvas_review_feedback import sync_actions
     sync_actions(ed)
     from .mobile_canvas_gtr_reconciliation import sync as sync_reconciliation
     sync_reconciliation(ed)
-    if frame and frame['empty_eligible'] and not scene.get('exclusion_reason'):
-        if not ed.clean_empty_button.winfo_manager():ed.clean_empty_button.pack(fill='x',pady=(4,0),after=ed.approve)
-        ed.clean_empty_button.configure(state='normal' if enabled else 'disabled',
-            text='Cofnij potwierdzenie braku tablic' if frame['empty_confirmed'] else 'Na obrazie nie ma tablic')
-    else:ed.clean_empty_button.pack_forget()
     ed.clean_exclude_button.configure(state='normal' if enabled else 'disabled',text='Zmień przyczynę wyłączenia…' if scene.get('exclusion_reason') else 'Nie można ocenić całego obrazu…')
     ed.clean_restore_button.configure(state='normal' if enabled else 'disabled')
     if scene.get('exclusion_reason') and not editing_reason:ed.clean_restore_button.pack(fill='x',pady=(4,0),before=ed.contexts.image_actions)
@@ -775,27 +783,21 @@ def install(ed,viewer):
     ed.h._bind_sidebar_wheel(ed.contexts)
     ed.panel.grid_remove()
     ed.frame_checked_var=tk.BooleanVar(master=ed.h.window,value=False)
-    ed.approve=tk.Checkbutton(ed.contexts.sections['image'],text='Wybierz ramkę, aby ją zatwierdzić',
-        variable=ed.frame_checked_var,command=lambda:confirm_checkbox(ed),state='disabled',
-        bg=p['bg'],fg=p['fg'],disabledforeground=p['fg'],selectcolor=p['surface'],activebackground=p['bg'],activeforeground=p['fg'],anchor='w',font=('Segoe UI',10))
-    ed.approve.pack(fill='x',pady=(6,0),before=ed.contexts.image_actions)
     button_options=dict(bg=p['surface'],fg=p['fg'],activebackground='#145A7A',activeforeground='#FFFFFF',font=('Segoe UI',10),relief='solid',bd=1,pady=3)
     ed.clean_gtr_confirm_button=tk.Button(ed.contexts.sections['object'],text='Zatwierdź ramki · Spacja',command=ed.confirm,**button_options)
     from .mobile_canvas_review_feedback import install as install_feedback
     install_feedback(ed,button_options)
     from .mobile_canvas_gtr_reconciliation import install as install_reconciliation
     install_reconciliation(ed,button_options)
-    ed.clean_empty_button=tk.Button(ed.contexts.sections['image'],text='Na obrazie nie ma tablic',
-                                   command=ed.confirm_empty_image,**button_options)
     ed.clean_exclude_button=tk.Button(ed.contexts.sections['image'],text='Nie można ocenić całego obrazu…',command=lambda:show_exclusion(ed),**button_options)
-    ed.clean_exclude_button.pack(fill='x',pady=(5,0),after=ed.approve)
+    ed.clean_exclude_button.pack(fill='x',pady=(5,0),before=ed.contexts.image_actions)
     ed.clean_restore_button=tk.Button(ed.contexts.sections['image'],text='Przywróć ocenę obrazu',command=lambda:restore_image(ed),**button_options)
     ed.clean_exclusion_context=None
     ed.clean_exclusion=tk.Frame(ed.contexts.sections['image'],bg=p['bg']);ed.clean_reason=tk.StringVar(master=ed.h.window)
-    tk.Label(ed.clean_exclusion,text='Przyczyna wyłączenia całego obrazu:',bg=p['bg'],fg=p['fg'],anchor='w',font=('Segoe UI',10)).pack(fill='x')
+    ed.clean_reason_label=tk.Label(ed.clean_exclusion,text='Przyczyna wyłączenia całego obrazu:',bg=p['bg'],fg=p['fg'],anchor='w',font=('Segoe UI',10));ed.clean_reason_label.pack(fill='x')
     ed.clean_reason_entry=tk.Entry(ed.clean_exclusion,textvariable=ed.clean_reason,font=('Segoe UI',10),bg=p['surface'],fg=p['fg'],insertbackground=p['fg']);ed.clean_reason_entry.pack(fill='x')
     ed.clean_reason_entry.bind('<Return>',lambda e:save_exclusion(ed))
-    tk.Button(ed.clean_exclusion,text='Wyłącz obraz',command=lambda:save_exclusion(ed),**button_options).pack(side='left')
+    ed.clean_reason_save=tk.Button(ed.clean_exclusion,text='Wyłącz obraz',command=lambda:save_exclusion(ed),**button_options);ed.clean_reason_save.pack(side='left')
     tk.Button(ed.clean_exclusion,text='Anuluj',command=lambda:close_exclusion(ed),**button_options).pack(side='right')
     ed.clean_bar=tk.Frame(viewer,bg=p['surface'],height=30);ed.clean_bar.grid(row=0,column=0,sticky='ew',pady=(0,3))
     ed.clean_bar.columnconfigure(1,weight=1)

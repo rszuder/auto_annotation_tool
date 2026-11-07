@@ -1387,7 +1387,7 @@ class MobileReportBrowser:
             left, ("Wybor", "Data", "Wariant", "Scena", "Powt.", "Weryfikacja", "p95"),
             ("✓", "Data", "Wariant", "Materiał", "Powt.", "Weryfikacja", "P95"),
             (30, 112, 87, 96, 45, 116, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
-            selectmode="browse")
+            selectmode="extended")
         self.report_table.shell.grid(row=3, column=0, sticky="nsew")
         self.report_table.tree.column('Wybor',width=30,minwidth=30)
         tree=self.report_table.tree
@@ -1404,11 +1404,12 @@ class MobileReportBrowser:
             foreground=[('selected',self.palette.get('selection_fg',self.fg))])
         self._update_sort_headings()
         self.report_table.tree.bind("<<TreeviewSelect>>", self._on_report_selected, add="+")
-        self.report_table.tree.bind("<Button-1>", self._toggle_comparison_checkbox, add="+")
+        from .mobile_report_selection import ReportListSelection
+        self._report_list_selection = ReportListSelection(self)
         self.btn_import_reports = ttk.Button(left, text="Importuj raport z telefonu", command=self.import_report)
         self.btn_import_reports.grid(row=4, column=0, sticky="ew", pady=(9, 0), ipady=3)
         # AKT87: one click per reviewed session. No duplicate selection basket.
-        self.compare_hint = tk.Label(left, text="✓: wybór do analizy · miary sprawdzane osobno",
+        self.compare_hint = tk.Label(left, text="Ctrl/Shift + klik: wybór wierszy · Spacja: zaznacz/odznacz grupę",
             bg=self.card_bg, fg=self.muted, anchor=tk.W, font=("Segoe UI", 8))
         self.compare_hint.grid(row=5,column=0,sticky="ew",pady=(8,3))
         self.btn_compare_open = ttk.Button(left,text="Porównaj wybrane (0)",
@@ -2072,6 +2073,8 @@ class MobileReportBrowser:
                     info["variant_short"],scenario,repeat,
                     status,_format_ms(_pipeline_p95(r)),{"tag":tag})
         tree=self.report_table.tree
+        previous_selection=tree.selection()
+        previous_focus=tree.focus()
         mapping={'report_'+hashlib.sha256(json.dumps(report_view_key(r),ensure_ascii=False).encode()).hexdigest():r for r in filtered}
         self._suppress_report_select=True
         try:
@@ -2114,9 +2117,12 @@ class MobileReportBrowser:
             selected_iid=next(iter(mapping))
         self._suppress_report_select = True
         try:
-            self.report_table.tree.selection_set(selected_iid)
-            self.report_table.tree.focus(selected_iid)
-            self.report_table.tree.see(selected_iid)
+            preserve_group=not select_report_id and bool(previous_selection or preserve_preview or current is not None)
+            surviving=[iid for iid in previous_selection if iid in mapping]
+            tree.selection_set(surviving if preserve_group else selected_iid)
+            focus=previous_focus if preserve_group and previous_focus in mapping else selected_iid
+            tree.focus(focus)
+            tree.see(focus)
         except Exception:
             pass
         finally:
@@ -2192,10 +2198,12 @@ class MobileReportBrowser:
     def _on_report_selected(self, _event=None) -> None:
         if self._suppress_report_select:
             return
-        selection=self.report_table.tree.selection()
+        tree=self.report_table.tree
+        selection=tree.selection()
         if not selection:
             return
-        report=self.report_by_iid.get(str(selection[0]))
+        focus=tree.focus()
+        report=self.report_by_iid.get(str(focus if focus in self.report_by_iid else selection[0]))
         if report:
             current=getattr(self,'current_report',None)
             if current is not None and self._comparison_key(current)==self._comparison_key(report):return
@@ -2212,21 +2220,8 @@ class MobileReportBrowser:
         if tree.identify_region(event.x,event.y)!='cell' or tree.identify_column(event.x)!='#1':return None
         iid=tree.identify_row(event.y);report=self.report_by_iid.get(iid)
         if report is None:return 'break'
-        from .mobile_analysis import selection_identity
-        try:identity=selection_identity(report,self._matching_cached_bundle(report))
-        except ValueError as exc:self._set_status(str(exc),'warning');return 'break'
-        key=self._comparison_key(report)
-        if key in self._comparison_checked:self._comparison_checked.discard(key);tree.set(iid,'Wybor','☐')
-        else:
-            for other in getattr(self,'_ordered_reports',list(self.report_by_iid.values())):
-                if self._comparison_key(other) not in self._comparison_checked:continue
-                try:other_identity=selection_identity(other,self._matching_cached_bundle(other))
-                except ValueError:continue
-                if identity[0]==other_identity[0] or identity[1]==other_identity[1]:
-                    self._set_status('Ta sama sesja lub SHA jest już w koszyku. Kopia nie jest kolejnym pomiarem.','warning');return 'break'
-            self._comparison_checked.add(key);tree.set(iid,'Wybor','☑')
-        self._update_comparison_basket_status()
-        return 'break'
+        from .mobile_report_selection import toggle_checks
+        return toggle_checks(self,[iid])
 
     def _clear_comparison_checks(self):
         from .mobile_analysis import selection_identity
@@ -2263,7 +2258,10 @@ class MobileReportBrowser:
         def worker():
             try:
                 cohort=analyze(inputs,'F4')
-                if not any(s.metadata.get('experiment')=='F4' for s in cohort.sessions):cohort=analyze(inputs,'DIAGNOSTIC')
+                families = {s.metadata.get('experiment') for s in cohort.sessions if s.source_status == 'VERIFIED'}
+                if families == {'F5A'}:
+                    cohort = analyze(inputs, 'F5A')
+                elif not any(s.metadata.get('experiment')=='F4' for s in cohort.sessions):cohort=analyze(inputs,'DIAGNOSTIC')
                 failure=None
             except Exception as exc:cohort=None;failure=str(exc)
             def done():

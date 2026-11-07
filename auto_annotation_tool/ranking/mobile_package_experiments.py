@@ -374,6 +374,9 @@ class MobileReportBundle:
     crop_count: int = 0
     annotation_count: int = 0
     sample_schema: dict[str, Any] = field(default_factory=dict)
+    scene_evidence: dict[str, Any] = field(default_factory=dict)
+    mz_input_evidence: dict[str, Any] = field(default_factory=dict)
+    tv_bbox_evidence: dict[str, Any] = field(default_factory=dict)
     collection_session: dict[str, Any] = field(default_factory=dict)
     attempt_rows: tuple[dict[str, str], ...] = field(default_factory=tuple)
     attempt_total: int = 0
@@ -419,6 +422,8 @@ class MobileReportBundle:
             "crop_count": self.crop_count,
             "annotation_count": self.annotation_count,
             "sample_schema": dict(self.sample_schema),
+            "mz_input_evidence": dict(self.mz_input_evidence),
+            "tv_bbox_evidence": dict(self.tv_bbox_evidence),
             "collection_session": dict(self.collection_session),
             "attempt_rows": list(self.attempt_rows),
             "attempt_total": self.attempt_total,
@@ -779,11 +784,6 @@ class ReportBundleReader:
                 for name in normalized_names
                 if name.lower().endswith((".pt", ".tflite", ".onnx", ".param", ".bin", ".alprmodel"))
             ]
-            if embedded_model_entries:
-                warnings.append(
-                    "Raport zawiera binarne artefakty modeli. Nowy lekki standard .alprsession "
-                    "powinien przechowywać tylko manifesty pipeline i referencje SHA-256."
-                )
 
             def read_text(name: str, *, optional: bool = False, limit: int | None = None) -> str:
                 info = normalized_names.get(name)
@@ -973,6 +973,46 @@ class ReportBundleReader:
             else:
                 bundle_kind = "unknown"
 
+            scene_evidence = dict(available=False, status='ABSENT', scenes=(), roles=())
+            if errors and any((sample_schema.get('capabilities') or {}).get(k) for k in ('scene_evidence_v1','mt_detection_roles_v1')):
+                scene_evidence = dict(available=False, status='INVALID', scenes=(), roles=(), reason='ARCHIVE_INTEGRITY_FAILURE')
+            if not errors:
+                from .mobile_scene_evidence import read_extension
+                try:
+                    scene_evidence = read_extension(archive, sample_schema, collection_session, manifest, report_payload)
+                    if scene_evidence['status'] == 'PARTIAL':
+                        warnings.append('F5A: niekompletne dowody scen/ról; brakujące jednostki pozostają N/A.')
+                except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as exc:
+                    errors.append('F5A evidence contract: ' + str(exc))
+                    scene_evidence = dict(available=False, status='INVALID', scenes=(), roles=(), reason=str(exc))
+            from .mobile_mz_input_evidence import read_extension as read_mz_extension, absent as mz_absent
+            mz_input_evidence = mz_absent(collection_session.get('measurement_purpose'))
+            try:
+                mz_input_evidence = read_mz_extension(archive, sample_schema, collection_session, manifest, report_payload)
+                if errors and mz_input_evidence.get('available'):
+                    raise ValueError('ARCHIVE_INTEGRITY_FAILURE')
+                if mz_input_evidence['status'] == 'PARTIAL':
+                    warnings.append('MZ: niekompletny dowód wejścia; brak dowodu pozostaje N/A.')
+            except (ValueError, KeyError, TypeError, OSError, zipfile.BadZipFile) as exc:
+                errors.append('MZ input evidence contract: ' + str(exc))
+                mz_input_evidence = dict(available=False, status='INVALID', rows=[], dependencies={}, reason=str(exc))
+            from .mobile_tv_bbox_evidence import read_extension as read_tv_extension, absent as tv_absent
+            tv_bbox_evidence = tv_absent()
+            try:
+                tv_bbox_evidence = read_tv_extension(archive, sample_schema, collection_session, manifest, report_payload)
+                if errors and tv_bbox_evidence.get('available'):
+                    raise ValueError('ARCHIVE_INTEGRITY_FAILURE')
+                if tv_bbox_evidence['status'] == 'PARTIAL':
+                    warnings.append('TV_BBOX_CROP: niekompletne dowody wejścia; brak pozostaje N/A.')
+            except (ValueError, KeyError, TypeError, AttributeError, IndexError, ArithmeticError, OSError, zipfile.BadZipFile) as exc:
+                errors.append('TV BBOX evidence contract: ' + str(exc))
+                tv_bbox_evidence = dict(available=False, status='INVALID', rows=[], dependencies={}, reason=str(exc))
+            tensor_entries = set(mz_input_evidence.get('tensor_payloads', ()))
+            if any(name not in tensor_entries for name in embedded_model_entries):
+                warnings.append(
+                    "Raport zawiera binarne artefakty modeli. Nowy lekki standard .alprsession "
+                    "powinien przechowywać tylko manifesty pipeline i referencje SHA-256."
+                )
             validation = ReportBundleValidation(
                 ok=not errors,
                 errors=tuple(errors),
@@ -989,6 +1029,13 @@ class ReportBundleReader:
                 checked_hashes=checked_hashes,
                 skipped_hashes=skipped_hashes,
             )
+            if scene_evidence.get('available'):
+                capabilities.update(scene_evidence_v1=True, mt_detection_roles_v1=True,
+                                    scene_evidence_status=scene_evidence['status'])
+            capabilities.update(mz_input_evidence_v1=mz_input_evidence.get('available', False),
+                                mz_input_evidence_status=mz_input_evidence['status'])
+            if tv_bbox_evidence.get('available'):
+                capabilities.update(tv_bbox_crop_v1=True, tv_bbox_status=tv_bbox_evidence['status'])
             artifact_flags = {
                 "has_traces": bool(trace_total),
                 "has_thermal": bool(thermal_total),
@@ -1009,6 +1056,11 @@ class ReportBundleReader:
                 "attempts": attempt_total,
             }
             report = MobileBenchmarkReport.from_dict(report_payload or {})
+            if (mz_input_evidence.get('available') or tv_bbox_evidence.get('available')) and not report_payload.get('measured_at'):
+                # Diagnostic producer fixtures do not declare this report date.
+                # Keep it unavailable instead of generating a different identity
+                # on each native source re-open.
+                report = replace(report, measured_at='')
             report, experiment_session = _attach_report_ingest_metadata(
                 report,
                 path=path,
@@ -1052,6 +1104,9 @@ class ReportBundleReader:
                 sample_schema=sample_schema,
                 collection_session=collection_session,
                 attempt_rows=tuple(attempt_rows),
+                scene_evidence=scene_evidence,
+                mz_input_evidence=mz_input_evidence,
+                tv_bbox_evidence=tv_bbox_evidence,
                 attempt_total=attempt_total,
                 attempts_available=attempts_available,
                 log_preview=log_preview,
