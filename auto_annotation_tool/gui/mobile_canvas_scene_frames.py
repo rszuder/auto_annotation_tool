@@ -52,6 +52,13 @@ def open_scene(ed, key):
         return True
     row = h.session.scene_frames[key]
     h.subject_key = ''
+    # Retire the previous subject table before any queued selection callback
+    # can run. Its rows are rebuilt by genuine MT/MZ navigation afterwards.
+    h._record_ids = {}
+    h.record_tree.delete(*h.record_tree.get_children())
+    h._retained_image_on_refresh = None
+    h._source_frame_keep_on_selection = ''
+    h._multi_requested_attempt = ''
     # current_invocation is the existing Canvas active-unit slot; no MT record
     # or mt_invocation_id is created. The record kind and persisted scope are SCENE.
     h.current_record = ('scene', key)
@@ -92,6 +99,13 @@ def context(ed, model):
     note += '\nMT: ' + row['mt_execution_status'] + ((' · ' + row['mt_not_run_reason']) if row['mt_not_run_reason'] else '')
     note += '\nPokrycie ROI: ' + (cover['reason'] or ', '.join(r['coverage'] for r in cover['rows']) or 'brak mianownika')
     note += '\nE2E TV: N/A · SCENE_UNMAPPED'
+    model = getattr(ed, 'observation_model', None)
+    if model:
+        block = next((b for b in model['blocks'] if b['scene_id'] == s['scene_event_id']), None)
+        if block:
+            start = (block['start_ns'] - block['session_start_ns']) / 1e9
+            end = (block['end_ns'] - block['session_start_ns']) / 1e9
+            note += f'\nBlok obserwacji: {start:.3f}–{end:.3f} s · Stabilność: N/A'
     object_text = 'Wybierz ramkę na pełnej scenie'
     if selected:
         object_text = 'GTR · fizyczna tablica\nGTZ: ' + (selected['gt_text'] or selected['text_exclusion_reason'] or 'nieuzupełniony')
@@ -104,13 +118,23 @@ def context(ed, model):
     scene_na = rows['n_missing']
     caption = f"Sceny: {rows['n_assessed']}/{rows['n_scene_events']} ocenione · N/A źródła: {scene_na}"
     caption += f"\nMT/ROI: {len(session.mt_invocations)} wywołań · attempts: {len(session.attempts)}"
+    counts = dict(inspected=f"{rows['n_assessed']}/{rows['n_scene_events']}",
+                  remaining=str(rows['n_scene_events']-rows['n_assessed']-scene_na), decisions=str(int(not s['checked'])))
+    inventory = ed.inventory()
+    if inventory.get('operator_review_progress'):
+        from ..ranking.mobile_operator_progress import image_counts, evidence_caption
+        from ..ranking.mobile_review_status import approval_caption
+        progress = inventory['operator_review_progress']
+        human = image_counts(progress)
+        counts.update(inspected=human['fraction'], remaining=str(human['remaining']) if human['remaining'] is not None else 'Nie ustalono')
+        caption = approval_caption(inventory, session.review.review_status, session.review.review_revision)
+        caption += '\n' + evidence_caption(progress)
     count = str(len(s['objects'])) if s['presence'] != 'UNRESOLVED' else '—'
     return dict(object=object_text, object_title='WYBRANA TABLICA', image=note, image_note=note,
         image_counts=dict(gt=count,tp='—',fp='—',fn='—'), bbox_counts=dict(tp='—',fp='—',fn='—'),
         bbox_note='Pełna scena jest odrębną populacją od MT/ROI', bbox_scope='SCENE_FRAME · ASSISTED',
         locator_target=None, session=caption, session_note='Brak potwierdzonego mapowania scen TV',
-        session_counts=dict(inspected=f"{rows['n_assessed']}/{rows['n_scene_events']}",
-                            remaining=str(rows['n_scene_events']-rows['n_assessed']-scene_na),decisions=str(int(not s['checked']))))
+        session_counts=counts)
 
 
 def source_finals(session, key):
@@ -125,6 +149,8 @@ def source_finals(session, key):
 
 def paint_sources(ed):
     ed.c.delete('scene_mt_source')
+    from .mobile_canvas_visibility import gt_only
+    if gt_only(ed):return
     s=ed._read()
     focus=getattr(ed,'scene_mt_focus',None)
     if not s or s.get('scope')!='SCENE_FRAME' or not focus or ed.mode=='draw' or ed.h._image is None:

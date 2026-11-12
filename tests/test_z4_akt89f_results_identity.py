@@ -113,7 +113,11 @@ def test_history_and_phone_times_remain_separate_from_canvas(tmp_path):
     assert historical==before
     unreviewed=build_overview(r,b,dict(source_archive_sha256=SHA,_ui_canvas_progress=dict(
         session_id=SID,source_sha256=SHA,total=19,inspected=0,remaining=19)))
-    assert not unreviewed['canvas']['ready'] and '0/19' in unreviewed['canvas']['progress']
+    # An unversioned operational inventory does not prove image population or
+    # saved human decisions. Timing and MT invocation counts cannot supply it.
+    assert not unreviewed['canvas']['ready']
+    assert unreviewed['canvas']['progress'] == 'Nie ustalono liczby obrazów do oceny'
+    assert unreviewed['canvas']['progress_ratio'] is None
     assert unreviewed['performance']==view['performance']
 
 

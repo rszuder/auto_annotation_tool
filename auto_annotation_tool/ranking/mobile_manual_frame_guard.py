@@ -7,6 +7,11 @@ from .mobile_pose_metrics import _cross, _signed_area, _clip_convex
 
 def reference_records(scene,exclude_plate_id=None):
     """Saved active references, not raw model contours or history snapshots."""
+    if scene.get('scope') in ('SOURCE_PHOTOGRAPH','F5A_TV_EXPOSURE_CAMERAX','F5A_SOURCE_INSPECTION'):
+        for number, obj in enumerate(scene['objects'], 1):
+            if obj['quad'] is not None and obj['object_id'] != exclude_plate_id:
+                yield dict(plate_id=obj['object_id'],number=number,quad=obj['quad'])
+        return
     from . import mobile_candidate_stacks as stacks
     from .mobile_canvas_operator_view import collision_reference_ids,reference_numbers
     state=scene.get(stacks.KEY) or stacks._legacy(scene)

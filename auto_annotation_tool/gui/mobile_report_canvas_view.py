@@ -62,7 +62,7 @@ def load_canvas_snapshot(session_id, source_sha, results_root, review_root):
 def canvas_overview(snapshot, *, session_id="", source_sha="", progress=None, loading=False):
     snapshot = snapshot or {}
     gate = snapshot.get("verification") or {}
-    state = gate.get("state", "NONE")
+    state = gate.get("state", "UNKNOWN")
     c = snapshot.get("summary") or {}
     bound = (state == "READY" and snapshot.get("session_id") == session_id
              and snapshot.get("source_sha256") == source_sha
@@ -73,19 +73,16 @@ def canvas_overview(snapshot, *, session_id="", source_sha="", progress=None, lo
     titles = ("MT — wykrycie tablic", "MT — dopasowanie obrysu",
               "MZ — pełne zgodne odczyty", "MZ — błędy znaków")
     cards = [dict(title=t, value="—", note="Brak zatwierdzonej oceny Canvas.") for t in titles]
-    status = {"READY":"WYMAGA KONTROLI", "NONE":"BRAK · Do weryfikacji",
+    status = {"READY":"WYMAGA KONTROLI", "NONE":"Nie rozpoczęto",
         "IN_PROGRESS":"W TOKU", "STALE":"EKSPORT NIEAKTUALNY", "NEEDS_EXPORT":"EKSPORT NIEAKTUALNY",
-        "UNREADABLE":"BRAK ODCZYTU", "INVALID":"WYMAGA KONTROLI", "INCOMPLETE":"W TOKU"}.get(state, "BRAK")
-    counter, detail, ratio = "Postęp Canvas: brak potwierdzonych danych", gate.get("reason", ""), None
+        "UNREADABLE":"BRAK ODCZYTU", "INVALID":"WYMAGA KONTROLI", "INCOMPLETE":"W TOKU"}.get(state, "Nie potwierdzono stanu weryfikacji")
+    counter, detail, ratio = "Nie ustalono liczby obrazów do oceny", gate.get("reason", ""), None
     p = progress or {}
-    if p.get("session_id") == session_id and p.get("source_sha256") == source_sha:
-        counter = f"Sprawdzone obrazy: {p['inspected']}/{p['total']} · pozostało: {p['remaining']}"
-        ratio = p['inspected']/p['total'] if p['total'] else None
     def pct(value):
         return f"{value:.2f}%".replace(".", ",") if isinstance(value, (int, float)) else "—"
     if bound:
         status = "ZATWIERDZONA"
-        counter = f"Sprawdzone obrazy: {c['checked_scenes']}/{c['scene_count']} · rewizja {gate['revision']}"
+        counter = f"Archiwalne oceny MT/ROI: {c['checked_scenes']}/{c['scene_count']} · rewizja {gate['revision']}"
         ratio = (c['checked_scenes'] + c['excluded_scenes'])/c['scene_count']
         detail = f"Ocena asystowana · poza oceną: {c['excluded_scenes']} · SHA {source_sha[:12]}…"
         cards[0].update(value=f"{c['linked_plates']}/{c['expected_plates']}",
@@ -102,10 +99,11 @@ def canvas_overview(snapshot, *, session_id="", source_sha="", progress=None, lo
           and c.get('review_revision')==gate.get('revision') and c.get('session_id')==session_id):
         status='ZATWIERDZONA · OGRANICZENIA POMIARÓW'
         checked=(c.get('operator_progress') or {}).get('inspected',c.get('inspected_scenes',0))
-        total=c.get('scene_count',0);counter=f'Zweryfikowane obrazy: {checked}/{total} · rewizja {gate["revision"]}'
-        ratio=checked/total if total else None
+        total=c.get('scene_count',0)
+        counter, ratio = 'Nie ustalono liczby obrazów do oceny', None
         from .mobile_measurement_availability import limits_text
         detail='Weryfikacja zakończona. Nie każdy obraz ma dane do wszystkich pomiarów.\n'+limits_text(c,snapshot.get('mt_evaluation'))
+        detail+=f'\nArchiwalny stan operacyjny MT/ROI: {checked}/{total} · rewizja {gate["revision"]}; nie jest to postęp ocen obrazów przez operatora.'
     elif loading:
         status = "Wczytywanie oceny Canvas…"
     objects=snapshot.get('mt_object_evaluation') or {}
@@ -129,6 +127,17 @@ def canvas_overview(snapshot, *, session_id="", source_sha="", progress=None, lo
     elif bound or state=='APPROVED_LIMITED':
         cards[0]['title']='MT — archiwalna ocena Canvas'
         detail+='\nArchiwalny wynik Canvas/v1; brak eksportu F4-EVAL-2.0. Bieżące v2 jest dostępne w weryfikacji i analizie.'
+    from ..ranking.mobile_operator_progress import SCHEMA, presentation
+    if (p.get('schema') == SCHEMA and p.get('session_id') == session_id
+            and p.get('source_sha256') == source_sha
+            and not (p.get('sidecar_state') == 'ABSENT' and (bound or state == 'APPROVED_LIMITED'))):
+        operator = presentation(p)
+        status, counter, ratio = operator['status'], operator['progress'], operator['progress_ratio']
+        detail = operator['progress_subtitle'] + ('\nOcena GT/MT/MZ: ' + detail if detail else '')
+    elif p and not (bound or state == 'APPROVED_LIMITED'):
+        counter, ratio = 'Nie ustalono liczby obrazów do oceny', None
+    if bound or state == 'APPROVED_LIMITED':
+        detail += '\nPochodzenie zatwierdzonej oceny: ' + str(gate.get('export_dir') or 'zweryfikowany eksport źródłowy')
     return dict(status=status, cards=cards, progress=counter, progress_subtitle=detail,
                 progress_ratio=ratio, ready=bound,
                 methodology="Ocena asystowana: z widoczną predykcją. Pełnej zgodności całego potoku nie oceniano osobno.")

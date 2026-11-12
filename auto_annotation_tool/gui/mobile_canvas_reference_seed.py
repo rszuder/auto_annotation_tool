@@ -32,6 +32,8 @@ def focus(ed,oid):
 
 
 def for_editor(ed,scene,state):
+    from .mobile_canvas_visibility import gt_only
+    if gt_only(ed):return {}
     key=(id(ed.h.session),ed.h.current_invocation,ed.h.session.review.review_revision,scene['source_binding'])
     if getattr(ed,'_reference_seeds_key',None)!=key:
         ed._reference_seeds={c['object_id']:project(ed.h.session,ed.h.current_invocation,scene,state,c) for c in state['candidates']}

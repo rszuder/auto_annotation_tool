@@ -48,7 +48,7 @@ def initial_directory(default):
     return readable_directory(default) or Path.home()
 
 
-def remember_successful_import(paths):
+def remember_successful_import(paths, *, folder=None):
     """Call only after the report store commits a non-cancelled import.
 
     A picker batch normally has one parent. If called with several parents,
@@ -57,7 +57,7 @@ def remember_successful_import(paths):
     if SESSION is None or not paths or not remember_enabled():
         return
     try:
-        folder = Path(paths[-1]).expanduser().resolve().parent
+        folder = Path(folder).expanduser().resolve() if folder is not None else Path(paths[-1]).expanduser().resolve().parent
         SESSION.set(SECTION, ENABLED, True)
         SESSION.set(SECTION, FOLDER, str(folder))
         SESSION.save_session()

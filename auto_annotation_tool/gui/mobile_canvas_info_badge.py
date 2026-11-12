@@ -119,6 +119,11 @@ def context_model(ed,layer_view=None,*,row=None,kind=None):
     if not q:return None
     model=dict(kind=kind,oid=row['oid'],plate_id=row['pid'],attempt_id=row['candidate']['attempt_id'] if row['candidate'] else None,
                quad=copy.deepcopy(q),reference_id=row.get('reference_id'))
+    a3=getattr(ed.h,'_f5a_a3',None)
+    if a3 and a3.active and row['candidate'] and kind!='GTR':
+        model.update(title=f"MT · wskazanie {row['candidate']['mt_detection_index']+1}",
+                     detail='Wynik: '+(row['candidate']['mz_prediction'] or 'brak odczytu'))
+        return model
     if kind=='GTR':
         if row.get('seed'):
             model.update(title='GTR startowy · niezapisany szkic',
@@ -158,12 +163,18 @@ def clear(ed):
 
 
 def focus_in_window(ed):
-    widget=ed.h.window.focus_get()
-    # Menus and inline entries belong to this review even when their bindtags
-    # omit the Toplevel, so a missed FocusIn cannot leave the badge suspended.
-    while widget is not None:
-        if widget is ed.h.window:return True
-        widget=getattr(widget,'master',None)
+    window=ed.h.window
+    # ttk dropdowns are Tcl-created widgets without Python wrappers. Calling
+    # focus_get() on their listbox raises KeyError('popdown'). Walk Tcl parents
+    # instead; this also keeps menus/inline entries inside their review window.
+    try:
+        widget=str(window.tk.call('focus','-displayof',window._w))
+        while widget:
+            if widget==window._w:return True
+            widget=str(window.tk.call('winfo','parent',widget))
+    except tk.TclError:
+        # The focused widget/window may disappear before an idle check runs.
+        return False
     return False
 
 
@@ -351,6 +362,11 @@ class ExecutionHUD(tk.Frame):
     def cget(self,key):return '\n'.join(self.lines) if key=='text' else super().cget(key)
 
 def update_hud(ed):
+    from .mobile_canvas_visibility import gt_only
+    if gt_only(ed):ed.source_hud.unavailable();return
+    a3=getattr(ed.h,'_f5a_a3',None)
+    if a3 and a3.active:
+        ed.source_hud.unavailable();return  # A3 uses photo/MT progress, not legacy frame counters.
     from ..ranking.mobile_canvas_source_hud import frame_execution
     h=ed.h
     if h._image is None or not h._image_entry:ed.source_hud.unavailable();return

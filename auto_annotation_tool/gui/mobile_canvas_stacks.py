@@ -5,6 +5,7 @@ from ..ranking import mobile_candidate_stacks as stacks
 from ..ranking import mobile_canvas_review as core
 
 def view(ed):
+    if getattr(ed,'reference_source',None) is not None:return None
     s=ed._read()
     if not s:return None
     key=(id(ed.h.session),ed.h.session.review.source_archive_sha256,ed.h.current_invocation,ed.h.session.review.review_revision)
@@ -20,6 +21,8 @@ def enhanced(ed):
                 or any(len(members(v,pid))>1 for pid in v['plates'])))
 
 def write_reference(ed,oid,*,quad=None,text=None,reason=''):
+    if getattr(ed,'reference_source',None) is not None:
+        return ed.reference_source.edit(oid,quad=quad,text=text,reason=reason)
     if hasattr(ed,'clean_bar') and oid==ed.selected:
         from .mobile_canvas_clean_view import selected
         row=selected(ed)

@@ -81,10 +81,7 @@ def science_from_verified_bundle(bundle: Any) -> dict:
     result["form_verification"] = verification_progress(session)
     from ..ranking.mobile_canvas_presentation import build_inventory
     inventory = build_inventory(session)
-    result["_ui_canvas_progress"] = {k:inventory[k] for k in
-        ("total", "inspected", "remaining", "excluded")}
-    result["_ui_canvas_progress"].update(session_id=session.session_id,
-        source_sha256=session.review.source_archive_sha256, review_revision=session.review.review_revision)
+    result["_ui_canvas_progress"] = inventory['operator_review_progress']
     return result
 
 
@@ -104,6 +101,10 @@ def build_overview(report: Any, bundle: Any = None, science: Any = None, *, load
     canvas = canvas_overview(_dict(science).get("_ui_canvas_snapshot"),
         session_id=info["session_id"], source_sha=source_hash,
         progress=_dict(science).get("_ui_canvas_progress"), loading=loading)
+    if error:
+        canvas.update(status="Nie można potwierdzić weryfikacji", progress_ratio=None,
+                      progress="Nie ustalono liczby obrazów do oceny",
+                      progress_subtitle="Nie udało się odczytać oceny operatora: " + error)
     validated = bool(bundle is not None and getattr(getattr(bundle, "validation", None), "ok", False)
                      and str(getattr(bundle, "source_archive_sha256", "") or "").lower() == source_hash
                      and str(getattr(getattr(bundle, "report", None), "report_id", "")) == str(getattr(report, "report_id", "")))
@@ -233,7 +234,14 @@ def build_overview(report: Any, bundle: Any = None, science: Any = None, *, load
     perf_n = speed["pipeline"]["n"]
     if perf_n is not None and perf_n < 30 and "—" not in speed["pipeline"]["p95"]:
         warnings.append(f"Czas P95 opiera się na {perf_n} pomiarach; przy małej próbie jest niestabilny.")
-    source_text = "Źródło zweryfikowane · SHA-256 " + source_hash[:12] + "…" if validated else "Raport zapisany · źródło jeszcze niezweryfikowane"
+    source_text = "Integralność źródła potwierdzona (ZIP/SHA-256) · " + source_hash[:12] + "…" if validated else "Raport zapisany · integralność źródła jeszcze niepotwierdzona"
+    from ..ranking.mobile_operator_progress import evidence_caption
+    evidence = evidence_caption(_dict(science).get('_ui_canvas_progress')) if validated else ''
+    if evidence:
+        source_text += "\n" + evidence
+    if _dict(science).get('_ui_canvas_progress', {}).get('schema') == 'alpr.desktop.operator_progress.v1' and validated:
+        status, progress = canvas['status'], canvas['progress']
+        progress_subtitle, progress_ratio = canvas['progress_subtitle'], canvas['progress_ratio']
     return {"status": status, "progress": progress, "progress_subtitle": progress_subtitle,
             "progress_ratio": progress_ratio, "cards": tuple(blocks), "performance": speed,
             "frames": frames, "warnings": tuple(warnings[:2]), "source": source_text,
@@ -452,7 +460,11 @@ class ScientificDashboard(tk.Frame):
         self.history._sync()
         self.cards_host.grid() if primary.get("ready") else self.cards_host.grid_remove()
         ratio = primary.get("progress_ratio")
-        self.progress_bar.configure(value=round(100 * ratio, 1) if isinstance(ratio, (int, float)) and 0 <= ratio <= 1 else 0)
+        if isinstance(ratio, (int, float)) and 0 <= ratio <= 1:
+            self.progress_bar.configure(value=round(100 * ratio, 1))
+            self.progress_bar.grid()
+        else:
+            self.progress_bar.grid_remove()
         cards = primary.get("cards", ())
         for i, variables in enumerate(self.card_vars):
             values = cards[i] if i < len(cards) else {}

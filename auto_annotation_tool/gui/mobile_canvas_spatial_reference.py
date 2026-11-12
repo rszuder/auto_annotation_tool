@@ -153,7 +153,10 @@ def canonical_action(session,gid,oid,pid,*,operation,quad=None,text=None,reason=
     if not state['plates'][pid]['confirmed']:partial.confirm_gtr(staged,gid,pid)
     stacks.associate(staged,gid,oid,pid)
     if operation=='edit':stacks.edit_gt(staged,gid,oid,quad=quad,text=text,reason=reason)
-    else:partial.toggle_stack(staged,gid,oid=oid)
+    # This is the first explicit association, not a request to undo it.
+    # associate() already supplies a positive decision; toggling it again
+    # would immediately turn this single Space into UNRESOLVED.
+    else:partial.confirm_stack(staged,gid,oid=oid)
     final=core.scene(staged,gid)
     final['events']=copy.deepcopy(s['events'])
     if stacks.HISTORY in s:final[stacks.HISTORY]=copy.deepcopy(s[stacks.HISTORY])

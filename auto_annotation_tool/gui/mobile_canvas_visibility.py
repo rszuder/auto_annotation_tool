@@ -8,6 +8,11 @@ def enabled(editor, name):
     return bool(variable.get()) if variable is not None else True
 
 
+def gt_only(editor):
+    """Transient manual-entry view; never relabel historical provenance."""
+    return bool(getattr(editor,'manual_gt_first',False) and not enabled(editor,'inf'))
+
+
 def contours(editor):
     """All saved references and one proven source contour per FINAL.
 

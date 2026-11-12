@@ -41,6 +41,10 @@ def load_editor():
     history=types.ModuleType(prefix+'.ranking.mobile_mt_history')
     history.history_evidence=lambda *a,**kw:None
     sys.modules[history.__name__]=history
+    # Exercise the real fail-closed adapter: these legacy fixtures have no
+    # validated scene registry, so they retain the existing navigation.
+    from auto_annotation_tool.gui import mobile_canvas_observation_blocks
+    sys.modules[prefix+'.gui.mobile_canvas_observation_blocks']=mobile_canvas_observation_blocks
     # This minimal legacy fixture intentionally has no session/source binding,
     # so it cannot construct candidate stacks. Stack behavior is exercised on
     # source-backed sessions by T01–T28; keep these event assertions unchanged.

@@ -237,7 +237,7 @@ def inspect_canvas(canvas: dict[str, Any] | None, review_status: str) -> tuple[b
     return True, f"MT: {linked} ramki i {missed} pominięć; MZ: {read} odczytów; obrazy {c['checked_scenes']}/{c['scene_count']}"
 
 
-def _live_review_state(review_root: Path | None, sha: str, session_id: str):
+def _live_review_state(review_root: Path | None, sha: str, session_id: str, *, diagnostics=None):
     if not review_root:
         return None
     path = Path(review_root) / "human_reviews" / (sha + ".review.json")
@@ -252,6 +252,9 @@ def _live_review_state(review_root: Path | None, sha: str, session_id: str):
         rev = _integer(d.get("review_revision"))
         if rev is None or d.get("review_status") not in ("NOT_STARTED", "IN_PROGRESS", "COMPLETED"):
             raise ValueError("Nieprawidłowy status/rewizja")
+        if diagnostics is not None:
+            from ..ranking.mobile_operator_progress import has_decisions
+            diagnostics['live_review_has_decisions'] = has_decisions(d)
         return rev, d["review_status"]
     except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
         return "INVALID"
@@ -290,7 +293,7 @@ def imported_verification(session_id: str, source_sha: str, results_root: Path |
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", str(session_id or "")) or not re.fullmatch(r"[a-f0-9]{64}", str(source_sha or "").lower()):
         return Verification("UNKNOWN", "Nieustalona", "Brak zgodnej tożsamości SHA/session_id.")
     source_sha = source_sha.lower()
-    live = _live_review_state(review_root, source_sha, session_id)
+    live = _live_review_state(review_root, source_sha, session_id, diagnostics=trace)
     trace["live_review"] = live
     if live == "INVALID":
         return Verification("INVALID", "Wymaga kontroli", "Sidecar weryfikacji jest uszkodzony lub niespójny.")
@@ -349,10 +352,14 @@ def imported_verification(session_id: str, source_sha: str, results_root: Path |
         return _rejected_verification(*failure, export_dir=directory)
     if live and isinstance(live, tuple):
         if live[1] == "COMPLETED":
-            return Verification("NEEDS_EXPORT", "Eksport wymagany", "Zatwierdzono ocenę, lecz nie ma aktualnego eksportu MT+MZ.", live[0])
+            if not trace.get('live_review_has_decisions'):
+                return Verification("NEEDS_EXPORT", "Nie rozpoczęto", "Status zapisu COMPLETED nie zawiera decyzji operatora; wymaga kontroli zakresu oceny.", live[0])
+            return Verification("NEEDS_EXPORT", "Zakończona · eksport wymagany", "Zatwierdzono ocenę, lecz nie ma aktualnego eksportu MT+MZ.", live[0])
+        if trace.get('live_review_has_decisions'):
+            return Verification("IN_PROGRESS", "W toku", "Istnieją zapisane decyzje operatora; ocena GT/MT/MZ nie została zatwierdzona.", live[0])
         if live[1] == "IN_PROGRESS":
-            return Verification("IN_PROGRESS", "W toku", "Weryfikacja nie została zatwierdzona.", live[0])
-    return Verification("NONE", "Do weryfikacji", "Brak kompletnej oceny MT+MZ powiązanej z archiwum.")
+            return Verification("IN_PROGRESS", "Nie rozpoczęto", "Zapis roboczy nie zawiera potwierdzonych decyzji operatora.", live[0])
+    return Verification("NONE", "Nie rozpoczęto", "Brak zapisanych decyzji operatora. Ocena GT/MT/MZ nie została ukończona.")
 
 
 def paired_geometry_text(canvas: dict[str, Any] | None):

@@ -6,7 +6,7 @@ import tkinter as tk
 MIN_ZOOM, MAX_ZOOM = 1.0, 256.0  # Same upper bound as the existing A/plate fit.
 FRAME_MS = 16
 
-def wheel_factor(event):
+def wheel_factor(event, *, step_factor=1.25):
     delta = float(getattr(event, 'delta', 0) or 0)
     if not math.isfinite(delta):
         return None
@@ -14,7 +14,7 @@ def wheel_factor(event):
         steps = delta / 120.0
     else:
         steps = {4: 1, 5: -1}.get(getattr(event, 'num', None), 0)
-    return 1.25 ** max(-24, min(24, steps)) if steps else None
+    return step_factor ** max(-24, min(24, steps)) if steps else None
 
 def paint_viewport(host, *, preview=False):
     host._viewport_paint = True

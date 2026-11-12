@@ -8,6 +8,7 @@ import json
 import hashlib
 import statistics
 import threading
+import queue
 from dataclasses import replace
 from tkinter import filedialog
 from datetime import datetime
@@ -26,6 +27,9 @@ from ..ranking import (
     score_mobile_report,
     read_mobile_sample_image,
 )
+from ..ranking.mobile_package_experiments import (
+    plan_mobile_session_import, mobile_import_path_error, validate_known_mobile_experiment, F5A_IMPORT_GROUP,
+)
 from .web_slim_scrollbar import WebSlimScrollbar, blend_hex_colors
 from .mobile_report_plot_axis import axis_ticks, pixel_column_extrema
 from .mobile_report_x_zoom import clamp_x_view, zoom_x_view, pan_x_view, visible_xy
@@ -37,6 +41,10 @@ from .mobile_report_chart_styles import LATENCY_SERIES_STYLES, draw_chart_marker
 from .mobile_compare_review_gate import imported_verification
 from . import mobile_import_preferences
 from .z4_mobile_report_browser_ux import (desktop_status, matches_report_filter, report_identity, selected_report_caption)
+from .mobile_report_operator_metadata import (
+    phone_session_metadata, phone_name_caption, phone_note_caption,
+    phone_list_caption, preserve_phone_notes,
+)
 from .z4_mobile_report_browser_ux import (SORT_COLUMNS, report_measurement_time, report_repeat,
     report_view_key, report_sort_value, sorted_report_view, report_sort_preference, save_report_sort_preference)
 from .mobile_report_science_dashboard import ScientificDashboard, build_overview, science_from_verified_bundle
@@ -323,6 +331,8 @@ def _compact_mobile_report_for_store(report: MobileBenchmarkReport, bundle: Mobi
             list_limit=MOBILE_REPORT_RAW_STORAGE_LIST_LIMIT,
             text_limit=MOBILE_REPORT_RAW_STORAGE_TEXT_LIMIT,
         )
+        if isinstance(report.raw, dict) and isinstance(compact_raw, dict):
+            preserve_phone_notes(report.raw, compact_raw)
         # Cache tylko z bieżącej, zweryfikowanej paczki, z przypiętym SHA.
         # Nie zapisujemy do oryginalnego archiwum ani do weryfikacji GT.
         if bundle is not None:
@@ -765,6 +775,332 @@ class _WrappedLabelTable:
         self._canvas.after_idle(self._sync_scrollregion)
 
 
+class _MobileFolderImportFlow:
+    """Folder phases hosted by the existing picker; workers only publish queue events."""
+
+    def __init__(self, browser, dialog, selection, close):
+        self.browser, self.dialog, self.selection, self.close_callback = browser, dialog, selection, close
+        self.events = queue.Queue()
+        self.cancel_event = threading.Event()
+        self.phase, self.plan, self.closed, self.poll_id = "selection", None, False, None
+        self.page = tk.Frame(dialog, bg=browser.bg, padx=14, pady=12)
+        self.page.columnconfigure(0, weight=1)
+        self.page.rowconfigure(2, weight=1)
+        self.title = tk.StringVar(value="")
+        self.location = tk.StringVar(value="")
+        self.note = tk.StringVar(value="")
+        tk.Label(self.page, textvariable=self.title, bg=browser.bg, fg=browser.fg,
+                 font=("Segoe UI", 14, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="ew")
+        self.path_label = tk.Label(self.page, textvariable=self.location, bg=browser.bg, fg=browser.muted,
+                                  width=1, height=2, anchor=tk.W, justify=tk.LEFT)
+        self.path_label.grid(row=1, column=0, sticky="ew", pady=(3, 6))
+        self.work = tk.Frame(self.page, bg=browser.bg)
+        self.work.columnconfigure(0, weight=1)
+        self.progress_text = tk.StringVar(value="Wyszukiwanie archiwów…")
+        self.current_file = tk.StringVar(value="")
+        tk.Label(self.work, textvariable=self.progress_text, bg=browser.bg, fg=browser.fg,
+                 font=("Segoe UI", 12)).grid(row=0, column=0, sticky="ew", pady=(24, 12))
+        self.progress = ttk.Progressbar(self.work, mode="indeterminate")
+        self.progress.grid(row=1, column=0, sticky="ew", padx=20, pady=12)
+        self.current_label = tk.Label(self.work, textvariable=self.current_file, width=1, height=3,
+                                     bg=browser.bg, fg=browser.muted, justify=tk.LEFT, anchor=tk.W)
+        self.current_label.grid(row=2, column=0, sticky="ew", padx=20)
+        self.result = tk.Frame(self.page, bg=browser.bg)
+        self.result.columnconfigure(0, weight=1)
+        self.result.rowconfigure(2, weight=1)
+        self.result.rowconfigure(3, weight=1)
+        self.stats = tk.Frame(self.result, bg=browser.bg)
+        self.stats.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.stats.columnconfigure(0, weight=1)
+        self.stats.columnconfigure(1, weight=1)
+        self.stats_vars = []
+        for n in range(8):
+            variable = tk.StringVar()
+            self.stats_vars.append(variable)
+            tk.Label(self.stats, textvariable=variable, width=1, anchor=tk.W, bg=browser.bg,
+                     fg=browser.fg, font=("Segoe UI", 10, "bold" if n == 7 else "normal")).grid(
+                         row=n // 2, column=n % 2, sticky="ew", padx=(0, 8))
+        self.group_box = tk.Frame(self.result, bg=browser.bg)
+        self.group_box.columnconfigure(0, weight=1)
+        self.group_tree = ttk.Treeview(self.group_box, columns=("new", "existing", "conflicts"), height=3,
+                                      selectmode="browse")
+        self.group_tree.heading("#0", text="Serie rozpoznane z metadanych")
+        self.group_tree.column("#0", width=380, minwidth=120)
+        for key, label in (("new", "Nowe"), ("existing", "Istniejące"), ("conflicts", "Niezgodne")):
+            self.group_tree.heading(key, text=label)
+            self.group_tree.column(key, width=85, minwidth=70, stretch=False, anchor=tk.CENTER)
+        self.group_tree.grid(row=0, column=0, sticky="ew")
+        self.group_button = ttk.Button(self.group_box, text="Wybierz zaznaczoną serię do importu", command=self.choose_group)
+        self.group_button.grid(row=1, column=0, sticky="e", pady=4)
+        files_box = tk.Frame(self.result, bg=browser.bg)
+        files_box.grid(row=2, column=0, sticky="nsew")
+        files_box.rowconfigure(0, weight=1)
+        files_box.columnconfigure(0, weight=1)
+        self.files = ttk.Treeview(files_box, columns=("identity",), height=7, selectmode="browse")
+        self.files.heading("#0", text="Grupy wyników / archiwum")
+        self.files.heading("identity", text="Wariant / powtórzenie / blok")
+        self.files.column("#0", width=440, minwidth=160)
+        self.files.column("identity", width=220, minwidth=120)
+        self.files.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(files_box, command=self.files.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.files.configure(yscrollcommand=scroll.set)
+        self.files.bind("<<TreeviewSelect>>", self.show_file)
+        detail_box = tk.Frame(self.result, bg=browser.bg)
+        detail_box.grid(row=3, column=0, sticky="nsew", pady=(6, 0))
+        detail_box.columnconfigure(0, weight=1)
+        detail_box.rowconfigure(0, weight=1)
+        self.details = tk.Text(detail_box, width=1, height=6, wrap=tk.WORD, font=("Segoe UI", 10),
+                               bg=browser.panel, fg=browser.fg, relief=tk.FLAT, padx=8, pady=6, state=tk.DISABLED)
+        self.details.grid(row=0, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(detail_box, command=self.details.yview)
+        detail_scroll.grid(row=0, column=1, sticky="ns")
+        self.details.configure(yscrollcommand=detail_scroll.set)
+        self.note_label = tk.Label(self.page, textvariable=self.note, width=1, height=2, anchor=tk.W,
+                                  justify=tk.LEFT, bg=browser.bg, fg=browser.muted)
+        self.note_label.grid(row=3, column=0, sticky="ew", pady=(5, 3))
+        self.actions = tk.Frame(self.page, bg=browser.bg)
+        self.actions.grid(row=4, column=0, sticky="ew")
+        self.back_button = ttk.Button(self.actions, text="Wróć do wyboru folderu", command=self.back)
+        self.copy_button = ttk.Button(self.actions, text="Kopiuj podsumowanie", command=self.copy_summary)
+        self.cancel_button = ttk.Button(self.actions, text="Anuluj", command=self.cancel_or_close)
+        self.import_button = ttk.Button(self.actions, command=self.commit)
+        self.page.bind("<Configure>", self.resize, add="+")
+        dialog.bind("<Destroy>", self.dispose, add="+")
+        dialog._mobile_import_flow = self
+
+    @property
+    def busy(self):
+        return self.phase in {"scanning", "importing"}
+
+    def resize(self, event):
+        width = max(260, event.width - 30)
+        for label in (self.path_label, self.current_label, self.note_label):
+            label.configure(wraplength=width)
+
+    def dispose(self, event):
+        if event.widget is not self.dialog:
+            return
+        self.closed = True
+        self.cancel_event.set()
+        if self.poll_id is not None:
+            try:
+                self.dialog.after_cancel(self.poll_id)
+            except tk.TclError:
+                pass
+        # Release Tcl variables on the UI thread. Otherwise a later worker's
+        # cyclic GC can invoke Variable.__del__ against a destroyed interpreter.
+        self.stats_vars.clear()
+        for name in ("title", "location", "note", "progress_text", "current_file"):
+            setattr(self, name, None)
+        self.dialog._mobile_import_flow = None
+        self.close_callback = None
+
+    def request_close(self):
+        if self.phase == "importing":
+            self.cancel_event.set()
+            self.note.set("Przerywam zapis. Za chwilę pokażę faktyczną liczbę zapisanych sesji.")
+            return False
+        self.cancel_event.set()
+        return True
+
+    def cancel_or_close(self):
+        if self.busy:
+            self.cancel_event.set()
+            self.note.set("Anulowanie po bieżącym archiwum. Zapisane wcześniej sesje pozostają w magazynie.")
+            self.cancel_button.configure(state=tk.DISABLED)
+        else:
+            self.close_callback()
+
+    def _working(self, phase):
+        self.phase = phase
+        self.cancel_event = threading.Event()
+        self.selection.pack_forget()
+        self.page.pack(fill=tk.BOTH, expand=True)
+        self.result.grid_remove()
+        self.work.grid(row=2, column=0, sticky="nsew")
+        for button in self.actions.winfo_children():
+            button.pack_forget()
+        self.cancel_button.configure(text="Anuluj sprawdzanie" if phase == "scanning" else "Przerwij import", state=tk.NORMAL)
+        self.cancel_button.pack(side=tk.RIGHT)
+        self.title.set("Sprawdzanie archiwów" if phase == "scanning" else "Importowanie sesji")
+        self.progress_text.set("Wyszukiwanie archiwów…" if phase == "scanning" else f"Importowanie 0 z {len(self.plan.eligible_items)} sesji")
+        self.current_file.set("")
+        self.note.set("Sprawdzanie nie zapisuje raportów." if phase == "scanning" else "Sesje są zapisywane kolejno. Przerwanie nie cofa wcześniejszych zapisów.")
+        self.progress.configure(mode="indeterminate", value=0)
+        self.progress.start(14)
+
+    def _launch(self, operation):
+        # No Tk/after callbacks, widget access or browser UI calls in this worker.
+        events, cancelled = self.events, self.cancel_event.is_set
+        def worker():
+            try:
+                result = operation(lambda done, total, path: events.put(("progress", (done, total, str(path)))), cancelled)
+                events.put(("result", result))
+            except Exception as exc:
+                events.put(("error", str(exc)))
+        threading.Thread(target=worker, name="mobile-folder-" + self.phase, daemon=True).start()
+        self.poll_id = self.dialog.after(40, self.poll)
+
+    def scan(self, root):
+        if self.busy:
+            return
+        self.browser._folder_import_handled = True
+        self.plan = None
+        root = Path(root)
+        self.location.set(str(root))
+        existing = tuple(self.browser.store.reports)
+        self._working("scanning")
+        self._launch(lambda progress, cancelled: plan_mobile_session_import(
+            root, existing, progress=progress, cancelled=cancelled, prepare_report=_compact_mobile_report_for_store))
+
+    def commit(self):
+        if self.busy or self.plan is None or not self.plan.eligible_items:
+            return
+        store, plan = self.browser.store, self.plan
+        self._working("importing")
+        self._launch(lambda progress, cancelled: store.import_mobile_session_plan(plan, progress=progress, cancelled=cancelled))
+
+    def poll(self):
+        self.poll_id = None
+        if self.closed:
+            return
+        while True:
+            try:
+                kind, value = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "progress":
+                done, total, path = value
+                if total:
+                    self.progress.stop()
+                    self.progress.configure(mode="determinate", maximum=total, value=done)
+                    self.progress_text.set(f"Sprawdzono {done} z {total} archiwów" if self.phase == "scanning" else f"Importowanie {done} z {total} sesji")
+                else:
+                    self.progress_text.set("Wyszukiwanie archiwów…")
+                self.current_file.set(("Sprawdzanie: " if self.phase == "scanning" else "Zapis: ") + Path(path).name)
+            elif kind == "result":
+                writing = self.phase == "importing"
+                self.plan = value
+                if writing:
+                    imported = [i for i in value.items if i.status == "IMPORTED"]
+                    if imported:
+                        mobile_import_preferences.remember_successful_import([i.path for i in imported], folder=value.root)
+                        self.browser._folder_import_saved_id = imported[-1].report.report_id
+                self.show_result()
+            else:
+                self.progress.stop()
+                self.phase = "error"
+                self.title.set("Nie udało się sprawdzić folderu")
+                self.progress_text.set(value)
+                self.current_file.set("")
+                self.cancel_button.configure(text="Anuluj", state=tk.NORMAL)
+                self.back_button.pack(side=tk.LEFT)
+        if self.busy:
+            self.poll_id = self.dialog.after(40, self.poll)
+
+    def show_result(self):
+        self.progress.stop()
+        self.phase = "finished" if self.plan.finished else "result"
+        self.title.set("Wynik importu" if self.plan.finished else "Wynik sprawdzenia")
+        self.work.grid_remove()
+        self.result.grid(row=2, column=0, sticky="nsew")
+        p = self.plan
+        other = [i for i in p.items if i.group is not None and i.group != p.selected_group]
+        for variable, value in zip(self.stats_vars, p.overview()):
+            variable.set(value)
+        self.location.set(f"{p.root}\nSeria główna / wybrana: {p.group_caption(p.selected_group)}")
+        self.group_tree.delete(*self.group_tree.get_children())
+        self.group_keys = {}
+        for n, (group, items) in enumerate(p.groups.items()):
+            iid = f"g{n}"
+            self.group_keys[iid] = group
+            self.group_tree.insert("", tk.END, iid=iid, text=p.group_caption(group), values=(
+                sum(i.status == "NEW" for i in items), sum(i.status == "EXISTING" for i in items), sum(i.status == "CONFLICT" for i in items)))
+            if group == p.selected_group:
+                self.group_tree.selection_set(iid)
+        if len(p.groups) > 1:
+            self.group_box.grid(row=1, column=0, sticky="ew", pady=(0, 4))
+        else:
+            self.group_box.grid_remove()
+        self.files.delete(*self.files.get_children())
+        labels = {"good": "Zgodne z protokołem" if p.selected_group == F5A_IMPORT_GROUP else "Zakwalifikowane — kontrola ogólna",
+                  "bad": "Niezgodne z protokołem", "other": "Pilotaże / inne serie",
+                  "existing": "Już zaimportowane", "invalid": "Uszkodzone lub nieczytelne", "duplicate": "Duplikaty"}
+        self.file_items = {}
+        for category, label in labels.items():
+            self.files.insert("", tk.END, iid=category, text=label, open=category == "bad")
+        for n, item in enumerate(p.items):
+            # These are overlapping views, not disjoint populations. An existing
+            # pilot must remain visible in both its series and existing reports.
+            categories = []
+            if item.status == "INVALID": categories.append("invalid")
+            if item.status in {"CONFLICT", "IDENTITY_CONFLICT", "ERROR"}: categories.append("bad")
+            if item.group is not None and item.group != p.selected_group: categories.append("other")
+            if item.status in {"EXISTING", "IMPORTED"}: categories.append("existing")
+            if item.status == "DUPLICATE": categories.append("duplicate")
+            if item.group == p.selected_group and item.status in {"NEW", "EXISTING", "IMPORTED"}: categories.append("good")
+            for category in categories:
+                iid = f"file{n}-{category}"
+                self.file_items[iid] = item
+                self.files.insert(category, tk.END, iid=iid, text=item.path.name,
+                                  values=(" / ".join(item.observed(k) for k in ("variant", "replicate_index", "block")),))
+        for category, label in labels.items():
+            self.files.item(category, text=f"{label} ({len(self.files.get_children(category))})")
+        self.set_details("Wybierz archiwum, aby zobaczyć jego tożsamość i szczegóły kwalifikacji.\nGrupy są filtrami: pilot może być widoczny także w już zaimportowanych.\n\n" + "\n".join(
+            f"MT — {label}: {p.mt_counts(items)[0]} archiwów z niekompletnymi dowodami; {sum(p.mt_counts(items)[1].values())} przerwanych wywołań"
+            for label, items in (("cały skan", p.items), ("właściwa seria F5A", [i for i in p.items if i.is_f5a]), ("inne serie", [i for i in p.items if not i.is_f5a]))))
+        for button in self.actions.winfo_children():
+            button.pack_forget()
+        self.back_button.pack(side=tk.LEFT)
+        self.copy_button.pack(side=tk.LEFT, padx=6)
+        self.cancel_button.configure(text="Anuluj", state=tk.NORMAL)
+        self.cancel_button.pack(side=tk.RIGHT)
+        self.import_button.configure(text=p.import_caption, state=tk.NORMAL if p.eligible_items else tk.DISABLED)
+        self.import_button.pack(side=tk.RIGHT, padx=6)
+        if p.finished:
+            self.note.set(f"Zaimportowano: {p.count('IMPORTED')} | Już istniały: {p.count('EXISTING')} | Nie zaimportowano: {len(p.items)-p.count('IMPORTED')-p.count('EXISTING')} | Błędy: {p.count('ERROR')+p.count('INVALID')+p.count('IDENTITY_CONFLICT')}" + (". Zapis przerwany; wcześniejsze zapisy zachowano." if p.cancelled else ""))
+        elif p.cancelled:
+            self.note.set("Sprawdzanie anulowane. Wynik jest częściowy; wróć do wyboru folderu, aby sprawdzić ponownie.")
+        elif p.selected_group is None and p.groups:
+            self.note.set("Wybierz jawnie serię w tabeli i zatwierdź przyciskiem wyboru grupy. Nic nie zapisano.")
+        elif other:
+            self.note.set(f"Pominięto {len(other)} sesje pilotażowe / innych serii. Można jawnie wybrać ich grupę. Nic nie zapisano.")
+        elif not p.eligible_items:
+            self.note.set("Brak nowych zgodnych sesji do zapisu. Sprawdź grupy błędów i już zaimportowanych archiwów.")
+        else:
+            self.note.set("Sprawdzenie zakończone. Dopiero przycisk importu zapisze zgodne sesje wybranej serii.")
+
+    def set_details(self, text):
+        self.details.configure(state=tk.NORMAL)
+        self.details.delete("1.0", tk.END)
+        self.details.insert("1.0", text)
+        self.details.configure(state=tk.DISABLED)
+
+    def show_file(self, event=None):
+        selected = self.files.selection()
+        if selected and selected[0] in self.file_items:
+            self.set_details(self.plan.item_summary(self.file_items[selected[0]]))
+
+    def choose_group(self):
+        selected = self.group_tree.selection()
+        if not self.busy and selected:
+            self.plan.select_group(self.group_keys[selected[0]])
+            self.show_result()
+
+    def copy_summary(self):
+        if self.plan is not None:
+            self.dialog.clipboard_clear()
+            self.dialog.clipboard_append(self.plan.summary(completed=self.plan.finished))
+            self.note.set("Skopiowano pełną diagnostykę: wszystkie grupy, zakresy MT i szczegóły plików.")
+
+    def back(self):
+        if not self.busy:
+            self.phase = "selection"
+            self.page.pack_forget()
+            self.selection.pack(fill=tk.BOTH, expand=True)
+
+
 class MobileReportBrowser:
     def __init__(self, owner, parent=None):
         self.owner = owner
@@ -925,6 +1261,11 @@ class MobileReportBrowser:
             return False
 
     def _request_close(self) -> None:
+        for panel in getattr(self, '_photo_reference_windows', ()):
+            if not panel._closed:
+                panel.close()
+                if not panel._closed:
+                    return
         reviews = [panel for panel in getattr(self, "_sample_reviews", {}).values() if not panel._closed]
         if reviews:
             for panel in reviews:
@@ -959,6 +1300,17 @@ class MobileReportBrowser:
                 button.configure(state=state)
             except Exception:
                 pass
+        button = getattr(self, "btn_cancel_import", None)
+        if button is not None:
+            button.grid() if running else button.grid_remove()
+            button.configure(state=tk.NORMAL if running else tk.DISABLED)
+
+    def _cancel_mobile_import(self) -> None:
+        self._import_cancel_requested = True
+        self._set_status("Anulowanie — kończę bieżące archiwum. Zapisane wcześniej sesje pozostaną w magazynie.", "warning")
+        button = getattr(self, "btn_cancel_import", None)
+        if button is not None:
+            button.configure(state=tk.DISABLED)
 
     @staticmethod
     def _is_mobile_report_file(path: Path) -> bool:
@@ -996,6 +1348,8 @@ class MobileReportBrowser:
         start_dir = mobile_import_preferences.initial_directory(default_dir)
 
         selected_paths: list[Path] = []
+        self._folder_import_handled = False
+        self._folder_import_saved_id = ""
         state: dict[str, Any] = {"dir": start_dir}
         entries: list[dict[str, Any]] = []
 
@@ -1004,8 +1358,8 @@ class MobileReportBrowser:
         dialog.title("Wybierz raporty z telefonu")
         dialog.configure(bg=self.bg)
         try:
-            dialog.geometry("920x620")
-            dialog.minsize(760, 500)
+            dialog.geometry("1040x740")
+            dialog.minsize(760, 600)
             dialog.resizable(True, True)
         except Exception:
             pass
@@ -1017,7 +1371,7 @@ class MobileReportBrowser:
 
         title = tk.Label(
             shell,
-            text="Wybierz jeden lub kilka raportów z aplikacji mobilnej",
+            text="Wybierz pliki raportów lub folder do skanowania",
             bg=self.bg,
             fg=self.fg,
             font=("Segoe UI", 13, "bold"),
@@ -1026,7 +1380,7 @@ class MobileReportBrowser:
         title.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         subtitle = tk.Label(
             shell,
-            text="Obsługiwane formaty: .alprsession, .zip, .json. Zaznacz wiele pozycji klawiszem Ctrl albo Shift.",
+            text="Pliki: .alprsession, .zip, .json (Ctrl lub Shift). Import folderu skanuje ścieżkę z pola poniżej i jej podfoldery.",
             bg=self.bg,
             fg=self.muted,
             font=("Segoe UI", 9),
@@ -1041,7 +1395,7 @@ class MobileReportBrowser:
         path_row.grid_columnconfigure(1, weight=1)
         tk.Label(
             path_row,
-            text="Folder:",
+            text="Folder do skanowania:",
             bg=self.bg,
             fg=self.fg,
             font=("Segoe UI", 9, "bold"),
@@ -1067,7 +1421,27 @@ class MobileReportBrowser:
             command=lambda: mobile_import_preferences.set_remember_enabled(remember_var.get()),
             bg=self.bg, fg=self.fg, activebackground=self.bg, activeforeground=self.fg,
             selectcolor=self.panel, font=("Segoe UI", 9),
-        ).grid(row=0, column=2, sticky="e", padx=(10, 0))
+        ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(5, 0))
+
+        def _choose_folder() -> None:
+            try:
+                dialog.grab_release()
+                selected = filedialog.askdirectory(
+                    parent=dialog, title="Wybierz folder do importu", mustexist=True,
+                    initialdir=str(mobile_import_preferences.readable_directory(path_var.get()) or state["dir"]))
+                if selected:
+                    path_var.set(selected)
+                    _load_dir(selected)
+            except Exception as exc:
+                _set_status("Nie udało się otworzyć selektora folderów. Wklej pełną ścieżkę w polu powyżej.", "error")
+                logger.warning("Selektor folderu importu: %s", exc)
+            finally:
+                if dialog.winfo_exists():
+                    dialog.grab_set()
+                    dialog.focus_force()
+
+        ttk.Button(path_row, text="Wybierz folder…", command=_choose_folder).grid(
+            row=0, column=2, sticky="e", padx=(8, 0))
 
         list_shell = tk.Frame(
             shell,
@@ -1159,24 +1533,18 @@ class MobileReportBrowser:
         def _load_dir(path: Path | str) -> bool:
             try:
                 target = Path(str(path or "")).expanduser()
-                if not target.exists() or not target.is_dir():
-                    _set_status("Ten folder nie istnieje albo nie jest dostępny.", "error")
-                    return False
+                if not target.is_dir():
+                    raise FileNotFoundError(str(target))
                 target = target.resolve()
+                children = list(target.iterdir())
             except Exception as exc:
-                _set_status(f"Nie udało się otworzyć folderu: {exc}", "error")
+                _set_status(mobile_import_path_error(exc, path), "error")
                 return False
 
             entries.clear()
             listbox.delete(0, tk.END)
             state["dir"] = target
             path_var.set(str(target))
-
-            try:
-                children = list(target.iterdir())
-            except Exception as exc:
-                _set_status(f"Nie udało się odczytać folderu: {exc}", "error")
-                return False
 
             if target.parent != target:
                 entries.append({"path": target.parent, "dir": True, "report": False})
@@ -1236,7 +1604,17 @@ class MobileReportBrowser:
             selected_paths[:] = reports
             _close()
 
+        def _accept_folder() -> None:
+            # Only the visible editable path chooses the root. Navigating into
+            # a subdirectory updates that path; list selection cannot override it.
+            folder = path_var.get()
+            if not _load_dir(folder):
+                return
+            flow.scan(Path(state["dir"]))
+
         def _close() -> None:
+            if not flow.request_close():
+                return
             try:
                 dialog.grab_release()
             except Exception:
@@ -1276,6 +1654,9 @@ class MobileReportBrowser:
         )
         ttk.Button(actions, text="Anuluj", command=_close).grid(row=0, column=7, sticky="e", padx=(8, 6), ipadx=8, ipady=2)
         ttk.Button(actions, text="Importuj zaznaczone", command=_accept).grid(row=0, column=8, sticky="e", ipadx=10, ipady=2)
+        ttk.Button(actions, text="Sprawdź folder z podfolderami", command=_accept_folder).grid(
+            row=1, column=7, columnspan=2, sticky="e", pady=(10, 0), ipady=2)
+        flow = _MobileFolderImportFlow(self, dialog, shell, _close)
 
         path_entry.bind("<Return>", lambda _event: (_load_dir(path_var.get()), "break")[-1], add="+")
         listbox.bind("<Double-Button-1>", _open_or_accept, add="+")
@@ -1288,13 +1669,13 @@ class MobileReportBrowser:
         try:
             dialog.update_idletasks()
             minimum_width = max(760, int(actions.winfo_reqwidth()) + 28)
-            dialog.minsize(minimum_width, 500)
+            dialog.minsize(minimum_width, 600)
             parent_x = int(self.window.winfo_rootx())
             parent_y = int(self.window.winfo_rooty())
             parent_w = int(self.window.winfo_width() or 920)
             parent_h = int(self.window.winfo_height() or 620)
             width = max(minimum_width, min(940, max(760, int(parent_w * 0.86))))
-            height = min(660, max(500, int(parent_h * 0.82)))
+            height = min(780, max(650, int(parent_h * 0.82)))
             x = parent_x + max(18, int((parent_w - width) / 2))
             y = parent_y + max(18, int((parent_h - height) / 2))
             dialog.geometry(f"{width}x{height}+{x}+{y}")
@@ -1313,6 +1694,13 @@ class MobileReportBrowser:
         except Exception:
             pass
         return tuple(selected_paths)
+
+    def open_photo_reference(self):
+        from .z4_photo_reference import open_photo_reference
+        panel = open_photo_reference(self.window)
+        if panel is not None:
+            self._photo_reference_windows = [p for p in getattr(self, '_photo_reference_windows', ()) if not p._closed] + [panel]
+        return panel
 
     def _build(self) -> None:
         root = tk.Frame(self.window, bg=self.bg, padx=12, pady=10)
@@ -1338,6 +1726,8 @@ class MobileReportBrowser:
         self.btn_link_archive = ttk.Button(header, text="Podłącz archiwum",
                   command=self.link_source_archive, state="disabled")
         self.btn_link_archive.grid(row=0, column=2, rowspan=2, sticky="e", padx=(8, 0))
+        ttk.Button(header, text='GT fotografii', command=self.open_photo_reference).grid(
+            row=0, column=3, rowspan=2, sticky='e', padx=(8, 0))
         self.btn_link_archive.grid_remove()
 
         workspace = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=self.bg, bd=0, relief=tk.FLAT,
@@ -1353,7 +1743,8 @@ class MobileReportBrowser:
             highlightthickness=1,
             highlightbackground=self.border,
         )
-        workspace.add(left, width=600, minsize=580, padx=0, pady=0, stretch="never")
+        workspace.add(left, width=650, minsize=610, padx=0, pady=0, stretch="never")
+        self._report_list_pane = left
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(3, weight=1)
         left_header = tk.Frame(left, bg=self.card_bg)
@@ -1384,12 +1775,14 @@ class MobileReportBrowser:
         tk.Label(left, textvariable=self.report_count_var, bg=self.card_bg, fg=self.muted,
                  font=("Segoe UI", 9), anchor=tk.W).grid(row=2, column=0, sticky="ew", pady=(0, 5))
         self.report_table = _TreeTable(
-            left, ("Wybor", "Data", "Wariant", "Scena", "Powt.", "Weryfikacja", "p95"),
-            ("✓", "Data", "Wariant", "Materiał", "Powt.", "Weryfikacja", "P95"),
-            (30, 112, 87, 96, 45, 116, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
+            left, ("Wybor", "Nazwa", "Data", "Wariant", "Scena", "Powt.", "Weryfikacja", "p95"),
+            ("✓", "Nazwa / notatka z telefonu", "Data", "Wariant", "Materiał", "Powt.", "Weryfikacja", "P95"),
+            (28, 242, 94, 60, 96, 44, 104, 65), palette={**self.palette, "panel": self.card_bg}, height=18,
             selectmode="extended")
         self.report_table.shell.grid(row=3, column=0, sticky="nsew")
-        self.report_table.tree.column('Wybor',width=30,minwidth=30)
+        self.report_table.tree.column('Wybor',width=28,minwidth=28)
+        self.report_table.tree.configure(displaycolumns=('Wybor','Nazwa','Wariant','Powt.','Weryfikacja','Data'))
+        self.report_table.tree.column('Nazwa', minwidth=210, stretch=True)
         tree=self.report_table.tree
         style=ttk.Style(tree)
         row_font=tkfont.Font(root=tree,font=style.lookup(tree.cget('style'),'font'))
@@ -1403,6 +1796,16 @@ class MobileReportBrowser:
             background=[('selected',self.palette.get('selection_bg',self.accent))],
             foreground=[('selected',self.palette.get('selection_fg',self.fg))])
         self._update_sort_headings()
+        self._size_report_list_columns()
+        list_xscroll = ttk.Scrollbar(self.report_table.shell, orient=tk.HORIZONTAL, command=tree.xview)
+        list_xscroll.grid(row=1, column=0, sticky="ew")
+        def update_list_xscroll(first, last):
+            list_xscroll.set(first, last)
+            if float(first) <= 0 and float(last) >= 1:
+                list_xscroll.grid_remove()
+            else:
+                list_xscroll.grid()
+        tree.configure(xscrollcommand=update_list_xscroll)
         self.report_table.tree.bind("<<TreeviewSelect>>", self._on_report_selected, add="+")
         from .mobile_report_selection import ReportListSelection
         self._report_list_selection = ReportListSelection(self)
@@ -1440,6 +1843,18 @@ class MobileReportBrowser:
         self.hero_meta_label = tk.Label(identity, textvariable=self.hero_meta_var, bg=self.bg, fg=self.muted,
                         font=("Segoe UI", 9), anchor=tk.W, justify=tk.LEFT, wraplength=650)
         self.hero_meta_label.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        phone_note = tk.Frame(identity, bg=self.bg)
+        phone_note.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        phone_note.grid_columnconfigure(0, weight=1)
+        tk.Label(phone_note, text="Notatka z telefonu", bg=self.bg, fg=self.fg,
+                 font=("Segoe UI", 9, "bold"), anchor=tk.W).grid(row=0, column=0, sticky="w", pady=(0, 3))
+        self.phone_note_text = tk.Text(phone_note, height=3, width=1, wrap="word", state="disabled",
+            bg=self.panel, fg=self.fg, relief=tk.FLAT, font=("Segoe UI", 10), padx=7, pady=5,
+            selectbackground=self.palette.get('selection_bg', self.accent), takefocus=True)
+        self.phone_note_text.grid(row=1, column=0, sticky="ew")
+        phone_scroll = ttk.Scrollbar(phone_note, orient=tk.VERTICAL, command=self.phone_note_text.yview)
+        phone_scroll.grid(row=1, column=1, sticky="ns")
+        self.phone_note_text.configure(yscrollcommand=phone_scroll.set)
         # No navigation buttons next to the title: tabs directly below already
         # provide navigation, and warnings are contextual to the source details.
         right.bind("<Configure>", self._resize_report_details, add="+")
@@ -1523,6 +1938,9 @@ class MobileReportBrowser:
                     bg=self.bg, fg=self.muted, font=("Segoe UI", 8), anchor=tk.W)
         self.status_label.grid(row=0, column=0, sticky="ew")
         self.progress = ttk.Progressbar(status_bar, mode="indeterminate", length=110)
+        self.btn_cancel_import = ttk.Button(status_bar, text="Anuluj import", command=self._cancel_mobile_import)
+        self.btn_cancel_import.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.btn_cancel_import.grid_remove()
 
     @staticmethod
     def _pointer_inside_widget(widget, x: int, y: int) -> bool:
@@ -2015,9 +2433,43 @@ class MobileReportBrowser:
         }
         self._update_comparison_basket_status(silent=True)
         self._apply_report_filter(select_report_id=select_report_id, auto_select=auto_select, refresh_preview=True)
+        # Only legacy truncated notes need enrichment. Reuse SHA-pinned recovery
+        # and its cache; filtering/refreshing must not scan every archive.
+        for report in self._ordered_reports:
+            if phone_session_metadata(report, self._matching_cached_bundle(report)).note.state == 'TRUNCATED':
+                path = stored_source(report)
+                if path:
+                    self._begin_source_recovery(report, path)
+
+    def _size_report_list_columns(self) -> None:
+        """Fit this session table to its actual heading font and Windows DPI."""
+        tree = self.report_table.tree
+        style = ttk.Style(tree)
+        style_name = tree.cget('style')
+        heading_font = tkfont.Font(root=tree, font=(
+            style.lookup(style_name + '.Heading', 'font') or 'TkHeadingFont'))
+        row_font = tkfont.Font(root=tree, font=(style.lookup(style_name, 'font') or 'TkDefaultFont'))
+        padding = max(16, round(tree.winfo_fpixels('14p')))
+        samples = {
+            'Wybor': ('☑',), 'Nazwa': (), 'Wariant': ('R0', 'R1', 'R2'),
+            'Powt.': ('r03',), 'Data': ('09.11.2026', '23:59 +02:00'),
+            'Weryfikacja': ('Nie rozpoczęto', 'Wymaga eksportu', 'Niepełna MT+MZ', 'eksport wymagany'),
+        }
+        total = 0
+        for column in tree.cget('displaycolumns'):
+            title = tree.heading(column, 'text').rstrip(' ↑↓')
+            # Reserve both arrows once, so sorting does not move the separators.
+            headings = (title,) if column == 'Wybor' else (title + ' ↑', title + ' ↓')
+            width = max([heading_font.measure(text) for text in headings]
+                        + [row_font.measure(text) for text in samples.get(column, ())]) + padding
+            tree.column(column, width=width, minwidth=width, stretch=(column == 'Nazwa'))
+            total += width
+        # Prefer enough room for every visible column, while preserving the
+        # ability to narrow the pane and scroll on a smaller display.
+        self.report_split.paneconfigure(self._report_list_pane, width=total + 42)
 
     def _update_sort_headings(self):
-        titles=dict(Data='Data',Wariant='Wariant',Scena='Materiał',Weryfikacja='Weryfikacja',p95='P95',**{'Powt.':'Powt.'})
+        titles=dict(Nazwa='Nazwa / notatka z telefonu',Data='Data',Wariant='Wariant',Scena='Materiał',Weryfikacja='Weryfikacja',p95='P95',**{'Powt.':'Powt.'})
         for column in SORT_COLUMNS:
             arrow=(' ↓' if self._report_sort_descending else ' ↑') if column==self._report_sort_column else ''
             self.report_table.tree.heading(column,text=titles[column]+arrow,command=lambda c=column:self._sort_reports(c))
@@ -2045,7 +2497,8 @@ class MobileReportBrowser:
         filtered = [r for r in all_reports if matches_report_filter(r, query, self._matching_cached_bundle(r))]
         column=getattr(self,'_report_sort_column','Data');descending=getattr(self,'_report_sort_descending',True)
         filtered=sorted_report_view(filtered,lambda r:report_sort_value(r,column,
-            report_identity(r,self._matching_cached_bundle(r)),self._comparison_verification.get(self._comparison_key(r)),_pipeline_p95(r)),descending)
+            report_identity(r,self._matching_cached_bundle(r)),self._comparison_verification.get(self._comparison_key(r)),_pipeline_p95(r),
+            phone_session_metadata(r,self._matching_cached_bundle(r))),descending)
         def table_line(r):
             info=report_identity(r, self._matching_cached_bundle(r))
             repeat=report_repeat(r)[0]
@@ -2056,6 +2509,7 @@ class MobileReportBrowser:
             except ValueError:ready=False
             status=('Zatwierdzona\npełna ocena' if state and state.ready else
                 'Zatwierdzona\nogr. miary' if state and state.state=='APPROVED_LIMITED' else state.label if state else 'Nieustalona')
+            status = status.replace(' · ', '\n')
             from .mobile_report_source_recovery import stored_source
             try:source_available=Path(stored_source(r)).is_file()
             except OSError:source_available=False
@@ -2069,7 +2523,7 @@ class MobileReportBrowser:
             else:date=stamp.strftime('%d.%m.%Y\n%H:%M bez strefy') if stamp else '—'
             scenario=info['scenario'] or '—'
             if len(scenario)>11 and '_' in scenario:scenario='\n'.join(scenario.rsplit('_',1))
-            return (tick,date,
+            return (tick,phone_list_caption(phone_session_metadata(r,self._matching_cached_bundle(r))),date,
                     info["variant_short"],scenario,repeat,
                     status,_format_ms(_pipeline_p95(r)),{"tag":tag})
         tree=self.report_table.tree
@@ -2132,6 +2586,8 @@ class MobileReportBrowser:
             self._show_report(selected_report,self._matching_cached_bundle(selected_report))
 
     def _ux_reset_selection(self) -> None:
+        if hasattr(self, 'phone_note_text'):
+            self._replace_text(self.phone_note_text, '')
         for name, text in (("hero_title_var", "Wybierz raport z listy"),
                            ("hero_meta_var", ""), ("selected_report_info_var", "Wybierz sesję, aby zobaczyć jej identyfikatory."),
                            ("review_status_var", "Weryfikacja Desktop: brak wybranej sesji")):
@@ -2390,6 +2846,12 @@ class MobileReportBrowser:
         path_values = self._ask_mobile_report_paths(initial_dir)
         if not path_values:
             self._set_import_controls(False)
+            if getattr(self, "_folder_import_handled", False):
+                saved_id = getattr(self, "_folder_import_saved_id", "")
+                if saved_id:
+                    self._refresh_report_list(saved_id)
+                self._set_status("Zamknięto dialog importu. Zapisane sesje pozostają w magazynie." if saved_id else "Zamknięto sprawdzanie folderu. Magazyn raportów bez zmian.", "info")
+                return
             self._set_status("Import anulowany. Nie wybrano plików raportów.", "warning")
             return
         report_paths = [Path(value) for value in path_values if str(value or "").strip()]
@@ -2411,6 +2873,7 @@ class MobileReportBrowser:
             failures: list[tuple[Path, str]] = []
             successful_paths: list[Path] = []
             saved = 0
+            already_existing = 0
             last_saved_report_id = ""
             save_error = ""
             try:
@@ -2430,6 +2893,13 @@ class MobileReportBrowser:
                             bundles.append((report_path, bundle))
                             if bundle.validation.ok:
                                 try:
+                                    validate_known_mobile_experiment(bundle)
+                                    existing = self.store.existing_import(bundle.report)
+                                    if existing is not None:
+                                        already_existing += 1
+                                        successful_paths.append(report_path)
+                                        bundles[-1] = (report_path, replace(bundle, report=existing))
+                                        continue
                                     self.store.reports = [
                                         _compact_mobile_report_for_store(report)
                                         for report in self.store.reports
@@ -2486,6 +2956,11 @@ class MobileReportBrowser:
 
                     failed_count = len(failures)
                     invalid_count = len(invalid)
+                    if already_existing and not failed_count and not invalid_count:
+                        if not saved:
+                            mobile_import_preferences.remember_successful_import(successful_paths)
+                        self._set_status(f"Zaimportowano {saved} nowych raportów. Już istniejące: {already_existing}; zachowano weryfikację.", "success")
+                        return
                     if saved and not failed_count and not invalid_count:
                         if total_files == 1 and saved == 1 and bundles:
                             report = bundles[0][1].report
@@ -2660,6 +3135,9 @@ class MobileReportBrowser:
             return
         self._source_failures.pop(report_id, None)
         self.bundle_by_report_id[report_id] = result.bundle
+        if (hasattr(self, '_ordered_reports')
+                and phone_session_metadata(report, result.bundle) != phone_session_metadata(report)):
+            self._apply_report_filter(auto_select=False, preserve_preview=True)
         linked_report = report
         if manual and str(report.source_path or "") != result.path:
             linked_report = relinked_report(report, result.path)
@@ -2688,7 +3166,7 @@ class MobileReportBrowser:
                 self.source_status_var.set(self._source_failures[report_id])
             else:
                 self.source_status_var.set(
-                    f"Źródło sprawdzone  ·  {n} pomiarów czasu  ·  {crops} wyciętych tablic")
+                    f"Integralność źródła potwierdzona (ZIP/SHA-256)  ·  {n} pomiarów czasu  ·  {crops} wyciętych tablic")
 
     def _show_report(self, report: MobileBenchmarkReport | None, bundle: MobileReportBundle | None = None) -> None:
         if report is None:
@@ -2714,7 +3192,7 @@ class MobileReportBrowser:
         if bundle is not None:
             n = len(bundle.trace_rows)
             c = sum(e.name.startswith("samples/crops/") for e in bundle.entries)
-            self.source_status_var.set(f"Źródło sprawdzone  ·  {n} pomiarów czasu  ·  {c} wyciętych tablic")
+            self.source_status_var.set(f"Integralność źródła potwierdzona (ZIP/SHA-256)  ·  {n} pomiarów czasu  ·  {c} wyciętych tablic")
         if hasattr(self, "btn_link_archive"):
             self.btn_link_archive.configure(state="normal")
             if bundle is None:
@@ -2773,9 +3251,13 @@ class MobileReportBrowser:
         from .mobile_model_identity import identity_from_bundle
         models = identity_from_bundle(bundle)
         from .mobile_measurement_availability import polish_model_caption
-        self.hero_title_var.set("Pakiet: " + polish_model_caption(models["caption"]))
-        meta = (f"{info['variant']} · {info['scenario'] or 'Scenariusz: brak danych'} · "
-                f"{models['repeat_label']} · {models['variant_caption']} · {local_measurement_time(report.measured_at, compact=True)}")
+        phone = phone_session_metadata(report, bundle)
+        self.hero_title_var.set(phone_name_caption(phone))
+        if hasattr(self, 'phone_note_text'):
+            self._replace_text(self.phone_note_text, phone_note_caption(phone))
+        meta = (f"Seria: {info['series'] or 'brak danych'} · Wariant: {info['variant']} · "
+                f"Powtórzenie: {report_repeat(report)[0]}\n"
+                f"Scenariusz: {info['scenario'] or 'brak danych'} · {local_measurement_time(report.measured_at, compact=True)}")
         if bundle and bundle.validation.warnings:
             meta += f"  ·  {len(bundle.validation.warnings)} uwaga o archiwum (Szczegóły)"
         self.hero_meta_var.set(meta)
@@ -3609,6 +4091,7 @@ class MobileReportBrowser:
         return "break"
 
     def _begin_latency_pan(self, event):
+        self._latency_press_xy = (float(event.x), float(event.y))
         self._latency_pan_origin = (float(event.x), self._latency_x_view) if self._latency_x_view is not None else None
 
     def _move_latency_pan(self, event):
@@ -3623,6 +4106,54 @@ class MobileReportBrowser:
 
     def _end_latency_pan(self, _event):
         self._latency_pan_origin = None
+        origin = getattr(self, '_latency_press_xy', None)
+        link = self._evidence_timing_link() if getattr(self, '_linked_evidence_timing', None) else None
+        if not origin or not link or (float(_event.x)-origin[0])**2+(float(_event.y)-origin[1])**2 > 16:
+            return
+        points = getattr(self, '_latency_hit_points', ())
+        if not points:
+            return
+        point = min(points, key=lambda p: (p[0]-_event.x)**2+(p[1]-_event.y)**2)
+        if (point[0]-_event.x)**2+(point[1]-_event.y)**2 <= 144:
+            row = self.current_bundle.trace_rows[point[2]]
+            if row.get('frame_id') not in (None, ''):
+                link['callback'](str(row['frame_id']), point[3])
+
+    def _evidence_timing_link(self):
+        link = getattr(self, '_linked_evidence_timing', None)
+        report = getattr(self, 'current_report', None)
+        if link and report and str(report.source_archive_sha256).lower() == link['sha']:
+            return link
+        return None
+
+    def link_evidence_timing(self, archive_sha, trace_ids, callback, *, open_tab=False):
+        """Optional source-ID bridge; ordinary Z4 charts keep their own clock/zoom."""
+        report = getattr(self, 'current_report', None)
+        if report is None or str(report.source_archive_sha256).lower() != str(archive_sha).lower():
+            return False
+        ids = frozenset(str(v) for v in trace_ids)
+        previous = self._evidence_timing_link()
+        self._linked_evidence_timing = dict(sha=str(archive_sha).lower(), ids=ids, callback=callback)
+        if open_tab:
+            self.notebook.select(3)
+            self.technical_notebook.select(self.latency_split.master)
+            # The selected source points must not remain outside an old zoom.
+            self._latency_x_view = None
+            self.window.lift()
+            self.window.after_idle(self._reveal_linked_timing_points)
+        if open_tab or previous is None or previous['ids'] != ids:
+            self._draw_latency_chart()
+        return True
+
+    def _reveal_linked_timing_points(self):
+        if not self._evidence_timing_link() or not self.window.winfo_exists():
+            return
+        split = self.latency_split
+        # The existing splitter can otherwise leave only a few pixels below
+        # the legend on first opening a hidden tab. Keep the points clickable.
+        if len(split.panes()) > 1 and split.winfo_height() > 320 and self.latency_canvas.winfo_height() < 260:
+            split.sashpos(0, int(split.winfo_height() * .74))
+        self._draw_latency_chart()
 
     def _reset_latency_zoom(self, _event=None):
         self._latency_x_view = None
@@ -3850,6 +4381,12 @@ class MobileReportBrowser:
                                           radius=3.3, background=self.panel)
                         picked_points.append((point_x, point_y, i, key, value))
             self._latency_hit_points = picked_points
+            link = self._evidence_timing_link() if getattr(self, '_linked_evidence_timing', None) else None
+            if link:
+                for px, py, i, _, _ in picked_points:
+                    if str(bundle.trace_rows[i].get('frame_id', '')) in link['ids']:
+                        canvas.create_oval(px-6, py-6, px+6, py+6, outline=self.fg, width=2,
+                                           tags=('linked_evidence_timing',))
             if dense and plot_w >= 450:
                 footer_notes.append("Zagęszczony widok: zakres min–max na kolumnę")
             # Guidance is below all legend rows, never behind MZ label.

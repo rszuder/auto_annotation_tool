@@ -2,6 +2,14 @@
 
 
 def approval_caption(inventory, review_status, revision):
+    if inventory.get('operator_review_progress'):
+        from .mobile_operator_progress import presentation
+        source = inventory['operator_review_progress']
+        p = presentation(source)
+        caption = f"Weryfikacja operatora: {p['status']} · {p['progress']}"
+        if source.get('unit_kind') == 'MT_ROI' and source.get('mt_assessed') is not None:
+            caption += f" · osobno MT/ROI: {source['mt_assessed']}/{source['mt_total']}"
+        return caption
     total = inventory.get('total', 0)
     if inventory.get('scene_scope'):
         scene=inventory['scene_scope']

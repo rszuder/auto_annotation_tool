@@ -306,6 +306,13 @@ class Navigator:
         self.hint.configure(wraplength=max(150,self.ed.clean_bar.winfo_width()-12))
 
     def update(self):
+        from .mobile_canvas_visibility import gt_only
+        if gt_only(self.ed):
+            self.controls.grid_remove();self.hint.configure(text='Wyniki modeli ukryte · najpierw ręczne GT');self.hint.grid()
+            self.ed.clean_caption.configure(text='Ręczne GT · D: obrys · Enter: tekst · Spacja: zatwierdź')
+            self.ed.clean_menu.entryconfigure(self.ed.clean_mz_crop_index,state='disabled')
+            return
+        self.controls.grid()
         ed=self.ed;value=layers.model(ed);choices=finals(ed);ids=[c['object_id'] for c in choices]
         from .mobile_canvas_clean_view import selected,source
         row=selected(ed);manual=bool(row and not row['candidate'])

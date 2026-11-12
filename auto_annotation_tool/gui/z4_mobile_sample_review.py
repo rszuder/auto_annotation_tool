@@ -1253,6 +1253,8 @@ class MobileSampleReviewWindow:
         # The original zoom_to_mt_detection remains for legacy report flows.
         self.plate_fit_button.configure(command=self._canvas_editor.fit_plate_toggle)
         self._canvas_editor.build_report_tab(tabs)
+        from .mobile_f5a_assisted import install as install_f5a_assisted
+        install_f5a_assisted(self, header, left)
 
     def _bind_sidebar_wheel(self, widget):
         """Lokalne zdarzenia potomkow: bez bind_all i bez przechwytywania zoomu obrazu."""
@@ -1324,6 +1326,7 @@ class MobileSampleReviewWindow:
                 if error:
                     if getattr(self, "_canvas_editor", None) is not None:
                         self._canvas_editor.in_refresh = False
+                        self._canvas_editor._pending_observation_target = None
                     self.status_var.set(error)
                     if self._mt_corr_active and self._mt_corr_drag is None:
                         self._mt_corr_points = [list(p) for p in self._mt_corr_last_saved]
@@ -1336,6 +1339,9 @@ class MobileSampleReviewWindow:
                         return
                 if self.session and refresh_controls:
                     self._sync_review_controls()
+                if saving and not error and getattr(self, '_canvas_editor', None) is not None:
+                    from .mobile_canvas_observation_blocks import resume
+                    resume(self._canvas_editor)
         except queue.Empty:
             pass
         self._poll_id = self.window.after(40, self._poll)
@@ -1384,6 +1390,7 @@ class MobileSampleReviewWindow:
             first = next(iter(self._subject_ids))
             self.subject_tree.selection_set(first)
             self.subject_tree.focus(first)
+        if getattr(self,'_f5a_a3',None):self._f5a_a3.loaded()
 
     def _multi_group(self):
         if not self.session or not self.current_invocation:
@@ -1854,9 +1861,21 @@ class MobileSampleReviewWindow:
         return " / ".join(stage for stage in (mt, mz) if stage)
 
     def _select_record(self, event=None):
+        # TreeviewSelect is queued by Tk. A full-scene selection deliberately
+        # has no subject; an old MT/sample event must not leave that scene or
+        # finish an edit before its record context has been validated.
+        if self.session is None:
+            return
+        subject = self.session.subjects.get(self.subject_key)
+        if subject is None:
+            return
         selected = self.record_tree.selection()
         record = self._record_ids.get(selected[0]) if selected else None
         if not record or record == self.current_record:
+            return
+        kind, key = record
+        members = subject.get({"attempt": "attempts", "sample": "samples"}.get(kind, ""), ())
+        if key not in members:
             return
         if getattr(self, "_canvas_editor", None) is not None and not self._canvas_editor.prepare_navigation():
             return
@@ -1885,7 +1904,7 @@ class MobileSampleReviewWindow:
         group = self.session.mt_invocations.get(self.current_invocation)
         self._image_rows = _review_image_sources(
             kind, row, attempt, group,
-            [self.session.samples[sid] for sid in self.session.subjects[self.subject_key]["samples"]],
+            [self.session.samples[sid] for sid in subject["samples"]],
             self.session.entry_names,
         )
         self.image_choice.configure(values=[title for title, _ in self._image_rows])
@@ -1911,7 +1930,7 @@ class MobileSampleReviewWindow:
         result_row = row
         if kind == "attempt":
             for candidate in (self.session.samples[sid]
-                              for sid in self.session.subjects[self.subject_key]["samples"]):
+                              for sid in subject["samples"]):
                 if candidate.get("attempt_id") == key:
                     result_row = candidate
                     break
@@ -3698,8 +3717,12 @@ class MobileSampleReviewWindow:
         cx, cy = self._view_center
         half_x = width / (2.0 * scale)
         half_y = height / (2.0 * scale)
-        cx = iw / 2.0 if iw <= 2 * half_x else max(half_x, min(iw - half_x, cx))
-        cy = ih / 2.0 if ih <= 2 * half_y else max(half_y, min(ih - half_y, cy))
+        a3 = getattr(self, '_f5a_a3', None)
+        if not (a3 and a3.active):
+            cx = iw / 2.0 if iw <= 2 * half_x else max(half_x, min(iw - half_x, cx))
+            cy = ih / 2.0 if ih <= 2 * half_y else max(half_y, min(ih - half_y, cy))
+        # A3 permits margins around the frame: clamping/recentring here would
+        # undo the cursor anchor, especially while the frame is letterboxed.
         self._view_center = (cx, cy)
         # Renderowanie TYLKO widocznego obszaru, bez tworzenia olbrzymich PhotoImage przy zoomie.
         # Obraz PIL jest tylko do odczytu; piksele poza nim wypelnia ciemne tlo.
@@ -3731,7 +3754,10 @@ class MobileSampleReviewWindow:
                 "Błękit: oryginalny obrys MT. Pomarańcz: obrys operatora. "
                 "Rolką przybliżaj obraz, narożniki przeciągaj myszą."))
         if getattr(self, "_canvas_editor", None) is not None:
-            if self._canvas_editor.paint(width, height):
+            handled = self._canvas_editor.paint(width, height)
+            a3=getattr(self,'_f5a_a3',None)
+            if a3 and a3.active:a3.painted()
+            if handled:
                 return
         if self._is_source_frame_view():
             self._paint_source_frame_overlays(width, height)
@@ -3962,7 +3988,8 @@ class MobileSampleReviewWindow:
         if self._image is None:
             return "break"
         from .mobile_canvas_zoom import wheel_factor, request_zoom
-        factor = wheel_factor(event)
+        a3 = getattr(self, '_f5a_a3', None)
+        factor = wheel_factor(event, step_factor=1.12 if a3 and a3.active else 1.25)
         if factor is not None:
             request_zoom(self, factor, (event.x, event.y))
         return "break"
@@ -4506,6 +4533,8 @@ class MobileSampleReviewWindow:
 
 
     def next_pending(self):
+        a3=getattr(self,'_f5a_a3',None)
+        if a3 and a3.active:return a3.next_pending()
         if getattr(self, "_canvas_editor", None) is not None:
             return self._canvas_editor.next_pending()
         # Stage MT takes priority; never send operator back to an already assessed
@@ -4816,7 +4845,13 @@ def open_mobile_sample_review(browser, report, bundle=None):
         current.window.lift()
         current.window.focus_set()
         return current
-    browser._sample_review = MobileSampleReviewWindow(browser, report, bundle)
+    from .mobile_f5a_scene_gt import open_if_supported
+    try:
+        scene_review = open_if_supported(browser, report, bundle)
+    except (OSError, ValueError, KeyError) as exc:
+        messagebox.showerror('GT scen F5A', 'Nie otwarto GT scen: '+str(exc), parent=browser.window)
+        return None
+    browser._sample_review = scene_review or MobileSampleReviewWindow(browser, report, bundle)
     reviews[key] = browser._sample_review
     browser._sample_reviews = reviews
     return browser._sample_review

@@ -10,10 +10,14 @@ def contains(ed,quad,x,y):
     return quad_contains_point(quad,*ed.to_source(x,y)) or edge_distance((x,y),[ed.to_canvas(p) for p in quad])<=7
 
 def context(ed):
+    revision=(ed.reference_source.data.data['revision'] if getattr(ed,'reference_source',None)
+              else ed.h.session.review.review_revision)
     return (id(ed.h.session),ed.h.current_invocation,ed.h._image_entry,ed.selected,
-            ed.h.session.review.review_revision,ed.h._view_zoom,ed.c.winfo_width(),ed.c.winfo_height())
+            revision,ed.h._view_zoom,ed.c.winfo_width(),ed.c.winfo_height())
 
 def outside(ed,x,y):
+    if getattr(ed,'reference_source',None):
+        return not ed.hit(x,y) and not any(o['quad'] and contains(ed,o['quad'],x,y) for o in ed._read()['objects'])
     from .mobile_canvas_navigator import hit
     from .mobile_canvas_visibility import contours
     if hit(ed,x,y) is not None:return False

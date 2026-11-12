@@ -13,9 +13,11 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
+from .mobile_report_operator_metadata import phone_session_metadata
+
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
 
-SORT_COLUMNS = ('Data','Wariant','Scena','Powt.','Weryfikacja','p95')
+SORT_COLUMNS = ('Nazwa','Data','Wariant','Scena','Powt.','Weryfikacja','p95')
 
 
 def report_measurement_time(report):
@@ -45,7 +47,11 @@ def report_view_key(report):
         ('report_id','source_archive_sha256','source_path','package_id','variant_id','measured_at'))
 
 
-def report_sort_value(report,column,identity,verification,p95):
+def report_sort_value(report,column,identity,verification,p95,phone_metadata=None):
+    if column=='Nazwa':
+        metadata=phone_metadata or phone_session_metadata(report)
+        value=metadata.name.value or metadata.note.value
+        return unicodedata.normalize('NFKC',value).casefold() if value else None
     if column=='Data':
         stamp=report_measurement_time(report)
         # Without an offset the absolute instant is unknown; keep it after
@@ -139,7 +145,9 @@ def report_identity(report: Any, bundle: Any = None) -> dict[str, str]:
 
 def report_filter_blob(report: Any, bundle: Any = None) -> str:
     info = report_identity(report, bundle)
-    return " ".join([*info.values(), _text(_get(report, "measured_at")), _text(_get(report, "source_archive_sha256"))]).casefold()
+    phone = phone_session_metadata(report, bundle)
+    return " ".join([*info.values(), phone.name.value, phone.note.value,
+                     _text(_get(report, "measured_at")), _text(_get(report, "source_archive_sha256"))]).casefold()
 
 
 def matches_report_filter(report: Any, search: str, bundle: Any = None) -> bool:
@@ -194,6 +202,21 @@ def sidecar_preview(root: Path | str, archive_sha256: str, session_id: str = "")
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
             raise ValueError("Nieprawidłowy numer rewizji.")
         entered_gt = sum(1 for row in subjects.values() if isinstance(row, dict) and _text(row.get("ground_truth")))
+        scene_gt=payload.get('provenance',{}).get('f5a_scene_gt_v1')
+        if scene_gt is not None:
+            from ..ranking.mobile_f5a_scene_gt import progress
+            if scene_gt.get('session_id')!=original_session or scene_gt.get('source_archive_sha256')!=source:
+                raise ValueError('GT scen dotyczy innego źródła.')
+            if 'exposure_review' in scene_gt:
+                from ..ranking.mobile_f5a_scene_gt import exposure_progress
+                counts=exposure_progress(scene_gt)
+                return dict(state='in_progress',title=f"Oceniono {counts['reviewed']} z {counts['total']} zdjęć",
+                    detail=f"Potwierdzone: {counts['confirmed']} · skorygowane: {counts['corrected']} · błędy: {counts['errors']} · N/A: {counts['na']}",
+                    revision=revision,gt_entries=entered_gt,exposure_review=counts)
+            counts=progress(scene_gt)
+            return dict(state='in_progress',title=f"GT scen: {counts['approved']}/{counts['total']}",
+                detail='Zatwierdzone GT scen. Kwalifikacja wyników MT/MZ i przypadki N/A są raportowane osobno.',
+                revision=revision,gt_entries=entered_gt,scene_gt=counts)
         titles = {"NOT_STARTED": "Weryfikacja Desktop: nierozpoczęta", "IN_PROGRESS": "Weryfikacja Desktop: w toku", "COMPLETED": "Weryfikacja Desktop: ukończona"}
         return {"state": status.lower(), "title": titles[status], "detail": f"Rewizja {revision} • GT wpisane: {entered_gt} (nie liczba ukończonych ocen).", "revision": revision, "gt_entries": entered_gt}
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:

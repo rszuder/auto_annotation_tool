@@ -323,6 +323,12 @@ class MobileReviewSession:
         return result
 
     def _validate_decisions(self, review: MobileHumanReview) -> None:
+        if 'f5a_scene_gt_v1' in review.provenance:
+            from .mobile_f5a_scene_gt import validate_layer as validate_scene_gt
+            validate_scene_gt(self, review)
+        if 'f5a_assisted_gt_v1' in review.provenance:
+            from .mobile_f5a_assisted import validate_layer
+            validate_layer(self, review)
         from .mobile_scene_frame_review import validate_loaded
         validate_loaded(self, review)
         for decisions, records in ((review.subjects, self.subjects), (review.attempt_annotations, self.attempts),
@@ -405,6 +411,7 @@ class MobileReviewSession:
         self._save_change(changed)
 
     def predictions_visible(self, key: str) -> bool:
+        if getattr(self,'_f5a_reference',None) is not None:return True
         subject = self.review.subjects.get(key, {})
         return self.review.review_mode == "assisted" or bool(subject.get("gt_confirmed") and subject.get("ground_truth"))
 
@@ -632,6 +639,12 @@ class MobileReviewSession:
         paths.extend(export_mz_inputs(self, directory))
         from .mobile_tv_bbox_evidence import export as export_tv_inputs
         paths.extend(export_tv_inputs(self, directory))
+        if 'f5a_assisted_gt_v1' in self.review.provenance:
+            from .mobile_f5a_assisted import export as export_f5a_assisted
+            paths.extend(export_f5a_assisted(self, directory))
+        if 'f5a_scene_gt_v1' in self.review.provenance:
+            from .mobile_f5a_scene_gt import export as export_scene_gt
+            paths.extend(export_scene_gt(self, directory))
         return paths
 
 

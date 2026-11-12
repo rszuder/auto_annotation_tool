@@ -22,6 +22,8 @@ class ShiftPreview:
 
     @property
     def active(self):
+        from .mobile_canvas_visibility import gt_only
+        if gt_only(self.ed):return False
         return bool(self.held and self.ed.mode!='draw' and not self.ed.drag)
 
     def press(self,event):

@@ -11,7 +11,10 @@ def source(ed):
     snapshot=view(ed)
     if not snapshot:return None
     from .mobile_canvas_spatial_reference import view as spatial_view
-    return spatial_view(ed,ed._read(),display_snapshot(ed._read(),snapshot))
+    value=spatial_view(ed,ed._read(),display_snapshot(ed._read(),snapshot))
+    from .mobile_canvas_visibility import gt_only
+    if gt_only(ed):value=dict(value,candidates=[])
+    return value
 
 def show_fp(ed):return bool(getattr(ed,'show_fp_var',None) and ed.show_fp_var.get())
 
@@ -85,6 +88,9 @@ def refresh_visibility(ed):
 def refresh_contours(ed):
     # A view toggle must not prune selection, rebuild metrics or finish GTZ.
     ed._s_hover_hit=None
+    if getattr(ed,'manual_gt_first',False):
+        ed._navigator_initialized=None
+        ed.sync()
     ed.request_overlay()
 
 def selected(ed):
@@ -489,6 +495,17 @@ def right_hit(ed,x,y):
     return next(iter(hits),None)
 
 def context(ed,model):
+    from .mobile_canvas_visibility import gt_only
+    if gt_only(ed):
+        rows=records(ed);row=selected(ed);s=ed._read() or {}
+        text='Ręczne GT na tej klatce. D: narysuj obrys; wpisz tekst i zatwierdź Enter.'
+        if row and row['plate']:
+            plate=row['plate'];text='GT: '+(plate['gt_text'] or plate['text_exclusion_reason'] or 'uzupełnij tekst lub powód nieczytelności')
+        return dict(object=text,image='Wyniki modeli ukryte',
+            image_note='Po ustaleniu GT: Widok → Pokaż wyniki modeli (MT/MZ).',
+            image_counts=dict(gt=str(len(rows)) if rows or s.get('presence')=='NO_PLATES' else '—',tp='—',fp='—',fn='—'),
+            session='Ręczne GT · zapis automatyczny',session_note='Zapisane oceny można wznowić po ponownym otwarciu sesji.',
+            session_counts=dict(inspected='—',remaining='—',decisions='—'),locator_target=None)
     if (ed._read() or {}).get('scope') == 'SCENE_FRAME':
         from .mobile_canvas_scene_frames import context as scene_context
         return scene_context(ed, model)
@@ -581,6 +598,12 @@ def context(ed,model):
         from ..ranking.mobile_review_status import approval_caption
         assessed = inv.get('operator_assessed', inv['assessed'])
         session = approval_caption(inv, ed.h.session.review.review_status, ed.h.session.review.review_revision)
+    session_counts = dict(inspected=f"{assessed}/{inv['total']}", remaining=str(inv['remaining']), decisions=str(inv.get('decisions',pending)))
+    if inv.get('operator_review_progress'):
+        from ..ranking.mobile_operator_progress import image_counts
+        human = image_counts(inv['operator_review_progress'])
+        session = approval_caption(inv, ed.h.session.review.review_status, ed.h.session.review.review_revision)
+        session_counts.update(inspected=human['fraction'], remaining=str(human['remaining']) if human['remaining'] is not None else 'Nie ustalono')
     if r and r['pid'] and not r['candidate']:
         from ..ranking.mobile_mt_geometry_layers import overlapping_references
         overlap=overlapping_references(s,v).get(r['pid'],[])
@@ -622,7 +645,7 @@ def context(ed,model):
     for unit in task['units']:obj+='\n'+unit['text']+' · '+', '.join(unit['reasons'])
     return dict(object=obj,image=image,session=session,object_title=title,image_counts=image_counts,image_note=image_note,
                 bbox_counts=bbox_counts,bbox_note=bbox_note,bbox_scope=bbox_scope,locator_target=locator_target,
-                session_counts=dict(inspected=f"{assessed}/{inv['total']}",remaining=str(inv['remaining']),decisions=str(inv.get('decisions',pending))),
+                session_counts=session_counts,
                 session_note='Eksport nieaktualny' if stale else status)
 
 class CompactContexts(tk.Frame):
@@ -632,7 +655,7 @@ class CompactContexts(tk.Frame):
             frame=tk.Frame(self,bg=p['bg']);frame.pack(fill='x',pady=(0,6));self.sections[key]=frame
             heading=tk.Label(frame,text=title,bg=p['bg'],fg=p['blue'],anchor='w',font=('Segoe UI',10,'bold'));heading.pack(fill='x');self.titles[key]=heading
             specs={'image':(('gt','Zapisane GT'),('tp','Trafne MT (TP)'),('fp','Błędne MT (FP)'),('fn','Pominięte GT (FN)')),
-                   'session':(('inspected','Sprawdzone'),('remaining','Pozostało'),('decisions','Decyzje tablic'))}.get(key,())
+                   'session':(('inspected','Ocenione przez operatora'),('remaining','Pozostało obrazów'),('decisions','Decyzje tablic'))}.get(key,())
             if specs:
                 cards=tk.Frame(frame,bg=p['bg']);cards.pack(fill='x',pady=(5,0));columns=2 if key=='image' else 3
                 for i,(name,caption) in enumerate(specs):
@@ -737,6 +760,8 @@ def sync_image_actions(ed):
     if target:
         pid=row['pid'] if row['gt'] and not bad_source else None
         verified=partial.stack_is_verified(scene,oid=row['oid'] if not pid else None,plate_id=pid)
+        if not row['fp'] and row['candidate'] and row['candidate'].get('spatial_relation',{}).get('plate_id')==pid:
+            verified=partial.stack_is_verified(scene,oid=row['candidate']['object_id'])
         removed=bool(row['plate'] and row['plate']['geometry_state']=='operator_removed' and not row['gt'])
         ed.clean_gtr_confirm_button.configure(text='Uznaj wskazanie MT · Spacja' if bad_source else 'Narysuj obrys GTR · D' if removed else 'Cofnij weryfikację · Spacja' if verified else 'Zatwierdź ramki · Spacja',
                                             command=ed.draw_toggle if removed and not bad_source else ed.confirm,

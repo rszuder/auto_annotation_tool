@@ -159,6 +159,7 @@ def run_picker(default,callback,size='760x500'):
     root=tk.Tk();root.geometry(size+'+0+0');root.withdraw()
     errors=[];root.report_callback_exception=lambda *a:errors.append(a)
     b=picker_host(root)
+    b.store=MobilePackageExperimentStore(default.parent/'private-picker-store')
     def drive():
         d=next(w for w in root.winfo_children() if isinstance(w,tk.Toplevel))
         try:
@@ -187,10 +188,11 @@ def test_native_checkbox_layout_navigation_cancel_and_toggle_persistence(tmp_pat
         listing=next(w for w in widgets(d) if isinstance(w,tk.Listbox))
         assert entry.get()==str(source.parent) and bool(d.getvar(check.cget('variable')))
         assert 'good.json' in '\n'.join(listing.get(0,'end'))
-        assert entry.winfo_rootx()+entry.winfo_width()<=check.winfo_rootx()
+        assert entry.winfo_rooty()+entry.winfo_height()<=check.winfo_rooty()
         assert check.winfo_rootx()+check.winfo_width()<=d.winfo_rootx()+d.winfo_width()
-        buttons={w.cget('text'):w for w in widgets(d) if w.winfo_class()=='TButton'}
-        assert set(buttons)=={'Raporty','Pobrane','Pulpit','Folder wyżej','Odśwież','Anuluj','Importuj zaznaczone'}
+        buttons={w.cget('text'):w for w in widgets(d) if w.winfo_class()=='TButton' and w.winfo_ismapped()}
+        assert set(buttons)=={'Raporty','Pobrane','Pulpit','Folder wyżej','Odśwież','Anuluj','Importuj zaznaczone',
+                             'Sprawdź folder z podfolderami','Wybierz folder…'}
         assert all(w.winfo_rootx()+w.winfo_width()<=d.winfo_rootx()+d.winfo_width() for w in buttons.values())
         assert listing.cget('selectmode')=='extended'
         buttons['Raporty'].invoke();assert entry.get()==str(default)

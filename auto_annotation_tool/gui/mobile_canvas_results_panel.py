@@ -44,8 +44,8 @@ class CanvasResultsPanel(ScrollPane):
         self.reads.pack(fill="x", padx=20, pady=(3, 7))
         technical = Disclosure(self.body, "Szczegóły postępu i wykrycia MT", p=p)
         technical.pack(fill="x", padx=18, pady=(8, 0))
-        self._cards([("inspected", "Przejrzane", "blue"), ("ready", "Zweryfikowane", "green"),
-                     ("excluded", "Nie do oceny", "purple"), ("pending", "Do sprawdzenia", "amber")], 4, host=technical.body)
+        self._cards([("inspected", "Obrazy ocenione przez operatora", "blue"), ("ready", "Zapisane oceny MT/ROI", "green"),
+                     ("excluded", "Nie do oceny", "purple"), ("pending", "Obrazy pozostałe do oceny", "amber")], 4, host=technical.body)
         self._cards([("expected", "Oczekiwane tablice", "blue"), ("linked", "Powiązane z MT", "green"),
                      ("missed", "Pominięte przez MT", "amber"), ("false", "Fałszywe wskazania", "red")], 4, host=technical.body)
         self.detection = label(technical.body, "", p=p, bg=p["bg"], size=10, fg=p["muted"], wrap=980)
@@ -112,11 +112,21 @@ class CanvasResultsPanel(ScrollPane):
         self.cards["ready"].set(str(ready), "wymagane decyzje operatora zapisane")
         self.cards["excluded"].set(str(inventory["excluded"]), "sprawdzone, poza oceną")
         self.cards["pending"].set(str(remaining), "wymagają decyzji lub uzupełnienia danych")
+        if inventory.get('operator_review_progress'):
+            from ..ranking.mobile_operator_progress import image_counts
+            human = image_counts(inventory['operator_review_progress'])
+            self.cards['inspected'].set(human['fraction'], 'obrazy ocenione przez operatora; wyłącznie zapisane decyzje')
+            self.cards['ready'].set(str(inventory['operator_review_progress'].get('mt_assessed')) if inventory['operator_review_progress'].get('mt_assessed') is not None else 'Nie ustalono', 'odrębny zakres: zapisane oceny MT/ROI')
+            self.cards['pending'].set(str(human['remaining']) if human['remaining'] is not None else 'Nie ustalono', 'obrazy bez zapisanej oceny operatora')
         notices = []
         scene_scope = d.get('scene_frame_assessment') or {}
         if scene_scope:
             notices.append(f"Pełne sceny ASSISTED: {scene_scope['n_assessed']}/{scene_scope['n_scene_events']} ocenione; MISSING: {scene_scope['n_missing']}. TV E2E: N/A (SCENE_UNMAPPED).")
-        if review_status=='COMPLETED':notices.append('Zatwierdzenie zapisane w ocenie.')
+        if inventory.get('operator_review_progress'):
+            from ..ranking.mobile_operator_progress import evidence_caption
+            notices.append(evidence_caption(inventory['operator_review_progress']))
+            notices.append(inventory['operator_review_progress']['provenance'])
+        elif review_status=='COMPLETED':notices.append('Zatwierdzenie zapisane w ocenie.')
         elif inventory.get('experiment_family') == 'F5A':
             notices.append(f'Zapisane oceny MT/ROI: {assessed}/{n}; techniczne N/A nie są ocenami operatora.')
         elif not inventory.get('approval_remaining',remaining):notices.append('Wszystkie wymagane decyzje zapisane; można zatwierdzić weryfikację.')

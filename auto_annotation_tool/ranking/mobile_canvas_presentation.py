@@ -89,6 +89,9 @@ def build_inventory(session):
     if getattr(session, 'scene_frames', {}):
         from .mobile_scene_frame_review import summary as scene_summary
         result['scene_scope'] = scene_summary(session)
+    if getattr(session, 'bundle', None) is not None and hasattr(session, 'sidecar_path'):
+        from .mobile_operator_progress import from_session
+        result['operator_review_progress'] = from_session(session, result)
     return result
 
 
@@ -148,6 +151,10 @@ def _legacy_review_progress(scene):
 
 
 def progress_caption(inventory):
+    if inventory.get('operator_review_progress'):
+        from .mobile_operator_progress import presentation
+        p = presentation(inventory['operator_review_progress'])
+        return f"Weryfikacja operatora: {p['status']} · {p['progress']}"
     return (f"Przejrzane: {inventory['inspected']}/{inventory['total']}  ·  "
             f"Decyzje do podjęcia: {inventory.get('decisions', inventory['incomplete'])}  ·  "
             f"Braki dowodów modelu: {inventory.get('evidence_gaps', 0)}")
@@ -218,6 +225,9 @@ def review_contexts(session, scene, model, inventory):
     whole = (f"Przejrzane: {inventory['inspected']}/{total} · Oceny kompletne: {inventory['assessed']}/{total}"
              f"\nDecyzje do podjęcia: {inventory['decisions']} · Braki dowodów: {inventory['evidence_gaps']}"
              f'\n{status}' + (' · zakres roboczy' if status == 'W toku' else '')) if session else 'Brak sesji'
+    if inventory.get('operator_review_progress'):
+        from .mobile_review_status import approval_caption
+        whole = approval_caption(inventory, session.review.review_status, session.review.review_revision)
     return dict(object=selected, image=image, session=whole)
 
 
@@ -733,7 +743,11 @@ def summary_caption(data, inventory):
     from .mobile_session_metrics import canvas_metric_projection
     d = canvas_metric_projection(data,data.get('mt_object_evaluation_v2'))
     cer = d["text_errors"] / d["gt_characters"] if d["gt_characters"] else None
-    return (f"Sprawdzono {inventory['inspected']}/{inventory['total']}  |  "
+    counter = f"Sprawdzono {inventory['inspected']}/{inventory['total']}"
+    if inventory.get('operator_review_progress'):
+        from .mobile_operator_progress import presentation
+        counter = presentation(inventory['operator_review_progress'])['progress']
+    return (f"{counter}  |  "
             f"MZ zgodne {d['exact_reads']}/{d['evaluated_reads']}  |  "
             f"CER {percent(cer * 100 if cer is not None else None)} ({d['text_errors']}/{d['gt_characters']})  |  "
             f"IoU {percent(d['polygon_iou_mean_pct'])} (n={d['geometry_n']})  |  "
